@@ -9,11 +9,12 @@
 
 const MapEdit = {
   active: false,
-  mode: 'labels',       // labels | roads | rails
+  mode: 'labels',       // labels | roads | rails | properties
   sel: null,            // selected road/rail id (within current mode)
   selLabel: null,
   drawing: null,        // { pts: [...] } while the pen is down
   addingLabel: false,
+  addingProperty: false,
   saveTimer: null,
 
   map() { return S().settings.map; },
@@ -24,12 +25,12 @@ const MapEdit = {
     if (!isGM()) return;
     if (!this.map()) return toast('This world has no map document — reset or migrate it first.', true);
     this.active = on === undefined ? !this.active : on;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false;
+    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false;
     GameMap.render();
   },
   setMode(m) {
     this.mode = m;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false;
+    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false;
     GameMap.render();
   },
 
@@ -52,12 +53,15 @@ const MapEdit = {
       return;
     }
     bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '✎ MAP EDITOR'));
-    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways']]) {
+    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties']]) {
       bar.appendChild(el('button.chip', { class: this.mode === m ? 'active' : '', onclick: () => this.setMode(m) }, label));
     }
     if (this.mode === 'labels') {
       bar.appendChild(el('button.chip', { class: this.addingLabel ? 'active' : '', onclick: () => { this.addingLabel = !this.addingLabel; GameMap.renderLayerBar(); } },
         this.addingLabel ? '⌖ click the map…' : '+ Label'));
+    } else if (this.mode === 'properties') {
+      bar.appendChild(el('button.chip', { class: this.addingProperty ? 'active' : '', onclick: () => { this.addingProperty = !this.addingProperty; GameMap.renderLayerBar(); } },
+        this.addingProperty ? '⌖ click the map…' : '+ Property'));
     } else {
       const noun = this.mode === 'roads' ? 'road' : 'railway';
       if (this.drawing) {
@@ -73,7 +77,8 @@ const MapEdit = {
     const hints = {
       labels: 'drag a label to move · click one to edit or delete',
       roads: 'click a road to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
-      rails: 'click a railway to select · drag ○ · ◆ inserts a point · double-click ○ removes it'
+      rails: 'click a railway to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
+      properties: 'drag a marker to move it · click one to open its file · "+ Property" places a new one'
     };
     bar.appendChild(el('span.map-edit-hint', hints[this.mode]));
   },
@@ -93,6 +98,13 @@ const MapEdit = {
       } else if (this.selLabel) {
         this.selLabel = null;
         GameMap.render();
+      }
+      return;
+    }
+    if (this.mode === 'properties') {
+      if (this.addingProperty) {
+        this.addingProperty = false;
+        this.createProperty(pt);
       }
       return;
     }
@@ -208,6 +220,63 @@ const MapEdit = {
     ]);
   },
 
+  /* ---------- properties: place new ones, drag existing ones ---------- */
+  nearestProvinceId(pt) {
+    // properties don't carry their own boundary test on the client, so pick
+    // the province of whichever city marker sits closest to the drop point
+    let best = null, bd = Infinity;
+    for (const c of S().cities) {
+      if (!c.pos || !c.provinceId) continue;
+      const d = (c.pos[0] - pt[0]) ** 2 + (c.pos[1] - pt[1]) ** 2;
+      if (d < bd) { bd = d; best = c.provinceId; }
+    }
+    return best || (S().provinces[0] || {}).id;
+  },
+
+  async createProperty(pt) {
+    const body = {
+      name: 'New Property', type: 'commercial', kind: 'office',
+      provinceId: this.nearestProvinceId(pt), pos: pt, ownerId: null,
+      value: 100000, employees: 0, income: 0, expenses: 0, description: '', inventory: [], vars: {}
+    };
+    try {
+      const r = await POST('/api/gm/coll/properties', body);
+      toast('Property placed — opening its file…');
+      W.gmTab = 'mapobjects'; W.gmSub = 'properties'; W.gmSel.mapobjects = r.id; GM.draftKey = null;
+      this.toggle(false);
+      App.go('gm');
+    } catch (e) { toast(e.message, true); }
+  },
+
+  propertyPointerDown(e, pr, g) {
+    const rect = g.querySelector('.prop-marker');
+    const start = GameMap.clientToWorld(e.clientX, e.clientY);
+    const orig = pr.pos.slice();
+    let moved = false;
+    const onMove = (ev) => {
+      const cur = GameMap.clientToWorld(ev.clientX, ev.clientY);
+      const nx = Math.round(orig[0] + cur[0] - start[0]);
+      const ny = Math.round(orig[1] + cur[1] - start[1]);
+      if (!moved && Math.abs(nx - orig[0]) + Math.abs(ny - orig[1]) > 2) moved = true;
+      pr.pos = [nx, ny];
+      g.setAttribute('data-x', nx); g.setAttribute('data-y', ny);
+      GameMap.updateMarkerScale();
+    };
+    const onUp = async () => {
+      rect.removeEventListener('pointermove', onMove);
+      rect.removeEventListener('pointerup', onUp);
+      if (moved) {
+        try { await PATCH('/api/gm/coll/properties/' + pr.id, { pos: pr.pos }); toast('Property moved.'); }
+        catch (err) { toast(err.message, true); }
+      } else {
+        select('property', pr.id, { noPan: true });
+      }
+    };
+    try { rect.setPointerCapture(e.pointerId); } catch (err) { /* stylus/touch edge cases */ }
+    rect.addEventListener('pointermove', onMove);
+    rect.addEventListener('pointerup', onUp);
+  },
+
   /* ---------- pen-tool overlay (vertex + midpoint handles) ---------- */
   renderOverlay(gm) {
     const NS = 'http://www.w3.org/2000/svg';
@@ -307,6 +376,7 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'Escape') {
     if (MapEdit.drawing) { MapEdit.drawing = null; GameMap.render(); }
     else if (MapEdit.addingLabel) { MapEdit.addingLabel = false; GameMap.renderLayerBar(); }
+    else if (MapEdit.addingProperty) { MapEdit.addingProperty = false; GameMap.renderLayerBar(); }
     else if (MapEdit.sel || MapEdit.selLabel) { MapEdit.sel = null; MapEdit.selLabel = null; GameMap.render(); }
     else MapEdit.toggle(false);
   } else if ((e.key === 'Delete' || e.key === 'Backspace') && MapEdit.sel) { e.preventDefault(); MapEdit.deleteSel(); }

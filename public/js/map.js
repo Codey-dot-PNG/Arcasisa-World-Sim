@@ -67,16 +67,25 @@ const GameMap = {
   bindPanZoom(wrap) {
     const svg = this.svg;
     svg.addEventListener('pointerdown', (e) => {
-      this.drag = { sx: e.clientX, sy: e.clientY, ox: this.view.x, oy: this.view.y, moved: false };
-      svg.setPointerCapture(e.pointerId);
-      svg.classList.add('dragging');
+      // capture is deferred to the first real move (see pointermove below):
+      // capturing here unconditionally would re-target every click's
+      // pointerup at the svg itself (per the Pointer Events spec), so a
+      // plain click on a province/city/property never reaches its own
+      // listener. Deferring lets an un-captured click hit the real target
+      // while a genuine drag still captures once movement starts.
+      this.drag = { sx: e.clientX, sy: e.clientY, ox: this.view.x, oy: this.view.y, moved: false, pid: e.pointerId };
     });
     svg.addEventListener('pointermove', (e) => {
-      if (!this.drag) return;
+      if (!this.drag || e.pointerId !== this.drag.pid) return;
+      if (!this.drag.moved && Math.abs(e.clientX - this.drag.sx) + Math.abs(e.clientY - this.drag.sy) > 4) {
+        this.drag.moved = true;
+        try { svg.setPointerCapture(this.drag.pid); } catch (err) { /* pointer already gone */ }
+        svg.classList.add('dragging');
+      }
+      if (!this.drag.moved) return;
       const ctm = svg.getScreenCTM();
       const dx = (e.clientX - this.drag.sx) / ctm.a;
       const dy = (e.clientY - this.drag.sy) / ctm.d;
-      if (Math.abs(e.clientX - this.drag.sx) + Math.abs(e.clientY - this.drag.sy) > 4) this.drag.moved = true;
       this.view.x = this.drag.ox + dx;
       this.view.y = this.drag.oy + dy;
       this.applyTransform();
@@ -298,8 +307,15 @@ const GameMap = {
       rect.setAttribute('class', 'prop-marker');
       rect.setAttribute('fill', owner ? owner.color || '#5c5340' : '#5c5340');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) rect.classList.add('selected');
+      const draggableHere = editing && MapEdit.mode === 'properties';
+      if (draggableHere) rect.classList.add('edit-draggable');
+      rect.addEventListener('pointerdown', (e) => {
+        if (!draggableHere) return;
+        e.stopPropagation();
+        MapEdit.propertyPointerDown(e, pr, g);
+      });
       rect.addEventListener('pointerup', (e) => {
-        if (this.dragMoved() || W.placing || this.editing()) return;
+        if (draggableHere || this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         select('property', pr.id, { noPan: true });
       });
@@ -362,7 +378,7 @@ const GameMap = {
 
   updateMarkerScale() {
     const k = this.view.k;
-    const showProps = k >= 6.7 || W.layer === 'ownership';
+    const showProps = k >= 6.7 || W.layer === 'ownership' || (this.editing() && MapEdit.mode === 'properties');
     if (this.markerLayer) {
       for (const g of this.markerLayer.children) {
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
@@ -432,6 +448,13 @@ const GameMap = {
     const lg = document.getElementById('map-legend');
     if (!lg) return;
     clear(lg);
+    if (W.legendHidden) {
+      lg.classList.add('collapsed');
+      lg.appendChild(el('button.chip', { onclick: () => { W.legendHidden = false; this.renderLegend(); } }, '☰ Show Key'));
+      return;
+    }
+    lg.classList.remove('collapsed');
+    lg.appendChild(el('button.icon-btn.lg-hide', { title: 'Hide key', onclick: () => { W.legendHidden = true; this.renderLegend(); } }, '✕'));
     if (W.layer === 'data') {
       const vdef = (S().variables || []).find(v => v.scope === 'province' && v.key === W.dataVar);
       lg.appendChild(el('div.lg-title', 'DATA LAYER — ' + (vdef ? vdef.label : W.dataVar)));

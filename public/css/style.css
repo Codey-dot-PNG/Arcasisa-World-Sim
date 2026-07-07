@@ -398,7 +398,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   padding:10px 13px; font-family:var(--font-mono); font-size:9px; letter-spacing:.06em;
   color:var(--ink-soft); max-width:280px;
 }
-#map-legend .lg-title{font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:7px;}
+#map-legend.collapsed{padding:0; border:none; background:none;}
+#map-legend .lg-hide{position:absolute; top:4px; right:4px; width:20px; height:20px; font-size:10px;}
+#map-legend .lg-title{font-size:8.5px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:7px; padding-right:20px;}
+.edit-draggable{cursor:move !important;}
 .lg-row{display:flex; align-items:center; gap:7px; padding:1.5px 0;}
 .lg-swatch{width:10px; height:10px; border:1px solid var(--rule-strong); flex-shrink:0;}
 #map-compass{position:absolute; bottom:18px; right:18px; z-index:4; opacity:.5; pointer-events:none; font-family:var(--font-mono); text-align:center; color:var(--ink-soft); font-size:9px; letter-spacing:.2em;}

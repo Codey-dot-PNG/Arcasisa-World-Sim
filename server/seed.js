@@ -313,19 +313,22 @@ function seed() {
   ];
 
   // ---- roles -------------------------------------------------------------
-  const PAGES_ALL = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'timeline'];
+  // 'timeline' is deliberately absent: the Timeline tab is GM-only (the GM
+  // role appends it below). Non-GM operators see their own transactions in
+  // the Economy ledger instead.
+  const PAGES_ALL = ['map', 'parliament', 'companies', 'economy', 'population', 'news'];
   function role(id, name, perms) { return { id, name, builtin: true, perms }; }
   const roles = [
-    role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true }),
-    role('citizen', 'Citizen', { pages: ['map', 'companies', 'economy', 'news', 'timeline'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false }),
+    role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['timeline', 'gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true }),
+    role('citizen', 'Citizen', { pages: ['map', 'companies', 'economy', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false }),
     role('mp', 'MP', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
     role('judge', 'Judge', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
-    role('executive', 'Executive (Company)', { pages: ['map', 'companies', 'economy', 'news', 'timeline', 'population'], inventories: 'own', accounts: 'own', companyFinancials: true, government: false, statistics: true, mapLayers: ['political', 'ownership'], manageNews: false, gm: false }),
+    role('executive', 'Executive (Company)', { pages: ['map', 'companies', 'economy', 'news', 'population'], inventories: 'own', accounts: 'own', companyFinancials: true, government: false, statistics: true, mapLayers: ['political', 'ownership'], manageNews: false, gm: false }),
     role('president', 'President', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: false, gm: false }),
     role('minister', 'Cabinet Minister', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
     role('journalist', 'Journalist', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: true, gm: false }),
-    role('police', 'Police', { pages: ['map', 'companies', 'economy', 'population', 'news', 'timeline'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
-    role('military', 'Military', { pages: ['map', 'economy', 'news', 'timeline'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
+    role('police', 'Police', { pages: ['map', 'companies', 'economy', 'population', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
+    role('military', 'Military', { pages: ['map', 'economy', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
   ];
 
   // ---- users -------------------------------------------------------------
@@ -533,28 +536,48 @@ function seed() {
         Economy: 'paper_economists',
         Business: 'paper_economists'
       },
-      // Phase 10 — Audio & Presentation. The intended default soundtrack is
-      // the playlist at https://www.youtube.com/watch?v=vZDT1vaCUqE, but a
-      // bare <audio> element cannot play YouTube page URLs — only direct
-      // audio file URLs (.mp3/.ogg/.m4a/etc). Seed a handful of placeholder
-      // library entries (titles preserved / inspired by that playlist,
-      // ordered) with empty/placeholder URLs so the shape and default
-      // playlist ordering are correct out of the box. THE GM SHOULD PASTE
-      // DIRECT AUDIO FILE URLS into these (or new) library entries from GM
-      // Studio → Presentation for real playback.
+      // Phase 10 — Audio & Presentation. Default soundtrack: the Suzerain:
+      // Rizia OST, streamed straight from YouTube (public/js/music.js routes
+      // YouTube URLs through a hidden IFrame API player; direct audio file
+      // URLs still play through a plain <audio> element). The GM adds more
+      // tracks / playlists / forced event tracks in GM Studio → Presentation.
       music: {
-        enabled: false,
-        shuffle: true,
+        enabled: true,
+        shuffle: false,
         volume: 0.7,
         library: [
-          { id: 'trk_seed1', title: 'Suzerain: Rizia OST — Stress', url: '' },
-          { id: 'trk_seed2', title: 'Suzerain: Rizia OST — Assembly', url: '' },
-          { id: 'trk_seed3', title: 'Suzerain: Rizia OST — The Republic', url: '' },
-          { id: 'trk_seed4', title: 'Suzerain: Rizia OST — Election Night', url: '' },
-          { id: 'trk_seed5', title: 'Suzerain: Rizia OST — Reflection', url: '' }
+          { id: 'trk_rizia01', title: 'Suzerain: Rizia OST — Main Theme', url: 'https://www.youtube.com/watch?v=C8Yu0WTLdXo' },
+          { id: 'trk_rizia02', title: 'Suzerain: Rizia OST — Toras', url: 'https://www.youtube.com/watch?v=EKoRsKcOGd0' },
+          { id: 'trk_rizia03', title: 'Suzerain: Rizia OST — Map of Rizia', url: 'https://www.youtube.com/watch?v=NNkSTtpTsdw' },
+          { id: 'trk_rizia04', title: 'Suzerain: Rizia OST — For The People', url: 'https://www.youtube.com/watch?v=L0bN8DipxkY' },
+          { id: 'trk_rizia05', title: 'Suzerain: Rizia OST — Breather', url: 'https://www.youtube.com/watch?v=1bzoIqSiT8Q' },
+          { id: 'trk_rizia06', title: 'Suzerain: Rizia OST — Alliances', url: 'https://www.youtube.com/watch?v=m_vUofSSndo' },
+          { id: 'trk_rizia07', title: 'Suzerain: Rizia OST — By The People', url: 'https://www.youtube.com/watch?v=8lBrodCyNnw' },
+          { id: 'trk_rizia08', title: 'Suzerain: Rizia OST — Negotiations', url: 'https://www.youtube.com/watch?v=apLRHhlwNrY' },
+          { id: 'trk_rizia09', title: 'Suzerain: Rizia OST — Stress', url: 'https://www.youtube.com/watch?v=vZDT1vaCUqE' },
+          { id: 'trk_rizia10', title: 'Suzerain: Rizia OST — Up In The Air', url: 'https://www.youtube.com/watch?v=wvY9x4xVDOs' },
+          { id: 'trk_rizia11', title: 'Suzerain: Rizia OST — Impasse', url: 'https://www.youtube.com/watch?v=TF7rCp33DLA' },
+          { id: 'trk_rizia12', title: 'Suzerain: Rizia OST — Solitude', url: 'https://www.youtube.com/watch?v=pfgA7WOmuwk' },
+          { id: 'trk_rizia13', title: 'Suzerain: Rizia OST — Falling Into Place', url: 'https://www.youtube.com/watch?v=OZjHv84YT1A' },
+          { id: 'trk_rizia14', title: 'Suzerain: Rizia OST — Uncertainty', url: 'https://www.youtube.com/watch?v=s6Zx6ss8RIM' },
+          { id: 'trk_rizia15', title: 'Suzerain: Rizia OST — Crisis', url: 'https://www.youtube.com/watch?v=Nhw4BLy6Pas' },
+          { id: 'trk_rizia16', title: 'Suzerain: Rizia OST — Sunrise', url: 'https://www.youtube.com/watch?v=lKraHXwJWls' },
+          { id: 'trk_rizia17', title: 'Suzerain: Rizia OST — Gridlock', url: 'https://www.youtube.com/watch?v=h8c-p2SRvBQ' },
+          { id: 'trk_rizia18', title: 'Suzerain: Rizia OST — Still', url: 'https://www.youtube.com/watch?v=FktZOO-LNpM' },
+          { id: 'trk_rizia19', title: 'Suzerain: Rizia OST — Traitor', url: 'https://www.youtube.com/watch?v=y-WZ3baw71I' },
+          { id: 'trk_rizia20', title: 'Suzerain: Rizia OST — Continuation', url: 'https://www.youtube.com/watch?v=yPBeqdCk33U' },
+          { id: 'trk_rizia21', title: 'Suzerain: Rizia OST — Consequence', url: 'https://www.youtube.com/watch?v=k_Zy9EcY4j0' },
+          { id: 'trk_rizia22', title: 'Suzerain: Rizia OST — Fruition', url: 'https://www.youtube.com/watch?v=MekX0DZrhEM' }
         ],
         playlists: [
-          { id: 'plist_default', name: 'Default Soundtrack', tracks: ['trk_seed1', 'trk_seed2', 'trk_seed3', 'trk_seed4', 'trk_seed5'] }
+          {
+            id: 'plist_default', name: 'Default Soundtrack', tracks: [
+              'trk_rizia01', 'trk_rizia02', 'trk_rizia03', 'trk_rizia04', 'trk_rizia05', 'trk_rizia06',
+              'trk_rizia07', 'trk_rizia08', 'trk_rizia09', 'trk_rizia10', 'trk_rizia11', 'trk_rizia12',
+              'trk_rizia13', 'trk_rizia14', 'trk_rizia15', 'trk_rizia16', 'trk_rizia17', 'trk_rizia18',
+              'trk_rizia19', 'trk_rizia20', 'trk_rizia21', 'trk_rizia22'
+            ]
+          }
         ],
         activePlaylist: 'plist_default',
         forcedTrack: null

@@ -1059,13 +1059,13 @@ const GM = {
     /* ---------- music library ---------- */
     main.appendChild(Views.secLabel('Music Library'));
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Every track available to the simulator. Paste a direct audio file URL (.mp3/.ogg/.m4a/etc — not a YouTube page link) and a title; add it to a playlist below. “Forced-only” tracks are hidden from normal shuffle and only play when explicitly forced above.'));
+      'Every track available to the simulator. Paste a YouTube link (watch/youtu.be) or a direct audio file URL (.mp3/.ogg/.m4a/etc) and a title; add it to a playlist below. “Forced-only” tracks are hidden from normal shuffle and only play when explicitly forced above — force one to score an event.'));
 
     const libBox = el('div');
     d.library.forEach((t, i) => {
       libBox.appendChild(el('div', { style: 'display:flex; gap:8px; align-items:flex-end; margin-bottom:6px; flex-wrap:wrap;' },
         el('div', { style: 'flex:1 1 180px;' }, F.field('Title', F.text(t, 'title'))),
-        el('div', { style: 'flex:2 1 260px;' }, F.field('Audio URL', F.text(t, 'url', 'https://…/track.mp3'))),
+        el('div', { style: 'flex:2 1 260px;' }, F.field('Track URL (YouTube or audio file)', F.text(t, 'url', 'https://www.youtube.com/watch?v=…'))),
         el('div', { style: 'padding-bottom:8px;' }, F.check(t, 'forcedOnly', 'Forced-only')),
         el('button.icon-btn', {
           title: 'Remove from library', style: 'padding-bottom:8px;',

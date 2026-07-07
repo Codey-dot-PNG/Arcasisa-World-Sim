@@ -365,7 +365,7 @@ function renderTicker() {
   clear(track);
   const items = (S().timeline || []).slice(-14).reverse();
   for (const t of items) {
-    track.appendChild(el('span.tick-item', { onclick: () => App.go('timeline'), title: (t.detail || '') },
+    track.appendChild(el('span.tick-item', { onclick: () => { if (can('timeline')) App.go('timeline'); }, title: (t.detail || '') },
       el('span.tt', TICK_GLYPH[t.type] || '·'),
       el('span', `T${t.turn}`),
       el('span', t.title)

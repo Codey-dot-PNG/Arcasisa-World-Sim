@@ -51,6 +51,34 @@ function uid(prefix) {
   return (prefix || 'id') + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// Default soundtrack (Phase 10): the Suzerain: Rizia OST, streamed from
+// YouTube (public/js/music.js plays YouTube URLs through a hidden IFrame
+// player). Mirrors the fresh-seed library in seed.js — keep the two in sync.
+const DEFAULT_MUSIC_TRACKS = [
+  ['C8Yu0WTLdXo', 'Main Theme'], ['EKoRsKcOGd0', 'Toras'], ['NNkSTtpTsdw', 'Map of Rizia'],
+  ['L0bN8DipxkY', 'For The People'], ['1bzoIqSiT8Q', 'Breather'], ['m_vUofSSndo', 'Alliances'],
+  ['8lBrodCyNnw', 'By The People'], ['apLRHhlwNrY', 'Negotiations'], ['vZDT1vaCUqE', 'Stress'],
+  ['wvY9x4xVDOs', 'Up In The Air'], ['TF7rCp33DLA', 'Impasse'], ['pfgA7WOmuwk', 'Solitude'],
+  ['OZjHv84YT1A', 'Falling Into Place'], ['s6Zx6ss8RIM', 'Uncertainty'], ['Nhw4BLy6Pas', 'Crisis'],
+  ['lKraHXwJWls', 'Sunrise'], ['h8c-p2SRvBQ', 'Gridlock'], ['FktZOO-LNpM', 'Still'],
+  ['y-WZ3baw71I', 'Traitor'], ['yPBeqdCk33U', 'Continuation'], ['k_Zy9EcY4j0', 'Consequence'],
+  ['MekX0DZrhEM', 'Fruition']
+];
+function defaultMusic() {
+  const library = DEFAULT_MUSIC_TRACKS.map(([vid, name], i) => ({
+    id: 'trk_rizia' + String(i + 1).padStart(2, '0'),
+    title: 'Suzerain: Rizia OST — ' + name,
+    url: 'https://www.youtube.com/watch?v=' + vid
+  }));
+  return {
+    enabled: true, shuffle: false, volume: 0.7,
+    library,
+    playlists: [{ id: 'plist_default', name: 'Default Soundtrack', tracks: library.map(t => t.id) }],
+    activePlaylist: 'plist_default',
+    forcedTrack: null
+  };
+}
+
 // Bring a world loaded from disk/DB up to the current schema. Idempotent and
 // additive — safe to run on every load. Returns true if anything changed so
 // callers can persist. New collections/fields introduced by later phases add
@@ -79,26 +107,18 @@ function migrate(world) {
   }
   // Phase 10 — Audio & Presentation. Same default shape as a fresh seed
   // (see seed.js) so a live world upgrades with a usable Music Library /
-  // playlist instead of an empty one. Additive only — never overwrites a
-  // GM's existing music config.
+  // playlist instead of an empty one. Never overwrites a GM's own config:
+  // the upgrade branch only fires when every library track still has an
+  // empty URL (the old unplayable placeholder state).
   if (world.settings && !world.settings.music) {
-    world.settings.music = {
-      enabled: false,
-      shuffle: true,
-      volume: 0.7,
-      library: [
-        { id: 'trk_seed1', title: 'Suzerain: Rizia OST — Stress', url: '' },
-        { id: 'trk_seed2', title: 'Suzerain: Rizia OST — Assembly', url: '' },
-        { id: 'trk_seed3', title: 'Suzerain: Rizia OST — The Republic', url: '' },
-        { id: 'trk_seed4', title: 'Suzerain: Rizia OST — Election Night', url: '' },
-        { id: 'trk_seed5', title: 'Suzerain: Rizia OST — Reflection', url: '' }
-      ],
-      playlists: [
-        { id: 'plist_default', name: 'Default Soundtrack', tracks: ['trk_seed1', 'trk_seed2', 'trk_seed3', 'trk_seed4', 'trk_seed5'] }
-      ],
-      activePlaylist: 'plist_default',
-      forcedTrack: null
-    };
+    world.settings.music = defaultMusic();
+    changed = true;
+  } else if (world.settings && world.settings.music &&
+    (world.settings.music.library || []).length &&
+    world.settings.music.library.every(t => !t.url)) {
+    const vol = world.settings.music.volume;
+    world.settings.music = defaultMusic();
+    if (vol !== undefined) world.settings.music.volume = vol;
     changed = true;
   }
   if (world.settings) {
@@ -134,6 +154,16 @@ function migrate(world) {
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
+
+  // Timeline tab is GM-only: strip the 'timeline' page from every non-GM
+  // role so existing worlds pick up the tightened visibility. (The server
+  // also filters timeline data itself in api.js filterState.)
+  for (const r of (world.roles || [])) {
+    if (r.perms && !r.perms.gm && Array.isArray(r.perms.pages) && r.perms.pages.includes('timeline')) {
+      r.perms.pages = r.perms.pages.filter(pg => pg !== 'timeline');
+      changed = true;
+    }
+  }
 
   // Currency → Arcasian Koren (₳, code ARK). Ungated: only flips the old
   // default 'K' symbol, so a GM's custom symbol is left alone.

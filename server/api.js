@@ -111,12 +111,12 @@ function filterState(u) {
 
   const news = (p.manageNews ? db.news : db.news.filter(n => n.status === 'published')).slice(-300);
 
-  // Timeline visibility (Phase 6): non-GM operators see the public record
-  // (news / time / elections / system) plus entries that concern their own
-  // ownership chain. GM sees everything. Cap kept at 400 after filtering.
-  const publicTlTypes = new Set(['news', 'time', 'election', 'system']);
+  // Timeline visibility (Phase 6, tightened): the full record is GM-only.
+  // Non-GM operators receive only entries that concern their own ownership
+  // chain (their entity and companies it controls) — nothing about anyone
+  // else. Cap kept at 400 after filtering.
   const timeline = (p.gm ? db.timeline
-    : db.timeline.filter(e => publicTlTypes.has(e.type) || (e.refs && e.refs.some(r => controlled.has(r))))).slice(-400);
+    : db.timeline.filter(e => e.refs && e.refs.some(r => controlled.has(r)))).slice(-400);
 
   // Trade offers (Phase 4.3): a user sees offers where either side is in their
   // ownership chain; GM sees all.
@@ -131,7 +131,10 @@ function filterState(u) {
     cities: db.cities,
     items: db.items,
     markers: db.markers || [],
-    history: p.statistics ? (db.history || []) : undefined,
+    // Share prices are public market information — everyone gets them so the
+    // Exchange price-history graphs work for citizens. National statistics
+    // (GDP, money supply, …) stay gated on the statistics clearance.
+    history: p.statistics ? (db.history || []) : (db.history || []).map(h => ({ turn: h.turn, shares: h.shares })),
     timeline, trades,
     elections: db.elections,
     events: p.gm ? db.events : undefined,

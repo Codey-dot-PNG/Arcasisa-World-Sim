@@ -505,7 +505,6 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .paper-mast.active{opacity:1; border-color:var(--ink); transform:translateY(-1px);}
 .paper-mast .pm-name{font-size:19px; line-height:1.05; letter-spacing:0.01em; margin-bottom:4px;}
 .paper-mast .pm-tagline{font-family:var(--font-mono); font-size:8px; letter-spacing:0.16em; text-transform:uppercase; color:var(--ink-faint);}
-.paper-mast .pm-owner{font-family:var(--font-voice); font-style:italic; font-size:9.5px; color:var(--ink-faint); margin-top:6px; opacity:.85;}
 
 /* Arcasia Today — black block caps, double rules, state paper */
 .paper-mast-today{background:var(--paper);}
@@ -515,29 +514,36 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   border-top:3px double var(--rule-strong); border-bottom:3px double var(--rule-strong);
   padding:6px 0 5px;
 }
-.paper-mast-today .pm-owner{font-style:normal; font-family:var(--font-voice);}
 
-/* The National Herald — red block caps, yellow frame, NFP-funded */
+/* The National Herald — small red THE over big red block caps, with the
+   yellow rectangle frame sitting behind the name (reference:
+   Newspaper examples/National Herald.png) */
 .paper-mast-herald{background:var(--paper); position:relative;}
 .paper-mast-herald::before{
-  content:""; position:absolute; left:8px; top:8px; width:46px; height:46px;
-  border:9px solid #e8b23a; opacity:.9;
+  content:""; position:absolute; left:14%; top:10px; width:34%; height:52px;
+  border:8px solid #e8b23a; opacity:.95;
 }
 .paper-mast-herald .pm-name{
   font-family:'Arial Narrow', 'Inter', sans-serif; font-weight:900; text-transform:uppercase;
-  letter-spacing:0.01em; font-size:22px; color:#d3241a; position:relative; z-index:1;
+  letter-spacing:0.01em; font-size:22px; color:#e8241a; position:relative; z-index:1;
+}
+.paper-mast-herald .pm-name .pm-the{
+  display:block; font-size:11px; letter-spacing:0.06em; text-align:left;
+  margin:-4px 0 1px 6%;
 }
 .paper-mast-herald .pm-tagline{color:var(--ink-soft); font-weight:700;}
 
-/* Economists — red serif on a blue swoosh, Satrom group */
+/* Economists — red serif caps across a blue ellipse swoosh (reference:
+   Newspaper examples/3.png) */
 .paper-mast-economists{background:var(--paper); position:relative; overflow:hidden;}
 .paper-mast-economists::before{
-  content:""; position:absolute; left:-10%; right:-10%; top:38%; height:38%;
-  border-radius:50%; background:#6fa8dc; opacity:.55; transform:rotate(-4deg);
+  content:""; position:absolute; left:2%; right:2%; top:14%; height:52%;
+  border-radius:50%; border:7px solid #6fa8dc; opacity:.85; transform:rotate(-3deg);
 }
 .paper-mast-economists .pm-name{
-  font-family:var(--font-voice); font-weight:700; text-transform:uppercase;
-  letter-spacing:0.02em; font-size:23px; color:#c2281d; position:relative; z-index:1;
+  font-family:Georgia, 'Times New Roman', serif; font-weight:700; text-transform:uppercase;
+  letter-spacing:-0.01em; font-size:22px; color:#e02318; position:relative; z-index:1;
+  padding-top:8px;
 }
 .paper-mast-economists .pm-tagline{position:relative; z-index:1;}
 

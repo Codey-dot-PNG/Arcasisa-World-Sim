@@ -911,9 +911,10 @@ const Views = {
     inner.appendChild(this.statStrip(cells));
 
     /* Phase 7.3 — GDP & money-supply history, gated on statistics clearance
-       (filterState only sends state.history when perms.statistics is set). */
+       (filterState strips gdp/moneySupply from state.history without
+       perms.statistics — only share prices survive for the Exchange tab). */
     const hist = S().history;
-    if (hist && hist.length) {
+    if (hist && hist.length && hist.some(h => h.gdp !== undefined || h.moneySupply !== undefined)) {
       const xLabels = hist.map(h => 'T' + h.turn);
       inner.appendChild(this.secLabel('National GDP Over Time'));
       inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.gdp || 0) })), {
@@ -1275,13 +1276,18 @@ const Views = {
     // ---- masthead switcher: four cards, one per paper ----
     const switcher = el('div.paper-switcher');
     papers.forEach(p => {
+      // The Herald masthead sets a small "THE" above the big red name,
+      // matching the reference art — split a leading "The " when present.
+      const theMatch = p.style === 'herald' ? String(p.name || '').match(/^(the)\s+(.*)$/i) : null;
+      const nameEl = theMatch
+        ? el('div.pm-name', el('span.pm-the', theMatch[1]), theMatch[2])
+        : el('div.pm-name', p.name);
       switcher.appendChild(el(`div.paper-mast.paper-mast-${p.style}`, {
         class: p.id === W.newsPaper ? 'active' : '',
         onclick: () => { W.newsPaper = p.id; W.newsCat = 'All'; W.newsQ = ''; App.renderView(); }
       },
-        el('div.pm-name', p.name),
-        el('div.pm-tagline', p.tagline || ''),
-        el('div.pm-owner', '*' + (p.owner || ''))));
+        nameEl,
+        el('div.pm-tagline', p.tagline || '')));
     });
     inner.appendChild(switcher);
 

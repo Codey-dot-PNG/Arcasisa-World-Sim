@@ -1,7 +1,7 @@
 'use strict';
-/* Phase 10 — Audio & Presentation: a single shared <audio> element playing
-   from settings.music. Every client applies the same settings (via sync
-   broadcast) so a GM's playlist/force-track changes propagate immediately.
+/* Phase 10 — Audio & Presentation: shared playback driven by settings.music.
+   Every client applies the same settings (via sync broadcast) so a GM's
+   playlist/force-track changes propagate immediately.
 
    Data shape (server/seed.js, server/store.js migrate):
      settings.music = {
@@ -12,25 +12,39 @@
        forcedTrack: id|null
      }
 
+   Playback backends — chosen per track by URL:
+   - YouTube links (watch/youtu.be/embed/shorts) play through a hidden
+     YouTube IFrame API player, so the default soundtrack can stream
+     straight from YouTube with no saved asset files.
+   - Anything else is treated as a direct audio file URL (.mp3/.ogg/…)
+     and plays through a plain <audio> element.
+
    Forced-vs-normal enforcement:
    - Tracks with forcedOnly:true are excluded from every normal playlist/
      shuffle queue (buildQueue() filters them out).
    - A forcedTrack (any library track, including forcedOnly ones) always
      wins: apply() checks it first, loops it, and only falls back to the
-     active playlist once forcedTrack is cleared.
+     active playlist once forcedTrack is cleared — this is how the GM
+     "runs an event" with a specific score under it.
 
    This module never mutates the server; it only reads S().settings.music
-   and reflects it into the <audio> element + a small top-bar widget. */
+   and reflects it into the players + a small top-bar widget. */
 const Music = {
   audio: null,
   widget: null,
   queue: [],        // shuffled/ordered list of library track ids for normal playback
   queuePos: -1,
-  curTrackId: null,  // id of the track currently loaded into audio.src
+  curTrackId: null,  // id of the track currently loaded
   curForced: null,   // forcedTrack id we last applied, or null
   curPlaylist: null, // activePlaylist id we last built the queue from
   curShuffle: null,
   armed: false,      // first-interaction unlock done
+  mode: null,        // 'yt' | 'audio' — backend of the current track
+  vol: 0.7,
+  muted: false,
+  yt: null,          // hidden YT.Player instance
+  ytReady: false,
+  curYtId: null,     // video id currently loaded into the YT player
 
   init() {
     if (this.audio) return; // idempotent
@@ -62,6 +76,45 @@ const Music = {
   },
   library() { const c = this.cfg(); return (c && c.library) || []; },
   trackById(id) { return this.library().find(t => t.id === id); },
+
+  /* ---------- YouTube backend ---------- */
+  ytIdOf(url) {
+    const m = String(url || '').match(/(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{6,})/);
+    return m ? m[1] : null;
+  },
+  // Lazily load the IFrame API and create one hidden, reusable player.
+  ensureYT() {
+    if (this.yt && this.ytReady) return Promise.resolve(this.yt);
+    if (this._ytLoading) return this._ytLoading;
+    this._ytLoading = new Promise((resolve) => {
+      const make = () => {
+        const host = document.createElement('div');
+        host.style.cssText = 'position:fixed; left:-9999px; bottom:0; width:1px; height:1px; overflow:hidden;';
+        document.body.appendChild(host);
+        this.yt = new YT.Player(host, {
+          width: 1, height: 1,
+          playerVars: { autoplay: 0, controls: 0, disablekb: 1, playsinline: 1 },
+          events: {
+            onReady: () => { this.ytReady = true; resolve(this.yt); },
+            onStateChange: (e) => {
+              if (e.data === YT.PlayerState.ENDED) this.onEnded();
+              else this.renderWidget();
+            },
+            // deleted/region-blocked/non-embeddable video — skip it rather
+            // than leaving every client silent
+            onError: () => { if (this.mode === 'yt' && !this.curForced) this.advanceQueue(true); }
+          }
+        });
+      };
+      if (window.YT && window.YT.Player) make();
+      else {
+        const prev = window.onYouTubeIframeAPIReady;
+        window.onYouTubeIframeAPIReady = () => { if (prev) prev(); make(); };
+        loadScript('https://www.youtube.com/iframe_api').catch(() => {});
+      }
+    });
+    return this._ytLoading;
+  },
 
   /* Build the normal-shuffle/ordered track-id list for the active playlist
      (falling back to the whole library when there's no playlist), always
@@ -95,13 +148,13 @@ const Music = {
     if (!this.audio) return;
 
     if (!cfg || !cfg.enabled) {
-      if (!this.audio.paused) this.audio.pause();
+      this.stopAll();
       this.curTrackId = null; this.curForced = null; this.curPlaylist = null;
       this.renderWidget();
       return;
     }
 
-    this.audio.volume = Math.max(0, Math.min(1, cfg.volume === undefined ? 0.7 : Number(cfg.volume)));
+    this.setVolume(Math.max(0, Math.min(1, cfg.volume === undefined ? 0.7 : Number(cfg.volume))), true);
 
     // ---- forced track wins over everything ----
     if (cfg.forcedTrack) {
@@ -110,8 +163,8 @@ const Music = {
         const changed = this.curForced !== cfg.forcedTrack || this.curTrackId !== t.id;
         this.curForced = cfg.forcedTrack;
         this.curPlaylist = null; // playlist state invalidated; rebuilt when forced clears
-        this.audio.loop = true;
-        if (changed || forceRestart) this.loadAndPlay(t);
+        this.audio.loop = true;  // YT looping is handled in onEnded()
+        if (changed || forceRestart) this.loadAndPlay(t, forceRestart || changed);
         return;
       }
       // forcedTrack id referenced a track no longer in the library — fall
@@ -132,8 +185,8 @@ const Music = {
       if (this.queuePos === -1) {
         // current track isn't part of the (new) rotation — start fresh
         this.advanceQueue(forceRestart);
-      } else if (forceRestart && this.audio.paused && this.armed) {
-        this.audio.play().catch(() => {});
+      } else if (forceRestart && !this.isPlaying() && this.armed) {
+        this.resume();
       }
       return;
     }
@@ -143,7 +196,7 @@ const Music = {
   },
 
   advanceQueue(forceRestart) {
-    if (!this.queue.length) { this.curTrackId = null; this.audio.pause(); this.renderWidget(); return; }
+    if (!this.queue.length) { this.curTrackId = null; this.stopAll(); this.renderWidget(); return; }
     this.queuePos = (this.queuePos + 1) % this.queue.length;
     if (this.queuePos === 0 && this.curShuffle) this.queue = this.shuffleArr(this.queue.slice());
     const t = this.trackById(this.queue[this.queuePos]);
@@ -152,27 +205,66 @@ const Music = {
 
   loadAndPlay(track, forceRestart) {
     if (!track || !track.url) { this.curTrackId = track ? track.id : null; this.renderWidget(); return; }
-    if (this.curTrackId !== track.id || forceRestart) {
-      this.curTrackId = track.id;
-      this.audio.src = track.url;
+    const changed = this.curTrackId !== track.id || forceRestart;
+    this.curTrackId = track.id;
+    const ytId = this.ytIdOf(track.url);
+
+    if (ytId) {
+      this.mode = 'yt';
+      if (!this.audio.paused) this.audio.pause();
+      this.ensureYT().then(p => {
+        if (this.curTrackId !== track.id) return; // superseded while the API loaded
+        p.setVolume(Math.round(this.vol * 100));
+        if (this.muted) p.mute(); else p.unMute();
+        if (changed || this.curYtId !== ytId) {
+          this.curYtId = ytId;
+          // cueing (not loading) while unarmed avoids a blocked-autoplay error
+          if (this.armed) p.loadVideoById(ytId); else p.cueVideoById(ytId);
+        } else if (this.armed) p.playVideo();
+        this.renderWidget();
+      });
+    } else {
+      this.mode = 'audio';
+      this.pauseYT();
+      if (changed) this.audio.src = track.url;
+      if (this.armed) this.audio.play().catch(() => { /* still locked or bad URL — widget shows a play button */ });
     }
-    if (this.armed) this.audio.play().catch(() => { /* still locked or bad URL — widget shows a play button */ });
     this.renderWidget();
   },
 
   onEnded() {
-    if (this.curForced) { this.audio.currentTime = 0; this.audio.play().catch(() => {}); return; } // loop handles it, but belt-and-braces
+    if (this.curForced) { this.restartCurrent(); return; }
     this.advanceQueue(true);
   },
+  restartCurrent() {
+    if (this.mode === 'yt' && this.yt && this.ytReady) { this.yt.seekTo(0, true); this.yt.playVideo(); }
+    else { this.audio.currentTime = 0; this.audio.play().catch(() => {}); }
+  },
 
-  /* ---------- transport used by the widget ---------- */
+  /* ---------- backend-agnostic transport ---------- */
+  isPlaying() {
+    if (this.mode === 'yt') {
+      try { return !!(this.yt && this.ytReady && this.yt.getPlayerState() === YT.PlayerState.PLAYING); }
+      catch (e) { return false; }
+    }
+    return !!(this.audio && !this.audio.paused);
+  },
+  pauseYT() { if (this.yt && this.ytReady) { try { this.yt.pauseVideo(); } catch (e) {} } },
+  stopAll() {
+    if (!this.audio.paused) this.audio.pause();
+    this.pauseYT();
+  },
+  resume() {
+    if (this.mode === 'yt') { if (this.yt && this.ytReady) this.yt.playVideo(); }
+    else this.audio.play().catch(() => {});
+  },
   togglePlay() {
     if (!this.audio) return;
     this.armed = true;
-    if (this.audio.paused) {
-      if (!this.curTrackId) this.apply(true);
-      else this.audio.play().catch(() => {});
-    } else this.audio.pause();
+    if (this.isPlaying()) this.stopAll();
+    else if (this.curTrackId) this.resume();
+    else this.apply(true);
+    this.renderWidget();
   },
   next() {
     if (!this.audio) return;
@@ -180,12 +272,16 @@ const Music = {
     if (this.curForced) return; // forced track has no "next" — GM controls it
     this.advanceQueue(true);
   },
-  setVolume(v) {
+  setVolume(v, fromSync) {
+    this.vol = v;
     if (this.audio) this.audio.volume = v;
+    if (this.yt && this.ytReady) { try { this.yt.setVolume(Math.round(v * 100)); } catch (e) {} }
+    if (!fromSync) this.renderWidget();
   },
   toggleMute() {
-    if (!this.audio) return;
-    this.audio.muted = !this.audio.muted;
+    this.muted = !this.muted;
+    if (this.audio) this.audio.muted = this.muted;
+    if (this.yt && this.ytReady) { try { this.muted ? this.yt.mute() : this.yt.unMute(); } catch (e) {} }
     this.renderWidget();
   },
 
@@ -222,11 +318,10 @@ const Music = {
     const t = this.trackById(this.curForced || this.curTrackId);
     this.els.title.textContent = t ? (t.title || 'Untitled track') + (this.curForced ? ' (forced)' : '') : 'No track';
     this.els.title.title = this.els.title.textContent;
-    const playing = this.audio && !this.audio.paused;
-    this.els.playBtn.textContent = playing ? '⏸' : '▶';
+    this.els.playBtn.textContent = this.isPlaying() ? '⏸' : '▶';
     this.els.nextBtn.disabled = !!this.curForced;
-    this.els.muteBtn.classList.toggle('active', !!(this.audio && this.audio.muted));
-    if (this.audio && document.activeElement !== this.els.volume) this.els.volume.value = String(this.audio.volume);
+    this.els.muteBtn.classList.toggle('active', this.muted);
+    if (document.activeElement !== this.els.volume) this.els.volume.value = String(this.vol);
   }
 };
 

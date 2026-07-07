@@ -9,6 +9,7 @@ const store = require('./server/store');
 const sim = require('./server/sim');
 const api = require('./server/api');
 const { seed } = require('./server/seed');
+const mapdata = require('./server/mapdata');
 
 const PORT = process.env.PORT || 4820;
 const PUBLIC = path.join(__dirname, 'public');
@@ -58,6 +59,10 @@ const server = http.createServer(async (req, res) => {
 
 (async () => {
   await store.load(seed, process.argv.includes('--reseed'));
+  // self-heal: a world file loaded from disk (or a rollback target) may
+  // predate the SVG map — upgrade it in place rather than surface
+  // "no map document" errors in the client.
+  if (mapdata.applyMap(store.get())) { store.saveNow(); console.log('  Map document upgraded on load.'); }
   sim.setLongLived(true); // enables real auto-advance timers in this process
   sim.init(api.broadcast);
   sim.updateDerived();

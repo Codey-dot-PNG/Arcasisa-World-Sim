@@ -4,6 +4,7 @@ const store = require('./store');
 const sim = require('./sim');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
+const mapdata = require('./mapdata');
 
 const COOKIE_EXTRA = process.env.VERCEL ? '; Secure' : '';
 
@@ -373,6 +374,11 @@ async function handle(req, res, pathname, method) {
       if (pathname === '/api/gm/rollback' && method === 'POST') {
         const b = await readBody(req);
         await store.rollback(Math.round(Number(b.turn)));
+        // the restored snapshot may predate the SVG map document — upgrade
+        // it in place so rolling back never resurfaces "no map document".
+        // store.rollback() swaps in a new db object, so re-fetch it here
+        // rather than mutate the stale `db` const captured above.
+        if (mapdata.applyMap(store.get())) store.save();
         store.log('system', `World rolled back to turn ${b.turn}`, 'By order of the Gamemaster.', actor, []);
         sim.scheduleAuto();
         broadcast('sync');
@@ -393,7 +399,8 @@ async function handle(req, res, pathname, method) {
         if (b.registration) Object.assign(s.registration, b.registration);
         if (b.newsThresholds) Object.assign(s.newsThresholds, b.newsThresholds);
         if (b.demographics) Object.assign(s.demographics, b.demographics);
-        if (b.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
+        if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
+        if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);
         store.save(); broadcast('sync');

@@ -3,6 +3,7 @@
 // Everything created here is plain data — the engine has no knowledge of any
 // of these names. The GM can edit or delete all of it through the UI.
 const crypto = require('crypto');
+const mapdata = require('./mapdata');
 
 function hashPassword(pw) {
   const salt = crypto.randomBytes(8).toString('hex');
@@ -471,37 +472,10 @@ function seed() {
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
       newsThresholds: { transaction: 5000000 },
-      demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS },
-      mapDecor: {
-        lands: [
-          { name: 'KARAZNIA', pts: [[0,96],[64,80],[140,86],[214,64],[300,70],[368,52],[440,58],[506,42],[560,20],[560,0],[0,0]], label: [140,44] },
-          { name: 'ARAGONIA', pts: [], label: [400,30] },
-          { name: 'MADROSIA', pts: [[560,20],[596,34],[650,44],[712,30],[758,10],[758,0],[560,0]], label: [655,14] },
-          { name: 'VALKSLAND', pts: [[1200,0],[1020,28],[968,84],[992,170],[956,262],[1002,352],[966,452],[1010,548],[978,628],[1040,675],[1200,675]], label: [1085,300], rot: -78 },
-          { name: 'ALDONESIA', pts: [[0,540],[56,568],[118,616],[150,652],[96,675],[0,675]], label: [60,608] },
-          { name: 'SOLME', pts: [[320,470],[360,486],[402,470],[430,500],[460,514],[460,560],[444,600],[430,640],[400,640],[356,628],[316,604],[330,576],[298,548],[316,520],[300,492]], label: [372,556] },
-          { name: 'DEL’ CASIA', pts: [[460,514],[470,522],[520,540],[560,528],[600,538],[640,520],[688,498],[730,470],[770,452],[824,470],[832,522],[802,572],[742,622],[682,650],[600,666],[520,662],[470,656],[430,640],[444,600],[460,560]], label: [672,586] }
-        ],
-        islets: [
-          { c: [196,104], r: 13 }, { c: [226,132], r: 9 }, { c: [206,168], r: 11 }, { c: [240,192], r: 7 }, { c: [180,140], r: 8 },
-          { c: [250,320], r: 6 }, { c: [262,372], r: 8 }, { c: [240,420], r: 5 }
-        ],
-        isletLabels: [{ text: 'MAZON', pos: [206, 86] }],
-        seaLabels: [
-          { text: 'STRAIT OF VALGOS', pos: [886, 250], rot: -72 },
-          { text: 'STRAIT OF CASA', pos: [240, 660], rot: 0 },
-          { text: 'ANTACEAN SEA', pos: [130, 420], rot: -90 }
-        ],
-        roads: [
-          [[348,186],[430,230],[520,240],[600,215],[660,182],[730,150]],
-          [[730,150],[706,240],[742,308]],
-          [[742,308],[660,330],[600,352],[560,390]],
-          [[560,390],[470,400],[390,360]],
-          [[390,360],[352,300],[348,186]],
-          [[560,390],[576,450],[600,510]]
-        ],
-        rails: [[[730,150],[706,240],[742,308],[700,380],[646,442],[604,505]]]
-      }
+      demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS }
+      // settings.map (countries, labels, roads, rails) is attached by
+      // mapdata.applyMap(db) below, which also upgrades all coordinates
+      // to the 3840×2160 SVG map grid.
     },
     globalVars: {},
     variables: [
@@ -531,6 +505,8 @@ function seed() {
   for (const p of db.provinces) {
     p.vars.population = Object.values(p.demographics).reduce((s, g) => s + g.population, 0);
   }
+  // lift the hand-drawn 1200×675 world onto the SVG map grid
+  mapdata.applyMap(db);
   return db;
 }
 

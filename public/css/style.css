@@ -13,6 +13,7 @@
   --rule:rgba(34,29,21,0.14);
   --rule-strong:rgba(34,29,21,0.30);
   --sea:#d8cdae;
+  --map-sea:#8ea3b4;
   --good:#3f5c3a;
   --bad:#7a2318;
   --font-voice:'Fraunces', serif;
@@ -23,16 +24,16 @@ body[data-mood="dark"]{
   --paper:#15110d; --paper-deep:#1f1812; --paper-line:#3a2f24;
   --ink:#d9cfb8; --ink-soft:#a49778; --ink-faint:#6e6450;
   --rule:rgba(217,207,184,0.14); --rule-strong:rgba(217,207,184,0.30);
-  --sea:#100d0a; --good:#8aa384;
+  --sea:#100d0a; --map-sea:#141b22; --good:#8aa384;
 }
 body[data-mood="red"]{
   --paper:#241110; --paper-deep:#301715; --paper-line:#512420;
   --ink:#ecdcc4; --ink-soft:#c3a98c; --ink-faint:#8d7360;
   --rule:rgba(236,220,196,0.14); --rule-strong:rgba(236,220,196,0.30);
-  --sea:#1b0d0c; --good:#9aa88a;
+  --sea:#1b0d0c; --map-sea:#1d1418; --good:#9aa88a;
 }
-body[data-mood="warm"]{ --paper:#f2e3c4; --paper-deep:#ead6ad; --paper-line:#d0b787; --sea:#ddc9a0; }
-body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --paper-line:#cdb478; --accent:#8a5a14; --accent-soft:#a37427; --sea:#dcc788; }
+body[data-mood="warm"]{ --paper:#f2e3c4; --paper-deep:#ead6ad; --paper-line:#d0b787; --sea:#ddc9a0; --map-sea:#96a9b3; }
+body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --paper-line:#cdb478; --accent:#8a5a14; --accent-soft:#a37427; --sea:#dcc788; --map-sea:#93a49b; }
 
 *{box-sizing:border-box;}
 html,body{margin:0; padding:0; height:100%;}
@@ -318,30 +319,59 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .chip.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
 
 /* ═══════════ MAP ═══════════ */
-#map-wrap{position:absolute; inset:0; overflow:hidden; background:var(--sea);}
+#map-wrap{position:absolute; inset:0; overflow:hidden; background:var(--map-sea);}
 #map-svg{width:100%; height:100%; display:block; cursor:grab;}
 #map-svg.dragging{cursor:grabbing;}
 #map-svg text{user-select:none; pointer-events:none;}
-.prov-shape{stroke:var(--ink); stroke-opacity:.55; stroke-width:1.1; cursor:pointer; transition:fill-opacity .2s ease;}
-.prov-shape:hover{fill-opacity:.85;}
-.prov-shape.selected{stroke:var(--accent); stroke-width:2.4; stroke-opacity:1;}
-.prov-label{font-family:var(--font-mono); font-weight:700; letter-spacing:.3em; fill:var(--ink); opacity:.62;}
-.prov-stat{font-family:var(--font-mono); letter-spacing:.08em; fill:var(--ink-soft); opacity:.8;}
-.foreign-land{fill:var(--paper-line); fill-opacity:.55; stroke:var(--ink); stroke-opacity:.3; stroke-width:1;}
-.foreign-label{font-family:var(--font-mono); font-weight:700; letter-spacing:.34em; fill:var(--ink-soft); opacity:.5;}
-.sea-label{font-family:var(--font-mono); letter-spacing:.42em; fill:var(--ink-soft); opacity:.42; font-style:italic;}
-.map-road{fill:none; stroke:var(--ink); stroke-opacity:.32; stroke-width:1;}
-.map-rail{fill:none; stroke:var(--accent); stroke-opacity:.45; stroke-width:1; stroke-dasharray:5 3;}
-.city-dot{fill:var(--paper); stroke:var(--ink); stroke-width:1.4; cursor:pointer;}
+.map-ocean{fill:var(--map-sea);}
+.map-frame{fill:none; stroke:rgba(18,24,32,.4); stroke-width:3;}
+.country-shape{stroke:rgba(45,42,36,.55); stroke-width:1.1; cursor:pointer; transition:filter .15s ease;}
+.country-shape:hover{filter:brightness(1.07);}
+.country-shape.selected{stroke:var(--accent); stroke-width:2.4;}
+.prov-shape{stroke:rgba(24,20,14,.6); stroke-width:1.3; cursor:pointer; transition:fill-opacity .2s ease, filter .15s ease;}
+.prov-shape:hover{filter:brightness(1.08);}
+.prov-shape.selected{stroke:var(--accent); stroke-width:2.6;}
+.prov-label{
+  font-family:var(--font-voice); font-weight:600; letter-spacing:.14em;
+  fill:#f4ecdc; opacity:.95; paint-order:stroke; stroke:rgba(55,38,20,.42); stroke-width:7px;
+}
+.prov-stat{font-family:var(--font-mono); letter-spacing:.08em; fill:#f4ecdc; opacity:.85; paint-order:stroke; stroke:rgba(55,38,20,.4); stroke-width:4px;}
+.map-label-country{
+  font-family:var(--font-voice); font-weight:600; letter-spacing:.16em;
+  fill:#ffffff; opacity:.94; paint-order:stroke; stroke:rgba(30,40,52,.45); stroke-width:6px;
+}
+.map-label-sea{font-family:var(--font-voice); font-style:italic; letter-spacing:.5em; fill:#e9f1f2; opacity:.72;}
+.map-label-note{font-family:var(--font-mono); font-weight:700; letter-spacing:.3em; fill:#f4ecdc; opacity:.85; paint-order:stroke; stroke:rgba(55,38,20,.35); stroke-width:3px;}
+#map-svg text.editable{pointer-events:all; cursor:move;}
+#map-svg text.editable:hover{opacity:1;}
+#map-svg text.selected{fill:var(--accent-soft);}
+.map-road{fill:none; stroke:#332e26; stroke-opacity:.8; stroke-width:1.7px;}
+.map-rail-base{fill:none; stroke:#3a3028; stroke-opacity:.9; stroke-width:2.8px;}
+.map-rail-dash{fill:none; stroke:#efe6cf; stroke-opacity:.95; stroke-width:1.3px; stroke-dasharray:7 7;}
+.map-road.editing, .map-rail-base.editing{stroke:var(--accent); stroke-opacity:1;}
+.edit-hit{fill:none; stroke:#fff; stroke-opacity:0; stroke-width:16px; cursor:pointer; pointer-events:stroke;}
+.edit-preview{fill:none; stroke:var(--accent); stroke-width:2px; stroke-dasharray:5 5;}
+.edit-handle{fill:#fff; stroke:var(--accent); stroke-width:3; cursor:grab;}
+.edit-handle:hover{fill:var(--accent-soft);}
+.edit-mid{fill:var(--accent); opacity:.5; cursor:copy;}
+.edit-mid:hover{opacity:.9;}
+.map-edit-hint{
+  font-family:var(--font-mono); font-size:9px; letter-spacing:.08em; color:var(--ink-soft);
+  background:var(--paper); border:1px solid var(--rule-strong); padding:4px 8px;
+}
+.city-dot{fill:var(--paper); stroke:var(--ink); stroke-width:4.4; cursor:pointer;}
 .city-dot:hover{stroke:var(--accent);}
-.city-dot.selected{stroke:var(--accent); stroke-width:2.2;}
-.city-ring{fill:none; stroke:var(--ink); stroke-width:1;}
-.city-label{font-family:var(--font-mono); font-size:9px; letter-spacing:.12em; fill:var(--ink); text-transform:uppercase;}
-.prop-marker{cursor:pointer; stroke:var(--ink); stroke-opacity:.7; stroke-width:.7;}
-.prop-marker:hover{stroke:var(--accent); stroke-width:1.6; stroke-opacity:1;}
-.prop-marker.selected{stroke:var(--accent); stroke-width:2; stroke-opacity:1;}
+.city-dot.selected{stroke:var(--accent); stroke-width:7;}
+.city-ring{fill:none; stroke:var(--ink); stroke-width:3.2;}
+.city-label{
+  font-family:var(--font-mono); font-size:29px; letter-spacing:.12em; fill:var(--ink); text-transform:uppercase;
+  paint-order:stroke; stroke:rgba(238,230,210,.55); stroke-width:6px;
+}
+.prop-marker{cursor:pointer; stroke:var(--ink); stroke-opacity:.7; stroke-width:2.2;}
+.prop-marker:hover{stroke:var(--accent); stroke-width:5; stroke-opacity:1;}
+.prop-marker.selected{stroke:var(--accent); stroke-width:6.4; stroke-opacity:1;}
 .prop-glyph{font-family:var(--font-mono); font-weight:700; fill:var(--paper); pointer-events:none;}
-.graticule{stroke:var(--ink); stroke-opacity:.05;}
+.graticule{stroke:#ffffff; stroke-opacity:.06;}
 
 #map-controls{
   position:absolute; top:14px; right:14px; z-index:5;

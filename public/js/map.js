@@ -1,12 +1,15 @@
 'use strict';
-/* Interactive map. SVG world 1200×675, smooth pan/zoom, data-driven layers.
-   Everything drawn here comes from state: provinces (polygons), cities,
-   properties (markers), and settings.mapDecor (foreign coasts, roads, rails). */
+/* Interactive map. SVG world on the 3840×2160 master-map grid, smooth
+   pan/zoom, data-driven layers. Everything drawn here comes from state:
+   settings.map (foreign countries, text labels, roads, railways),
+   provinces (SVG shapes), cities and properties (markers).
+   GM editing of labels/roads/rails lives in mapedit.js. */
 
 const GameMap = {
   ready: false,
+  VIEW: { w: 3840, h: 2160 },
   view: { x: 0, y: 0, k: 1 },
-  svg: null, world: null, markerLayer: null, cityLayer: null,
+  svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
   drag: null,
 
   mount(container) {
@@ -16,7 +19,7 @@ const GameMap = {
 
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('id', 'map-svg');
-    this.svg.setAttribute('viewBox', '0 0 1200 675');
+    this.svg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
     this.svg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
     wrap.appendChild(this.svg);
 
@@ -37,10 +40,22 @@ const GameMap = {
   },
 
   reset(silent) {
-    // fit island with a little margin
-    this.view = { x: -60, y: 20, k: 1.12 };
+    // frame the island with its neighbours, whatever the window shape
+    const R = { x: 560, y: 80, w: 2340, h: 2040 }; // Arcasia + nearby coasts
+    let view = { x: -375, y: -170, k: 1.22 };
+    const w = this.svg.clientWidth, h = this.svg.clientHeight;
+    this._fitted = !!(w && h); // false while the app shell is still hidden
+    if (w && h) {
+      const s0 = Math.max(w / this.VIEW.w, h / this.VIEW.h); // slice scale
+      const vw = w / s0, vh = h / s0;                        // visible viewBox units
+      const k = Math.min(32, Math.max(0.55, Math.min(vw / R.w, vh / R.h)));
+      view = { k, x: this.VIEW.w / 2 - (R.x + R.w / 2) * k, y: this.VIEW.h / 2 - (R.y + R.h / 2) * k };
+    }
+    this.view = view;
     if (!silent) this.applyTransform();
   },
+
+  editing() { return !!(window.MapEdit && MapEdit.active); },
 
   /* ---------- pan & zoom ---------- */
   clientToWorld(cx, cy) {
@@ -70,11 +85,14 @@ const GameMap = {
       const moved = this.drag && this.drag.moved;
       this.drag = null;
       svg.classList.remove('dragging');
-      if (!moved && W.placing) {
+      if (moved) return;
+      if (W.placing) {
         const [wx, wy] = this.clientToWorld(e.clientX, e.clientY);
         const cb = W.placing.cb;
         this.setPlacing(null);
         cb([Math.round(wx), Math.round(wy)]);
+      } else if (this.editing()) {
+        MapEdit.mapClick(this.clientToWorld(e.clientX, e.clientY), e);
       }
     });
     svg.addEventListener('wheel', (e) => {
@@ -82,27 +100,31 @@ const GameMap = {
       const pt = this.svg.createSVGPoint();
       pt.x = e.clientX; pt.y = e.clientY;
       const sp = pt.matrixTransform(this.svg.getScreenCTM().inverse());
-      const k2 = Math.min(9, Math.max(0.7, this.view.k * Math.exp(-e.deltaY * 0.0014)));
+      const k2 = Math.min(32, Math.max(0.55, this.view.k * Math.exp(-e.deltaY * 0.0014)));
       this.view.x = sp.x - (sp.x - this.view.x) * (k2 / this.view.k);
       this.view.y = sp.y - (sp.y - this.view.y) * (k2 / this.view.k);
       this.view.k = k2;
       this.applyTransform();
     }, { passive: false });
-    svg.addEventListener('dblclick', (e) => { e.preventDefault(); this.zoomBy(1.6); });
+    svg.addEventListener('dblclick', (e) => {
+      e.preventDefault();
+      if (this.editing() && MapEdit.dblclick()) return;
+      this.zoomBy(1.6);
+    });
   },
   zoomBy(f) {
-    const k2 = Math.min(9, Math.max(0.7, this.view.k * f));
+    const k2 = Math.min(32, Math.max(0.55, this.view.k * f));
     // zoom about viewBox centre
-    const cx = 600, cy = 337;
+    const cx = this.VIEW.w / 2, cy = this.VIEW.h / 2;
     this.view.x = cx - (cx - this.view.x) * (k2 / this.view.k);
     this.view.y = cy - (cy - this.view.y) * (k2 / this.view.k);
     this.view.k = k2;
     this.applyTransform();
   },
   focus(pos, minK) {
-    const targetK = Math.max(this.view.k, minK || 2.6);
+    const targetK = Math.max(this.view.k, minK || 8);
     const from = { ...this.view };
-    const to = { k: targetK, x: 600 - pos[0] * targetK, y: 337 - pos[1] * targetK };
+    const to = { k: targetK, x: this.VIEW.w / 2 - pos[0] * targetK, y: this.VIEW.h / 2 - pos[1] * targetK };
     const t0 = performance.now();
     const anim = (t) => {
       const u = Math.min(1, (t - t0) / 340);
@@ -137,10 +159,10 @@ const GameMap = {
       const vals = S().provinces.map(x => Number(x.vars[W.dataVar]) || 0);
       const min = Math.min(...vals), max = Math.max(...vals);
       const t = max > min ? ((Number(p.vars[W.dataVar]) || 0) - min) / (max - min) : 0.5;
-      return { fill: 'rgb(122,35,24)', opacity: 0.08 + t * 0.6 };
+      return { fill: 'rgb(122,35,24)', opacity: 0.14 + t * 0.62 };
     }
-    if (W.layer === 'ownership' || W.layer === 'plain') return { fill: 'var(--paper-deep)', opacity: 0.9 };
-    return { fill: p.color || 'var(--paper-deep)', opacity: 0.55 };
+    if (W.layer === 'ownership' || W.layer === 'plain') return { fill: 'var(--paper-deep)', opacity: 0.94 };
+    return { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
   },
 
   /* ---------- render ---------- */
@@ -149,82 +171,114 @@ const GameMap = {
     const NS = 'http://www.w3.org/2000/svg';
     const mk = (tag, attrs, parent) => {
       const n = document.createElementNS(NS, tag);
-      for (const k in attrs) n.setAttribute(k, attrs[k]);
+      for (const k in attrs) if (attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
       (parent || this.world).appendChild(n);
       return n;
     };
+    this.mk = mk;
+    if (!this._fitted) this.reset(true); // first visible render: fit the island
     clear(this.svg);
     this.world = document.createElementNS(NS, 'g');
     this.svg.appendChild(this.world);
 
-    // graticule
-    for (let x = 0; x <= 1200; x += 100) mk('line', { x1: x, y1: -400, x2: x, y2: 1100, class: 'graticule' });
-    for (let y = -300; y <= 1000; y += 100) mk('line', { x1: -400, y1: y, x2: 1600, y2: y, class: 'graticule' });
-
-    const decor = S().settings.mapDecor || {};
+    const map = S().settings.map || { countries: [], labels: [], roads: [], rails: [] };
+    const editing = this.editing();
     const ptsStr = (pts) => pts.map(p => p.join(',')).join(' ');
+    const title = (node, text) => {
+      const t = document.createElementNS(NS, 'title');
+      t.textContent = text;
+      node.appendChild(t);
+    };
 
-    // foreign landmasses + labels
-    for (const land of (decor.lands || [])) {
-      if (land.pts && land.pts.length > 2) mk('polygon', { points: ptsStr(land.pts), class: 'foreign-land' });
-      if (land.label) {
-        const t = mk('text', {
-          x: land.label[0], y: land.label[1], class: 'foreign-label', 'font-size': 15,
-          'text-anchor': 'middle', transform: land.rot ? `rotate(${land.rot} ${land.label[0]} ${land.label[1]})` : ''
-        });
-        t.textContent = land.name;
-      }
-    }
-    for (const isl of (decor.islets || [])) {
-      const [cx, cy] = isl.c, r = isl.r;
-      const pts = [];
-      for (let a = 0; a < 7; a++) {
-        const ang = a / 7 * Math.PI * 2;
-        pts.push([cx + Math.cos(ang) * r * (0.75 + ((a * 37) % 10) / 20), cy + Math.sin(ang) * r * (0.8 + ((a * 53) % 10) / 25)]);
-      }
-      mk('polygon', { points: ptsStr(pts), class: 'foreign-land' });
-    }
-    for (const lb of (decor.isletLabels || [])) {
-      const t = mk('text', { x: lb.pos[0], y: lb.pos[1], class: 'foreign-label', 'font-size': 10, 'text-anchor': 'middle' });
-      t.textContent = lb.text;
-    }
-    for (const sl of (decor.seaLabels || [])) {
-      const t = mk('text', {
-        x: sl.pos[0], y: sl.pos[1], class: 'sea-label', 'font-size': 11, 'text-anchor': 'middle',
-        transform: sl.rot ? `rotate(${sl.rot} ${sl.pos[0]} ${sl.pos[1]})` : ''
+    // ocean, graticule and the map boundary frame
+    mk('rect', { x: -8000, y: -8000, width: this.VIEW.w + 16000, height: this.VIEW.h + 16000, class: 'map-ocean' });
+    for (let x = 0; x <= this.VIEW.w; x += 320) mk('line', { x1: x, y1: -1400, x2: x, y2: this.VIEW.h + 1400, class: 'graticule' });
+    for (let y = -1280; y <= this.VIEW.h + 1280; y += 320) mk('line', { x1: -1400, y1: y, x2: this.VIEW.w + 1400, y2: y, class: 'graticule' });
+    mk('rect', { x: 0, y: 0, width: this.VIEW.w, height: this.VIEW.h, class: 'map-frame' });
+
+    // foreign powers — international borders in their shades of grey
+    this.countryNodes = {};
+    for (const c of (map.countries || [])) {
+      if (!c.shape) continue;
+      const node = mk('path', { d: c.shape, 'fill-rule': 'evenodd', class: 'country-shape', fill: c.fill || '#a8a196', 'vector-effect': 'non-scaling-stroke' });
+      node.addEventListener('pointerup', (e) => {
+        if (this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        if (c.entityId && entById(c.entityId)) select('entity', c.entityId, { noPan: true });
+        else toast(c.name + ' — no dossier on file.');
       });
-      t.textContent = sl.text;
+      title(node, c.name);
+      if (c.entityId) this.countryNodes[c.entityId] = node;
     }
 
-    // island shadow (all provinces merged silhouette effect)
+    // island drop shadow, then the provinces themselves
     for (const p of S().provinces) {
-      if (p.path && p.path.length > 2) mk('polygon', { points: ptsStr(p.path), fill: 'rgba(34,29,21,0.28)', stroke: 'rgba(34,29,21,0.28)', 'stroke-width': 5, transform: 'translate(2.5,3.5)' });
+      if (p.shape) mk('path', { d: p.shape, 'fill-rule': 'evenodd', fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
+      else if (p.path && p.path.length > 2) mk('polygon', { points: ptsStr(p.path), fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
     }
-    // province polygons
     this.provNodes = {};
     for (const p of S().provinces) {
-      if (!p.path || p.path.length < 3) continue;
       const f = this.provFill(p);
-      const poly = mk('polygon', { points: ptsStr(p.path), class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity });
-      poly.addEventListener('pointerup', (e) => { if (!this.dragMoved() && !W.placing) { e.stopPropagation(); select('province', p.id, { noPan: true }); } });
-      const title = document.createElementNS(NS, 'title');
-      title.textContent = p.name;
-      poly.appendChild(title);
+      let poly = null;
+      if (p.shape) poly = mk('path', { d: p.shape, 'fill-rule': 'evenodd', class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
+      else if (p.path && p.path.length > 2) poly = mk('polygon', { points: ptsStr(p.path), class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
+      if (!poly) continue;
+      poly.addEventListener('pointerup', (e) => {
+        if (this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        select('province', p.id, { noPan: true });
+      });
+      title(poly, p.name);
       this.provNodes[p.id] = poly;
     }
 
-    // roads & rails
-    for (const r of (decor.roads || [])) mk('polyline', { points: ptsStr(r), class: 'map-road' });
-    for (const r of (decor.rails || [])) mk('polyline', { points: ptsStr(r), class: 'map-rail' });
+    // transport — roads, then railways (casing + sleeper dashes)
+    for (const r of (map.roads || [])) {
+      if (!r.pts || r.pts.length < 2) continue;
+      mk('polyline', { points: ptsStr(r.pts), class: 'map-road', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'roads:' + r.id });
+    }
+    for (const r of (map.rails || [])) {
+      if (!r.pts || r.pts.length < 2) continue;
+      mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-base', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
+      mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-dash', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
+    }
+    // wide invisible strokes so the pen tool can pick a line up easily
+    if (editing && (MapEdit.mode === 'roads' || MapEdit.mode === 'rails')) {
+      for (const r of (map[MapEdit.mode] || [])) {
+        if (!r.pts || r.pts.length < 2) continue;
+        const hit = mk('polyline', { points: ptsStr(r.pts), class: 'edit-hit', 'vector-effect': 'non-scaling-stroke' });
+        hit.addEventListener('pointerup', (e) => {
+          if (this.dragMoved() || MapEdit.drawing) return;
+          e.stopPropagation();
+          MapEdit.selectPath(MapEdit.mode, r.id);
+        });
+      }
+    }
 
-    // province labels (+ data value when data layer active)
+    // editable text markers (country names, seas, notes)
+    for (const lbl of (map.labels || [])) {
+      const canEdit = editing && MapEdit.mode === 'labels';
+      const t = mk('text', {
+        x: lbl.pos[0], y: lbl.pos[1],
+        class: 'map-label map-label-' + (lbl.kind || 'note') + (canEdit ? ' editable' : '') + (canEdit && MapEdit.selLabel === lbl.id ? ' selected' : ''),
+        'font-size': lbl.size || 40, 'text-anchor': 'middle',
+        transform: lbl.rot ? `rotate(${lbl.rot} ${lbl.pos[0]} ${lbl.pos[1]})` : '',
+        'data-label': lbl.id
+      });
+      t.textContent = lbl.text;
+      if (canEdit) t.addEventListener('pointerdown', (e) => MapEdit.labelPointerDown(e, lbl.id));
+    }
+
+    // province names (+ data value when the data layer is active)
     for (const p of S().provinces) {
       if (!p.labelPos) continue;
-      const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': 14, 'text-anchor': 'middle' });
+      const size = p.labelSize || 46;
+      const rot = p.labelRot ? `rotate(${p.labelRot} ${p.labelPos[0]} ${p.labelPos[1]})` : '';
+      const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': size, 'text-anchor': 'middle', transform: rot });
       t.textContent = p.name.toUpperCase();
       if (W.layer === 'data') {
         const vdef = (S().variables || []).find(v => v.scope === 'province' && v.key === W.dataVar);
-        const st = mk('text', { x: p.labelPos[0], y: p.labelPos[1] + 14, class: 'prov-stat', 'font-size': 9, 'text-anchor': 'middle' });
+        const st = mk('text', { x: p.labelPos[0], y: p.labelPos[1] + size * 0.72, class: 'prov-stat', 'font-size': Math.max(24, size * 0.34), 'text-anchor': 'middle', transform: rot });
         st.textContent = fmtVal(p.vars[W.dataVar], vdef ? vdef.format : 'number');
       }
     }
@@ -239,20 +293,22 @@ const GameMap = {
       g.setAttribute('data-marker', pr.id);
       g.setAttribute('data-x', pr.pos[0]); g.setAttribute('data-y', pr.pos[1]);
       const rect = document.createElementNS(NS, 'rect');
-      rect.setAttribute('x', -5.5); rect.setAttribute('y', -5.5);
-      rect.setAttribute('width', 11); rect.setAttribute('height', 11);
+      rect.setAttribute('x', -17.6); rect.setAttribute('y', -17.6);
+      rect.setAttribute('width', 35.2); rect.setAttribute('height', 35.2);
       rect.setAttribute('class', 'prop-marker');
       rect.setAttribute('fill', owner ? owner.color || '#5c5340' : '#5c5340');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) rect.classList.add('selected');
-      rect.addEventListener('pointerup', (e) => { if (!this.dragMoved() && !W.placing) { e.stopPropagation(); select('property', pr.id, { noPan: true }); } });
-      const title = document.createElementNS(NS, 'title');
-      title.textContent = `${pr.name} — ${owner ? owner.name : 'unowned'}`;
-      rect.appendChild(title);
+      rect.addEventListener('pointerup', (e) => {
+        if (this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        select('property', pr.id, { noPan: true });
+      });
+      title(rect, `${pr.name} — ${owner ? owner.name : 'unowned'}`);
       const glyph = document.createElementNS(NS, 'text');
       glyph.setAttribute('class', 'prop-glyph');
-      glyph.setAttribute('font-size', 8);
+      glyph.setAttribute('font-size', 25.6);
       glyph.setAttribute('text-anchor', 'middle');
-      glyph.setAttribute('y', 3);
+      glyph.setAttribute('y', 9.6);
       glyph.textContent = KIND_GLYPH[pr.kind] || '•';
       g.appendChild(rect); g.appendChild(glyph);
       this.markerLayer.appendChild(g);
@@ -266,30 +322,36 @@ const GameMap = {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('data-city', c.id);
       g.setAttribute('data-x', c.pos[0]); g.setAttribute('data-y', c.pos[1]);
-      const r = c.size === 3 ? 4.6 : c.size === 2 ? 3.6 : 2.7;
+      const r = c.size === 3 ? 14.7 : c.size === 2 ? 11.5 : 8.6;
       const dot = document.createElementNS(NS, 'circle');
       dot.setAttribute('r', r);
       dot.setAttribute('class', 'city-dot');
       if (W.selection && W.selection.kind === 'city' && W.selection.id === c.id) dot.classList.add('selected');
-      dot.addEventListener('pointerup', (e) => { if (!this.dragMoved() && !W.placing) { e.stopPropagation(); select('city', c.id, { noPan: true }); } });
-      const title = document.createElementNS(NS, 'title');
-      title.textContent = c.name;
-      dot.appendChild(title);
+      dot.addEventListener('pointerup', (e) => {
+        if (this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        select('city', c.id, { noPan: true });
+      });
+      title(dot, c.name);
       g.appendChild(dot);
       if (c.isCapital) {
         const ring = document.createElementNS(NS, 'circle');
-        ring.setAttribute('r', r + 2.6);
+        ring.setAttribute('r', r + 8.3);
         ring.setAttribute('class', 'city-ring');
         g.appendChild(ring);
       }
       const lbl = document.createElementNS(NS, 'text');
       lbl.setAttribute('class', 'city-label');
-      lbl.setAttribute('x', r + 4);
-      lbl.setAttribute('y', 3);
+      lbl.setAttribute('x', r + 13);
+      lbl.setAttribute('y', 9.6);
       lbl.textContent = (c.isCapital ? '★ ' : '') + c.name;
       g.appendChild(lbl);
       this.cityLayer.appendChild(g);
     }
+
+    // GM pen-tool overlay (vertex handles, in-progress lines)
+    this.editLayer = null;
+    if (editing) MapEdit.renderOverlay(this);
 
     this.renderLayerBar();
     this.renderLegend();
@@ -300,13 +362,13 @@ const GameMap = {
 
   updateMarkerScale() {
     const k = this.view.k;
-    const showProps = k >= 2.1 || W.layer === 'ownership';
+    const showProps = k >= 6.7 || W.layer === 'ownership';
     if (this.markerLayer) {
       for (const g of this.markerLayer.children) {
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
         const sel = W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker');
         const s = (showProps || sel) ? 1 / k : 0.32 / k;
-        g.setAttribute('transform', `translate(${x},${y}) scale(${Math.max(s, 0.11)})`);
+        g.setAttribute('transform', `translate(${x},${y}) scale(${Math.max(s, 0.034)})`);
         const glyph = g.querySelector('.prop-glyph');
         if (glyph) glyph.style.display = (showProps || sel) ? '' : 'none';
       }
@@ -317,11 +379,19 @@ const GameMap = {
         g.setAttribute('transform', `translate(${x},${y}) scale(${1 / Math.max(1, k * 0.72)})`);
       }
     }
+    if (this.editLayer) {
+      for (const g of this.editLayer.children) {
+        if (!g.hasAttribute('data-x')) continue;
+        const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
+        g.setAttribute('transform', `translate(${x},${y}) scale(${1 / k})`);
+      }
+    }
   },
 
   highlight() {
     if (!this.ready || !this.provNodes) return;
     for (const id in this.provNodes) this.provNodes[id].classList.toggle('selected', !!(W.selection && W.selection.kind === 'province' && W.selection.id === id));
+    for (const id in (this.countryNodes || {})) this.countryNodes[id].classList.toggle('selected', !!(W.selection && W.selection.kind === 'entity' && W.selection.id === id));
     if (this.markerLayer) for (const g of this.markerLayer.children) {
       const r = g.querySelector('.prop-marker');
       if (r) r.classList.toggle('selected', !!(W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker')));
@@ -353,6 +423,7 @@ const GameMap = {
       bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent);' }, '⌖ CLICK MAP: ' + W.placing.label));
       bar.appendChild(el('button.chip', { onclick: () => this.setPlacing(null) }, 'cancel'));
     }
+    if (window.MapEdit) MapEdit.toolbar(bar);
   },
 
   setPlacing(p) { W.placing = p; this.renderLayerBar(); },
@@ -379,6 +450,13 @@ const GameMap = {
       lg.appendChild(el('div.lg-title', S().settings.worldName.toUpperCase()));
       for (const p of S().provinces) {
         lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + (p.color || '#ccc') }), el('span', p.name)));
+      }
+      const countries = (S().settings.map || {}).countries || [];
+      if (countries.length) {
+        lg.appendChild(el('div.lg-title', { style: 'margin-top:8px;' }, 'FOREIGN POWERS'));
+        for (const c of countries) {
+          lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + c.fill }), el('span', c.name)));
+        }
       }
       lg.appendChild(el('div', { style: 'margin-top:6px; color:var(--ink-faint);' }, 'zoom in for properties · ★ capital'));
     }

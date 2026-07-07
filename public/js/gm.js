@@ -233,20 +233,22 @@ const GM = {
     if (!selId) return;
     const isNew = selId === '__new__';
     const source = isNew
-      ? { name: 'New Province', color: '#8a8a6a', description: '', path: [[100, 100], [200, 80], [240, 160], [140, 190]], labelPos: [170, 135], vars: {}, demographics: {} }
+      ? { name: 'New Province', color: '#8a8a6a', description: '', shape: 'M1750 950 L2100 900 L2200 1120 L1900 1220 Z', labelPos: [1960, 1040], labelRot: 0, labelSize: 60, vars: {}, demographics: {} }
       : provById(selId);
     if (!source) return;
     const d = this.getDraft('prov:' + selId, source);
-    d.pathText = d.pathText || (d.path || []).map(p => p.join(',')).join(' ');
+    if (d.shapeText === undefined) d.shapeText = d.shape || (d.path || []).map(p => p.join(',')).join(' ');
 
     main.appendChild(Views.secLabel(isNew ? 'New Province' : 'Edit — ' + source.name));
     main.appendChild(el('div.form-grid',
       this.field('Name', this.text(d, 'name')),
       this.field('Map colour', this.color(d, 'color')),
       this.field('Label position "x,y"', el('input.text-input', { value: (d.labelPos || []).join(','), oninput: (e) => d.labelPos = e.target.value.split(',').map(Number) })),
-      this.field('Capital city', this.sel(d, 'capital', [['__null__', '— none —'], ...S().cities.map(c => [c.id, c.name])]))));
+      this.field('Capital city', this.sel(d, 'capital', [['__null__', '— none —'], ...S().cities.map(c => [c.id, c.name])])),
+      this.field('Label rotation (°)', this.num(d, 'labelRot')),
+      this.field('Label size', this.num(d, 'labelSize'))));
     main.appendChild(this.field('Description', this.area(d, 'description')));
-    main.appendChild(this.field('Boundary polygon — points "x,y x,y …" on the 1200×675 map grid', this.area(d, 'pathText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;')));
+    main.appendChild(this.field('Boundary — SVG path data ("M x y L x y … Z") or points "x,y x,y …" on the 3840×2160 map grid', this.area(d, 'shapeText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;')));
     main.appendChild(this.varsEditor(d, 'province'));
 
     // demographics grid
@@ -273,8 +275,17 @@ const GM = {
 
     const bar = this.saveBar('provinces', d, isNew);
     bar.firstChild.addEventListener('click', () => {
-      try { d.path = d.pathText.trim().split(/\s+/).map(pair => pair.split(',').map(Number)).filter(p => p.length === 2 && !p.some(isNaN)); } catch (e) { }
-      delete d.pathText;
+      const txt = String(d.shapeText || '').trim();
+      if (/^[Mm]/.test(txt)) {
+        // SVG path data
+        d.shape = txt;
+        d.path = null;
+      } else if (txt) {
+        // legacy "x,y x,y …" polygon
+        try { d.path = txt.split(/\s+/).map(pair => pair.split(',').map(Number)).filter(p => p.length === 2 && !p.some(isNaN)); } catch (e) { }
+        d.shape = null;
+      }
+      delete d.shapeText;
     }, { capture: true });
     main.appendChild(bar);
   },
@@ -316,7 +327,7 @@ const GM = {
       () => { W.gmSel.mapobjects = '__newcity__'; this.draftKey = null; App.renderView(); }));
     if (!selId) return;
     const isNew = selId === '__newcity__';
-    const source = isNew ? { name: 'New City', provinceId: S().provinces[0] && S().provinces[0].id, pos: [600, 340], size: 1, isCapital: false, description: '' } : cityById(selId);
+    const source = isNew ? { name: 'New City', provinceId: S().provinces[0] && S().provinces[0].id, pos: [1900, 1000], size: 1, isCapital: false, description: '' } : cityById(selId);
     if (!source) return;
     const d = this.getDraft('city:' + selId, source);
     main.appendChild(Views.secLabel(isNew ? 'New City' : 'Edit — ' + source.name));
@@ -339,7 +350,7 @@ const GM = {
     if (!selId) return;
     const isNew = selId === '__newprop__';
     const source = isNew
-      ? { name: 'New Property', type: 'commercial', kind: 'office', provinceId: S().provinces[0] && S().provinces[0].id, pos: [600, 340], ownerId: null, value: 100000, employees: 0, income: 0, expenses: 0, description: '', inventory: [], vars: {} }
+      ? { name: 'New Property', type: 'commercial', kind: 'office', provinceId: S().provinces[0] && S().provinces[0].id, pos: [1900, 1000], ownerId: null, value: 100000, employees: 0, income: 0, expenses: 0, description: '', inventory: [], vars: {} }
       : propById(selId);
     if (!source) return;
     const d = this.getDraft('prop:' + selId, source);

@@ -56,7 +56,7 @@ function el(spec, attrs, ...children) {
 const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); return n; };
 
 /* ---------- formatting ---------- */
-const CUR = () => (W.state ? W.state.settings.currency : 'K');
+const CUR = () => (W.state ? W.state.settings.currency : '₳');
 function fmtNum(n, dec) {
   if (n === undefined || n === null || isNaN(n)) return '—';
   const d = dec === undefined ? (Math.abs(n) < 10 && n % 1 !== 0 ? 2 : 0) : dec;
@@ -102,6 +102,53 @@ const perms = () => (W.me ? W.me.role.perms : { pages: [], mapLayers: [] });
 const can = (page) => perms().pages && perms().pages.includes(page);
 const isGM = () => !!perms().gm;
 const myEntity = () => (W.me && W.me.entityId ? entById(W.me.entityId) : null);
+
+/* ---------- ownership & market mirrors ----------
+   Client-side mirrors of server/ownership.js and server/market.js, used by
+   views to gate UI without a round-trip. Same one-hop links: ownerId, ceoId,
+   party leaderId, majority shareholding. Chains compose; depth-capped and
+   cycle-safe. The server re-checks everything, so these only affect what is
+   shown, never what is allowed. */
+function ownership_directlyControlsClient(controllerId, e) {
+  if (!e || !controllerId) return false;
+  if (e.ownerId && e.ownerId === controllerId) return true;
+  if (e.ceoId && e.ceoId === controllerId) return true;
+  if (e.type === 'party' && e.leaderId === controllerId) return true;
+  if (e.sharesOutstanding && Array.isArray(e.shareholders)) {
+    const held = e.shareholders.filter(s => s.entityId === controllerId).reduce((sum, s) => sum + (s.shares || 0), 0);
+    if (held > e.sharesOutstanding / 2) return true;
+  }
+  return false;
+}
+// The set of entity ids the current user's entity controls (incl. itself).
+function ownershipSetClient(rootEntityId) {
+  const root = rootEntityId || (W.me && W.me.entityId);
+  const set = new Set();
+  if (!root || !S()) return set;
+  set.add(root);
+  let frontier = [root], depth = 0;
+  while (frontier.length && depth < 6) {
+    const next = [];
+    for (const controllerId of frontier) {
+      for (const e of S().entities) {
+        if (set.has(e.id)) continue;
+        if (ownership_directlyControlsClient(controllerId, e)) { set.add(e.id); next.push(e.id); }
+      }
+    }
+    frontier = next; depth++;
+  }
+  return set;
+}
+function ownership_controlsClient(rootEntityId, targetEntityId) {
+  if (!rootEntityId || !targetEntityId) return false;
+  if (rootEntityId === targetEntityId) return true;
+  return ownershipSetClient(rootEntityId).has(targetEntityId);
+}
+// Shares not yet allocated to any holder — what the market maker sells from.
+function market_treasuryPoolClient(co) {
+  const held = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
+  return Math.max(0, (co.sharesOutstanding || 0) - held);
+}
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
 const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', port: 'P', airport: 'V', university: 'U', infrastructure: 'I' };
@@ -312,7 +359,7 @@ function renderExplorer() {
 }
 
 /* ---------- ticker ---------- */
-const TICK_GLYPH = { economy: 'K', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
+const TICK_GLYPH = { economy: '₳', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
 function renderTicker() {
   const track = document.getElementById('ticker-track');
   clear(track);

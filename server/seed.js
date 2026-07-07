@@ -127,7 +127,7 @@ function seed() {
       description: 'The federal government of the Republic of Arcasia. Presidential republic; unicameral Parliament of 150 seats.',
       ceoId: 'per_valen', vars: {}, inventory: [{ itemId: 'item_gold', qty: 1200 }] },
     { id: 'ent_bank', type: 'government', name: 'Bank of Arcasia', color: '#33424d', logo: A + '/flags/seal.png',
-      description: 'Central bank and issuer of the Arcasian Koren (K).',
+      description: 'Central bank and issuer of the Arcasian Koren (₳, ARK).',
       ownerId: 'ent_gov', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
 
     { id: 'ent_arc', type: 'company', name: 'ARC', industry: 'State Corporation', color: '#33424d', logo: A + '/companies/arc.png',
@@ -494,7 +494,7 @@ function seed() {
     schema: 2,
     settings: {
       worldName: 'Republic of Arcasia',
-      currency: 'K',
+      currency: '₳',
       currencyName: 'Arcasian Koren',
       // Phase 11 — national profile card shown atop the Population view and
       // in the Government entity dossier. `leader: null` reflects the vacancy

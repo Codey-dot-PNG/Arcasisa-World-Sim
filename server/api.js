@@ -361,7 +361,7 @@ async function handle(req, res, pathname, method) {
       store.save(); broadcast('sync');
       return json(res, 200, { trade });
     }
-    m = pathname.match(/^\/api\/trades\/([\w-]+)\/(accept|decline|cancel)$/);
+    let m = pathname.match(/^\/api\/trades\/([\w-]+)\/(accept|decline|cancel)$/);
     if (m) {
       const trade = (db.trades || []).find(t => t.id === m[1]);
       if (!trade) return bad('No such trade offer.');
@@ -496,7 +496,7 @@ async function handle(req, res, pathname, method) {
       store.save(); broadcast('sync');
       return json(res, 200, { article: a });
     }
-    let m = pathname.match(/^\/api\/news\/([\w-]+)$/);
+    m = pathname.match(/^\/api\/news\/([\w-]+)$/);
     if (m && (method === 'PATCH' || method === 'DELETE')) {
       const gm = u.role.perms.gm;
       if (!u.role.perms.manageNews && !gm) return deny('Press credentials required.');

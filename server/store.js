@@ -135,6 +135,15 @@ function migrate(world) {
   try { if (require('./market').syncAllCertificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
 
+  // Currency → Arcasian Koren (₳, code ARK). Ungated: only flips the old
+  // default 'K' symbol, so a GM's custom symbol is left alone.
+  if (world.settings) {
+    if (world.settings.currency === 'K') { world.settings.currency = '₳'; changed = true; }
+    if (world.settings.currencyName === 'Arcasian Mark' || !world.settings.currencyName) {
+      world.settings.currencyName = 'Arcasian Koren'; changed = true;
+    }
+  }
+
   // ---- Phase 11 — one-time world-data update -----------------------------
   // Gated on schema so this block runs exactly once per world: fresh seeds
   // are born at schema 2 (see seed.js) and skip it entirely; a live world
@@ -159,15 +168,7 @@ function migrate(world) {
       changed = true;
     }
 
-    // 2. Currency → Arcasian Koren. Only flip the old default symbol; leave
-    //    a GM's custom symbol alone if they already changed it to something
-    //    else.
-    if (world.settings) {
-      if (world.settings.currency === '₳') { world.settings.currency = 'K'; changed = true; }
-      if (world.settings.currencyName === 'Arcasian Mark' || !world.settings.currencyName) {
-        world.settings.currencyName = 'Arcasian Koren'; changed = true;
-      }
-    }
+    // 2. Currency rename is handled by the ungated migration above.
 
     // 3. Arcasia national profile card (Population view + Government dossier).
     if (world.settings && !world.settings.country) {

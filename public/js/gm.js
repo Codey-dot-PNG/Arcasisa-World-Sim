@@ -14,12 +14,18 @@ const GM = {
     ['variables', 'Variables'],
     ['events', 'Event Engine'],
     ['population', 'Population'],
+    ['presentation', 'Presentation'],
     ['roles', 'Roles & Operators'],
     ['danger', 'Archive & Danger']
   ],
 
   render(container) {
     clear(container);
+    // a re-render discards whatever DOM the expression popover (Phase 8) was
+    // anchored to — drop the stale refs rather than leaving a dangling
+    // mousedown listener on document.
+    if (this._exprPopDoc) { document.removeEventListener('mousedown', this._exprPopDoc, true); }
+    this._exprPop = null; this._exprPopDoc = null; this._exprPopFor = null;
     const layout = el('div.gm-layout');
     const nav = el('div.gm-nav');
     for (const [id, label] of this.TABS) {
@@ -32,6 +38,7 @@ const GM = {
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
       registry: this.tabRegistry, economy: this.tabEconomy, items: this.tabItems,
       variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
+      presentation: this.tabPresentation,
       roles: this.tabRoles, danger: this.tabDanger
     }[W.gmTab] || this.tabWorld;
     fn.call(this, main);
@@ -452,7 +459,7 @@ const GM = {
             el('label.field-label', 'Memo'), this.text(nd, 'memo')
           ), [{ label: 'Execute', onClick: async () => { await POST('/api/gm/mint', nd); toast('Executed.'); } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
         }
-      }, '₳ Mint / Destroy'),
+      }, CUR() + ' Mint / Destroy'),
       el('button.dash-btn', { onclick: () => Views.transferModal() }, '⇄ Transfer')));
 
     main.appendChild(Views.secLabel('All Accounts'));
@@ -492,6 +499,30 @@ const GM = {
   },
 
   /* ═══════════ VARIABLES ═══════════ */
+  // Phase 8 — Variables tab usage scan. Walks every event's condition and
+  // effect strings looking for "$key" (direct reads) and "(..., key)" as the
+  // last argument of prov()/ent() calls (the two conventions evalExpr
+  // supports), and returns the events that reference it. Best-effort string
+  // scan only — it does not parse the expression, so it can't tell a real
+  // reference from a coincidental substring inside another word, hence the
+  // word-boundary regex.
+  findVarUsage(key) {
+    if (!key) return [];
+    const dollarRe = new RegExp('\\$' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b');
+    const callRe = new RegExp('\\b(?:prov|ent)\\s*\\([^)]*,\\s*' + key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*\\)');
+    const refs = (s) => typeof s === 'string' && (dollarRe.test(s) || callRe.test(s));
+    const hits = [];
+    for (const ev of S().events || []) {
+      let hit = false;
+      for (const c of ev.conditions || []) if (refs(c.a) || refs(c.b)) hit = true;
+      for (const fx of ev.effects || []) {
+        for (const v of Object.values(fx)) if (refs(v)) hit = true;
+      }
+      if (hit) hits.push(ev);
+    }
+    return hits;
+  },
+
   tabVariables(main) {
     main.appendChild(el('div.doc-title', 'Variable Definitions'));
     main.appendChild(el('div.doc-sub', 'define what the world measures — nothing is hardcoded'));
@@ -514,7 +545,194 @@ const GM = {
       this.field('Default value', this.num(d, 'default'))));
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:10px;' },
       'RENAMING A KEY DOES NOT MIGRATE EXISTING VALUES — SET THEM AGAIN ON EACH OBJECT.'));
-    main.appendChild(this.saveBar('variables', d, isNew, d.label));
+
+    if (!isNew) {
+      const usedIn = this.findVarUsage(source.key);
+      main.appendChild(Views.secLabel('Used in'));
+      if (usedIn.length) {
+        main.appendChild(el('div.chip-row', usedIn.map(ev => el('button.chip', {
+          onclick: () => { W.gmSel.events = ev.id; W.gmTab = 'events'; this.draftKey = null; App.renderView(); }
+        }, ev.name))));
+      } else {
+        main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint);' }, 'No event currently references $' + source.key + '.'));
+      }
+    }
+
+    const bar = el('div.btn-row', { style: 'margin-top:22px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },
+      el('button.solid-btn', {
+        onclick: async () => {
+          const renaming = !isNew && d.key !== source.key;
+          const goSave = async () => { try { await this.saveColl('variables', d, isNew); } catch (e) { toast(e.message, true); } };
+          if (renaming) {
+            const usedIn = this.findVarUsage(source.key);
+            if (usedIn.length) {
+              confirmModal('RENAME REFERENCED VARIABLE',
+                `${usedIn.length} event(s) still reference $${source.key} (${usedIn.map(e => e.name).join(', ')}). ` +
+                `Renaming to $${d.key} does NOT update those expressions — they will start reading an unset variable. Rename anyway?`,
+                goSave, 'Rename Anyway');
+              return;
+            }
+          }
+          await goSave();
+        }
+      }, isNew ? 'Create' : 'Save Changes'),
+      !isNew ? el('button.dash-btn', {
+        onclick: () => { const copy = JSON.parse(JSON.stringify(d)); delete copy.id; copy.key = copy.key + '_copy'; POST('/api/gm/coll/variables', copy).then(() => toast('Duplicated.')).catch(e => toast(e.message, true)); }
+      }, 'Duplicate') : null,
+      !isNew ? el('button.danger-btn', {
+        onclick: () => {
+          const usedIn = this.findVarUsage(source.key);
+          const goDelete = () => this.deleteColl('variables', d.id, d.label || d.key);
+          if (usedIn.length) {
+            confirmModal('DESTROY REFERENCED VARIABLE',
+              `${usedIn.length} event(s) still reference $${source.key} (${usedIn.map(e => e.name).join(', ')}). ` +
+              `Deleting this definition leaves those expressions reading an unset (zero) variable. Delete anyway?`,
+              goDelete, 'Delete Anyway');
+          } else {
+            confirmModal('DESTROY RECORD', `Delete “${d.label || d.key}” permanently?`, goDelete);
+          }
+        }
+      }, 'Delete') : null
+    );
+    main.appendChild(bar);
+  },
+
+  /* ═══════════ EVENTS — expression authoring helpers (Phase 8) ═══════════
+     `exprInput()` renders a normal Forms.text-bound input plus a small "ƒx"
+     button opening a popover of $var / function chips and a live-eval line
+     hitting POST /api/gm/test-expr. Insert-at-caret keeps the draft binding
+     in sync by refiring the input's own 'input' event, so no new state is
+     threaded through the draft objects — the effect/condition objects keep
+     exactly the same shape sim.js already expects. */
+  FN_TEMPLATES: [
+    ['rand(a,b)', 'rand(,)'],
+    ['clamp(x,a,b)', 'clamp(,,)'],
+    ['min(a,b)', 'min(,)'],
+    ['max(a,b)', 'max(,)'],
+    ['round(x)', 'round()'],
+    ['floor(x)', 'floor()'],
+    ['ceil(x)', 'ceil()'],
+    ['abs(x)', 'abs()'],
+    ['sqrt(x)', 'sqrt()'],
+    ['turn()', 'turn()'],
+    ['g(key)', 'g()'],
+    ['prov(id,key)', 'prov(,)'],
+    ['ent(id,key)', 'ent(,)'],
+    ['item(id)', 'item()'],
+    ['pop(id)', 'pop()'],
+    ['balance(id)', 'balance()']
+  ],
+
+  // vars available to the expression popover for a given effect/condition
+  // scope — mirrors the $key / $p_key / prov()/ent() conventions documented
+  // at the bottom of the events tab.
+  scopeVarChips(scope) {
+    const defs = S().variables || [];
+    let chips = [];
+    if (scope === 'province') chips = defs.filter(v => v.scope === 'province').map(v => v.key);
+    else if (scope === 'entity' || scope === 'property') chips = defs.filter(v => v.scope === scope || v.scope === 'company').map(v => v.key);
+    else chips = defs.filter(v => v.scope === 'global').map(v => v.key);
+    return [...new Set(chips)];
+  },
+
+  closeExprPopover() {
+    if (this._exprPop) { this._exprPop.remove(); this._exprPop = null; }
+    if (this._exprPopDoc) { document.removeEventListener('mousedown', this._exprPopDoc, true); this._exprPopDoc = null; }
+    this._exprPopFor = null;
+  },
+
+  // input: the bound <input>/<textarea> whose value is the expression.
+  // scope: 'province' | 'entity' | 'property' | 'global' (chip source + eval context).
+  // targetId(): optional fn returning the current target id for context (e.g. fx.target).
+  exprInput(obj, key, ph, scope, targetIdFn) {
+    const F = this;
+    const input = F.text(obj, key, ph);
+    input.style.fontFamily = 'var(--font-mono)';
+    input.style.fontSize = '12px';
+    const btn = el('button.icon-btn', { type: 'button', title: 'Expression helper', style: 'font-family:var(--font-mono); font-size:11px;' }, 'ƒx');
+    btn.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      const reopening = F._exprPop && F._exprPopFor === input;
+      F.closeExprPopover();
+      if (reopening) return; // click on the same field's button toggles closed
+      F.openExprPopover(input, wrap, scope, targetIdFn);
+    });
+    const wrap = el('div', { style: 'position:relative; display:flex; gap:4px; align-items:flex-start;' }, el('div', { style: 'flex:1;' }, input), btn);
+    return wrap;
+  },
+
+  openExprPopover(input, anchor, scope, targetIdFn) {
+    const F = this;
+    const pop = el('div', {
+      style: 'position:absolute; top:100%; left:0; margin-top:4px; z-index:40; width:320px; max-width:60vw;' +
+        'background:var(--paper); border:1px solid var(--rule-strong); box-shadow:0 12px 30px rgba(0,0,0,0.28); padding:10px 12px;'
+    });
+    F._exprPop = pop;
+    F._exprPopFor = input;
+
+    const insertAtCaret = (snippet, caretBack) => {
+      const elIn = input;
+      const start = elIn.selectionStart ?? elIn.value.length;
+      const end = elIn.selectionEnd ?? elIn.value.length;
+      const v = elIn.value || '';
+      elIn.value = v.slice(0, start) + snippet + v.slice(end);
+      const caret = start + snippet.length - (caretBack || 0);
+      elIn.focus();
+      elIn.setSelectionRange(caret, caret);
+      elIn.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+
+    pop.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:4px;' }, 'Variables'));
+    const varChips = el('div.chip-row', { style: 'margin:0 0 8px;' });
+    // common global vars are always useful (growth trackers etc.) even when
+    // no variable def of scope:'global' has been authored yet.
+    const COMMON_GLOBALS = ['lastGdp', 'weekIndex', 'monthIndex'];
+    const vchips = F.scopeVarChips(scope);
+    const chipKeys = scope === 'global' ? [...new Set([...vchips, ...COMMON_GLOBALS])] : vchips;
+    for (const k of chipKeys) {
+      varChips.appendChild(el('button.chip', { type: 'button', onclick: () => insertAtCaret('$' + k) }, '$' + k));
+    }
+    if (!chipKeys.length) varChips.appendChild(el('span', { style: 'font-size:10.5px; color:var(--ink-faint);' }, 'no variables defined for this scope yet'));
+    pop.appendChild(varChips);
+
+    pop.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:4px;' }, 'Functions'));
+    const fnChips = el('div.chip-row', { style: 'margin:0 0 8px;' });
+    for (const [label, tmpl] of F.FN_TEMPLATES) {
+      fnChips.appendChild(el('button.chip', {
+        type: 'button', title: label,
+        onclick: () => insertAtCaret(tmpl, tmpl.endsWith(')') ? 1 : 0)
+      }, label));
+    }
+    pop.appendChild(fnChips);
+
+    pop.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:4px;' }, 'Live evaluation'));
+    const out = el('div', { style: 'font-family:var(--font-mono); font-size:12px; min-height:16px; color:var(--accent);' }, '—');
+    pop.appendChild(out);
+    pop.appendChild(el('div', { style: 'text-align:right; margin-top:6px;' },
+      el('button.dash-btn', { type: 'button', onclick: () => F.closeExprPopover() }, 'Close')));
+
+    let debounceTimer = null;
+    const evaluate = async () => {
+      const expr = input.value;
+      if (!expr || !expr.trim()) { out.textContent = '—'; return; }
+      try {
+        const r = await POST('/api/gm/test-expr', { expr, scope, targetId: targetIdFn ? targetIdFn() : undefined });
+        out.textContent = r.error ? '✕ ' + r.error : '= ' + (Math.round(r.value * 10000) / 10000);
+        out.style.color = r.error ? 'var(--accent)' : 'var(--ink)';
+      } catch (e) { out.textContent = '✕ ' + e.message; }
+    };
+    const onInput = () => { clearTimeout(debounceTimer); debounceTimer = setTimeout(evaluate, 300); };
+    input.addEventListener('input', onInput);
+    evaluate();
+
+    anchor.appendChild(pop);
+    // click-outside closes
+    const onDoc = (e) => { if (!pop.contains(e.target) && e.target !== input) F.closeExprPopover(); };
+    F._exprPopDoc = onDoc;
+    setTimeout(() => document.addEventListener('mousedown', onDoc, true), 0);
+    // stop the popover's own listener leaking after it's removed
+    const origRemove = pop.remove.bind(pop);
+    pop.remove = () => { input.removeEventListener('input', onInput); clearTimeout(debounceTimer); origRemove(); };
   },
 
   /* ═══════════ EVENTS ═══════════ */
@@ -533,73 +751,118 @@ const GM = {
     ['log', 'Write timeline entry']
   ],
 
+  // A small inline "word" of plain sentence text between controls.
+  sw(text) { return el('span', { style: 'font-size:12.5px; color:var(--ink-soft); white-space:nowrap;' }, text); },
+  // Wraps a control so it sits inline in the flowing sentence row.
+  si(control, minWidth) { return el('span', { style: 'display:inline-flex; vertical-align:middle; min-width:' + (minWidth || '90px') + ';' }, control); },
+  // Renders effect params as one flowing sentence row instead of a form grid.
+  // `parts` is an array of strings (rendered as sw()) and DOM nodes/controls
+  // (rendered inline via si()) — same fields/bindings as before, just laid
+  // out differently.
+  sentence(parts) {
+    const row = el('div', { style: 'display:flex; flex-wrap:wrap; gap:6px 8px; align-items:center; line-height:2.1;' });
+    for (const p of parts) {
+      if (p === null || p === undefined) continue;
+      // strings render as plain sentence words; anything already built by
+      // si()/exprInput() (a Node) is appended as-is — callers wrap their own
+      // controls so widths can vary per field.
+      row.appendChild(typeof p === 'string' ? this.sw(p) : p);
+    }
+    return row;
+  },
+
   effectParams(fx) {
-    const grid = el('div.form-grid');
     const F = this;
     const provTargets = this.provOptions([['all', '— all provinces —'], ['random', '— random province —']]);
     const groups = [['all', '— all groups —'], ...(S().settings.demographics.groups || []).map(g => [g, g])];
     const metrics = (S().settings.demographics.metrics || []).map(mDef => [mDef.key, mDef.label]);
     const ops = [['add', 'add (+)'], ['set', 'set (=)'], ['mul', 'multiply (×)']];
+    const box = el('div');
     switch (fx.type) {
-      case 'adjust_var':
-        grid.appendChild(F.field('Scope', F.sel(fx, 'scope', [['province', 'Province'], ['entity', 'Entity'], ['property', 'Property'], ['global', 'Global']], () => App.renderView())));
-        if (fx.scope === 'province') grid.appendChild(F.field('Target', F.sel(fx, 'target', provTargets)));
-        else if (fx.scope === 'entity') grid.appendChild(F.field('Target', F.sel(fx, 'target', [['all', '— all entities —'], ...F.entOptions()])));
-        else if (fx.scope === 'property') grid.appendChild(F.field('Target', F.sel(fx, 'target', [['all', '— all properties —'], ...S().properties.map(p => [p.id, p.name])])));
-        grid.appendChild(F.field('Variable key', F.text(fx, 'key', 'gdp')));
-        grid.appendChild(F.field('Operation', F.sel(fx, 'op', ops)));
-        grid.appendChild(F.field('Value (expression — $key reads the target)', F.text(fx, 'value', '$gdp * 0.001')));
+      case 'adjust_var': {
+        const scopeSel = F.sel(fx, 'scope', [['province', 'province'], ['entity', 'entity'], ['property', 'property'], ['global', 'global']], () => App.renderView());
+        let targetSel = null;
+        if (fx.scope === 'province') targetSel = F.sel(fx, 'target', provTargets);
+        else if (fx.scope === 'entity') targetSel = F.sel(fx, 'target', [['all', '— all entities —'], ...F.entOptions()]);
+        else if (fx.scope === 'property') targetSel = F.sel(fx, 'target', [['all', '— all properties —'], ...S().properties.map(p => [p.id, p.name])]);
+        box.appendChild(F.sentence([
+          'Adjust variable', F.si(F.text(fx, 'key', 'gdp'), '120px'),
+          'in', F.si(scopeSel, '110px'),
+          targetSel ? F.si(targetSel, '160px') : null,
+          F.si(F.sel(fx, 'op', ops), '110px'),
+          'by', F.si(F.exprInput(fx, 'value', '$gdp * 0.001', fx.scope, () => fx.target), '240px')
+        ]));
         break;
+      }
       case 'adjust_demo':
-        grid.appendChild(F.field('Province', F.sel(fx, 'province', provTargets)));
-        grid.appendChild(F.field('Group', F.sel(fx, 'group', groups)));
-        grid.appendChild(F.field('Metric', F.sel(fx, 'metric', metrics)));
-        grid.appendChild(F.field('Operation', F.sel(fx, 'op', ops)));
-        grid.appendChild(F.field('Value ($metric = group, $p_var = province)', F.text(fx, 'value', 'rand(-1,1)')));
+        box.appendChild(F.sentence([
+          'In', F.si(F.sel(fx, 'province', provTargets), '160px'),
+          'adjust', F.si(F.sel(fx, 'group', groups), '140px'),
+          F.si(F.sel(fx, 'metric', metrics), '140px'),
+          F.si(F.sel(fx, 'op', ops), '110px'),
+          'by', F.si(F.exprInput(fx, 'value', 'rand(-1,1)', 'province', () => fx.province), '220px')
+        ]));
+        box.appendChild(el('div', { style: 'font-size:9.5px; color:var(--ink-faint); margin-top:2px;' }, '$metric reads the group’s current value · $p_var reads the province variable'));
         break;
-      case 'money':
-        grid.appendChild(F.field('Kind', F.sel(fx, 'kind', [['deposit', 'Deposit (create money)'], ['withdraw', 'Withdraw (destroy money)'], ['transfer', 'Transfer']], () => App.renderView())));
-        if (fx.kind !== 'deposit') grid.appendChild(F.field('From entity', F.sel(fx, 'from', F.entOptions())));
-        if (fx.kind !== 'withdraw') grid.appendChild(F.field('To entity', F.sel(fx, 'to', F.entOptions())));
-        grid.appendChild(F.field('Amount (expression)', F.text(fx, 'amount', 'rand(10000, 50000)')));
-        grid.appendChild(F.field('Memo', F.text(fx, 'memo')));
+      case 'money': {
+        const kindSel = F.sel(fx, 'kind', [['deposit', 'deposit (create money)'], ['withdraw', 'withdraw (destroy money)'], ['transfer', 'transfer']], () => App.renderView());
+        box.appendChild(F.sentence([
+          'Move money —', F.si(kindSel, '190px'),
+          fx.kind !== 'deposit' ? 'from' : null, fx.kind !== 'deposit' ? F.si(F.sel(fx, 'from', F.entOptions()), '170px') : null,
+          fx.kind !== 'withdraw' ? 'to' : null, fx.kind !== 'withdraw' ? F.si(F.sel(fx, 'to', F.entOptions()), '170px') : null,
+          'amount', F.si(F.exprInput(fx, 'amount', 'rand(10000, 50000)', 'global'), '200px'),
+          'memo', F.si(F.text(fx, 'memo'), '160px')
+        ]));
         break;
+      }
       case 'spawn_item':
-        grid.appendChild(F.field('Entity', F.sel(fx, 'entity', F.entOptions())));
-        grid.appendChild(F.field('Item', F.sel(fx, 'item', F.itemOptions())));
-        grid.appendChild(F.field('Quantity (expression, negative removes)', F.text(fx, 'qty', '10')));
+        box.appendChild(F.sentence([
+          'Give', F.si(F.sel(fx, 'entity', F.entOptions()), '170px'),
+          F.si(F.sel(fx, 'item', F.itemOptions()), '160px'),
+          'quantity', F.si(F.exprInput(fx, 'qty', '10', 'global'), '140px'),
+          '(negative removes)'
+        ]));
         break;
       case 'set_item_value':
-        grid.appendChild(F.field('Item', F.sel(fx, 'item', F.itemOptions([['all', '— all items —']]))));
-        if (fx.item === 'all') grid.appendChild(F.field('Only category (optional)', F.text(fx, 'category', 'Securities')));
-        grid.appendChild(F.field('New value ($value = current)', F.text(fx, 'value', '$value * rand(0.95, 1.05)')));
+        box.appendChild(F.sentence([
+          'Set market value of', F.si(F.sel(fx, 'item', F.itemOptions([['all', '— all items —']]), () => App.renderView()), '170px'),
+          fx.item === 'all' ? 'only category' : null, fx.item === 'all' ? F.si(F.text(fx, 'category', 'Securities'), '140px') : null,
+          'to', F.si(F.exprInput(fx, 'value', '$value * rand(0.95, 1.05)', 'global'), '220px'),
+          '($value = current)'
+        ]));
         break;
       case 'transfer_property':
-        grid.appendChild(F.field('Property', F.sel(fx, 'property', S().properties.map(p => [p.id, p.name]))));
-        grid.appendChild(F.field('New owner', F.sel(fx, 'to', F.entOptions())));
+        box.appendChild(F.sentence([
+          'Transfer property', F.si(F.sel(fx, 'property', S().properties.map(p => [p.id, p.name])), '190px'),
+          'to new owner', F.si(F.sel(fx, 'to', F.entOptions()), '170px')
+        ]));
         break;
       case 'transfer_company':
-        grid.appendChild(F.field('Company', F.sel(fx, 'company', F.entOptions(['company']))));
-        grid.appendChild(F.field('New controller', F.sel(fx, 'to', F.entOptions())));
+        box.appendChild(F.sentence([
+          'Transfer control of company', F.si(F.sel(fx, 'company', F.entOptions(['company'])), '180px'),
+          'to', F.si(F.sel(fx, 'to', F.entOptions()), '170px')
+        ]));
         break;
       case 'adjust_support':
-        grid.appendChild(F.field('Party', F.sel(fx, 'party', F.entOptions(['party']))));
-        grid.appendChild(F.field('Province', F.sel(fx, 'province', provTargets)));
-        grid.appendChild(F.field('Group', F.sel(fx, 'group', groups)));
-        grid.appendChild(F.field('Support shift (expression)', F.text(fx, 'value', '2')));
+        box.appendChild(F.sentence([
+          'Shift support for party', F.si(F.sel(fx, 'party', F.entOptions(['party'])), '160px'),
+          'in', F.si(F.sel(fx, 'province', provTargets), '150px'),
+          'among', F.si(F.sel(fx, 'group', groups), '140px'),
+          'by', F.si(F.exprInput(fx, 'value', '2', 'province', () => fx.province), '160px')
+        ]));
         break;
       case 'news':
-        grid.appendChild(F.field('Headline ({expressions} interpolate)', F.text(fx, 'headline')));
-        grid.appendChild(F.field('Category', F.text(fx, 'category', 'Politics')));
-        grid.appendChild(el('div.full', F.field('Body', F.area(fx, 'body'))));
-        grid.appendChild(F.check(fx, 'publish', 'Publish immediately (otherwise lands in drafts)'));
+        box.appendChild(F.sentence(['Publish news headline', F.si(F.text(fx, 'headline'), '100%')]));
+        box.appendChild(F.sentence(['category', F.si(F.text(fx, 'category', 'Politics'), '160px')]));
+        box.appendChild(el('div.full', F.field('Body ({expressions} interpolate)', F.area(fx, 'body'))));
+        box.appendChild(F.check(fx, 'publish', 'Publish immediately (otherwise lands in drafts)'));
         break;
       case 'log':
-        grid.appendChild(F.field('Title', F.text(fx, 'title')));
-        grid.appendChild(F.field('Detail', F.text(fx, 'detail')));
+        box.appendChild(F.sentence(['Write timeline entry titled', F.si(F.text(fx, 'title'), '220px')]));
+        box.appendChild(F.sentence(['detail', F.si(F.text(fx, 'detail'), '100%')]));
         break;
     }
-    return grid;
+    return box;
   },
 
   tabEvents(main) {
@@ -642,11 +905,13 @@ const GM = {
     main.appendChild(Views.secLabel('Conditions (all must hold)'));
     d.conditions = d.conditions || [];
     d.conditions.forEach((c, i) => {
-      main.appendChild(el('div', { style: 'display:flex; gap:8px; align-items:flex-end; margin-bottom:4px;' },
-        el('div', { style: 'flex:1' }, this.text(c, 'a', 'prov(kordi, approval)')),
+      const row = el('div', { style: 'display:flex; gap:8px; align-items:flex-start; margin-bottom:4px;' },
+        this.sw('when'),
+        el('div', { style: 'flex:1' }, this.exprInput(c, 'a', 'prov(kordi, approval)', 'global')),
         el('div', { style: 'width:70px' }, this.sel(c, 'op', [['<', '<'], ['<=', '≤'], ['>', '>'], ['>=', '≥'], ['==', '='], ['!=', '≠']])),
-        el('div', { style: 'flex:1' }, this.text(c, 'b', '30')),
-        el('button.icon-btn', { onclick: () => { d.conditions.splice(i, 1); App.renderView(); } }, '✕')));
+        el('div', { style: 'flex:1' }, this.exprInput(c, 'b', '30', 'global')),
+        el('button.icon-btn', { onclick: () => { d.conditions.splice(i, 1); App.renderView(); } }, '✕'));
+      main.appendChild(row);
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => { d.conditions.push({ a: '', op: '>', b: '' }); App.renderView(); } }, '+ Add condition')));
 
@@ -662,16 +927,47 @@ const GM = {
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => { d.effects.push({ type: 'adjust_var', scope: 'province', target: 'all', op: 'add' }); App.renderView(); } }, '+ Add effect')));
 
+    const simBox = el('div');
+    const renderSimResult = (r) => {
+      clear(simBox);
+      if (!r) return;
+      if (r.error) { simBox.appendChild(el('div', { style: 'color:var(--accent); font-family:var(--font-mono); font-size:11.5px; margin-top:10px;' }, '✕ ' + r.error)); return; }
+      if (!r.ran) { simBox.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:11.5px; color:var(--ink-faint); margin-top:10px;' }, 'Conditions not met — nothing would run.')); return; }
+      const box = el('div', { style: 'margin-top:10px; border:1px dashed var(--rule-strong); padding:10px 12px; background:rgba(34,29,21,0.02);' });
+      box.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:0.12em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:6px;' }, 'Simulated result (not saved)'));
+      const diff = r.diff || {};
+      const lines = [];
+      for (const gv of diff.globalVars || []) lines.push(`$${gv.key}: ${fmtNum(gv.from)} → ${fmtNum(gv.to)}`);
+      for (const p of diff.provinces || []) for (const c of p.changes) lines.push(`${p.name} · $${c.key}: ${fmtNum(c.from)} → ${fmtNum(c.to)}`);
+      if (diff.moneyMoved) lines.push(`Money moved: ${fmtMoney(diff.moneyMoved)}`);
+      for (const n of diff.news || []) lines.push(`News drafted: “${n.headline}”`);
+      if (!lines.length) lines.push('No observable change.');
+      for (const l of lines) box.appendChild(el('div', { style: 'font-size:12px; padding:2px 0;' }, l));
+      simBox.appendChild(box);
+    };
+
     const bar = this.saveBar('events', d, isNew);
     if (!isNew) {
-      bar.insertBefore(el('button.outline-btn', {
+      const anchor = bar.children[1]; // "Duplicate" — fixed reference, insert both new buttons before it
+      const simulateBtn = el('button.outline-btn', {
+        onclick: async () => {
+          try {
+            const r = await POST('/api/gm/run-event', { id: d.id, dryRun: true });
+            renderSimResult(r);
+          } catch (e) { toast(e.message, true); }
+        }
+      }, '◌ Simulate');
+      const runBtn = el('button.outline-btn', {
         onclick: async () => {
           try { const r = await POST('/api/gm/run-event', { id: d.id }); toast(r.ran ? 'Event executed.' : 'Conditions not met — did not run.'); }
           catch (e) { toast(e.message, true); }
         }
-      }, '▸ Run Now'), bar.children[1]);
+      }, '▸ Run Now');
+      bar.insertBefore(simulateBtn, anchor);
+      bar.insertBefore(runBtn, anchor);
     }
     main.appendChild(bar);
+    main.appendChild(simBox);
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:14px; line-height:1.8;' },
       'EXPRESSIONS: numbers, + − × ÷ %, $key (target variable), rand(a,b), round, floor, ceil, abs, min, max, clamp(x,a,b), ',
       'prov(id, key), ent(id, key), item(id), balance(id), g(key), pop(all), turn().'));
@@ -713,6 +1009,116 @@ const GM = {
     }, 'Save Definitions')));
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:10px;' },
       'GROUP VALUES ARE EDITED PER PROVINCE UNDER “PROVINCES”. NEW GROUPS START AT ZERO THERE.'));
+  },
+
+  /* ═══════════ PRESENTATION (Phase 10 — Music) ═══════════
+     Everything here edits one draft of the whole settings.music object and
+     saves it in one PATCH /api/gm/settings { music: <whole object> }. The
+     sync broadcast that follows makes every client's Music.apply() react
+     (active playlist swap, forced track, volume, shuffle, enable/disable). */
+  musicDraft() {
+    const m = S().settings.music || { enabled: false, shuffle: true, volume: 0.7, library: [], playlists: [], activePlaylist: null, forcedTrack: null };
+    return this.getDraft('music', m);
+  },
+  async saveMusic(d) {
+    try {
+      await PATCH('/api/gm/settings', { music: d });
+      this.draftKey = null;
+      toast('Presentation settings saved.');
+    } catch (e) { toast(e.message, true); }
+  },
+
+  tabPresentation(main) {
+    const F = this;
+    const d = this.musicDraft();
+    d.library = d.library || [];
+    d.playlists = d.playlists || [];
+
+    main.appendChild(el('div.doc-title', 'Presentation'));
+    main.appendChild(el('div.doc-sub', 'music library, playlists and live playback control'));
+
+    /* ---------- transport ---------- */
+    main.appendChild(Views.secLabel('Playback'));
+    main.appendChild(this.check(d, 'enabled', 'Enable music (every connected client plays it)'));
+    main.appendChild(el('div.form-grid',
+      this.field('Active playlist', this.sel(d, 'activePlaylist',
+        [['__null__', '— none (whole library) —'], ...d.playlists.map(p => [p.id, p.name])])),
+      this.field('Force track (overrides playlist on every client)', this.sel(d, 'forcedTrack',
+        [['__null__', '— not forced —'], ...d.library.map(t => [t.id, t.title + (t.forcedOnly ? ' [forced-only]' : '')])]))));
+    main.appendChild(this.check(d, 'shuffle', 'Shuffle normal playback'));
+    main.appendChild(el('div.form-grid',
+      this.field('Volume', el('input', {
+        type: 'range', min: '0', max: '1', step: '0.05', value: d.volume ?? 0.7, style: 'width:100%;',
+        oninput: (e) => d.volume = Number(e.target.value)
+      }))));
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:4px;' },
+      'FORCED TRACKS NEVER APPEAR IN NORMAL SHUFFLE — ONLY WHEN SELECTED ABOVE. CLEARING THE FORCE RESUMES THE ACTIVE PLAYLIST.'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' },
+      el('button.solid-btn', { onclick: () => F.saveMusic(d) }, 'Save Presentation Settings')));
+
+    /* ---------- music library ---------- */
+    main.appendChild(Views.secLabel('Music Library'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Every track available to the simulator. Paste a direct audio file URL (.mp3/.ogg/.m4a/etc — not a YouTube page link) and a title; add it to a playlist below. “Forced-only” tracks are hidden from normal shuffle and only play when explicitly forced above.'));
+
+    const libBox = el('div');
+    d.library.forEach((t, i) => {
+      libBox.appendChild(el('div', { style: 'display:flex; gap:8px; align-items:flex-end; margin-bottom:6px; flex-wrap:wrap;' },
+        el('div', { style: 'flex:1 1 180px;' }, F.field('Title', F.text(t, 'title'))),
+        el('div', { style: 'flex:2 1 260px;' }, F.field('Audio URL', F.text(t, 'url', 'https://…/track.mp3'))),
+        el('div', { style: 'padding-bottom:8px;' }, F.check(t, 'forcedOnly', 'Forced-only')),
+        el('button.icon-btn', {
+          title: 'Remove from library', style: 'padding-bottom:8px;',
+          onclick: () => {
+            const usedIn = d.playlists.filter(p => (p.tracks || []).includes(t.id));
+            const doRemove = () => {
+              d.library.splice(i, 1);
+              d.playlists.forEach(p => { p.tracks = (p.tracks || []).filter(id => id !== t.id); });
+              if (d.forcedTrack === t.id) d.forcedTrack = null;
+              App.renderView();
+            };
+            if (usedIn.length) confirmModal('REMOVE TRACK', `“${t.title || t.id}” is used in ${usedIn.length} playlist(s). Remove it everywhere?`, async () => doRemove());
+            else doRemove();
+          }
+        }, '✕')));
+    });
+    if (!d.library.length) libBox.appendChild(el('div', { style: 'padding:10px 0; color:var(--ink-faint); font-size:12px;' }, 'No tracks yet.'));
+    main.appendChild(libBox);
+    main.appendChild(el('div.btn-row', el('button.dash-btn', {
+      onclick: () => { d.library.push({ id: 'trk_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), title: 'New Track', url: '', forcedOnly: false }); App.renderView(); }
+    }, '+ Add track to library')));
+
+    /* ---------- playlists ---------- */
+    main.appendChild(Views.secLabel('Playlists'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Playlists reference tracks from the library above by checkbox — no re-entering URLs.'));
+
+    d.playlists.forEach((p, pi) => {
+      const box = el('div.stage', { style: 'margin-bottom:12px;' });
+      box.appendChild(el('div.stage-header',
+        el('span.stage-chapter', el('span', { style: 'display:inline-block; min-width:220px;' }, F.text(p, 'name'))),
+        el('button.icon-btn', { title: 'Delete playlist', onclick: () => { d.playlists.splice(pi, 1); if (d.activePlaylist === p.id) d.activePlaylist = null; App.renderView(); } }, '✕')));
+      p.tracks = p.tracks || [];
+      const trackGrid = el('div.perm-grid');
+      d.library.forEach(t => {
+        const checked = p.tracks.includes(t.id);
+        trackGrid.appendChild(el('label',
+          el('input', {
+            type: 'checkbox', checked,
+            onchange: (e) => { p.tracks = e.target.checked ? [...new Set([...p.tracks, t.id])] : p.tracks.filter(id => id !== t.id); }
+          }),
+          t.title + (t.forcedOnly ? ' [forced-only]' : '')));
+      });
+      box.appendChild(trackGrid);
+      if (!d.library.length) box.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Add tracks to the library first.'));
+      main.appendChild(box);
+    });
+    main.appendChild(el('div.btn-row', el('button.dash-btn', {
+      onclick: () => { d.playlists.push({ id: 'plist_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), name: 'New Playlist', tracks: [] }); App.renderView(); }
+    }, '+ New playlist')));
+
+    main.appendChild(el('div.btn-row', { style: 'margin-top:18px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },
+      el('button.solid-btn', { onclick: () => F.saveMusic(d) }, 'Save Presentation Settings')));
   },
 
   /* ═══════════ ROLES & OPERATORS ═══════════ */
@@ -780,39 +1186,43 @@ const GM = {
   },
 
   usersEditor(main) {
+    const paperOptions = () => [['', '— none —'], ...(S().settings.newspapers || []).map(p => [p.id, p.name])];
     main.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: () => {
-        const nd = { username: '', displayName: '', password: '', roleId: 'citizen', entityId: null };
+        const nd = { username: '', displayName: '', password: '', roleId: 'citizen', entityId: null, newspaperId: '' };
         openModal('NEW OPERATOR ACCOUNT', el('div',
           el('label.field-label', 'Username'), this.text(nd, 'username'),
           el('label.field-label', 'Display name'), this.text(nd, 'displayName'),
           el('label.field-label', 'Passphrase'), this.text(nd, 'password'),
           el('label.field-label', 'Role'), this.sel(nd, 'roleId', (S().roles || []).map(r => [r.id, r.name])),
-          el('label.field-label', 'Linked entity (their persona)'), this.sel(nd, 'entityId', this.entOptions(null, true))
+          el('label.field-label', 'Linked entity (their persona)'), this.sel(nd, 'entityId', this.entOptions(null, true)),
+          el('label.field-label', 'Newspaper (journalist affiliation)'), this.sel(nd, 'newspaperId', paperOptions())
         ), [{ label: 'Create Account', onClick: async () => { await POST('/api/gm/users', nd); toast('Account created.'); } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
       }
     }, '+ New Operator')));
 
     main.appendChild(el('table.data',
-      el('thead', el('tr', el('th', 'Operator'), el('th', 'Display'), el('th', 'Role'), el('th', 'Persona'), el('th', 'Last Seen'), el('th', ''))),
+      el('thead', el('tr', el('th', 'Operator'), el('th', 'Display'), el('th', 'Role'), el('th', 'Persona'), el('th', 'Newspaper'), el('th', 'Last Seen'), el('th', ''))),
       el('tbody', (S().users || []).map(u2 => el('tr',
         el('td', { style: 'font-family:var(--font-mono);' }, u2.username),
         el('td', u2.displayName),
         el('td', ((S().roles || []).find(r => r.id === u2.roleId) || {}).name || u2.roleId),
         el('td', u2.entityId ? entName(u2.entityId) : '—'),
+        el('td', u2.newspaperId ? (((S().settings.newspapers || []).find(p => p.id === u2.newspaperId) || {}).name || u2.newspaperId) : '—'),
         el('td', u2.lastLogin ? new Date(u2.lastLogin).toLocaleDateString() : 'never'),
         el('td',
           el('button.outline-btn', {
             onclick: () => {
-              const nd = { displayName: u2.displayName, roleId: u2.roleId, entityId: u2.entityId, password: '' };
+              const nd = { displayName: u2.displayName, roleId: u2.roleId, entityId: u2.entityId, newspaperId: u2.newspaperId || '', password: '' };
               openModal('EDIT — ' + u2.username, el('div',
                 el('label.field-label', 'Display name'), this.text(nd, 'displayName'),
                 el('label.field-label', 'Role'), this.sel(nd, 'roleId', (S().roles || []).map(r => [r.id, r.name])),
                 el('label.field-label', 'Linked entity'), this.sel(nd, 'entityId', this.entOptions(null, true)),
+                el('label.field-label', 'Newspaper (journalist affiliation)'), this.sel(nd, 'newspaperId', paperOptions()),
                 el('label.field-label', 'New passphrase (blank = keep)'), this.text(nd, 'password')
               ), [{
                 label: 'Save', onClick: async () => {
-                  const body = { displayName: nd.displayName, roleId: nd.roleId, entityId: nd.entityId };
+                  const body = { displayName: nd.displayName, roleId: nd.roleId, entityId: nd.entityId, newspaperId: nd.newspaperId || null };
                   if (nd.password) body.password = nd.password;
                   await PATCH('/api/gm/users/' + u2.id, body);
                   toast('Account updated.');

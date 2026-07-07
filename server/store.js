@@ -62,6 +62,64 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
+  // Phase 5 — newspapers. Fixed four-paper list; additive so a GM rename of
+  // an existing paper is never clobbered by re-running this migration.
+  if (world.settings && !world.settings.newspapers) {
+    world.settings.newspapers = [
+      { id: 'paper_today', name: 'Arcasia Today', tagline: '-HEART OF ARCASIA-', city: 'Lachevan', style: 'today', owner: 'This newspaper is owned by the State corporation ARC' },
+      { id: 'paper_herald', name: 'The National Herald', tagline: 'VOICE OF THE NATION', city: 'Lachevan', style: 'herald', owner: 'This newspaper is funded by the NFP' },
+      { id: 'paper_economists', name: 'Economists', tagline: 'MARKETS · TRADE · INDUSTRY', city: 'Lachevan', style: 'economists', owner: 'This newspaper is owned by the Satrom group' },
+      { id: 'paper_radical', name: 'Radical', tagline: '-THE VOICE OF ARCASIA-', city: 'Kordi', style: 'radical', owner: 'This is an independent newspaper' }
+    ];
+    changed = true;
+  }
+  if (world.settings && !world.settings.newspaperRouting) {
+    world.settings.newspaperRouting = { Politics: 'paper_today', Regional: 'paper_herald', Foreign: 'paper_herald', Economy: 'paper_economists', Business: 'paper_economists' };
+    changed = true;
+  }
+  // Phase 10 — Audio & Presentation. Same default shape as a fresh seed
+  // (see seed.js) so a live world upgrades with a usable Music Library /
+  // playlist instead of an empty one. Additive only — never overwrites a
+  // GM's existing music config.
+  if (world.settings && !world.settings.music) {
+    world.settings.music = {
+      enabled: false,
+      shuffle: true,
+      volume: 0.7,
+      library: [
+        { id: 'trk_seed1', title: 'Suzerain: Rizia OST — Stress', url: '' },
+        { id: 'trk_seed2', title: 'Suzerain: Rizia OST — Assembly', url: '' },
+        { id: 'trk_seed3', title: 'Suzerain: Rizia OST — The Republic', url: '' },
+        { id: 'trk_seed4', title: 'Suzerain: Rizia OST — Election Night', url: '' },
+        { id: 'trk_seed5', title: 'Suzerain: Rizia OST — Reflection', url: '' }
+      ],
+      playlists: [
+        { id: 'plist_default', name: 'Default Soundtrack', tracks: ['trk_seed1', 'trk_seed2', 'trk_seed3', 'trk_seed4', 'trk_seed5'] }
+      ],
+      activePlaylist: 'plist_default',
+      forcedTrack: null
+    };
+    changed = true;
+  }
+  if (world.settings) {
+    const validPaperIds = new Set((world.settings.newspapers || []).map(p => p.id));
+    const routing = world.settings.newspaperRouting || {};
+    const defaultPaper = validPaperIds.has('paper_today') ? 'paper_today' : (world.settings.newspapers || [])[0] && world.settings.newspapers[0].id;
+    for (const n of (world.news || [])) {
+      if (!n.paperId || !validPaperIds.has(n.paperId)) {
+        n.paperId = routing[n.category] || defaultPaper;
+        changed = true;
+      }
+    }
+    // journalist users (and any user otherwise missing one) default to the
+    // state paper unless already assigned.
+    for (const uu of (world.users || [])) {
+      if (uu.newspaperId === undefined) {
+        uu.newspaperId = uu.roleId === 'journalist' ? defaultPaper : null;
+        changed = true;
+      }
+    }
+  }
   // Phase 4.4 — stock-market fields on companies (trust also used by Phase 9)
   for (const e of (world.entities || [])) {
     if (e.type !== 'company') continue;
@@ -76,6 +134,89 @@ function migrate(world) {
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
+
+  // ---- Phase 11 — one-time world-data update -----------------------------
+  // Gated on schema so this block runs exactly once per world: fresh seeds
+  // are born at schema 2 (see seed.js) and skip it entirely; a live world
+  // loaded at schema 1 (or missing schema) runs it here and is bumped to 2,
+  // so a second migrate() pass over the same world is a no-op.
+  if ((world.schema || 1) < 2) {
+    // 1. Remove the Kordistan FOREIGN POWER only — the domestic Kordi
+    //    province and its city are untouched.
+    const kordistanEntity = (world.entities || []).find(e => e.id === 'for_kordistan' || (e.type === 'foreign' && /^kordistan$/i.test(e.name || '')));
+    if (kordistanEntity) {
+      const kid = kordistanEntity.id;
+      world.entities = world.entities.filter(e => e.id !== kid);
+      world.accounts = (world.accounts || []).filter(a => a.ownerId !== kid);
+      if (world.settings && world.settings.map) {
+        if (Array.isArray(world.settings.map.countries)) {
+          world.settings.map.countries = world.settings.map.countries.filter(c => c.entityId !== kid && !/^kordistan$/i.test(c.name || ''));
+        }
+        if (Array.isArray(world.settings.map.labels)) {
+          world.settings.map.labels = world.settings.map.labels.filter(l => !/kordistan/i.test(l.text || ''));
+        }
+      }
+      changed = true;
+    }
+
+    // 2. Currency → Arcasian Koren. Only flip the old default symbol; leave
+    //    a GM's custom symbol alone if they already changed it to something
+    //    else.
+    if (world.settings) {
+      if (world.settings.currency === '₳') { world.settings.currency = 'K'; changed = true; }
+      if (world.settings.currencyName === 'Arcasian Mark' || !world.settings.currencyName) {
+        world.settings.currencyName = 'Arcasian Koren'; changed = true;
+      }
+    }
+
+    // 3. Arcasia national profile card (Population view + Government dossier).
+    if (world.settings && !world.settings.country) {
+      world.settings.country = {
+        leader: null,
+        government: 'Semi-Presidential Republic (no Prime Minister)',
+        economy: 'Mixed State Capitalism & Planned Economy',
+        gdpRank: '20th / 103',
+        urbanisation: 60,
+        lifeExpectancy: 55,
+        schooling: 4,
+        hdi: 0.534,
+        populationGrowth: 'high'
+      };
+      changed = true;
+    }
+
+    // 4. Rescale province populations ×2.79 and GDP ×2.686 — ONCE, guarded by
+    //    the schema check above so re-running migrate() (e.g. every request
+    //    in cloud mode) never double-applies this.
+    for (const p of (world.provinces || [])) {
+      if (p.demographics) {
+        for (const gname in p.demographics) {
+          const grp = p.demographics[gname];
+          if (grp && typeof grp.population === 'number') grp.population = Math.round(grp.population * 2.79);
+        }
+      }
+      if (p.vars && typeof p.vars.gdp === 'number') p.vars.gdp = Math.round(p.vars.gdp * 2.686);
+      if (p.vars && p.demographics) {
+        p.vars.population = Object.values(p.demographics).reduce((s, g) => s + (g.population || 0), 0);
+      }
+    }
+
+    // 5. Clear President Valen as national leader (persona stays on file).
+    const valen = (world.entities || []).find(e => e.id === 'per_valen');
+    if (valen) {
+      if (valen.title === 'President of the Republic') valen.title = 'Former President';
+      if (valen.description) {
+        valen.description = valen.description
+          .replace(/President since 1958\.\s*/i, '')
+          .replace(/^President of the Republic\.?\s*/i, 'Former President. ');
+      }
+      changed = true;
+    }
+
+    world.schema = 2;
+    changed = true;
+  }
+
   return changed;
 }
 

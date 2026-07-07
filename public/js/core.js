@@ -56,7 +56,7 @@ function el(spec, attrs, ...children) {
 const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); return n; };
 
 /* ---------- formatting ---------- */
-const CUR = () => (W.state ? W.state.settings.currency : '₳');
+const CUR = () => (W.state ? W.state.settings.currency : 'K');
 function fmtNum(n, dec) {
   if (n === undefined || n === null || isNaN(n)) return '—';
   const d = dec === undefined ? (Math.abs(n) < 10 && n % 1 !== 0 ? 2 : 0) : dec;
@@ -105,6 +105,12 @@ const myEntity = () => (W.me && W.me.entityId ? entById(W.me.entityId) : null);
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
 const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', port: 'P', airport: 'V', university: 'U', infrastructure: 'I' };
+// Assignable SVG map icons (Phase 1.5). Filenames (no extension) under
+// public/assets/icons/. Properties and event markers may carry an `icon`
+// naming one of these; the map renders /assets/icons/<icon>.svg in place of the
+// letter glyph / emoji. Hardcoded manifest — no directory listing.
+const ICON_MANIFEST = ['airport', 'factory', 'port', 'military', 'mine', 'farm', 'bank', 'government', 'university', 'rail-station', 'radio-mast', 'star'];
+const iconHref = (name) => '/assets/icons/' + name + '.svg';
 
 /* ---------- API ---------- */
 async function api(method, path, body) {
@@ -306,7 +312,7 @@ function renderExplorer() {
 }
 
 /* ---------- ticker ---------- */
-const TICK_GLYPH = { economy: '₳', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
+const TICK_GLYPH = { economy: 'K', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
 function renderTicker() {
   const track = document.getElementById('ticker-track');
   clear(track);

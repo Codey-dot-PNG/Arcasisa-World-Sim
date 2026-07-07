@@ -183,16 +183,28 @@ function fmtNum(n) {
   return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
-function draftNews(headline, body, category, publish, author) {
+// Phase 5 — newspapers. `paperId` is optional; when the caller doesn't know
+// (or care) which paper an auto-drafted article belongs to, it's derived from
+// settings.newspaperRouting[category], falling back to paper_today. Existing
+// call sites are unaffected: they simply omit the new last argument and get
+// the routed default, same publish/draft behaviour as before.
+function draftNews(headline, body, category, publish, author, paperId) {
   const db = store.get();
+  const cat = category || 'General';
+  const newspapers = (db.settings.newspapers || []);
+  const validPaperIds = new Set(newspapers.map(p => p.id));
+  const routing = db.settings.newspaperRouting || {};
+  const fallback = validPaperIds.has('paper_today') ? 'paper_today' : (newspapers[0] && newspapers[0].id) || 'paper_today';
+  const resolvedPaperId = (paperId && validPaperIds.has(paperId)) ? paperId : (routing[cat] || fallback);
   const a = {
-    id: store.uid('news'), headline, body, category: category || 'General',
+    id: store.uid('news'), headline, body, category: cat,
     status: publish ? 'published' : 'draft', author: author || 'Wire Service',
+    paperId: resolvedPaperId,
     ts: Date.now(), simDate: db.settings.time.date, turn: db.settings.time.turn
   };
   db.news.push(a);
   if (db.news.length > 400) db.news.splice(0, db.news.length - 400);
-  store.log('news', (publish ? 'Published: ' : 'Drafted: ') + headline, category || '', author || 'Wire Service', [a.id]);
+  store.log('news', (publish ? 'Published: ' : 'Drafted: ') + headline, cat, author || 'Wire Service', [a.id]);
   return a;
 }
 
@@ -342,7 +354,7 @@ function applyEffect(fx, meta) {
       break;
     }
     case 'news': {
-      draftNews(interpolate(fx.headline, {}), interpolate(fx.body, {}), fx.category, !!fx.publish, fx.author);
+      draftNews(interpolate(fx.headline, {}), interpolate(fx.body, {}), fx.category, !!fx.publish, fx.author, fx.paperId);
       break;
     }
     case 'election': runElection(actor); break;
@@ -630,7 +642,60 @@ function dhondt(votes, seats) {
   return won;
 }
 
-function runElection(actor) {
+// Phase 3.4 — manual election entry. When `manual` is supplied the GM has
+// typed in the result directly (e.g. a scripted/roleplayed outcome): we skip
+// computePolling entirely, trust the given rows, and still write the same
+// election record / news / log the simulated path produces. `manual` shape:
+// { rows: [{ partyId, votes, seats }], turnout }.
+function runManualElection(actor, manual) {
+  const db = store.get();
+  const totalSeats = db.settings.parliamentSeats || 150;
+  const rows = Array.isArray(manual.rows) ? manual.rows : [];
+  if (!rows.length) throw new Error('Manual election needs at least one party row.');
+
+  const seatSum = rows.reduce((s, r) => s + (Math.round(Number(r.seats)) || 0), 0);
+  if (seatSum > totalSeats) throw new Error(`Seats assigned (${seatSum}) exceed the ${totalSeats}-seat parliament.`);
+
+  const nationalRows = rows.map(r => {
+    const party = findEnt(r.partyId);
+    if (!party || party.type !== 'party') throw new Error('Unknown party: ' + r.partyId);
+    const votes = Math.max(0, Math.round(Number(r.votes) || 0));
+    const seats = Math.max(0, Math.round(Number(r.seats) || 0));
+    return { partyId: party.id, votes, seats };
+  });
+  const totalVotes = nationalRows.reduce((s, r) => s + r.votes, 0);
+  nationalRows.forEach(r => { r.pct = Math.round(r.votes / (totalVotes || 1) * 1000) / 10; });
+  nationalRows.sort((a, b) => b.seats - a.seats || b.votes - a.votes);
+
+  nationalRows.forEach(r => { const p = findEnt(r.partyId); if (p) p.mpCount = r.seats; });
+
+  const turnoutPct = manual.turnout !== undefined && manual.turnout !== null && manual.turnout !== ''
+    ? Math.round(Number(manual.turnout) * 10) / 10
+    : (() => { const electorate = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0); return Math.round(totalVotes / (electorate || 1) * 1000) / 10; })();
+
+  const rec = {
+    id: store.uid('elec'), ts: Date.now(), turn: db.settings.time.turn, simDate: db.settings.time.date,
+    name: `General Election — ${db.settings.time.date}`, seats: totalSeats, turnout: turnoutPct,
+    national: nationalRows, byProvince: {}, manual: true
+  };
+  db.elections.push(rec);
+  if (db.elections.length > 60) db.elections.splice(0, db.elections.length - 60);
+
+  const winner = nationalRows[0] ? db.entities.find(e => e.id === nationalRows[0].partyId) : null;
+  const nameOf = (pid) => { const e = db.entities.find(x => x.id === pid); return e ? (e.abbrev || e.name) : pid; };
+  const lines = nationalRows.map(r => `${nameOf(r.partyId)} — ${r.pct}% · ${r.seats} seats`).join('\n');
+  store.log('election', `General election (manual entry): ${winner ? winner.name : '—'} leads with ${nationalRows[0] ? nationalRows[0].seats : 0} seats`, `Turnout ${turnoutPct}%`, actor || 'GM', [rec.id]);
+  draftNews(`${winner ? winner.name.toUpperCase() : 'PARLIAMENT'} ${nationalRows[0] && nationalRows[0].seats >= Math.ceil(totalSeats / 2) ? 'WINS MAJORITY' : 'LEADS HUNG PARLIAMENT'}`,
+    `The Republic has voted. On a turnout of ${turnoutPct}%, the count of ${totalSeats} seats stands:\n\n${lines}\n\n` +
+    `${winner && nationalRows[0].seats >= Math.ceil(totalSeats / 2) ? winner.name + ' commands a majority and will govern alone.' : 'No party commands a majority; coalition talks begin at once.'}`,
+    'Politics', true, 'Election Commission');
+  store.save();
+  broadcast('sync');
+  return rec;
+}
+
+function runElection(actor, manual) {
+  if (manual) return runManualElection(actor, manual);
   const db = store.get();
   const { parties, byProvince, national, totalVotes } = computePolling(true);
   const totalSeats = db.settings.parliamentSeats || 150;

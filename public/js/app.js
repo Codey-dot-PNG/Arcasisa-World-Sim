@@ -138,6 +138,11 @@ const App = {
     if (W.selection && !document.getElementById('inspector').classList.contains('hidden')) {
       Views.inspect(W.selection.kind, W.selection.id);
     }
+    // Phase 3 — GM Command Bar: slim always-visible toolbar, GM-only, any view.
+    if (typeof GMBar !== 'undefined') GMBar.render();
+    // Phase 10 — reflect settings.music into the shared <audio> element +
+    // top-bar widget on every state refresh / sync broadcast.
+    if (typeof Music !== 'undefined') Music.apply();
   }
 };
 

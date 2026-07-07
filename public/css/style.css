@@ -89,6 +89,7 @@ button{font-family:inherit;}
   padding:6px 12px; cursor:pointer;
 }
 .dash-btn:hover{border-color:var(--accent); color:var(--accent);}
+.dash-btn.active{border-style:solid; border-color:var(--accent); color:var(--accent); font-weight:700;}
 .outline-btn{
   font-family:var(--font-mono); font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
   background:transparent; border:1px dashed var(--accent-soft); color:var(--accent-soft);
@@ -486,13 +487,77 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .tick-item .tt{color:var(--accent); font-weight:700;}
 @keyframes tickIn{from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:none;}}
 
-/* ═══════════ NEWS ═══════════ */
-.paper-masthead{
-  text-align:center; border-bottom:3px double var(--rule-strong);
-  padding-bottom:14px; margin-bottom:20px;
+/* ═══════════ NEWS — Phase 5: four fixed papers ═══════════ */
+/* Switcher: four masthead cards, one click each selects the active paper.
+   Reference images: Newspaper examples/ (Arcasia Today, National Herald,
+   Economists, Radical). Each .paper-mast-* variant matches one masthead. */
+.paper-switcher{
+  display:grid; grid-template-columns:repeat(4, 1fr); gap:10px;
+  margin-bottom:4px;
 }
-.paper-masthead .nm{font-family:var(--font-voice); font-size:42px; font-weight:600; letter-spacing:0.02em;}
-.paper-masthead .et{font-family:var(--font-mono); font-size:9px; letter-spacing:0.3em; text-transform:uppercase; color:var(--ink-faint); margin-top:4px;}
+.paper-mast{
+  cursor:pointer; text-align:center; padding:16px 10px 12px;
+  background:var(--paper-deep); border:1px solid var(--rule-strong);
+  opacity:0.55; transition:opacity .15s ease, transform .15s ease;
+  overflow:hidden; position:relative;
+}
+.paper-mast:hover{opacity:0.85;}
+.paper-mast.active{opacity:1; border-color:var(--ink); transform:translateY(-1px);}
+.paper-mast .pm-name{font-size:19px; line-height:1.05; letter-spacing:0.01em; margin-bottom:4px;}
+.paper-mast .pm-tagline{font-family:var(--font-mono); font-size:8px; letter-spacing:0.16em; text-transform:uppercase; color:var(--ink-faint);}
+.paper-mast .pm-owner{font-family:var(--font-voice); font-style:italic; font-size:9.5px; color:var(--ink-faint); margin-top:6px; opacity:.85;}
+
+/* Arcasia Today — black block caps, double rules, state paper */
+.paper-mast-today{background:var(--paper);}
+.paper-mast-today .pm-name{
+  font-family:'Arial Narrow', 'Inter', sans-serif; font-weight:900; text-transform:uppercase;
+  letter-spacing:0.01em; font-size:22px; color:var(--ink);
+  border-top:3px double var(--rule-strong); border-bottom:3px double var(--rule-strong);
+  padding:6px 0 5px;
+}
+.paper-mast-today .pm-owner{font-style:normal; font-family:var(--font-voice);}
+
+/* The National Herald — red block caps, yellow frame, NFP-funded */
+.paper-mast-herald{background:var(--paper); position:relative;}
+.paper-mast-herald::before{
+  content:""; position:absolute; left:8px; top:8px; width:46px; height:46px;
+  border:9px solid #e8b23a; opacity:.9;
+}
+.paper-mast-herald .pm-name{
+  font-family:'Arial Narrow', 'Inter', sans-serif; font-weight:900; text-transform:uppercase;
+  letter-spacing:0.01em; font-size:22px; color:#d3241a; position:relative; z-index:1;
+}
+.paper-mast-herald .pm-tagline{color:var(--ink-soft); font-weight:700;}
+
+/* Economists — red serif on a blue swoosh, Satrom group */
+.paper-mast-economists{background:var(--paper); position:relative; overflow:hidden;}
+.paper-mast-economists::before{
+  content:""; position:absolute; left:-10%; right:-10%; top:38%; height:38%;
+  border-radius:50%; background:#6fa8dc; opacity:.55; transform:rotate(-4deg);
+}
+.paper-mast-economists .pm-name{
+  font-family:var(--font-voice); font-weight:700; text-transform:uppercase;
+  letter-spacing:0.02em; font-size:23px; color:#c2281d; position:relative; z-index:1;
+}
+.paper-mast-economists .pm-tagline{position:relative; z-index:1;}
+
+/* Radical — navy slab serif, independent */
+.paper-mast-radical{background:var(--paper);}
+.paper-mast-radical .pm-name{
+  font-family:Georgia, 'Fraunces', serif; font-weight:900; text-transform:uppercase;
+  letter-spacing:0.03em; font-size:24px; color:#1c3a6b;
+}
+.paper-mast-radical .pm-tagline{color:var(--ink-soft);}
+
+/* strip under the switcher: city / tagline / lead category, echoing the
+   reference images' rule-bounded byline row */
+.paper-strapline{
+  display:flex; justify-content:space-between; align-items:center;
+  font-family:var(--font-mono); font-size:10px; letter-spacing:0.1em; text-transform:uppercase;
+  color:var(--ink-soft); border-top:1px solid var(--rule-strong); border-bottom:3px double var(--rule-strong);
+  padding:7px 2px; margin:10px 0 20px;
+}
+.paper-strapline .pm-mid{font-weight:700; color:var(--ink); letter-spacing:0.14em;}
 .news-article{border-bottom:1px solid var(--rule); padding:18px 0;}
 .news-article .headline{font-family:var(--font-voice); font-size:24px; font-weight:600; line-height:1.2; cursor:pointer;}
 .news-article .headline:hover{color:var(--accent);}
@@ -584,6 +649,7 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 }
 .modal-title{font-family:var(--font-mono); font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:var(--ink); font-weight:700;}
 #toast-root{position:fixed; left:18px; bottom:44px; z-index:110; display:flex; flex-direction:column; gap:8px;}
+body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 .toast{
   font-family:var(--font-mono); font-size:11px; letter-spacing:0.06em;
   background:var(--ink); color:var(--paper); padding:10px 16px;
@@ -606,6 +672,7 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   #simclock #clock-date{display:none;}
   .doc-view{padding:18px 16px 60px;}
   .form-grid{grid-template-columns:1fr;}
+  .paper-switcher{grid-template-columns:repeat(2, 1fr);}
 }
 
 /* ═══════════ ECONOMY CLUSTER — pick-lists, chips, badges (Phase 4/7) ═══════════ */
@@ -643,3 +710,79 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .trade-row .tr-meta{font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); letter-spacing:.06em; margin:2px 0 8px;}
 .trade-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:8px;}
 .trade-cols .tc-head{font-family:var(--font-mono); font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:3px;}
+
+/* ═══════════ GM COMMAND BAR (Phase 3) ═══════════
+   Slim always-available toolbar, GM-only, any view. Sits directly above the
+   ticker (#ticker is 32px tall) so it never covers the wire feed. */
+.gm-bar{
+  position:fixed; left:0; right:0; bottom:32px; z-index:95;
+  display:flex; align-items:center; gap:10px;
+  height:38px; padding:0 14px;
+  background:var(--paper-deep); border-top:1px solid var(--rule-strong);
+  box-shadow:0 -4px 14px rgba(0,0,0,.10);
+  font-family:var(--font-mono);
+}
+.gm-bar.hidden{display:none;}
+.gmbar-kicker{
+  font-size:9.5px; font-weight:700; letter-spacing:.28em;
+  color:var(--paper); background:var(--accent); padding:3px 7px; flex-shrink:0;
+}
+.gmbar-label{font-size:9.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--ink-faint); margin-right:2px;}
+.gmbar-group{display:flex; align-items:center; gap:6px; flex-shrink:0;}
+.gmbar-btn{
+  font-family:var(--font-mono); font-size:11px; font-weight:600;
+  background:transparent; border:1px solid var(--rule-strong); color:var(--ink);
+  padding:4px 9px; cursor:pointer;
+}
+.gmbar-btn:hover{border-color:var(--accent); color:var(--accent);}
+.gmbar-find-wrap{position:relative; flex:1; min-width:160px; max-width:340px;}
+.gmbar-find{font-size:11.5px; padding:5px 8px; height:auto;}
+.gmbar-find-results{
+  position:absolute; left:0; right:0; bottom:calc(100% + 4px);
+  max-height:260px; overflow-y:auto;
+  background:var(--paper); border:1px solid var(--rule-strong);
+  box-shadow:0 -8px 24px rgba(0,0,0,.18);
+}
+.gmbar-find-results.hidden{display:none;}
+.gmbar-menu{
+  position:absolute; right:0; bottom:calc(100% + 4px); z-index:2;
+  min-width:190px;
+  background:var(--paper); border:1px solid var(--rule-strong);
+  box-shadow:0 -8px 24px rgba(0,0,0,.18);
+}
+.gmbar-menu.hidden{display:none;}
+.gmbar-menu-item{
+  padding:8px 12px; font-size:12px; font-family:var(--font-ui); color:var(--ink);
+  cursor:pointer; border-bottom:1px solid var(--rule);
+}
+.gmbar-menu-item:last-child{border-bottom:none;}
+.gmbar-menu-item:hover{background:rgba(122,35,24,0.08); color:var(--accent);}
+@media (max-width:900px){
+  .gm-bar{flex-wrap:wrap; height:auto; padding:6px 10px; gap:6px;}
+  .gmbar-find-wrap{order:3; flex-basis:100%; max-width:none;}
+}
+
+/* ═══════════ MUSIC WIDGET (Phase 10) ═══════════
+   Compact top-bar player: mute, play/pause, next, now-playing title, volume.
+   Paper/mono styled to match the rest of the shell; hidden entirely when
+   settings.music.enabled is false. */
+.music-widget{
+  display:flex; align-items:center; gap:6px;
+  padding:4px 8px; margin-right:6px;
+  border:1px solid var(--rule-strong); background:var(--paper-deep);
+  font-family:var(--font-mono); flex-shrink:0;
+}
+.music-widget.hidden{display:none;}
+.music-widget .icon-btn{font-size:12px; padding:2px 5px;}
+.music-widget .icon-btn.active{color:var(--accent);}
+.music-title{
+  font-size:10px; letter-spacing:.04em; color:var(--ink-soft);
+  max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+.music-volume{width:64px; accent-color:var(--accent); cursor:pointer;}
+@media (max-width:1100px){
+  .music-title{max-width:80px;}
+}
+@media (max-width:900px){
+  .music-widget{display:none;} /* GM bar + tabs already crowd small screens; widget stays reachable via GM Studio */
+}

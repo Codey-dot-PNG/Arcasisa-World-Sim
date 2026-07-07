@@ -48,7 +48,7 @@ function makeDemo(totalPop, o) {
 }
 
 const PROV_VAR_DEFS = [
-  ['population', 'Population', 'number'], ['gdp', 'GDP (₳M)', 'number'], ['employment', 'Employment', 'percent'],
+  ['population', 'Population', 'number'], ['gdp', 'GDP (ARK M)', 'number'], ['employment', 'Employment', 'percent'],
   ['industry', 'Industry', 'number'], ['agriculture', 'Agriculture', 'number'], ['oilProduction', 'Oil Production (kbbl/d)', 'number'],
   ['trade', 'Trade', 'number'], ['crime', 'Crime', 'number'], ['education', 'Education', 'number'],
   ['healthcare', 'Healthcare', 'number'], ['approval', 'Govt. Approval', 'percent'], ['infrastructure', 'Infrastructure', 'number'],
@@ -127,7 +127,7 @@ function seed() {
       description: 'The federal government of the Republic of Arcasia. Presidential republic; unicameral Parliament of 150 seats.',
       ceoId: 'per_valen', vars: {}, inventory: [{ itemId: 'item_gold', qty: 1200 }] },
     { id: 'ent_bank', type: 'government', name: 'Bank of Arcasia', color: '#33424d', logo: A + '/flags/seal.png',
-      description: 'Central bank and issuer of the Arcasian Mark (₳).',
+      description: 'Central bank and issuer of the Arcasian Koren (K).',
       ownerId: 'ent_gov', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
 
     { id: 'ent_arc', type: 'company', name: 'ARC', industry: 'State Corporation', color: '#33424d', logo: A + '/companies/arc.png',
@@ -191,7 +191,7 @@ function seed() {
       support: { prov_kordi: { all: 26 }, prov_lachevan: { all: -30 }, prov_grazi: { all: -30 }, prov_korota: { all: -26 }, prov_mezdov: { all: -22 } }, vars: {}, inventory: [] },
 
     // people
-    { id: 'per_valen', type: 'person', name: 'Miron Valen', title: 'President of the Republic', color: '#1f3a5f', description: 'President since 1958. Leader of United Arcasia. A builder of compromises, so far.', vars: {}, inventory: [{ itemId: 'item_medal', qty: 1 }] },
+    { id: 'per_valen', type: 'person', name: 'Miron Valen', title: 'Former President', color: '#1f3a5f', description: 'Former leader of United Arcasia. A builder of compromises, so far.', vars: {}, inventory: [{ itemId: 'item_medal', qty: 1 }] },
     { id: 'per_verenne', type: 'person', name: 'Ilya Verenne', title: 'Leader of the Opposition (PFJ)', color: '#2f5c5a', description: 'Lawyer, orator, and the sharpest tongue in Parliament.', vars: {}, inventory: [] },
     { id: 'per_stahl', type: 'person', name: 'Gregor Stahl', title: 'Chairman, National Front', color: '#4a4441', description: 'Former colonel. Speaks softly about very loud things.', vars: {}, inventory: [] },
     { id: 'per_kandel', type: 'person', name: 'Rosa Kandel', title: 'First Secretary, ACP', color: '#8a2f24', description: 'Veteran of the dock strikes of ’48.', vars: {}, inventory: [] },
@@ -209,7 +209,7 @@ function seed() {
     { id: 'per_rill', type: 'person', name: 'Toma Rill', title: 'Citizen', color: '#5b5e2c', description: 'A citizen of Lachevan. Owns a radio, a television and 500 shares of AMCO.', vars: {}, inventory: [{ itemId: 'item_share_amco', qty: 500 }, { itemId: 'item_radio', qty: 1 }] },
 
     // foreign powers
-    { id: 'for_valksland', type: 'foreign', name: 'Valksland', color: '#726a58', stance: 'Tense', description: 'The great power across the Strait of Valgos. Watches Arcasia; Arcasia watches back.', vars: {}, inventory: [] },
+    { id: 'for_valksland', type: 'foreign', name: 'Valksland', color: '#726a58', logo: A + '/flags/valksland.png', stance: 'Tense', description: 'The great power across the Strait of Valgos. Watches Arcasia; Arcasia watches back.', vars: {}, inventory: [] },
     { id: 'for_delcasia', type: 'foreign', name: 'Del’ Casia', color: '#726a58', logo: A + '/flags/del-casia.png', stance: 'Tense', description: 'Southern neighbour on the island. The land border is quiet this year.', vars: {}, inventory: [] },
     { id: 'for_solme', type: 'foreign', name: 'Solme', color: '#726a58', logo: A + '/flags/solme.png', stance: 'Neutral', description: 'Small south-western neighbour. Trades with everyone, angers no one.', vars: {}, inventory: [] },
     { id: 'for_madrosia', type: 'foreign', name: 'Madrosia', color: '#726a58', logo: A + '/flags/madrosia.png', stance: 'Friendly', description: 'Northern maritime republic. Old trading partner.', vars: {}, inventory: [] },
@@ -218,7 +218,6 @@ function seed() {
     { id: 'for_sarom', type: 'foreign', name: 'Federation of Sarom', color: '#726a58', logo: A + '/flags/sarom.png', stance: 'Allied', description: 'Continental federation and treaty ally.', vars: {}, inventory: [] },
     { id: 'for_qinal', type: 'foreign', name: 'People’s Republic of Qinal', color: '#726a58', logo: A + '/flags/qinal.png', stance: 'Hostile', description: 'Revolutionary power. Prints pamphlets that keep turning up in Mezdov.', vars: {}, inventory: [] },
     { id: 'for_markasia', type: 'foreign', name: 'Kingdom of Markasia', color: '#726a58', logo: A + '/flags/markasia.png', stance: 'Friendly', description: 'Old kingdom, older money. Buys Arcasian oil.', vars: {}, inventory: [] },
-    { id: 'for_kordistan', type: 'foreign', name: 'Kordistan', color: '#726a58', logo: A + '/flags/kordistan.png', stance: 'Tense', description: 'Kin-state of the Kordish people. Follows events in Surat with great interest.', vars: {}, inventory: [] },
     { id: 'for_estal', type: 'foreign', name: 'Estal Federation', color: '#726a58', logo: A + '/flags/estal.png', stance: 'Neutral', description: 'Distant federation; occasional trade delegations.', vars: {}, inventory: [] },
     { id: 'org_grace', type: 'org', name: 'GRACE', color: '#5b5e2c', logo: A + '/flags/grace.png', stance: 'Member', description: 'Guild of Royal Allies for Commercial Exchange. Trade bloc; Arcasia holds observer status.', vars: {}, inventory: [] },
     { id: 'org_assembly', type: 'org', name: 'Assembly of Nations', color: '#5b5e2c', logo: A + '/flags/assembly.png', stance: 'Member', description: 'The world assembly. Arcasia is a founding member.', vars: {}, inventory: [] }
@@ -330,14 +329,16 @@ function seed() {
   ];
 
   // ---- users -------------------------------------------------------------
-  function user(id, username, displayName, roleId, entityId) {
+  // `extra` carries optional per-user fields introduced by later phases (e.g.
+  // Phase 5's `newspaperId`) without needing a positional parameter for each.
+  function user(id, username, displayName, roleId, entityId, extra) {
     const { salt, hash } = hashPassword('arcasia');
-    return { id, username, displayName, salt, passHash: hash, roleId, entityId, created: Date.now(), lastLogin: null };
+    return { id, username, displayName, salt, passHash: hash, roleId, entityId, created: Date.now(), lastLogin: null, ...(extra || {}) };
   }
   const users = [
     user('user_gm', 'gm', 'The Gamemaster', 'gamemaster', null),
     user('user_president', 'president', 'Miron Valen', 'president', 'per_valen'),
-    user('user_journalist', 'journalist', 'Jana Halden', 'journalist', 'per_halden'),
+    user('user_journalist', 'journalist', 'Jana Halden', 'journalist', 'per_halden', { newspaperId: 'paper_today' }),
     user('user_executive', 'executive', 'Kira Moss', 'executive', 'per_moss'),
     user('user_citizen', 'citizen', 'Toma Rill', 'citizen', 'per_rill')
   ];
@@ -455,13 +456,13 @@ function seed() {
     },
     {
       id: 'ev_infrastructure', name: 'State Infrastructure Programme', enabled: true,
-      description: 'A ₳25M national works programme. Fire manually when the government announces it.',
+      description: 'A K25M national works programme. Fire manually when the government announces it.',
       trigger: { type: 'manual' }, conditions: [],
       effects: [
         { type: 'money', kind: 'withdraw', from: 'ent_gov', amount: '25000000', memo: 'National works programme' },
         { type: 'adjust_var', scope: 'province', target: 'all', key: 'infrastructure', op: 'add', value: '2' },
         { type: 'adjust_var', scope: 'province', target: 'all', key: 'approval', op: 'add', value: '1.5' },
-        { type: 'news', headline: 'Government launches nationwide works programme', body: 'The Ministry of Development will spend ₳25 million on roads, water and power across all five provinces. Grazihall shares rose on the announcement.', category: 'Politics', publish: true }
+        { type: 'news', headline: 'Government launches nationwide works programme', body: 'The Ministry of Development will spend K25 million on roads, water and power across all five provinces. Grazihall shares rose on the announcement.', category: 'Politics', publish: true }
       ], lastTurn: 0, runs: 0
     },
     {
@@ -478,25 +479,86 @@ function seed() {
   ];
 
   // ---- news --------------------------------------------------------------
+  // Phase 5: four fixed newspapers. `paperId` on every article routes it to
+  // one masthead in the UI; `newspaperRouting` (below, in settings) maps a
+  // news category to a default paper for auto-drafted articles.
   const now = Date.now();
   const news = [
-    { id: 'news_seed1', headline: 'Parliament opens the 1962 session', category: 'Politics', status: 'published', author: 'Jana Halden', ts: now - 200000, simDate: '1962-03-01', turn: 0, body: 'President Valen opened the spring session of Parliament with a call for “steadiness in a loud decade”. The opposition benches, newly confident after autumn polling, promised to be anything but steady. The budget, the Kordi question and the strait dominate the order paper.' },
-    { id: 'news_seed2', headline: 'LEIKA unveils the T-1 television set', category: 'Business', status: 'published', author: 'Jana Halden', ts: now - 150000, simDate: '1962-03-01', turn: 0, body: 'At a crowded showroom on Assembly Street, LEIKA chief Kira Moss switched on the Republic’s first mass-market television. “Every Arcasian living room,” she promised, “within the decade.” The set retails at ₳148. The Herald’s reviewer notes the picture is excellent and the cabinet walnut.' },
-    { id: 'news_seed3', headline: 'Kordi assembly demands budget review', category: 'Regional', status: 'published', author: 'Jana Halden', ts: now - 100000, simDate: '1962-03-01', turn: 0, body: 'The semi-autonomous assembly in Surat voted 31–14 to demand a review of the federal transfer formula. KFF chairman Aran Suri called the current settlement “a pipeline that flows one way”. The Ministry of Finance said the formula is “under continuous review”, which observers note is another way of saying no.' }
+    { id: 'news_seed1', headline: 'Parliament opens the 1962 session', category: 'Politics', status: 'published', author: 'Jana Halden', ts: now - 200000, simDate: '1962-03-01', turn: 0, paperId: 'paper_today', body: 'President Valen opened the spring session of Parliament with a call for “steadiness in a loud decade”. The opposition benches, newly confident after autumn polling, promised to be anything but steady. The budget, the Kordi question and the strait dominate the order paper.' },
+    { id: 'news_seed2', headline: 'LEIKA unveils the T-1 television set', category: 'Business', status: 'published', author: 'Jana Halden', ts: now - 150000, simDate: '1962-03-01', turn: 0, paperId: 'paper_economists', body: 'At a crowded showroom on Assembly Street, LEIKA chief Kira Moss switched on the Republic’s first mass-market television. “Every Arcasian living room,” she promised, “within the decade.” The set retails at K148. The Herald’s reviewer notes the picture is excellent and the cabinet walnut.' },
+    { id: 'news_seed3', headline: 'Kordi assembly demands budget review', category: 'Regional', status: 'published', author: 'Jana Halden', ts: now - 100000, simDate: '1962-03-01', turn: 0, paperId: 'paper_herald', body: 'The semi-autonomous assembly in Surat voted 31–14 to demand a review of the federal transfer formula. KFF chairman Aran Suri called the current settlement “a pipeline that flows one way”. The Ministry of Finance said the formula is “under continuous review”, which observers note is another way of saying no.' }
   ];
 
   // ---- assembled world ----------------------------------------------------
   const db = {
-    schema: 1,
+    schema: 2,
     settings: {
       worldName: 'Republic of Arcasia',
-      currency: '₳',
-      currencyName: 'Arcasian Mark',
+      currency: 'K',
+      currencyName: 'Arcasian Koren',
+      // Phase 11 — national profile card shown atop the Population view and
+      // in the Government entity dossier. `leader: null` reflects the vacancy
+      // left when President Valen was cleared as national leader (per_valen
+      // remains on file as 'Former President').
+      country: {
+        leader: null,
+        government: 'Semi-Presidential Republic (no Prime Minister)',
+        economy: 'Mixed State Capitalism & Planned Economy',
+        gdpRank: '20th / 103',
+        urbanisation: 60,
+        lifeExpectancy: 55,
+        schooling: 4,
+        hdi: 0.534,
+        populationGrowth: 'high'
+      },
       time: { turn: 0, unit: 'day', perTurn: 1, date: '1962-03-01', auto: { enabled: false, seconds: 3600 } },
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
       newsThresholds: { transaction: 5000000 },
-      demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS }
+      demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS },
+      // Phase 5 — exactly four newspapers. Fixed list: the GM may rename
+      // fields here but the UI offers no "add paper" control.
+      newspapers: [
+        { id: 'paper_today', name: 'Arcasia Today', tagline: '-HEART OF ARCASIA-', city: 'Lachevan', style: 'today', owner: 'This newspaper is owned by the State corporation ARC' },
+        { id: 'paper_herald', name: 'The National Herald', tagline: 'VOICE OF THE NATION', city: 'Lachevan', style: 'herald', owner: 'This newspaper is funded by the NFP' },
+        { id: 'paper_economists', name: 'Economists', tagline: 'MARKETS · TRADE · INDUSTRY', city: 'Lachevan', style: 'economists', owner: 'This newspaper is owned by the Satrom group' },
+        { id: 'paper_radical', name: 'Radical', tagline: '-THE VOICE OF ARCASIA-', city: 'Kordi', style: 'radical', owner: 'This is an independent newspaper' }
+      ],
+      // category → default paper for auto-drafted articles (sim.draftNews).
+      // Unlisted categories fall back to paper_today.
+      newspaperRouting: {
+        Politics: 'paper_today',
+        Regional: 'paper_herald',
+        Foreign: 'paper_herald',
+        Economy: 'paper_economists',
+        Business: 'paper_economists'
+      },
+      // Phase 10 — Audio & Presentation. The intended default soundtrack is
+      // the playlist at https://www.youtube.com/watch?v=vZDT1vaCUqE, but a
+      // bare <audio> element cannot play YouTube page URLs — only direct
+      // audio file URLs (.mp3/.ogg/.m4a/etc). Seed a handful of placeholder
+      // library entries (titles preserved / inspired by that playlist,
+      // ordered) with empty/placeholder URLs so the shape and default
+      // playlist ordering are correct out of the box. THE GM SHOULD PASTE
+      // DIRECT AUDIO FILE URLS into these (or new) library entries from GM
+      // Studio → Presentation for real playback.
+      music: {
+        enabled: false,
+        shuffle: true,
+        volume: 0.7,
+        library: [
+          { id: 'trk_seed1', title: 'Suzerain: Rizia OST — Stress', url: '' },
+          { id: 'trk_seed2', title: 'Suzerain: Rizia OST — Assembly', url: '' },
+          { id: 'trk_seed3', title: 'Suzerain: Rizia OST — The Republic', url: '' },
+          { id: 'trk_seed4', title: 'Suzerain: Rizia OST — Election Night', url: '' },
+          { id: 'trk_seed5', title: 'Suzerain: Rizia OST — Reflection', url: '' }
+        ],
+        playlists: [
+          { id: 'plist_default', name: 'Default Soundtrack', tracks: ['trk_seed1', 'trk_seed2', 'trk_seed3', 'trk_seed4', 'trk_seed5'] }
+        ],
+        activePlaylist: 'plist_default',
+        forcedTrack: null
+      }
       // settings.map (countries, labels, roads, rails) is attached by
       // mapdata.applyMap(db) below, which also upgrades all coordinates
       // to the 3840×2160 SVG map grid.
@@ -528,8 +590,21 @@ function seed() {
     sessions: {}
   };
 
-  // sync province population var with demographics
+  // ---- Phase 11.4 rescale --------------------------------------------------
+  // The 1962 draft world was authored at ~14.0M population / 4,840M GDP. Bump
+  // both to the current target scale (~39M population / K13,000M GDP) while
+  // keeping every province's relative share intact. This runs exactly once,
+  // here at seed time (fresh worlds are born at schema 2, see below) — the
+  // matching migration in store.js is gated on `schema < 2` so a live world
+  // is never rescaled twice.
+  const POP_SCALE = 2.79;
+  const GDP_SCALE = 2.686;
   for (const p of db.provinces) {
+    for (const gname in p.demographics) {
+      p.demographics[gname].population = Math.round(p.demographics[gname].population * POP_SCALE);
+    }
+    p.vars.gdp = Math.round(p.vars.gdp * GDP_SCALE);
+    // sync province population var with (now rescaled) demographics
     p.vars.population = Object.values(p.demographics).reduce((s, g) => s + g.population, 0);
   }
   // lift the hand-drawn 1200×675 world onto the SVG map grid

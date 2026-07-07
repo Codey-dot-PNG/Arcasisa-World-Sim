@@ -4,6 +4,7 @@ const store = require('./store');
 const sim = require('./sim');
 const ownership = require('./ownership');
 const market = require('./market');
+const geometry = require('./geometry');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -58,7 +59,7 @@ function getUser(req) {
 function userPayload(u) {
   return {
     id: u.user.id, username: u.user.username, displayName: u.user.displayName,
-    entityId: u.user.entityId, roleId: u.user.roleId,
+    entityId: u.user.entityId, roleId: u.user.roleId, newspaperId: u.user.newspaperId || null,
     role: { id: u.role.id, name: u.role.name, perms: u.role.perms }
   };
 }
@@ -135,7 +136,7 @@ function filterState(u) {
     elections: db.elections,
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
-    users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, lastLogin: x.lastLogin })) : undefined
+    users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined
   };
 }
 
@@ -475,27 +476,46 @@ async function handle(req, res, pathname, method) {
       catch (e) { return bad(e.message); }
     }
 
-    // ---- newsroom ----
+    // ---- newsroom (Phase 5: four fixed papers, one journalist per paper) ----
     if (pathname === '/api/news' && method === 'POST') {
-      if (!u.role.perms.manageNews && !u.role.perms.gm) return deny('Press credentials required.');
+      const gm = u.role.perms.gm;
+      if (!u.role.perms.manageNews && !gm) return deny('Press credentials required.');
       const b = await readBody(req);
       if (!b.headline) return bad('A headline is required.');
-      const a = sim.draftNews(String(b.headline).slice(0, 200), String(b.body || '').slice(0, 8000), String(b.category || 'General').slice(0, 40), !!b.publish, u.user.displayName);
+      const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
+      let paperId = b.paperId && validPaperIds.has(b.paperId) ? b.paperId : undefined;
+      if (b.paperId && !validPaperIds.has(b.paperId)) return bad('Unknown newspaper.');
+      // A non-GM journalist may only publish/draft to their own paper. If they
+      // sent no paperId, default it to their own paper so the check below and
+      // sim.draftNews both land in the right place.
+      if (!gm) {
+        if (!paperId) paperId = u.user.newspaperId;
+        if (!u.user.newspaperId || paperId !== u.user.newspaperId) return deny('You may only file to your own newspaper.');
+      }
+      const a = sim.draftNews(String(b.headline).slice(0, 200), String(b.body || '').slice(0, 8000), String(b.category || 'General').slice(0, 40), !!b.publish, u.user.displayName, paperId);
       store.save(); broadcast('sync');
       return json(res, 200, { article: a });
     }
     let m = pathname.match(/^\/api\/news\/([\w-]+)$/);
     if (m && (method === 'PATCH' || method === 'DELETE')) {
-      if (!u.role.perms.manageNews && !u.role.perms.gm) return deny('Press credentials required.');
+      const gm = u.role.perms.gm;
+      if (!u.role.perms.manageNews && !gm) return deny('Press credentials required.');
       const idx = db.news.findIndex(n => n.id === m[1]);
       if (idx < 0) return bad('No such article.');
+      const article = db.news[idx];
+      if (!gm && (!u.user.newspaperId || article.paperId !== u.user.newspaperId)) return deny('You may only edit articles in your own newspaper.');
       if (method === 'DELETE') {
         const [gone] = db.news.splice(idx, 1);
         store.log('news', 'Article deleted: ' + gone.headline, '', u.user.displayName, []);
       } else {
         const b = await readBody(req);
+        const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
+        if (b.paperId !== undefined) {
+          if (!validPaperIds.has(b.paperId)) return bad('Unknown newspaper.');
+          if (!gm && b.paperId !== u.user.newspaperId) return deny('You may only file to your own newspaper.');
+        }
         const a = db.news[idx];
-        for (const k of ['headline', 'body', 'category', 'status']) if (b[k] !== undefined) a[k] = String(b[k]);
+        for (const k of ['headline', 'body', 'category', 'status', 'paperId']) if (b[k] !== undefined) a[k] = String(b[k]);
         if (b.status === 'published') store.log('news', 'Published: ' + a.headline, a.category, u.user.displayName, [a.id]);
       }
       store.save(); broadcast('sync');
@@ -516,6 +536,56 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         const ev = db.events.find(e => e.id === b.id);
         if (!ev) return bad('No such event.');
+        if (b.dryRun) {
+          // Phase 8 — Simulate button. Deep-snapshot the whole db, let the
+          // event actually run (sim.runEvent mutates the live in-memory db —
+          // there is no side-effect-free execution path), diff old vs. new,
+          // then restore the live db from the snapshot before anyone can see
+          // the mutation. We do NOT call store.save()/broadcast, so file mode
+          // never persists it.
+          // Cloud-mode caveat: store.log()/recordTxn() push copies into
+          // module-level pending buffers (pendingTimeline/pendingTxns) that
+          // live *outside* db and are NOT rolled back here — they are only
+          // flushed to Supabase by store.commit() at the end of a real
+          // request. Since a dry run never calls store.save() (which is what
+          // marks the doc `dirty`), commit() will still ship the log/txn rows
+          // even though the world doc itself was restored, so a dry run can
+          // leave a phantom timeline/transaction entry behind in cloud mode.
+          // Acceptable for now — flag if that drift becomes a problem.
+          const before = JSON.parse(JSON.stringify(store.get()));
+          let ran = false, err = null;
+          try { ran = sim.runEvent(ev, actor); } catch (e) { err = e.message; }
+          const after = store.get();
+          const diff = { globalVars: [], provinces: [], moneyMoved: 0, news: [] };
+          if (ran) {
+            const beforeG = before.globalVars || {}, afterG = after.globalVars || {};
+            for (const k of new Set([...Object.keys(beforeG), ...Object.keys(afterG)])) {
+              if (beforeG[k] !== afterG[k]) diff.globalVars.push({ key: k, from: beforeG[k], to: afterG[k] });
+            }
+            for (const bp of before.provinces || []) {
+              const ap = (after.provinces || []).find(p => p.id === bp.id);
+              if (!ap) continue;
+              const changes = [];
+              for (const k of new Set([...Object.keys(bp.vars || {}), ...Object.keys(ap.vars || {})])) {
+                if ((bp.vars || {})[k] !== (ap.vars || {})[k]) changes.push({ key: k, from: (bp.vars || {})[k], to: (ap.vars || {})[k] });
+              }
+              if (changes.length) diff.provinces.push({ id: bp.id, name: bp.name, changes });
+            }
+            const beforeTxCount = (before.transactions || []).length;
+            const newTxns = (after.transactions || []).slice(beforeTxCount);
+            diff.moneyMoved = newTxns.reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0);
+            const beforeNewsIds = new Set((before.news || []).map(a => a.id));
+            diff.news = (after.news || []).filter(a => !beforeNewsIds.has(a.id)).map(a => ({ id: a.id, headline: a.headline, paperId: a.paperId }));
+          }
+          // restore the live db in place — callers elsewhere hold the same
+          // reference returned by store.get(), so we mutate it rather than
+          // reassign.
+          const live = store.get();
+          for (const k of Object.keys(live)) delete live[k];
+          Object.assign(live, before);
+          if (err) return json(res, 200, { dryRun: true, ran: false, error: err, diff });
+          return json(res, 200, { dryRun: true, ran, diff });
+        }
         const ran = sim.runEvent(ev, actor);
         if (!ran) store.log('simulation', `Event “${ev.name}” did not run`, 'Conditions were not met.', actor, [ev.id]);
         sim.updateDerived();
@@ -523,13 +593,45 @@ async function handle(req, res, pathname, method) {
         return json(res, 200, { ran });
       }
       if (pathname === '/api/gm/election' && method === 'POST') {
-        const rec = sim.runElection(actor);
-        return json(res, 200, { election: rec });
+        const b = await readBody(req);
+        try {
+          const rec = sim.runElection(actor, b && b.manual ? b.manual : undefined);
+          return json(res, 200, { election: rec });
+        } catch (e) { return bad(e.message); }
+      }
+      // Phase 3.3 — Influence dialog: a safe allow-list of one-off effects the
+      // GM can fire without authoring a whole event.
+      const SAFE_EFFECT_TYPES = ['adjust_demo', 'adjust_var', 'adjust_support'];
+      if (pathname === '/api/gm/effect' && method === 'POST') {
+        const b = await readBody(req);
+        const fx = b && b.effect;
+        if (!fx || !SAFE_EFFECT_TYPES.includes(fx.type)) return bad('Unknown or unsafe effect type.');
+        try {
+          sim.applyEffect(fx, { actor, eventName: 'GM influence' });
+        } catch (e) { return bad(e.message); }
+        sim.updateDerived();
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true });
       }
       if (pathname === '/api/gm/test-expr' && method === 'POST') {
         const b = await readBody(req);
-        try { return json(res, 200, { value: sim.evalExpr(String(b.expr || ''), { vars: db.globalVars }) }); }
-        catch (e) { return json(res, 200, { error: e.message }); }
+        try {
+          let vars = db.globalVars;
+          if (b.scope === 'province') {
+            const p = (b.targetId && db.provinces.find(x => x.id === b.targetId)) || db.provinces[0];
+            if (p) {
+              // expose both bare keys ($employment) and p_-prefixed keys
+              // ($p_employment), matching the adjust_demo effect convention
+              // documented in the events tab.
+              vars = { ...p.vars };
+              for (const k in p.vars) vars['p_' + k] = p.vars[k];
+            }
+          } else if (b.scope === 'entity') {
+            const e = (b.targetId && db.entities.find(x => x.id === b.targetId)) || db.entities[0];
+            if (e) vars = { ...(e.vars || {}) };
+          }
+          return json(res, 200, { value: sim.evalExpr(String(b.expr || ''), { vars }) });
+        } catch (e) { return json(res, 200, { error: e.message }); }
       }
       if (pathname === '/api/gm/mint' && method === 'POST') {
         const b = await readBody(req);
@@ -576,6 +678,7 @@ async function handle(req, res, pathname, method) {
         if (b.demographics) Object.assign(s.demographics, b.demographics);
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
+        if (b.music) s.music = b.music; // Phase 10 — GM Studio Presentation tab writes the whole object
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);
         store.save(); broadcast('sync');
@@ -589,7 +692,13 @@ async function handle(req, res, pathname, method) {
         if (!/^[a-z0-9_.-]{3,24}$/.test(username)) return bad('Bad username.');
         if (db.users.some(x => x.username === username)) return bad('Username taken.');
         const { salt, hash } = hashPassword(String(b.password || 'arcasia'));
-        const nu = { id: store.uid('user'), username, displayName: String(b.displayName || username).slice(0, 60), salt, passHash: hash, roleId: b.roleId || 'citizen', entityId: b.entityId || null, created: Date.now(), lastLogin: null };
+        const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
+        const nu = {
+          id: store.uid('user'), username, displayName: String(b.displayName || username).slice(0, 60), salt, passHash: hash,
+          roleId: b.roleId || 'citizen', entityId: b.entityId || null,
+          newspaperId: (b.newspaperId && validPaperIds.has(b.newspaperId)) ? b.newspaperId : null,
+          created: Date.now(), lastLogin: null
+        };
         db.users.push(nu);
         store.log('system', `Account created: ${nu.username} (${nu.roleId})`, '', actor, []);
         store.save(); broadcast('sync');
@@ -609,6 +718,10 @@ async function handle(req, res, pathname, method) {
           if (b.displayName !== undefined) target.displayName = String(b.displayName).slice(0, 60);
           if (b.roleId !== undefined) target.roleId = b.roleId;
           if (b.entityId !== undefined) target.entityId = b.entityId || null;
+          if (b.newspaperId !== undefined) {
+            const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
+            target.newspaperId = (b.newspaperId && validPaperIds.has(b.newspaperId)) ? b.newspaperId : null;
+          }
           if (b.password) { const { salt, hash } = hashPassword(String(b.password)); target.salt = salt; target.passHash = hash; }
           store.log('system', `Account updated: ${target.username}`, '', actor, []);
         }
@@ -623,6 +736,11 @@ async function handle(req, res, pathname, method) {
         if (method === 'POST') {
           const b = await readBody(req);
           if (!b || typeof b !== 'object') return bad();
+          // place map objects into a province by geometry unless one was given
+          if ((coll === 'properties' || coll === 'markers') && b.pos && !b.provinceId) {
+            const pid = geometry.provinceAt(db.provinces, b.pos);
+            if (pid) b.provinceId = pid;
+          }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
           db[coll].push(b);
           store.log('gm', `Created ${coll.slice(0, -1)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
@@ -636,7 +754,14 @@ async function handle(req, res, pathname, method) {
           if (coll === 'items' && b.marketValue !== undefined && b.marketValue !== obj.marketValue) {
             store.log('market', `${obj.name} repriced: ${db.settings.currency}${obj.marketValue} → ${db.settings.currency}${b.marketValue}`, 'Every inventory holding this item updates automatically.', actor, [obj.id]);
           }
+          // re-home a dragged property/marker by geometry when pos moved and
+          // the client didn't send an explicit provinceId override
+          const posMoved = b.pos !== undefined && b.provinceId === undefined && (coll === 'properties' || coll === 'markers');
           Object.assign(obj, b);
+          if (posMoved) {
+            const pid = geometry.provinceAt(db.provinces, obj.pos);
+            if (pid) obj.provinceId = pid;
+          }
           if (coll === 'provinces' && obj.demographics) {
             obj.vars.population = Object.values(obj.demographics).reduce((s, g) => s + (g.population || 0), 0);
           }

@@ -186,7 +186,7 @@ const Views = {
       Forms.field('Owner', Forms.sel(d, 'ownerId', Forms.entOptions(null, true))),
       Forms.field('Category', Forms.sel(d, 'type', [['residential', 'Residential'], ['commercial', 'Commercial'], ['industrial', 'Industrial'], ['agricultural', 'Agricultural'], ['government', 'Government'], ['military', 'Military'], ['infrastructure', 'Infrastructure']])),
       Forms.field('Kind (marker glyph)', Forms.sel(d, 'kind', Object.keys(KIND_GLYPH).map(k => [k, k.replace('_', ' ') + ' [' + KIND_GLYPH[k] + ']']))),
-      Forms.field('Icon override', Forms.text(d, 'icon')),
+      Forms.field('Icon', Forms.sel(d, 'icon', [['', '— none (letter glyph) —'], ...ICON_MANIFEST.map(i => [i, i])])),
       Forms.field('Position "x,y"', el('input.text-input', { value: (d.pos || []).join(','), oninput: (e) => d.pos = e.target.value.split(',').map(Number) })),
       Forms.field('Assessed value', Forms.num(d, 'value')),
       Forms.field('Employees', Forms.num(d, 'employees')),
@@ -242,11 +242,26 @@ const Views = {
         Forms.field('Ideology — social (−100…+100)', Forms.num(d.ideology, 'soc'))));
       wrap.appendChild(Forms.check(d, 'inGovernment', 'Currently in government'));
     }
+
+    /* Phase 4.4 — GM-only market levers: sharePrice/trust/publicFloat aren't
+       set by any other editor, so the GM needs a direct hand on them (events
+       and the market-maker endpoints adjust them at runtime otherwise). */
+    if (e.type === 'company') {
+      wrap.appendChild(this.secLabel('Market (GM)'));
+      wrap.appendChild(el('div.form-grid',
+        Forms.field('Share price (' + CUR() + ')', Forms.num(d, 'sharePrice')),
+        Forms.field('Trust (0–100)', Forms.num(d, 'trust')),
+        Forms.field('Public float (0–100 %)', Forms.num(d, 'publicFloat'))));
+    }
+
     wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
 
     wrap.appendChild(this.editBar(async () => {
       const body = { name: d.name, color: d.color, logo: d.logo, description: d.description };
-      if (e.type === 'company') Object.assign(body, { industry: d.industry, ownerId: d.ownerId, ceoId: d.ceoId, sharesOutstanding: Number(d.sharesOutstanding) || 0 });
+      if (e.type === 'company') Object.assign(body, {
+        industry: d.industry, ownerId: d.ownerId, ceoId: d.ceoId, sharesOutstanding: Number(d.sharesOutstanding) || 0,
+        sharePrice: Number(d.sharePrice) || 0, trust: Number(d.trust) || 0, publicFloat: Number(d.publicFloat) || 0
+      });
       if (e.type === 'party') Object.assign(body, { leaderId: d.leaderId, ideology: d.ideology, inGovernment: !!d.inGovernment });
       if (e.type === 'person') body.title = d.title;
       if (e.type === 'foreign' || e.type === 'org') body.stance = d.stance;
@@ -437,6 +452,18 @@ const Views = {
         defs.forEach(v => { if (e.vars[v.key] !== undefined) { covered.add(v.key); wrap.appendChild(this.kv(v.label, fmtVal(e.vars[v.key], v.format))); } });
         for (const k in e.vars) if (!covered.has(k)) wrap.appendChild(this.kv(k, fmtNum(e.vars[k])));
       }
+      /* Phase 7.3 — small share-price sparkline, drawn from S().history's
+         per-turn shares[companyId] snapshots (only present when statistics
+         perms sent history, and only once the company is actually listed). */
+      if (e.sharePrice !== undefined) {
+        const hist = S().history || [];
+        const priceHist = hist.filter(h => h.shares && h.shares[e.id] !== undefined).map(h => ({ x: h.turn, y: h.shares[e.id] }));
+        if (priceHist.length) {
+          wrap.appendChild(this.secLabel('Share Price'));
+          wrap.appendChild(Charts.chartLine(priceHist, { width: 260, height: 70, title: 'SHARE PRICE', yFormat: v => CUR() + v }));
+        }
+      }
+
       if (e.shareholders) {
         wrap.appendChild(this.secLabel('Share Register'));
         const total = e.sharesOutstanding || e.shareholders.reduce((s, x) => s + x.shares, 0) || 1;
@@ -452,6 +479,12 @@ const Views = {
       wrap.appendChild(this.kv('Seats in Parliament', fmtNum(e.mpCount) + ' / ' + (S().settings.parliamentSeats || 150)));
       wrap.appendChild(this.kv('Position', this.ideologyLabel(e.ideology)));
       wrap.appendChild(this.kv('In Government', e.inGovernment ? 'Yes' : 'No'));
+    }
+
+    // Phase 11.3 — national profile on the Government of Arcasia's own file.
+    if (e.id === 'ent_gov') {
+      const country = this.countrySection();
+      if (country) wrap.appendChild(country);
     }
 
     const accts = this.accountsOf(id);
@@ -484,7 +517,7 @@ const Views = {
     const actions = el('div.insp-actions');
     const my = this.accountsOf(W.me.entityId);
     if (my.length && accts.length && id !== W.me.entityId) {
-      actions.appendChild(el('button.outline-btn', { onclick: () => this.transferModal(accts[0].id) }, '₳ Transfer Funds'));
+      actions.appendChild(el('button.outline-btn', { onclick: () => this.transferModal(accts[0].id) }, CUR() + ' Transfer Funds'));
     }
     const myEnt = myEntity();
     if (myEnt && myEnt.inventory && myEnt.inventory.length && id !== W.me.entityId) {
@@ -786,6 +819,20 @@ const Views = {
           pollBox.appendChild(this.barRow(p.name, poll.national[p.id] || 0, p.color));
         }
       } catch (e) { pollBox.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Polling unavailable: ' + e.message)); }
+
+      /* Phase 7.3 — polling-over-time, one series per party, drawn only from
+         the weekly rows that carry a polling snapshot (r.polling). */
+      const hist = S().history;
+      if (hist && hist.length) {
+        const pollRows = hist.filter(r => r.polling);
+        if (pollRows.length >= 2) {
+          inner.appendChild(this.secLabel('Polling Over Time'));
+          inner.appendChild(Charts.chartLine(parties.map(p => ({
+            name: p.abbrev || p.name, color: p.color,
+            points: pollRows.map(r => ({ x: r.turn, y: r.polling[p.id] }))
+          })), { title: 'NATIONAL POLLING', yFormat: v => v + '%' }));
+        }
+      }
     }
 
     if (lastElec) {
@@ -798,6 +845,12 @@ const Views = {
           el('td.num', r.pct + '%'),
           el('td.num', String(r.seats))))));
       inner.appendChild(tbl);
+
+      /* Phase 7.3 — election results bar chart (seats by party). */
+      inner.appendChild(Charts.chartBars((lastElec.national || []).map(r => {
+        const party = parties.find(p => p.id === r.partyId);
+        return { label: party ? (party.abbrev || party.name) : entName(r.partyId), value: r.seats, color: party ? party.color : undefined };
+      }), { title: 'SEATS', valueFormat: v => v + ' seats' }));
     }
   },
 
@@ -877,7 +930,7 @@ const Views = {
       inner.appendChild(this.secLabel('Your Accounts'));
       const box = el('div.stage');
       myAccts.forEach(a => box.appendChild(this.kv(a.name, fmtMoney(a.balance))));
-      box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, '₳ Wire Transfer')));
+      box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, CUR() + ' Wire Transfer')));
       inner.appendChild(box);
     }
 
@@ -1125,10 +1178,30 @@ const Views = {
   },
 
   /* ---- Population ---- */
+  // Phase 11.3 — national profile card. Shown to everyone (it's public
+  // knowledge, unlike the demographic tables below which need clearance).
+  countrySection() {
+    const c = (S().settings || {}).country;
+    if (!c) return null;
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Country'));
+    wrap.appendChild(this.kv('Leader', c.leader ? this.ownerLink(c.leader) : 'None'));
+    wrap.appendChild(this.kv('Government', c.government));
+    wrap.appendChild(this.kv('Economy', c.economy));
+    wrap.appendChild(this.kv('GDP Rank', c.gdpRank));
+    wrap.appendChild(this.kv('Urbanisation', c.urbanisation !== undefined ? c.urbanisation + '%' : '—'));
+    wrap.appendChild(this.kv('Life Expectancy', c.lifeExpectancy !== undefined ? c.lifeExpectancy + ' yrs' : '—'));
+    wrap.appendChild(this.kv('Avg. Schooling', c.schooling !== undefined ? c.schooling + ' yrs' : '—'));
+    wrap.appendChild(this.kv('HDI', c.hdi !== undefined ? c.hdi : '—'));
+    wrap.appendChild(this.kv('Population Growth', c.populationGrowth));
+    return wrap;
+  },
   viewPopulation(inner) {
     inner.appendChild(el('div.doc-title', 'Population of the Republic'));
     const g = S().globalVars || {};
     inner.appendChild(el('div.doc-sub', fmtNum(g.population) + ' citizens across ' + S().provinces.length + ' provinces'));
+    const country = this.countrySection();
+    if (country) inner.appendChild(country);
     if (!perms().statistics && !isGM()) {
       inner.appendChild(el('div.stage', el('div', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:.1em;' }, 'DEMOGRAPHIC RECORDS REQUIRE STATISTICS CLEARANCE.')));
       return;
@@ -1149,6 +1222,23 @@ const Views = {
 
     const p = provById(W.popProv);
     if (!p || !p.demographics) return;
+
+    /* Phase 7.3 — happiness & approval over time for the selected province,
+       gated on statistics clearance (filterState only sends state.history
+       when perms.statistics is set). Needs at least 2 recorded rows with
+       data for this province to be worth plotting. */
+    const hist = S().history;
+    if (hist && hist.length) {
+      const provRows = hist.filter(r => r.provinces && r.provinces[p.id]);
+      if (provRows.length >= 2) {
+        inner.appendChild(this.secLabel(p.name + ' — Happiness & Approval Over Time'));
+        inner.appendChild(Charts.chartLine([
+          { name: 'Happiness', color: 'var(--good)', points: provRows.map(r => ({ x: r.turn, y: (r.provinces[p.id] || {}).happiness })) },
+          { name: 'Approval', color: 'var(--accent)', points: provRows.map(r => ({ x: r.turn, y: (r.provinces[p.id] || {}).approval })) }
+        ], { title: 'HAPPINESS & APPROVAL', yFormat: v => v + '%' }));
+      }
+    }
+
     const metrics = (S().settings.demographics.metrics || []);
     inner.appendChild(this.secLabel(p.name + ' — Population Groups'));
     const head = el('tr', el('th', 'Group'));
@@ -1170,16 +1260,42 @@ const Views = {
     inner.appendChild(box);
   },
 
-  /* ---- News ---- */
+  /* ---- News (Phase 5: four fixed papers) ---- */
+  papers() { return (S().settings.newspapers || []); },
+  paperById(id) { return this.papers().find(p => p.id === id); },
+
   viewNews(inner) {
-    const canManage = perms().manageNews || isGM();
-    inner.appendChild(el('div.paper-masthead',
-      el('div.nm', 'The Arcasian Herald'),
-      el('div.et', 'EST. 1899 · PAPER OF RECORD · ' + fmtDate(S().settings.time.date).toUpperCase())));
+    const papers = this.papers();
+    if (!W.newsPaper || !papers.some(p => p.id === W.newsPaper)) W.newsPaper = 'paper_today';
+    const paper = this.paperById(W.newsPaper) || papers[0];
+    const isGmUser = isGM();
+    // A journalist may file only to their own paper; the GM may file to any.
+    const canManage = (perms().manageNews || isGmUser) && (isGmUser || W.me.newspaperId === paper.id);
+
+    // ---- masthead switcher: four cards, one per paper ----
+    const switcher = el('div.paper-switcher');
+    papers.forEach(p => {
+      switcher.appendChild(el(`div.paper-mast.paper-mast-${p.style}`, {
+        class: p.id === W.newsPaper ? 'active' : '',
+        onclick: () => { W.newsPaper = p.id; W.newsCat = 'All'; W.newsQ = ''; App.renderView(); }
+      },
+        el('div.pm-name', p.name),
+        el('div.pm-tagline', p.tagline || ''),
+        el('div.pm-owner', '*' + (p.owner || ''))));
+    });
+    inner.appendChild(switcher);
 
     if (!W.newsCat) W.newsCat = 'All';
     if (W.newsTab === undefined) W.newsTab = 'published';
-    const cats = ['All', ...new Set(S().news.map(n => n.category))];
+    const paperNews = S().news.filter(n => (n.paperId || 'paper_today') === paper.id);
+    const publishedNews = paperNews.filter(n => n.status === 'published');
+    const leadCat = publishedNews.length ? publishedNews[publishedNews.length - 1].category : 'General';
+    inner.appendChild(el('div.paper-strapline',
+      el('span', (paper.city || '').toUpperCase()),
+      el('span.pm-mid', paper.tagline || ''),
+      el('span', leadCat)));
+
+    const cats = ['All', ...new Set(paperNews.map(n => n.category))];
     const bar = el('div.chip-row');
     cats.forEach(c => bar.appendChild(el('button.chip', { class: c === W.newsCat ? 'active' : '', onclick: () => { W.newsCat = c; App.renderView(); } }, c)));
     const search = el('input.text-input', { placeholder: 'Search the archive…', style: 'max-width:260px;', value: W.newsQ || '', oninput: (e) => { W.newsQ = e.target.value; clearTimeout(W._nq); W._nq = setTimeout(() => App.renderView(), 250); } });
@@ -1190,14 +1306,18 @@ const Views = {
     if (canManage) {
       const tabs = el('div.chip-row',
         el('button.chip', { class: W.newsTab === 'published' ? 'active' : '', onclick: () => { W.newsTab = 'published'; App.renderView(); } }, 'Published'),
-        el('button.chip', { class: W.newsTab === 'draft' ? 'active' : '', onclick: () => { W.newsTab = 'draft'; App.renderView(); } }, 'Drafts (' + S().news.filter(n => n.status === 'draft').length + ')'),
-        el('button.dash-btn', { onclick: () => this.newsEditor() }, '✎ New Article'));
+        el('button.chip', { class: W.newsTab === 'draft' ? 'active' : '', onclick: () => { W.newsTab = 'draft'; App.renderView(); } }, 'Drafts (' + paperNews.filter(n => n.status === 'draft').length + ')'),
+        el('button.dash-btn', { onclick: () => this.newsEditor(null, paper.id) }, '✎ New Article'));
       inner.appendChild(tabs);
+    } else if ((perms().manageNews || isGmUser) && !isGmUser) {
+      inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin:4px 0 10px;' },
+        `Press credentials filed with ${this.paperById(W.me.newspaperId) ? this.paperById(W.me.newspaperId).name : 'no paper'}. Switch to that masthead to write.`));
     }
 
+    const canSeeDrafts = perms().manageNews || isGmUser;
     const q = (W.newsQ || '').toLowerCase();
-    let list = S().news.filter(n =>
-      (canManage ? n.status === W.newsTab : n.status === 'published') &&
+    let list = paperNews.filter(n =>
+      (canSeeDrafts ? n.status === W.newsTab : n.status === 'published') &&
       (W.newsCat === 'All' || n.category === W.newsCat) &&
       (!q || n.headline.toLowerCase().includes(q) || (n.body || '').toLowerCase().includes(q)));
     list = [...list].reverse();
@@ -1218,7 +1338,7 @@ const Views = {
       if (canManage) {
         art.appendChild(el('div.btn-row',
           n.status === 'draft' ? el('button.solid-btn', { onclick: async () => { await PATCH('/api/news/' + n.id, { status: 'published' }); toast('Published.'); } }, 'Publish') : null,
-          el('button.dash-btn', { onclick: () => this.newsEditor(n) }, 'Edit'),
+          el('button.dash-btn', { onclick: () => this.newsEditor(n, paper.id) }, 'Edit'),
           n.status === 'published' ? el('button.dash-btn', { onclick: async () => { await PATCH('/api/news/' + n.id, { status: 'draft' }); toast('Retracted to drafts.'); } }, 'Retract') : null,
           el('button.dash-btn', { onclick: () => confirmModal('DESTROY RECORD', 'Delete this article permanently?', async () => { await DEL('/api/news/' + n.id); toast('Deleted.'); }) }, 'Delete')));
       }
@@ -1226,25 +1346,36 @@ const Views = {
     });
   },
 
-  newsEditor(article) {
+  newsEditor(article, paperId) {
+    const isGmUser = isGM();
     const headline = el('input.text-input', { value: article ? article.headline : '', placeholder: 'HEADLINE' });
     const category = el('input.text-input', { value: article ? article.category : 'Politics', placeholder: 'Category' });
     const body = el('textarea.text-input', { style: 'min-height:180px;' }, article ? article.body : '');
+    const targetPaperId = article ? (article.paperId || 'paper_today') : (paperId || W.newsPaper || 'paper_today');
+    // GM may retarget which paper an article runs in; journalists are locked
+    // to their own masthead (the server enforces this regardless).
+    const paperSel = isGmUser
+      ? el('select.text-input', this.papers().map(p => el('option', { value: p.id, selected: p.id === targetPaperId ? 'selected' : undefined }, p.name)))
+      : null;
     openModal(article ? 'EDIT ARTICLE' : 'NEW ARTICLE', el('div',
+      isGmUser ? el('label.field-label', 'Newspaper') : null,
+      isGmUser ? paperSel : null,
       el('label.field-label', 'Headline'), headline,
       el('label.field-label', 'Category'), category,
       el('label.field-label', 'Body'), body
     ), [
       {
         label: article ? 'Save' : 'Publish', onClick: async () => {
-          if (article) await PATCH('/api/news/' + article.id, { headline: headline.value, category: category.value, body: body.value });
-          else await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: true });
+          const pid = isGmUser ? paperSel.value : targetPaperId;
+          if (article) await PATCH('/api/news/' + article.id, { headline: headline.value, category: category.value, body: body.value, paperId: pid });
+          else await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: true, paperId: pid });
           toast('Filed.');
         }
       },
       !article ? {
         label: 'Save as Draft', cls: 'dash-btn', onClick: async () => {
-          await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: false });
+          const pid = isGmUser ? paperSel.value : targetPaperId;
+          await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: false, paperId: pid });
           toast('Draft saved.');
         }
       } : null,
@@ -1256,6 +1387,8 @@ const Views = {
   viewTimeline(inner) {
     inner.appendChild(el('div.doc-title', 'The Record'));
     inner.appendChild(el('div.doc-sub', 'Every event, transfer and decision · newest first'));
+    if (!isGM()) inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin:6px 0 2px;' },
+      'You see the public record and files concerning your own holdings.'));
     if (!W.tlType) W.tlType = 'all';
     const types = ['all', ...new Set((S().timeline || []).map(t => t.type))];
     const bar = el('div.chip-row');

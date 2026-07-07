@@ -477,12 +477,23 @@ const GameMap = {
         select('property', pr.id, { noPan: true });
       });
       title(rect, `${pr.name} — ${owner ? owner.name : 'unowned'}`);
-      const glyph = document.createElementNS(NS, 'text');
-      glyph.setAttribute('class', 'prop-glyph');
-      glyph.setAttribute('font-size', 25.6);
-      glyph.setAttribute('text-anchor', 'middle');
-      glyph.setAttribute('y', 9.6);
-      glyph.textContent = KIND_GLYPH[pr.kind] || '•';
+      // an assigned SVG icon replaces the letter glyph on the flat marker
+      let glyph;
+      if (pr.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(pr.icon)) {
+        glyph = document.createElementNS(NS, 'image');
+        glyph.setAttribute('class', 'prop-glyph prop-icon');
+        glyph.setAttribute('href', iconHref(pr.icon));
+        glyph.setAttributeNS('http://www.w3.org/1999/xlink', 'href', iconHref(pr.icon));
+        glyph.setAttribute('width', 28); glyph.setAttribute('height', 28);
+        glyph.setAttribute('x', -14); glyph.setAttribute('y', -14);
+      } else {
+        glyph = document.createElementNS(NS, 'text');
+        glyph.setAttribute('class', 'prop-glyph');
+        glyph.setAttribute('font-size', 25.6);
+        glyph.setAttribute('text-anchor', 'middle');
+        glyph.setAttribute('y', 9.6);
+        glyph.textContent = KIND_GLYPH[pr.kind] || '•';
+      }
       g.appendChild(rect); g.appendChild(glyph);
       // isometric building — shown instead of the flat square once zoomed in
       // close enough to read it (toggled in updateMarkerScale). The flat
@@ -558,12 +569,22 @@ const GameMap = {
         select('marker', mrk.id, { noPan: true });
       });
       title(circ, mrk.title || 'Event marker');
-      const glyph = document.createElementNS(NS, 'text');
-      glyph.setAttribute('class', 'event-glyph');
-      glyph.setAttribute('font-size', 22);
-      glyph.setAttribute('text-anchor', 'middle');
-      glyph.setAttribute('y', 8);
-      glyph.textContent = (mrk.icon && mrk.icon.length <= 3) ? mrk.icon : '◈';
+      let glyph;
+      if (mrk.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(mrk.icon)) {
+        glyph = document.createElementNS(NS, 'image');
+        glyph.setAttribute('class', 'event-glyph event-icon');
+        glyph.setAttribute('href', iconHref(mrk.icon));
+        glyph.setAttributeNS('http://www.w3.org/1999/xlink', 'href', iconHref(mrk.icon));
+        glyph.setAttribute('width', 26); glyph.setAttribute('height', 26);
+        glyph.setAttribute('x', -13); glyph.setAttribute('y', -13);
+      } else {
+        glyph = document.createElementNS(NS, 'text');
+        glyph.setAttribute('class', 'event-glyph');
+        glyph.setAttribute('font-size', 22);
+        glyph.setAttribute('text-anchor', 'middle');
+        glyph.setAttribute('y', 8);
+        glyph.textContent = (mrk.icon && mrk.icon.length <= 3) ? mrk.icon : '◈';
+      }
       g.appendChild(circ); g.appendChild(glyph);
       const lbl = document.createElementNS(NS, 'text');
       lbl.setAttribute('class', 'event-label');

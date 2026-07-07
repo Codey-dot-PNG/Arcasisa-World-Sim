@@ -154,6 +154,52 @@ function migrate(world) {
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
+  // issue/reconcile property deed items against property.ownerId
+  try { if (require('./deeds').syncAllDeeds(world)) changed = true; }
+  catch (e) { /* deeds module optional during early boot */ }
+
+  // Masthead logo images for the four fixed papers (additive — a GM-set
+  // logo is left alone).
+  const PAPER_LOGOS = {
+    paper_today: '/assets/newspapers/today.png',
+    paper_herald: '/assets/newspapers/herald.png',
+    paper_economists: '/assets/newspapers/economists.png',
+    paper_radical: '/assets/newspapers/radical.png'
+  };
+  for (const paper of ((world.settings || {}).newspapers || [])) {
+    if (!paper.logo && PAPER_LOGOS[paper.id]) { paper.logo = PAPER_LOGOS[paper.id]; changed = true; }
+  }
+
+  // The national profile card (settings.country) was removed from the UI —
+  // drop the stale data from live worlds too.
+  if (world.settings && world.settings.country !== undefined) {
+    delete world.settings.country;
+    changed = true;
+  }
+
+  // Market session runs every turn (was weekly). Only flips the stock event
+  // if it still carries the default weekly trigger, so a GM's custom
+  // schedule survives. Noise coefficient is halved to keep the random walk
+  // comparable now that it applies ~7× as often.
+  const evMarket = (world.events || []).find(e => e.id === 'ev_market');
+  if (evMarket && evMarket.trigger && evMarket.trigger.type === 'weekly') {
+    evMarket.trigger = { type: 'every_turn' };
+    if (evMarket.name === 'Weekly Market Session') evMarket.name = 'Market Session';
+    for (const fx of (evMarket.effects || [])) {
+      if (fx.type === 'reprice_shares' && Number(fx.e) === 0.03) fx.e = 0.015;
+    }
+    changed = true;
+  }
+  // An older overhaul left ev_market repricing the certificate ITEMS
+  // (set_item_value on Securities) instead of company.sharePrice, so the
+  // Exchange price and its history never moved. Restore the canonical
+  // reprice_shares effect — narrowly matched so a GM's own custom effect
+  // list is never clobbered.
+  if (evMarket && (evMarket.effects || []).length === 1 &&
+    evMarket.effects[0].type === 'set_item_value' && evMarket.effects[0].category === 'Securities') {
+    evMarket.effects = [{ type: 'reprice_shares', company: 'all', a: 0.6, b: 0.8, c: 0.15, e: 0.015 }];
+    changed = true;
+  }
 
   // Timeline tab is GM-only: strip the 'timeline' page from every non-GM
   // role so existing worlds pick up the tightened visibility. (The server
@@ -200,21 +246,8 @@ function migrate(world) {
 
     // 2. Currency rename is handled by the ungated migration above.
 
-    // 3. Arcasia national profile card (Population view + Government dossier).
-    if (world.settings && !world.settings.country) {
-      world.settings.country = {
-        leader: null,
-        government: 'Semi-Presidential Republic (no Prime Minister)',
-        economy: 'Mixed State Capitalism & Planned Economy',
-        gdpRank: '20th / 103',
-        urbanisation: 60,
-        lifeExpectancy: 55,
-        schooling: 4,
-        hdi: 0.534,
-        populationGrowth: 'high'
-      };
-      changed = true;
-    }
+    // 3. (retired) the national profile card was removed — see the ungated
+    //    cleanup below that deletes settings.country from live worlds.
 
     // 4. Rescale province populations ×2.79 and GDP ×2.686 — ONCE, guarded by
     //    the schema check above so re-running migrate() (e.g. every request
@@ -416,6 +449,31 @@ async function rollback(turn) {
   return db;
 }
 
+// Replace the live world with an exported archive (the mirror of
+// /api/gm/export). The file carries everything — users, roles, articles,
+// logs — but we keep the live sessions and make sure the importing GM still
+// has an operator account, so the import can never lock everyone out.
+async function importWorld(world, currentGmUser) {
+  migrate(world); // bring older exports up to the current schema
+  world.sessions = db && db.sessions ? db.sessions : (world.sessions || {});
+  world.users = world.users || [];
+  if (currentGmUser && !world.users.some(x => x.id === currentGmUser.id || x.username === currentGmUser.username)) {
+    world.users.push(currentGmUser);
+  }
+  db = world;
+  if (MODE === 'file') {
+    // imported world starts with a clean snapshot archive
+    for (const f of fs.readdirSync(SNAP_DIR)) {
+      if (f.startsWith('turn-')) { try { fs.unlinkSync(path.join(SNAP_DIR, f)); } catch (e) { } }
+    }
+    saveNow();
+    return db;
+  }
+  await sb.del('snapshots', 'turn=gte.0');
+  save();
+  return db;
+}
+
 async function reset(seed) {
   db = (seed || seedFn)();
   if (MODE === 'file') {
@@ -469,5 +527,5 @@ function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 
 module.exports = {
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
-  snapshot, listSnapshots, rollback, reset, log, recordTxn, uid, byId, DATA_DIR
+  snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR
 };

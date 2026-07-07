@@ -4,6 +4,7 @@ const store = require('./store');
 const sim = require('./sim');
 const ownership = require('./ownership');
 const market = require('./market');
+const deeds = require('./deeds');
 const geometry = require('./geometry');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
@@ -27,14 +28,15 @@ function json(res, code, obj) {
   res.end(body);
   return true; // handled — the static server must not touch this response
 }
-function readBody(req) {
+function readBody(req, maxBytes) {
+  const cap = maxBytes || 4e6;
   // Vercel's Node runtime pre-parses JSON bodies onto req.body.
   if (req.body !== undefined && req.body !== null) {
     return Promise.resolve(typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body);
   }
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (c) => { data += c; if (data.length > 4e6) { reject(new Error('Body too large')); req.destroy(); } });
+    req.on('data', (c) => { data += c; if (data.length > cap) { reject(new Error('Body too large')); req.destroy(); } });
     req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(new Error('Invalid JSON')); } });
     req.on('error', reject);
   });
@@ -112,11 +114,13 @@ function filterState(u) {
   const news = (p.manageNews ? db.news : db.news.filter(n => n.status === 'published')).slice(-300);
 
   // Timeline visibility (Phase 6, tightened): the full record is GM-only.
-  // Non-GM operators receive only entries that concern their own ownership
-  // chain (their entity and companies it controls) — nothing about anyone
-  // else. Cap kept at 400 after filtering.
+  // Non-GM operators receive only transfer/trade/market/inventory entries
+  // that concern their own ownership chain (their entity and companies it
+  // controls) — no account creation, system notices or anyone else's
+  // business. Cap kept at 400 after filtering.
+  const playerTlTypes = new Set(['economy', 'ownership', 'market', 'inventory']);
   const timeline = (p.gm ? db.timeline
-    : db.timeline.filter(e => e.refs && e.refs.some(r => controlled.has(r)))).slice(-400);
+    : db.timeline.filter(e => playerTlTypes.has(e.type) && e.refs && e.refs.some(r => controlled.has(r)))).slice(-400);
 
   // Trade offers (Phase 4.3): a user sees offers where either side is in their
   // ownership chain; GM sees all.
@@ -305,11 +309,14 @@ async function handle(req, res, pathname, method) {
 
     if (pathname === '/api/trade' && method === 'POST') {
       const b = await readBody(req);
-      const fromEnt = db.entities.find(e => e.id === (u.role.perms.gm && b.fromEntityId ? b.fromEntityId : u.user.entityId));
+      // A controller may send from any entity in their ownership chain (their
+      // company, its subsidiaries, …), not just their own person.
+      const fromEnt = db.entities.find(e => e.id === (b.fromEntityId || u.user.entityId));
       const toEnt = db.entities.find(e => e.id === b.toEntityId);
       const item = db.items.find(i => i.id === b.itemId);
       const qty = Math.round(Number(b.qty));
       if (!fromEnt || !toEnt || !item) return bad('Unknown entity or item.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
       if (!(qty > 0)) return bad('Quantity must be positive.');
       if (!item.tradable && !u.role.perms.gm) return deny('That item is not tradable.');
@@ -317,6 +324,11 @@ async function handle(req, res, pathname, method) {
       // the shareholder register moves in lockstep with the certificate item.
       if (item.meta && item.meta.companyId) {
         try { market.transfer(item.meta.companyId, fromEnt.id, toEnt.id, qty, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, { ok: true }); }
+        catch (e) { return bad(e.message); }
+      }
+      // Property deeds likewise — moving the deed conveys the property itself.
+      if (item.meta && item.meta.propertyId) {
+        try { deeds.transfer(item.meta.propertyId, fromEnt.id, toEnt.id, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, { ok: true }); }
         catch (e) { return bad(e.message); }
       }
       fromEnt.inventory = fromEnt.inventory || [];
@@ -340,7 +352,9 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/trades' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
-      const fromEntityId = gm && b.fromEntityId ? b.fromEntityId : u.user.entityId;
+      // controllers may offer from any entity in their chain; the controls
+      // check below enforces it for non-GM users
+      const fromEntityId = b.fromEntityId || u.user.entityId;
       const fromEnt = db.entities.find(e => e.id === fromEntityId);
       const toEnt = db.entities.find(e => e.id === b.toEntityId);
       if (!fromEnt || !toEnt) return bad('Unknown entity.');
@@ -406,6 +420,7 @@ async function handle(req, res, pathname, method) {
       const moveItem = (fromE, toE, itemId, qty) => {
         const item = db.items.find(i => i.id === itemId);
         if (item && item.meta && item.meta.companyId) { market.transfer(item.meta.companyId, fromE.id, toE.id, qty, u.user.displayName); return; }
+        if (item && item.meta && item.meta.propertyId) { deeds.transfer(item.meta.propertyId, fromE.id, toE.id, u.user.displayName); return; }
         fromE.inventory = fromE.inventory || [];
         const row = fromE.inventory.find(r => r.itemId === itemId);
         row.qty -= qty;
@@ -664,6 +679,19 @@ async function handle(req, res, pathname, method) {
         broadcast('sync');
         return json(res, 200, { ok: true });
       }
+      if (pathname === '/api/gm/import' && method === 'POST') {
+        const b = await readBody(req, 32e6); // world exports can be large
+        if (!b || typeof b !== 'object' || !b.settings || !Array.isArray(b.entities) || !Array.isArray(b.provinces)) {
+          return bad('That file is not an Arcasia world export.');
+        }
+        await store.importWorld(b, u.user);
+        // an old export may predate the SVG map document — upgrade in place
+        if (mapdata.applyMap(store.get())) store.save();
+        store.log('system', 'World restored from an exported archive', '', actor, []);
+        sim.scheduleAuto();
+        broadcast('sync');
+        return json(res, 200, { ok: true });
+      }
       if (pathname === '/api/gm/reset' && method === 'POST') {
         await store.reset(seed);
         store.log('system', 'World reset to the seed of 1962', '', actor, []);
@@ -746,6 +774,7 @@ async function handle(req, res, pathname, method) {
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
           db[coll].push(b);
+          if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
           store.log('gm', `Created ${coll.slice(0, -1)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { id: b.id, obj: b });
@@ -768,6 +797,7 @@ async function handle(req, res, pathname, method) {
           if (coll === 'provinces' && obj.demographics) {
             obj.vars.population = Object.values(obj.demographics).reduce((s, g) => s + (g.population || 0), 0);
           }
+          if (coll === 'properties') deeds.syncAllDeeds(db); // rename/revalue/re-home the deed
           store.log('gm', `Updated ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, [obj.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { obj });
@@ -778,6 +808,7 @@ async function handle(req, res, pathname, method) {
           if (coll === 'roles' && db.users.some(x => x.roleId === obj.id)) return bad('Role is in use by accounts.');
           cascadeDelete(coll, obj);
           db[coll] = db[coll].filter(x => x.id !== obj.id);
+          if (coll === 'properties') deeds.syncAllDeeds(db); // retire the deed item
           store.log('gm', `Deleted ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, []);
           store.save(); broadcast('sync');
           return json(res, 200, { ok: true });

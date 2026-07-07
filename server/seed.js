@@ -406,11 +406,11 @@ function seed() {
       ], lastTurn: 0, runs: 0
     },
     {
-      id: 'ev_market', name: 'Weekly Market Session', enabled: true,
-      description: 'Listed shares reprice on the Lachevan exchange. Price moves with earnings yield (profit/valuation), national growth, citizen trust, and a little noise. All coefficients live in this effect — tune them here.',
-      trigger: { type: 'weekly' }, conditions: [],
+      id: 'ev_market', name: 'Market Session', enabled: true,
+      description: 'Listed shares reprice on the Lachevan exchange every turn. Price moves with earnings yield (profit/valuation), national growth, citizen trust, and a little noise. All coefficients live in this effect — tune them here.',
+      trigger: { type: 'every_turn' }, conditions: [],
       effects: [
-        { type: 'reprice_shares', company: 'all', a: 0.6, b: 0.8, c: 0.15, e: 0.03 }
+        { type: 'reprice_shares', company: 'all', a: 0.6, b: 0.8, c: 0.15, e: 0.015 }
       ], lastTurn: 0, runs: 0
     },
     {
@@ -499,21 +499,6 @@ function seed() {
       worldName: 'Republic of Arcasia',
       currency: '₳',
       currencyName: 'Arcasian Koren',
-      // Phase 11 — national profile card shown atop the Population view and
-      // in the Government entity dossier. `leader: null` reflects the vacancy
-      // left when President Valen was cleared as national leader (per_valen
-      // remains on file as 'Former President').
-      country: {
-        leader: null,
-        government: 'Semi-Presidential Republic (no Prime Minister)',
-        economy: 'Mixed State Capitalism & Planned Economy',
-        gdpRank: '20th / 103',
-        urbanisation: 60,
-        lifeExpectancy: 55,
-        schooling: 4,
-        hdi: 0.534,
-        populationGrowth: 'high'
-      },
       time: { turn: 0, unit: 'day', perTurn: 1, date: '1962-03-01', auto: { enabled: false, seconds: 3600 } },
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
@@ -522,10 +507,10 @@ function seed() {
       // Phase 5 — exactly four newspapers. Fixed list: the GM may rename
       // fields here but the UI offers no "add paper" control.
       newspapers: [
-        { id: 'paper_today', name: 'Arcasia Today', tagline: '-HEART OF ARCASIA-', city: 'Lachevan', style: 'today', owner: 'This newspaper is owned by the State corporation ARC' },
-        { id: 'paper_herald', name: 'The National Herald', tagline: 'VOICE OF THE NATION', city: 'Lachevan', style: 'herald', owner: 'This newspaper is funded by the NFP' },
-        { id: 'paper_economists', name: 'Economists', tagline: 'MARKETS · TRADE · INDUSTRY', city: 'Lachevan', style: 'economists', owner: 'This newspaper is owned by the Satrom group' },
-        { id: 'paper_radical', name: 'Radical', tagline: '-THE VOICE OF ARCASIA-', city: 'Kordi', style: 'radical', owner: 'This is an independent newspaper' }
+        { id: 'paper_today', name: 'Arcasia Today', tagline: '-HEART OF ARCASIA-', city: 'Lachevan', style: 'today', logo: '/assets/newspapers/today.png', owner: 'This newspaper is owned by the State corporation ARC' },
+        { id: 'paper_herald', name: 'The National Herald', tagline: 'VOICE OF THE NATION', city: 'Lachevan', style: 'herald', logo: '/assets/newspapers/herald.png', owner: 'This newspaper is funded by the NFP' },
+        { id: 'paper_economists', name: 'Economists', tagline: 'MARKETS · TRADE · INDUSTRY', city: 'Lachevan', style: 'economists', logo: '/assets/newspapers/economists.png', owner: 'This newspaper is owned by the Satrom group' },
+        { id: 'paper_radical', name: 'Radical', tagline: '-THE VOICE OF ARCASIA-', city: 'Kordi', style: 'radical', logo: '/assets/newspapers/radical.png', owner: 'This is an independent newspaper' }
       ],
       // category → default paper for auto-drafted articles (sim.draftNews).
       // Unlisted categories fall back to paper_today.

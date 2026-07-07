@@ -1242,8 +1242,34 @@ const GM = {
       el('div.stage-header', el('span.stage-chapter', 'Archive'), el('span.stage-year', '§1')),
       el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Download the complete world as a single JSON file — every province, account, article and log entry. Keep it somewhere safe; paper burns.'),
       el('div.btn-row', el('a.solid-btn', { href: '/api/gm/export', download: 'arcasia-world.json', style: 'text-decoration:none; display:inline-block;' }, '↓ Export World'))));
+
+    // ---- import a previously exported world ----
+    const filePick = el('input', { type: 'file', accept: '.json,application/json', style: 'display:none;' });
+    filePick.addEventListener('change', () => {
+      const f = filePick.files && filePick.files[0];
+      filePick.value = ''; // allow re-picking the same file
+      if (!f) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        let world;
+        try { world = JSON.parse(reader.result); } catch (e) { return toast('That file is not valid JSON.', true); }
+        if (!world || !world.settings || !Array.isArray(world.entities)) return toast('That file is not an Arcasia world export.', true);
+        confirmModal('RESTORE FROM ARCHIVE',
+          `Replace the ENTIRE current world with “${f.name}” (${(world.settings || {}).worldName || 'unnamed world'}, turn ${((world.settings || {}).time || {}).turn ?? '?'})? Everything since your last export of that file is destroyed. Your operator account stays.`,
+          async () => {
+            await POST('/api/gm/import', world);
+            toast('World restored from the archive.');
+          }, 'Import & Replace');
+      };
+      reader.readAsText(f);
+    });
     main.appendChild(el('div.stage', { style: 'margin-top:16px;' },
-      el('div.stage-header', el('span.stage-chapter', 'Total Reset'), el('span.stage-year', '§2')),
+      el('div.stage-header', el('span.stage-chapter', 'Restore'), el('span.stage-year', '§2')),
+      el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Import a previously exported world file. The current world is replaced wholesale — provinces, accounts, articles, operators, everything. Export first if in doubt.'),
+      el('div.btn-row', filePick, el('button.solid-btn', { onclick: () => filePick.click() }, '↑ Import World'))));
+
+    main.appendChild(el('div.stage', { style: 'margin-top:16px;' },
+      el('div.stage-header', el('span.stage-chapter', 'Total Reset'), el('span.stage-year', '§3')),
       el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Reset the world to the seed of March 1962. Every change, account and article since is destroyed. Operator accounts are re-seeded too.'),
       el('div.btn-row', el('button.danger-btn', {
         onclick: () => confirmModal('BURN THE ARCHIVE', 'Reset the entire world to the 1962 seed? This cannot be undone (export first).', async () => {

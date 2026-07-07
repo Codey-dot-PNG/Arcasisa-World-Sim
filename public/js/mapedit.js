@@ -38,11 +38,14 @@ const MapEdit = {
 
   save(immediate) {
     clearTimeout(this.saveTimer);
+    // Snapshot the payload NOW: `this.map()` reads W.state, and any sync that
+    // lands before a debounced save fires replaces W.state with server data —
+    // reading at run time would silently save the unedited world back.
+    const m = this.map();
+    const payload = { labels: m.labels, roads: m.roads, rails: m.rails };
     const run = async () => {
-      try {
-        const m = this.map();
-        await PATCH('/api/gm/settings', { map: { labels: m.labels, roads: m.roads, rails: m.rails } });
-      } catch (e) { toast(e.message, true); }
+      try { await PATCH('/api/gm/settings', { map: payload }); }
+      catch (e) { toast(e.message, true); }
     };
     if (immediate) run(); else this.saveTimer = setTimeout(run, 700);
   },
@@ -190,12 +193,26 @@ const MapEdit = {
       node.removeEventListener('pointermove', onMove);
       node.removeEventListener('pointerup', onUp);
       this.dragging = false;
-      if (moved) { this.save(); GameMap.render(); }
+      // a sync may have swapped W.state mid-drag, orphaning `lbl` — re-apply
+      // the final position to whatever the current state holds for this id
+      if (moved) { this.patchLabel(id, { pos: lbl.pos }); }
       else { this.selLabel = id; this.editLabel(id); }
     };
     try { node.setPointerCapture(e.pointerId); } catch (err) { /* stylus/touch edge cases */ }
     node.addEventListener('pointermove', onMove);
     node.addEventListener('pointerup', onUp);
+  },
+
+  // Apply changes to a label by id against the CURRENT state, then save
+  // immediately. Never holds onto a label object across awaits/timers — the
+  // object may belong to a stale W.state after any sync.
+  patchLabel(id, changes) {
+    const arr = this.map().labels;
+    let lbl = arr.find(l => l.id === id);
+    if (!lbl) { lbl = { id, text: '…', kind: 'note', pos: [0, 0], rot: 0, size: 40 }; arr.push(lbl); }
+    Object.assign(lbl, changes);
+    this.save(true);
+    GameMap.render();
   },
 
   editLabel(id) {
@@ -215,10 +232,10 @@ const MapEdit = {
     ), [
       {
         label: 'Save', onClick: () => {
-          Object.assign(lbl, { text: d.text || '…', kind: d.kind, size: Math.max(8, Number(d.size) || 40), rot: Number(d.rot) || 0 });
+          // patchLabel re-finds by id: `lbl` may be stale if the world synced
+          // while the modal was open (the old cause of "text doesn't save")
           this.selLabel = null;
-          this.save(true);
-          GameMap.render();
+          this.patchLabel(id, { text: d.text || '…', kind: d.kind, size: Math.max(8, Number(d.size) || 40), rot: Number(d.rot) || 0, pos: lbl.pos });
         }
       },
       {

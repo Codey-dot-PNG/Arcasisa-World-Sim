@@ -481,12 +481,6 @@ const Views = {
       wrap.appendChild(this.kv('In Government', e.inGovernment ? 'Yes' : 'No'));
     }
 
-    // Phase 11.3 — national profile on the Government of Arcasia's own file.
-    if (e.id === 'ent_gov') {
-      const country = this.countrySection();
-      if (country) wrap.appendChild(country);
-    }
-
     const accts = this.accountsOf(id);
     if (accts.length) {
       wrap.appendChild(this.secLabel('Bank Accounts'));
@@ -604,7 +598,10 @@ const Views = {
     return out;
   },
   transferModal(prefToAcct) {
-    const my = isGM() || perms().accounts === 'all' ? S().accounts : this.accountsOf(W.me.entityId);
+    // "my" accounts = the whole ownership chain (own entity + controlled
+    // companies + their subsidiaries), matching what the server lets us move
+    const mine = ownershipSetClient();
+    const my = isGM() ? S().accounts : (S().accounts || []).filter(a => mine.has(a.ownerId));
     if (!my.length) return toast('You control no accounts.', true);
 
     let fromId = my[0].id;
@@ -689,22 +686,38 @@ const Views = {
   },
 
   tradeModal(prefItem, prefTo) {
-    const myEnt = myEntity();
-    if (!myEnt || !myEnt.inventory || !myEnt.inventory.length) return toast('Your inventory is empty.', true);
-    const itemSel = el('select.text-input', myEnt.inventory.map(r => {
-      const it = itemById(r.itemId);
-      return it ? el('option', { value: it.id, selected: it.id === prefItem ? 'selected' : undefined }, `${it.name} (×${fmtNum(r.qty)})`) : null;
-    }));
-    const toSel = el('select.text-input', S().entities.filter(e => e.id !== myEnt.id).map(e =>
+    // sender can be any entity in the controlled chain that holds something
+    const mine = ownershipSetClient();
+    const sources = S().entities.filter(e => (isGM() || mine.has(e.id)) && (e.inventory || []).length);
+    if (!sources.length) return toast('No inventory to send — you and your companies hold nothing.', true);
+    let fromId = sources.some(s => s.id === W.me.entityId) ? W.me.entityId : sources[0].id;
+
+    const fromSel = el('select.text-input', sources.map(e =>
+      el('option', { value: e.id, selected: e.id === fromId ? 'selected' : undefined }, e.name)));
+    const itemSel = el('select.text-input');
+    const renderItems = () => {
+      const src = entById(fromSel.value);
+      clear(itemSel);
+      for (const r of (src && src.inventory) || []) {
+        const it = itemById(r.itemId);
+        if (it) itemSel.appendChild(el('option', { value: it.id, selected: it.id === prefItem ? 'selected' : undefined }, `${it.name} (×${fmtNum(r.qty)})`));
+      }
+    };
+    fromSel.addEventListener('change', renderItems);
+    renderItems();
+
+    const toSel = el('select.text-input', S().entities.filter(e => e.id !== fromId).map(e =>
       el('option', { value: e.id, selected: e.id === prefTo ? 'selected' : undefined }, e.name)));
     const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1' });
     openModal('TRANSFER OF GOODS', el('div',
+      el('label.field-label', 'From'), fromSel,
       el('label.field-label', 'Item'), itemSel,
       el('label.field-label', 'Recipient'), toSel,
       el('label.field-label', 'Quantity'), qty
     ), [{
       label: 'Transfer', onClick: async () => {
-        await POST('/api/trade', { itemId: itemSel.value, toEntityId: toSel.value, qty: Number(qty.value) });
+        if (fromSel.value === toSel.value) throw new Error('Sender and recipient are the same entity.');
+        await POST('/api/trade', { fromEntityId: fromSel.value, itemId: itemSel.value, toEntityId: toSel.value, qty: Number(qty.value) });
         toast('Goods transferred.');
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
@@ -926,11 +939,14 @@ const Views = {
       }));
     }
 
-    const myAccts = this.accountsOf(W.me.entityId);
+    // your accounts = the whole ownership chain: own entity plus any company
+    // you own or run as CEO, and their subsidiaries
+    const mineSet = ownershipSetClient();
+    const myAccts = (S().accounts || []).filter(a => mineSet.has(a.ownerId));
     if (myAccts.length) {
       inner.appendChild(this.secLabel('Your Accounts'));
       const box = el('div.stage');
-      myAccts.forEach(a => box.appendChild(this.kv(a.name, fmtMoney(a.balance))));
+      myAccts.forEach(a => box.appendChild(this.kv((a.ownerId === W.me.entityId ? '' : entName(a.ownerId) + ' — ') + a.name, fmtMoney(a.balance))));
       box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, CUR() + ' Wire Transfer')));
       inner.appendChild(box);
     }
@@ -1127,21 +1143,37 @@ const Views = {
 
   tradeOfferComposer() {
     const myEnt = myEntity();
-    if (!myEnt) return toast('You have no entity to trade from.', true);
-    const inv = myEnt.inventory || [];
-    const toSel = el('select.text-input', S().entities.filter(e => e.id !== myEnt.id).map(e => el('option', { value: e.id }, e.name)));
+    if (!myEnt && !isGM()) return toast('You have no entity to trade from.', true);
+    // offer can come from any entity in the controlled chain
+    const mine = ownershipSetClient();
+    const sources = S().entities.filter(e => isGM() || mine.has(e.id));
+    if (!sources.length) return toast('You have no entity to trade from.', true);
+    const fromSel = el('select.text-input', sources.map(e =>
+      el('option', { value: e.id, selected: e.id === W.me.entityId ? 'selected' : undefined }, e.name)));
+    const toSel = el('select.text-input', S().entities.map(e => el('option', { value: e.id }, e.name)));
     const memo = el('input.text-input', { placeholder: 'Memo (optional)' });
     const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
     const moneyGet = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
 
-    // give: checkboxes + qty over my own inventory
-    const giveRows = inv.map(r => {
-      const it = itemById(r.itemId);
-      if (!it) return null;
-      const check = el('input', { type: 'checkbox' });
-      const qty = el('input.text-input', { type: 'number', min: '1', max: String(r.qty), step: '1', value: '1', style: 'width:80px;' });
-      return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
-    }).filter(Boolean);
+    // give: checkboxes + qty over the offering entity's inventory, rebuilt
+    // whenever the From entity changes
+    let giveRows = [];
+    const giveBox = el('div');
+    const renderGive = () => {
+      const src = entById(fromSel.value);
+      clear(giveBox);
+      giveRows = ((src && src.inventory) || []).map(r => {
+        const it = itemById(r.itemId);
+        if (!it) return null;
+        const check = el('input', { type: 'checkbox' });
+        const qty = el('input.text-input', { type: 'number', min: '1', max: String(r.qty), step: '1', value: '1', style: 'width:80px;' });
+        return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
+      }).filter(Boolean);
+      if (giveRows.length) giveRows.forEach(r => giveBox.appendChild(r.node));
+      else giveBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'That entity holds no items.'));
+    };
+    fromSel.addEventListener('change', renderGive);
+    renderGive();
 
     // get: any tradable item + free qty (validated server-side at accept time)
     const getRows = [];
@@ -1157,8 +1189,9 @@ const Views = {
     };
 
     openModal('NEW TRADE OFFER', el('div',
+      el('label.field-label', 'Offer from'), fromSel,
       el('label.field-label', 'Offer to'), toSel,
-      el('label.field-label', 'You give (items)'), giveRows.length ? el('div', giveRows.map(r => r.node)) : el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Your inventory is empty.'),
+      el('label.field-label', 'You give (items)'), giveBox,
       el('label.field-label', 'Plus money you give (' + CUR() + ')'), moneyGive,
       el('label.field-label', 'You request (items)'), getBox,
       el('button.dash-btn', { style: 'margin:4px 0 10px;', onclick: addGetRow }, '+ Add requested item'),
@@ -1166,10 +1199,11 @@ const Views = {
       el('label.field-label', 'Memo'), memo
     ), [{
       label: 'Send Offer', onClick: async () => {
+        if (fromSel.value === toSel.value) throw new Error('Offerer and recipient are the same entity.');
         const give = giveRows.filter(r => r.check.checked).map(r => ({ itemId: r.itemId, qty: Number(r.qty.value) }));
         const get = getRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
         await POST('/api/trades', {
-          toEntityId: toSel.value, give, get,
+          fromEntityId: fromSel.value, toEntityId: toSel.value, give, get,
           money: { give: Number(moneyGive.value) || 0, get: Number(moneyGet.value) || 0 },
           memo: memo.value
         });
@@ -1179,30 +1213,10 @@ const Views = {
   },
 
   /* ---- Population ---- */
-  // Phase 11.3 — national profile card. Shown to everyone (it's public
-  // knowledge, unlike the demographic tables below which need clearance).
-  countrySection() {
-    const c = (S().settings || {}).country;
-    if (!c) return null;
-    const wrap = el('div');
-    wrap.appendChild(this.secLabel('Country'));
-    wrap.appendChild(this.kv('Leader', c.leader ? this.ownerLink(c.leader) : 'None'));
-    wrap.appendChild(this.kv('Government', c.government));
-    wrap.appendChild(this.kv('Economy', c.economy));
-    wrap.appendChild(this.kv('GDP Rank', c.gdpRank));
-    wrap.appendChild(this.kv('Urbanisation', c.urbanisation !== undefined ? c.urbanisation + '%' : '—'));
-    wrap.appendChild(this.kv('Life Expectancy', c.lifeExpectancy !== undefined ? c.lifeExpectancy + ' yrs' : '—'));
-    wrap.appendChild(this.kv('Avg. Schooling', c.schooling !== undefined ? c.schooling + ' yrs' : '—'));
-    wrap.appendChild(this.kv('HDI', c.hdi !== undefined ? c.hdi : '—'));
-    wrap.appendChild(this.kv('Population Growth', c.populationGrowth));
-    return wrap;
-  },
   viewPopulation(inner) {
     inner.appendChild(el('div.doc-title', 'Population of the Republic'));
     const g = S().globalVars || {};
     inner.appendChild(el('div.doc-sub', fmtNum(g.population) + ' citizens across ' + S().provinces.length + ' provinces'));
-    const country = this.countrySection();
-    if (country) inner.appendChild(country);
     if (!perms().statistics && !isGM()) {
       inner.appendChild(el('div.stage', el('div', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:.1em;' }, 'DEMOGRAPHIC RECORDS REQUIRE STATISTICS CLEARANCE.')));
       return;
@@ -1276,14 +1290,20 @@ const Views = {
     // ---- masthead switcher: four cards, one per paper ----
     const switcher = el('div.paper-switcher');
     papers.forEach(p => {
-      // The Herald masthead sets a small "THE" above the big red name,
-      // matching the reference art — split a leading "The " when present.
-      const theMatch = p.style === 'herald' ? String(p.name || '').match(/^(the)\s+(.*)$/i) : null;
-      const nameEl = theMatch
-        ? el('div.pm-name', el('span.pm-the', theMatch[1]), theMatch[2])
-        : el('div.pm-name', p.name);
+      // A paper with a logo image shows the wordmark itself; otherwise fall
+      // back to the CSS-art masthead. (Herald fallback sets a small "THE"
+      // above the big red name, matching the reference art.)
+      let nameEl;
+      if (p.logo) {
+        nameEl = el('div.pm-logo', el('img', { src: p.logo, alt: p.name }));
+      } else {
+        const theMatch = p.style === 'herald' ? String(p.name || '').match(/^(the)\s+(.*)$/i) : null;
+        nameEl = theMatch
+          ? el('div.pm-name', el('span.pm-the', theMatch[1]), theMatch[2])
+          : el('div.pm-name', p.name);
+      }
       switcher.appendChild(el(`div.paper-mast.paper-mast-${p.style}`, {
-        class: p.id === W.newsPaper ? 'active' : '',
+        class: (p.id === W.newsPaper ? 'active' : '') + (p.logo ? ' has-logo' : ''),
         onclick: () => { W.newsPaper = p.id; W.newsCat = 'All'; W.newsQ = ''; App.renderView(); }
       },
         nameEl,

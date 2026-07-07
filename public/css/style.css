@@ -505,6 +505,13 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .paper-mast.active{opacity:1; border-color:var(--ink); transform:translateY(-1px);}
 .paper-mast .pm-name{font-size:19px; line-height:1.05; letter-spacing:0.01em; margin-bottom:4px;}
 .paper-mast .pm-tagline{font-family:var(--font-mono); font-size:8px; letter-spacing:0.16em; text-transform:uppercase; color:var(--ink-faint);}
+/* wordmark image masthead (paper.logo) — suppress the CSS-art backdrop.
+   The source PNGs carry a lot of vertical padding, so the img fills the box
+   width and object-fit:cover crops the empty bands top/bottom. */
+.paper-mast .pm-logo{height:56px; margin-bottom:4px; overflow:hidden;}
+.paper-mast .pm-logo img{width:100%; height:100%; object-fit:cover; mix-blend-mode:multiply;}
+.paper-mast.has-logo{background:var(--paper);}
+.paper-mast.has-logo::before{display:none;}
 
 /* Arcasia Today — black block caps, double rules, state paper */
 .paper-mast-today{background:var(--paper);}

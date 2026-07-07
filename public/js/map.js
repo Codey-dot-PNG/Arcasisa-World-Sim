@@ -9,7 +9,7 @@ const GameMap = {
   ready: false,
   VIEW: { w: 3840, h: 2160 },
   // fixed world-unit scale for texture buildings — constant at every zoom
-  TEX_SCALE: 1,
+  TEX_SCALE: 0.7,
   view: { x: 0, y: 0, k: 1 },
   svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
   drag: null,

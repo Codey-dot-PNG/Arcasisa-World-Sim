@@ -1,0 +1,5 @@
+data/
+node_modules/
+.vercel
+.DS_Store
+Arcasia extra resources/

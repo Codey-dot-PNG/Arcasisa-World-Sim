@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Arcasia Simulation Engine</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="icon" href="/assets/flags/seal.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+<!-- ═══════════ LOGIN ═══════════ -->
+<div id="login-screen">
+  <div class="login-card stage">
+    <div class="login-seal"><img src="/assets/flags/seal.png" alt="Seal of Arcasia"></div>
+    <div class="login-masthead">
+      <div class="masthead-title"><strong>ARCASIA</strong> — SIMULATION ENGINE</div>
+      <div class="masthead-sub">Restricted system · authorised operators only</div>
+    </div>
+    <div class="login-stamp ending-stamp">Classified</div>
+    <form id="login-form" autocomplete="off">
+      <label class="field-label" for="login-user">Operator</label>
+      <input class="text-input" id="login-user" name="username" autocomplete="username" spellcheck="false">
+      <label class="field-label" for="login-pass">Passphrase</label>
+      <input class="text-input" id="login-pass" name="password" type="password" autocomplete="current-password">
+      <div id="register-fields" class="hidden">
+        <label class="field-label" for="login-display">Citizen name</label>
+        <input class="text-input" id="login-display" name="displayName" spellcheck="false">
+      </div>
+      <div id="login-error" class="login-error"></div>
+      <div class="login-actions">
+        <button type="submit" class="solid-btn" id="login-submit">Authenticate</button>
+        <button type="button" class="dash-btn" id="register-toggle">Request citizenship</button>
+      </div>
+    </form>
+    <div class="login-hint">SEED DOSSIER · gm / president / journalist / executive / citizen · passphrase “arcasia”</div>
+  </div>
+</div>
+
+<!-- ═══════════ APPLICATION ═══════════ -->
+<div id="app" class="hidden">
+  <header id="topbar">
+    <button id="explorer-toggle" class="icon-btn" title="Toggle explorer">☰</button>
+    <div id="brand">
+      <img src="/assets/flags/seal.png" alt="">
+      <span class="brand-title"><strong id="brand-world">ARCASIA</strong><span class="brand-sub">SIMULATION ENGINE</span></span>
+    </div>
+    <nav id="tabs"></nav>
+    <div class="topbar-spacer"></div>
+    <div id="simclock" title="Simulation clock">
+      <span id="clock-turn">TURN 0</span>
+      <span id="clock-date">—</span>
+      <span id="clock-auto" class="hidden" title="Auto-advance active">●</span>
+    </div>
+    <button id="advance-btn" class="outline-btn hidden" title="Advance the simulation one turn">Advance ▸</button>
+    <div class="mood-row" id="palette">
+      <button class="swatch active" data-mood="paper" title="Paper"></button>
+      <button class="swatch" data-mood="dark" title="Dark"></button>
+      <button class="swatch" data-mood="red" title="Red"></button>
+      <button class="swatch" data-mood="warm" title="Warm"></button>
+      <button class="swatch" data-mood="gold" title="Gold"></button>
+    </div>
+    <div id="user-chip" title="Signed in">
+      <span id="user-name">—</span>
+      <span id="user-role">—</span>
+    </div>
+    <button id="logout-btn" class="icon-btn" title="Sign out">⏻</button>
+  </header>
+
+  <div id="main">
+    <aside id="explorer">
+      <div class="explorer-head">
+        <input id="exp-search" class="text-input" placeholder="Search the Republic…" spellcheck="false">
+      </div>
+      <div id="exp-body"></div>
+    </aside>
+
+    <main id="view"></main>
+
+    <aside id="inspector" class="hidden">
+      <div class="inspector-head">
+        <span id="insp-kicker" class="insp-kicker">DOSSIER</span>
+        <button id="insp-close" class="icon-btn" title="Close">✕</button>
+      </div>
+      <div id="insp-body"></div>
+    </aside>
+  </div>
+
+  <footer id="ticker">
+    <span class="ticker-label">WIRE</span>
+    <div id="ticker-track"></div>
+  </footer>
+</div>
+
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+
+<script src="/js/core.js"></script>
+<script src="/js/map.js"></script>
+<script src="/js/views.js"></script>
+<script src="/js/gm.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

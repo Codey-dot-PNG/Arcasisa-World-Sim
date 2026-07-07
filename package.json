@@ -1,0 +1,11 @@
+{
+  "name": "arcasia-simulation-engine",
+  "version": "1.0.0",
+  "description": "Persistent multiplayer geopolitical simulation platform for the Arcasia roleplay community",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "reseed": "node server.js --reseed"
+  },
+  "engines": { "node": ">=18" }
+}

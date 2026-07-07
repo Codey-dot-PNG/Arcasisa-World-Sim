@@ -1,0 +1,499 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>DOSSIER — UI Style Demo</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,300;0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400;1,9..144,500&family=JetBrains+Mono:wght@400;500;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#eee6d2;
+  --paper-deep:#e4d9bd;
+  --paper-line:#cdbf9c;
+  --ink:#221d15;
+  --ink-soft:#5c5340;
+  --ink-faint:#8d846a;
+  --accent:#7a2318;
+  --accent-soft:#9b4536;
+  --rule:rgba(34,29,21,0.14);
+  --rule-strong:rgba(34,29,21,0.30);
+  --font-voice:'Fraunces', serif;
+  --font-mono:'JetBrains Mono', monospace;
+  --font-ui:'Inter', sans-serif;
+}
+
+*{box-sizing:border-box;}
+html,body{margin:0; padding:0; min-height:100vh;}
+body{
+  background:var(--paper);
+  color:var(--ink);
+  font-family:var(--font-ui);
+  position:relative;
+  overflow-x:hidden;
+  transition:background-color .5s ease;
+}
+
+body::before{
+  content:"";
+  position:fixed; inset:0;
+  z-index:0;
+  pointer-events:none;
+  opacity:0.05;
+  mix-blend-mode:multiply;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+
+.app{
+  position:relative; z-index:1;
+  max-width:900px;
+  margin:0 auto;
+  padding:40px 28px 90px;
+}
+
+/* ---------- MASTHEAD ---------- */
+.masthead{
+  display:flex;
+  justify-content:space-between;
+  align-items:flex-end;
+  border-bottom:1px solid var(--rule-strong);
+  padding-bottom:14px;
+  flex-wrap:wrap;
+  gap:14px;
+  transition:border-color .5s ease;
+}
+.masthead-title{
+  font-family:var(--font-mono);
+  letter-spacing:0.32em;
+  font-size:12px;
+  color:var(--ink-soft);
+}
+.masthead-title strong{color:var(--ink); font-weight:700;}
+.masthead-sub{
+  font-family:var(--font-mono);
+  font-size:10px;
+  letter-spacing:0.14em;
+  color:var(--ink-faint);
+  margin-top:4px;
+  text-transform:uppercase;
+}
+
+/* ---------- MOOD SWATCHES ---------- */
+.mood-row{display:flex; align-items:center; gap:9px;}
+.mood-label{
+  font-family:var(--font-mono); font-size:10px; letter-spacing:0.1em;
+  color:var(--ink-faint); text-transform:uppercase; margin-right:4px;
+}
+.swatch{
+  width:20px; height:20px; border-radius:50%;
+  border:2px solid var(--rule-strong);
+  cursor:pointer;
+  padding:0;
+}
+.swatch.active{border-color:var(--ink); box-shadow:0 0 0 2px var(--paper), 0 0 0 3px var(--ink);}
+.swatch[data-mood="paper"]{background:#e4d9bd;}
+.swatch[data-mood="dark"]{background:#1f1812;}
+.swatch[data-mood="red"]{background:#301715;}
+.swatch[data-mood="warm"]{background:#ead6ad;}
+.swatch[data-mood="gold"]{background:#e5d098;}
+
+body[data-mood="dark"]{
+  --paper:#15110d; --paper-deep:#1f1812; --paper-line:#3a2f24;
+  --ink:#d9cfb8; --ink-soft:#a49778; --ink-faint:#6e6450;
+  --rule:rgba(217,207,184,0.14); --rule-strong:rgba(217,207,184,0.30);
+}
+body[data-mood="red"]{
+  --paper:#241110; --paper-deep:#301715; --paper-line:#512420;
+  --ink:#ecdcc4; --ink-soft:#c3a98c; --ink-faint:#8d7360;
+  --rule:rgba(236,220,196,0.14); --rule-strong:rgba(236,220,196,0.30);
+}
+body[data-mood="warm"]{ --paper:#f2e3c4; --paper-deep:#ead6ad; --paper-line:#d0b787; }
+body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --accent:#8a5a14; --accent-soft:#a37427; }
+
+/* ---------- TOGGLE SWITCH ---------- */
+.toggle-wrap{
+  display:flex; align-items:center; gap:9px;
+  font-family:var(--font-mono); font-size:10px; letter-spacing:0.1em;
+  color:var(--ink-faint); text-transform:uppercase;
+}
+.switch{
+  position:relative; width:32px; height:17px;
+  background:var(--paper-deep);
+  border:1px solid var(--rule-strong);
+  cursor:pointer; flex-shrink:0;
+}
+.switch::after{
+  content:""; position:absolute; top:1px; left:1px;
+  width:13px; height:13px;
+  background:var(--ink-faint);
+  transition:transform .15s ease, background .15s ease;
+}
+.switch.on{border-color:var(--accent);}
+.switch.on::after{transform:translateX(15px); background:var(--accent);}
+
+/* ---------- SECTION LABEL ---------- */
+.section-label{
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.2em;
+  text-transform:uppercase; color:var(--ink-faint);
+  margin:44px 0 14px;
+}
+.section-label:first-of-type{margin-top:34px;}
+
+/* ---------- TIMELINE ---------- */
+.timeline-wrap{
+  overflow-x:auto;
+  padding-bottom:2px;
+}
+.timeline{
+  position:relative;
+  display:flex;
+  align-items:center;
+  min-width:max-content;
+}
+.timeline::before{
+  content:"";
+  position:absolute;
+  left:8px; right:8px; top:5px;
+  height:1px;
+  background:var(--rule-strong);
+}
+.tick{
+  position:relative;
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  padding:0 20px;
+  flex-shrink:0;
+}
+.tick:first-child{padding-left:8px;}
+.tick-dot{
+  width:7px; height:7px;
+  border-radius:50%;
+  background:var(--ink-faint);
+  border:2px solid var(--paper);
+  position:relative; z-index:1;
+}
+.tick.current .tick-dot{
+  background:var(--accent);
+  box-shadow:0 0 0 3px rgba(122,35,24,0.16);
+  animation:tickPulse 2s ease-in-out infinite;
+}
+@keyframes tickPulse{
+  0%,100%{box-shadow:0 0 0 3px rgba(122,35,24,0.16);}
+  50%{box-shadow:0 0 0 5px rgba(122,35,24,0.08);}
+}
+.tick-year{
+  font-family:var(--font-mono); font-size:9.5px; letter-spacing:0.05em;
+  color:var(--ink-soft); margin-top:6px; white-space:nowrap;
+}
+.tick.current .tick-year{color:var(--accent); font-weight:700;}
+
+/* ---------- STAGE (dossier card) ---------- */
+.stage{
+  background:var(--paper-deep);
+  border:1px solid var(--rule);
+  padding:44px 48px;
+  position:relative;
+  box-shadow:0 22px 44px rgba(34,29,21,0.10);
+  transition:background-color .5s ease;
+}
+.stage::before{
+  content:"";
+  position:absolute; left:0; top:0; bottom:0; width:3px;
+  background:var(--accent); opacity:0.55;
+}
+.stage-header{
+  display:flex; justify-content:space-between; align-items:baseline;
+  border-bottom:1px solid var(--rule-strong);
+  padding-bottom:10px; margin-bottom:28px;
+  font-family:var(--font-mono);
+}
+.stage-chapter{
+  font-size:10.5px; letter-spacing:0.16em; text-transform:uppercase;
+  color:var(--ink-soft);
+}
+.stage-year{font-size:11px; letter-spacing:0.08em; color:var(--accent); font-weight:700;}
+
+.narrative{
+  font-family:var(--font-voice);
+  font-size:20px;
+  line-height:1.8;
+  font-weight:400;
+  color:var(--ink);
+}
+.narrative .drop{
+  float:left;
+  font-size:3.1em;
+  line-height:0.78;
+  padding:5px 9px 0 0;
+  font-weight:500;
+  color:var(--accent);
+}
+
+.choices{margin-top:34px; display:flex; flex-direction:column; gap:9px;}
+.choice-btn{
+  font-family:var(--font-voice);
+  font-style:italic;
+  font-size:16px;
+  text-align:left;
+  background:transparent;
+  border:none;
+  border-left:2px solid var(--rule-strong);
+  padding:9px 0 9px 18px;
+  color:var(--ink);
+  cursor:pointer;
+  transition:border-color .18s ease, padding-left .18s ease, color .18s ease;
+}
+.choice-btn:hover{border-left-color:var(--accent); padding-left:24px; color:var(--accent);}
+.choice-btn::before{content:"— "; opacity:0.45;}
+
+.ending-stamp{
+  position:absolute; top:36px; right:40px;
+  border:3px solid var(--accent);
+  color:var(--accent);
+  font-family:var(--font-mono);
+  font-weight:700; font-size:12px; letter-spacing:0.18em;
+  padding:7px 13px;
+  transform:rotate(-8deg);
+  opacity:0.82;
+  text-transform:uppercase;
+}
+
+/* ---------- ROLE / VERDICT CARD ---------- */
+.ending-verdict{
+  border:2px solid var(--accent);
+  padding:14px 16px;
+}
+.ending-verdict .ev-kicker{
+  font-family:var(--font-mono);
+  font-size:9.5px; letter-spacing:0.2em; text-transform:uppercase;
+  color:var(--accent); margin-bottom:6px;
+}
+.ending-verdict .ev-name{
+  font-family:var(--font-voice);
+  font-size:22px; font-weight:600; color:var(--ink);
+}
+.ending-verdict .ev-key{
+  font-family:var(--font-mono);
+  font-size:9.5px; color:var(--ink-faint); margin-top:6px;
+}
+
+/* ---------- CASE SUMMARY ---------- */
+.case-summary{
+  margin-top:34px;
+  padding-top:26px;
+  border-top:1px dashed var(--rule-strong);
+}
+.case-summary h3{
+  font-family:var(--font-mono);
+  font-size:10px; letter-spacing:0.14em; text-transform:uppercase;
+  color:var(--ink-faint);
+  margin:20px 0 10px;
+}
+.case-summary h3:first-child{margin-top:0;}
+.var-row{
+  display:flex; justify-content:space-between; gap:10px;
+  font-size:13.5px; padding:4px 0;
+}
+.var-label{color:var(--ink-soft);}
+.var-value{color:var(--ink); text-align:right; font-weight:500;}
+
+.path-list{list-style:none; margin:0; padding:0;}
+.path-list li{
+  font-size:13px; line-height:1.5;
+  padding:6px 0 6px 14px;
+  border-left:1px solid var(--rule-strong);
+  position:relative;
+  color:var(--ink-soft);
+}
+.path-list li::before{
+  content:""; position:absolute; left:-3.5px; top:11px;
+  width:5px; height:5px; border-radius:50%;
+  background:var(--accent);
+}
+.path-year{font-family:var(--font-mono); color:var(--accent); font-size:10px; margin-right:6px;}
+
+/* ---------- BUTTONS ---------- */
+.btn-row{display:flex; gap:10px; flex-wrap:wrap; margin-top:18px;}
+.dash-btn{
+  font-family:var(--font-mono);
+  font-size:10px; letter-spacing:0.14em; text-transform:uppercase;
+  background:transparent;
+  border:1px dashed var(--rule-strong);
+  color:var(--ink-soft);
+  padding:6px 12px; cursor:pointer;
+}
+.dash-btn:hover{border-color:var(--accent); color:var(--accent);}
+.solid-btn{
+  font-family:var(--font-mono);
+  font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase;
+  background:var(--ink); color:var(--paper);
+  border:none; padding:11px 20px; cursor:pointer;
+}
+.solid-btn:hover{background:var(--accent);}
+.outline-btn{
+  font-family:var(--font-mono);
+  font-size:10px; letter-spacing:0.06em; text-transform:uppercase;
+  background:transparent;
+  border:1px dashed var(--accent-soft);
+  color:var(--accent-soft);
+  padding:5px 10px; cursor:pointer;
+}
+.outline-btn:hover{background:rgba(122,35,24,0.06); color:var(--accent);}
+
+/* ---------- TYPE SPECIMEN ---------- */
+.type-grid{display:grid; grid-template-columns:1fr 1fr; gap:24px;}
+.type-sample{border:1px solid var(--rule); padding:16px 18px; background:var(--paper-deep);}
+.type-sample .label{
+  font-family:var(--font-mono); font-size:9px; letter-spacing:0.14em;
+  text-transform:uppercase; color:var(--ink-faint); margin-bottom:8px;
+}
+.type-sample .voice{font-family:var(--font-voice); font-size:19px; color:var(--ink);}
+.type-sample .mono{font-family:var(--font-mono); font-size:13px; color:var(--ink);}
+.type-sample .ui{font-family:var(--font-ui); font-size:14px; color:var(--ink);}
+
+@media (max-width:640px){
+  .app{padding:24px 16px 60px;}
+  .masthead-title{font-size:11px; letter-spacing:0.2em;}
+  .stage{padding:28px 20px;}
+  .narrative{font-size:17.5px; line-height:1.68;}
+  .choice-btn{font-size:15px;}
+  .type-grid{grid-template-columns:1fr;}
+  .ending-stamp{
+    position:static; display:inline-block; margin-bottom:14px;
+    top:auto; right:auto; transform:rotate(-4deg);
+    font-size:11px; padding:6px 10px;
+  }
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="masthead">
+    <div>
+      <div class="masthead-title"><strong>DOSSIER</strong> — UI STYLE DEMO</div>
+      <div class="masthead-sub">Aged paper / archival editorial system</div>
+    </div>
+    <div class="mood-row">
+      <span class="mood-label">Palette</span>
+      <button class="swatch active" data-mood="paper" title="Paper"></button>
+      <button class="swatch" data-mood="dark" title="Dark"></button>
+      <button class="swatch" data-mood="red" title="Red"></button>
+      <button class="swatch" data-mood="warm" title="Warm"></button>
+      <button class="swatch" data-mood="gold" title="Gold"></button>
+    </div>
+  </div>
+
+  <div class="section-label">Timeline component</div>
+  <div class="timeline-wrap">
+    <div class="timeline" id="timeline"></div>
+  </div>
+
+  <div class="section-label">Primary content card</div>
+  <div class="stage" id="stageCard" style="position:relative;">
+    <div class="ending-stamp">Sample</div>
+    <div class="stage-header">
+      <div class="stage-chapter">Chapter Two — The Interview</div>
+      <div class="stage-year">1946</div>
+    </div>
+    <div class="narrative">
+      <span class="drop">T</span>his is placeholder body copy set in the display serif, used here purely to demonstrate line height, drop caps, and measure. Swap this text for whatever content the layout needs — the typography and spacing are what this demo is showing off, not any particular narrative.
+    </div>
+    <div class="choices">
+      <button class="choice-btn">First interactive option</button>
+      <button class="choice-btn">Second interactive option</button>
+      <button class="choice-btn">Third interactive option</button>
+    </div>
+  </div>
+
+  <div class="section-label">Role / verdict card</div>
+  <div class="ending-verdict">
+    <div class="ev-kicker">Result</div>
+    <div class="ev-name">The Example Outcome</div>
+    <div class="ev-key">STATUS: DEMO · REF: 000-0000</div>
+  </div>
+
+  <div class="section-label">Summary panel</div>
+  <div class="stage">
+    <div class="case-summary" style="margin-top:0; padding-top:0; border-top:none;">
+      <h3>Variables</h3>
+      <div class="var-row"><span class="var-label">Sample metric A</span><span class="var-value">72</span></div>
+      <div class="var-row"><span class="var-label">Sample metric B</span><span class="var-value">Enabled</span></div>
+      <div class="var-row"><span class="var-label">Sample metric C</span><span class="var-value">—</span></div>
+      <h3>Path</h3>
+      <ul class="path-list">
+        <li><span class="path-year">1938</span>First recorded step</li>
+        <li><span class="path-year">1941</span>Second recorded step</li>
+        <li><span class="path-year">1946</span>Third recorded step</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="section-label">Buttons</div>
+  <div class="btn-row">
+    <button class="solid-btn">Solid button</button>
+    <button class="dash-btn">♪ Dashed toggle</button>
+    <button class="outline-btn">✎ Outline button</button>
+    <div class="toggle-wrap">
+      <span>Switch</span>
+      <div class="switch" id="demoSwitch"></div>
+    </div>
+  </div>
+
+  <div class="section-label">Type specimen</div>
+  <div class="type-grid">
+    <div class="type-sample">
+      <div class="label">Fraunces — voice</div>
+      <div class="voice">The quick brown fox jumps.</div>
+    </div>
+    <div class="type-sample">
+      <div class="label">JetBrains Mono — labels</div>
+      <div class="mono">THE QUICK BROWN FOX 0123</div>
+    </div>
+    <div class="type-sample">
+      <div class="label">Inter — interface</div>
+      <div class="ui">The quick brown fox jumps over the lazy dog.</div>
+    </div>
+    <div class="type-sample">
+      <div class="label">Colors</div>
+      <div style="display:flex; gap:8px;">
+        <div style="width:28px; height:28px; background:var(--paper); border:1px solid var(--rule-strong);"></div>
+        <div style="width:28px; height:28px; background:var(--ink);"></div>
+        <div style="width:28px; height:28px; background:var(--accent);"></div>
+        <div style="width:28px; height:28px; background:var(--ink-soft);"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<script>
+// mood palette switcher
+document.querySelectorAll(".swatch").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    document.querySelectorAll(".swatch").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    const mood = btn.dataset.mood;
+    if(mood === "paper"){ document.body.removeAttribute("data-mood"); }
+    else{ document.body.setAttribute("data-mood", mood); }
+  });
+});
+
+// demo toggle switch
+document.getElementById("demoSwitch").addEventListener("click", function(){
+  this.classList.toggle("on");
+});
+
+// timeline ticks
+const years = ["1930","1934","1938","1941","1944","1946","1950"];
+const timeline = document.getElementById("timeline");
+years.forEach((y, i)=>{
+  const tick = document.createElement("div");
+  tick.className = "tick" + (i === years.length - 2 ? " current" : "");
+  tick.innerHTML = `<div class="tick-dot"></div><div class="tick-year">${y}</div>`;
+  timeline.appendChild(tick);
+});
+</script>
+</body>
+</html>

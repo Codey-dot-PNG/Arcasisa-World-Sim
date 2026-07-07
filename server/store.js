@@ -51,6 +51,34 @@ function uid(prefix) {
   return (prefix || 'id') + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
+// Bring a world loaded from disk/DB up to the current schema. Idempotent and
+// additive — safe to run on every load. Returns true if anything changed so
+// callers can persist. New collections/fields introduced by later phases add
+// their defaults here so live worlds upgrade without a reset.
+function migrate(world) {
+  if (!world) return false;
+  let changed = false;
+  const need = (key, def) => { if (world[key] === undefined) { world[key] = def; changed = true; } };
+  need('markers', []);                    // Phase 1.4 — event markers
+  need('history', []);                    // Phase 7.1 — time-series for charts
+  need('trades', []);                     // Phase 4.3 — negotiated trade offers
+  // Phase 4.4 — stock-market fields on companies (trust also used by Phase 9)
+  for (const e of (world.entities || [])) {
+    if (e.type !== 'company') continue;
+    if (e.trust === undefined) { e.trust = 50; changed = true; }
+    if (e.publicFloat === undefined) { e.publicFloat = 15; changed = true; }
+    if (e.sharePrice === undefined) {
+      const val = (e.vars && e.vars.valuation) || 0;
+      e.sharePrice = e.sharesOutstanding ? Math.max(1, Math.round(val / e.sharesOutstanding * 100) / 100) : 100;
+      changed = true;
+    }
+  }
+  // reconcile share certificates against the canonical register (Phase 4.4)
+  try { if (require('./market').syncAllCertificates(world)) changed = true; }
+  catch (e) { /* market module optional during early boot */ }
+  return changed;
+}
+
 /* ---------- row mapping (cloud tables use snake_case columns) ---------- */
 const tlRow = (e) => ({ id: e.id, ts: e.ts, turn: e.turn, sim_date: e.simDate, type: e.type, title: e.title, detail: e.detail, actor: e.actor, refs: e.refs || [] });
 const fromTlRow = (r) => ({ id: r.id, ts: Number(r.ts), turn: r.turn, simDate: r.sim_date, type: r.type, title: r.title, detail: r.detail, actor: r.actor, refs: r.refs || [] });
@@ -71,7 +99,7 @@ async function load(seed, reseed) {
   configure(seed);
   if (MODE === 'file') {
     fs.mkdirSync(SNAP_DIR, { recursive: true });
-    if (!reseed && fs.existsSync(DB_FILE)) db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+    if (!reseed && fs.existsSync(DB_FILE)) { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); if (migrate(db)) saveNow(); }
     else { db = seedFn(); saveNow(); }
     return db;
   }
@@ -101,6 +129,7 @@ async function begin() {
     db.timeline = tl.reverse().map(fromTlRow);
     const tx = await sb.select('transactions', `select=*&order=ts.desc&limit=${LOG_FETCH}`);
     db.transactions = tx.reverse().map(fromTxRow);
+    if (migrate(db)) save();
   }
   return db;
 }

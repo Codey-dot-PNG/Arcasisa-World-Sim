@@ -15,6 +15,8 @@ const MapEdit = {
   drawing: null,        // { pts: [...] } while the pen is down
   addingLabel: false,
   addingProperty: false,
+  addingMarker: false,
+  dragging: false,      // true while a vertex/marker/label is being dragged (suppresses GameMap.render)
   saveTimer: null,
 
   map() { return S().settings.map; },
@@ -25,12 +27,12 @@ const MapEdit = {
     if (!isGM()) return;
     if (!this.map()) return toast('This world has no map document — reset or migrate it first.', true);
     this.active = on === undefined ? !this.active : on;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false;
+    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false; this.addingMarker = false;
     GameMap.render();
   },
   setMode(m) {
     this.mode = m;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false;
+    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false; this.addingMarker = false;
     GameMap.render();
   },
 
@@ -53,7 +55,7 @@ const MapEdit = {
       return;
     }
     bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '✎ MAP EDITOR'));
-    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties']]) {
+    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties'], ['markers', 'Markers']]) {
       bar.appendChild(el('button.chip', { class: this.mode === m ? 'active' : '', onclick: () => this.setMode(m) }, label));
     }
     if (this.mode === 'labels') {
@@ -62,6 +64,9 @@ const MapEdit = {
     } else if (this.mode === 'properties') {
       bar.appendChild(el('button.chip', { class: this.addingProperty ? 'active' : '', onclick: () => { this.addingProperty = !this.addingProperty; GameMap.renderLayerBar(); } },
         this.addingProperty ? '⌖ click the map…' : '+ Property'));
+    } else if (this.mode === 'markers') {
+      bar.appendChild(el('button.chip', { class: this.addingMarker ? 'active' : '', onclick: () => { this.addingMarker = !this.addingMarker; GameMap.renderLayerBar(); } },
+        this.addingMarker ? '⌖ click the map…' : '+ Marker'));
     } else {
       const noun = this.mode === 'roads' ? 'road' : 'railway';
       if (this.drawing) {
@@ -78,7 +83,8 @@ const MapEdit = {
       labels: 'drag a label to move · click one to edit or delete',
       roads: 'click a road to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
       rails: 'click a railway to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
-      properties: 'drag a marker to move it · click one to open its file · "+ Property" places a new one'
+      properties: 'drag a marker to move it · click one to open its file · "+ Property" places a new one',
+      markers: 'drag a pin to move it · click one to edit or delete · "+ Marker" places a new one'
     };
     bar.appendChild(el('span.map-edit-hint', hints[this.mode]));
   },
@@ -105,6 +111,13 @@ const MapEdit = {
       if (this.addingProperty) {
         this.addingProperty = false;
         this.createProperty(pt);
+      }
+      return;
+    }
+    if (this.mode === 'markers') {
+      if (this.addingMarker) {
+        this.addingMarker = false;
+        this.createMarker(pt);
       }
       return;
     }
@@ -162,6 +175,7 @@ const MapEdit = {
     const start = GameMap.clientToWorld(e.clientX, e.clientY);
     const orig = lbl.pos.slice();
     let moved = false;
+    this.dragging = true;
     const onMove = (ev) => {
       const cur = GameMap.clientToWorld(ev.clientX, ev.clientY);
       const nx = Math.round(orig[0] + cur[0] - start[0]);
@@ -175,6 +189,7 @@ const MapEdit = {
     const onUp = () => {
       node.removeEventListener('pointermove', onMove);
       node.removeEventListener('pointerup', onUp);
+      this.dragging = false;
       if (moved) { this.save(); GameMap.render(); }
       else { this.selLabel = id; this.editLabel(id); }
     };
@@ -241,14 +256,17 @@ const MapEdit = {
     };
     try {
       const r = await POST('/api/gm/coll/properties', body);
-      toast('Property placed — opening its file…');
-      W.gmTab = 'mapobjects'; W.gmSub = 'properties'; W.gmSel.mapobjects = r.id; GM.draftKey = null;
-      this.toggle(false);
-      App.go('gm');
+      const id = (r.obj && r.obj.id) || r.id;
+      toast('Property placed — edit its details.');
+      // open the inline inspector editor (Phase 2) so the GM never leaves the map
+      select('property', id, { noPan: true });
+      W.inspEdit = true; W.inspDraft = null;
+      Views.inspect('property', id);
     } catch (e) { toast(e.message, true); }
   },
 
   propertyPointerDown(e, pr, g) {
+    this.dragging = true;
     const rect = g.querySelector('.prop-marker');
     const start = GameMap.clientToWorld(e.clientX, e.clientY);
     const orig = pr.pos.slice();
@@ -265,16 +283,60 @@ const MapEdit = {
     const onUp = async () => {
       rect.removeEventListener('pointermove', onMove);
       rect.removeEventListener('pointerup', onUp);
+      this.dragging = false;
       if (moved) {
         try { await PATCH('/api/gm/coll/properties/' + pr.id, { pos: pr.pos }); toast('Property moved.'); }
         catch (err) { toast(err.message, true); }
       } else {
         select('property', pr.id, { noPan: true });
       }
+      GameMap.render();
     };
     try { rect.setPointerCapture(e.pointerId); } catch (err) { /* stylus/touch edge cases */ }
     rect.addEventListener('pointermove', onMove);
     rect.addEventListener('pointerup', onUp);
+  },
+
+  /* ---------- event markers: place, drag, edit ---------- */
+  async createMarker(pt) {
+    const body = { title: 'New Marker', icon: '◈', description: '', pos: pt, createdTurn: (S().settings.time || {}).turn || 0 };
+    try {
+      const r = await POST('/api/gm/coll/markers', body);
+      toast('Marker placed.');
+      select('marker', (r.obj && r.obj.id) || r.id, { noPan: true });
+    } catch (e) { toast(e.message, true); }
+  },
+
+  markerPointerDown(e, mrk, g) {
+    this.dragging = true;
+    const circ = g.querySelector('.event-marker');
+    const start = GameMap.clientToWorld(e.clientX, e.clientY);
+    const orig = mrk.pos.slice();
+    let moved = false;
+    const onMove = (ev) => {
+      const cur = GameMap.clientToWorld(ev.clientX, ev.clientY);
+      const nx = Math.round(orig[0] + cur[0] - start[0]);
+      const ny = Math.round(orig[1] + cur[1] - start[1]);
+      if (!moved && Math.abs(nx - orig[0]) + Math.abs(ny - orig[1]) > 2) moved = true;
+      mrk.pos = [nx, ny];
+      g.setAttribute('data-x', nx); g.setAttribute('data-y', ny);
+      GameMap.updateMarkerScale();
+    };
+    const onUp = async () => {
+      circ.removeEventListener('pointermove', onMove);
+      circ.removeEventListener('pointerup', onUp);
+      this.dragging = false;
+      if (moved) {
+        try { await PATCH('/api/gm/coll/markers/' + mrk.id, { pos: mrk.pos }); toast('Marker moved.'); }
+        catch (err) { toast(err.message, true); }
+      } else {
+        select('marker', mrk.id, { noPan: true });
+      }
+      GameMap.render();
+    };
+    try { circ.setPointerCapture(e.pointerId); } catch (err) { /* stylus/touch edge cases */ }
+    circ.addEventListener('pointermove', onMove);
+    circ.addEventListener('pointerup', onUp);
   },
 
   /* ---------- pen-tool overlay (vertex + midpoint handles) ---------- */
@@ -340,9 +402,13 @@ const MapEdit = {
         GameMap.render();
       });
     });
+    // counter-scale the freshly-created handles/midpoints immediately so they
+    // are the right size on first paint, not only after the next applyTransform
+    gm.updateMarkerScale();
   },
 
   startVertexDrag(e, handle, obj, idx) {
+    this.dragging = true;
     const lines = GameMap.svg.querySelectorAll(`[data-mapedit="${this.mode}:${obj.id}"]`);
     const onMove = (ev) => {
       const cur = GameMap.clientToWorld(ev.clientX, ev.clientY);
@@ -356,6 +422,7 @@ const MapEdit = {
     const onUp = () => {
       handle.removeEventListener('pointermove', onMove);
       handle.removeEventListener('pointerup', onUp);
+      this.dragging = false;
       this.save();
       GameMap.render();
     };
@@ -377,6 +444,7 @@ document.addEventListener('keydown', (e) => {
     if (MapEdit.drawing) { MapEdit.drawing = null; GameMap.render(); }
     else if (MapEdit.addingLabel) { MapEdit.addingLabel = false; GameMap.renderLayerBar(); }
     else if (MapEdit.addingProperty) { MapEdit.addingProperty = false; GameMap.renderLayerBar(); }
+    else if (MapEdit.addingMarker) { MapEdit.addingMarker = false; GameMap.renderLayerBar(); }
     else if (MapEdit.sel || MapEdit.selLabel) { MapEdit.sel = null; MapEdit.selLabel = null; GameMap.render(); }
     else MapEdit.toggle(false);
   } else if ((e.key === 'Delete' || e.key === 'Backspace') && MapEdit.sel) { e.preventDefault(); MapEdit.deleteSel(); }

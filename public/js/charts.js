@@ -1,0 +1,207 @@
+'use strict';
+/* Lightweight SVG chart helpers for the dossier UI. Zero dependencies —
+   builds raw <svg> nodes with createElementNS, styled from the paper/ink
+   CSS custom properties so charts always match the active mood theme.
+
+   Charts.chartLine(series, opts) -> SVG node
+     series: [{x,y}, ...]  OR  [{name, color, points:[{x,y}, ...]}, ...]
+     opts: { width, height, xLabels, yFormat(v), title, pad }
+
+   Charts.chartBars(rows, opts) -> SVG node
+     rows: [{label, value, color?}, ...]
+     opts: { width, height, valueFormat(v), title, horizontal } */
+
+const Charts = {
+
+  /* ---------- shared helpers ---------- */
+  _ns: 'http://www.w3.org/2000/svg',
+  _svg(tag, attrs) {
+    const node = document.createElementNS(this._ns, tag);
+    if (attrs) for (const k in attrs) if (attrs[k] !== undefined && attrs[k] !== null) node.setAttribute(k, attrs[k]);
+    return node;
+  },
+  _num(v) { const n = Number(v); return isFinite(n) ? n : 0; },
+  _fmtY(v, fn) {
+    if (typeof fn === 'function') { try { return fn(v); } catch (e) { /* fall through */ } }
+    return (typeof fmtCompact === 'function') ? fmtCompact(v) : String(Math.round(v * 100) / 100);
+  },
+  _noData(width, height, title) {
+    const svg = this._svg('svg', { viewBox: `0 0 ${width} ${height}`, width, height, class: 'chart-svg chart-empty' });
+    svg.appendChild(this._svg('rect', { x: 0, y: 0, width, height, fill: 'var(--paper)', stroke: 'var(--rule)' }));
+    if (title) {
+      const t = this._svg('text', { x: width / 2, y: 18, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 10, fill: 'var(--ink-soft)', 'letter-spacing': '0.1em' });
+      t.textContent = String(title).toUpperCase();
+      svg.appendChild(t);
+    }
+    const msg = this._svg('text', {
+      x: width / 2, y: height / 2 + 4, 'text-anchor': 'middle',
+      'font-family': 'var(--font-mono)', 'font-size': 11, fill: 'var(--ink-faint)', 'letter-spacing': '0.08em'
+    });
+    msg.textContent = 'NO DATA';
+    svg.appendChild(msg);
+    return svg;
+  },
+
+  /* ---------- line chart ---------- */
+  chartLine(series, opts) {
+    opts = opts || {};
+    const width = opts.width || 520, height = opts.height || 200;
+    const pad = opts.pad || { top: 26, right: 16, bottom: 26, left: 46 };
+
+    // Normalize input: either flat point array, or array of named lines.
+    let lines;
+    if (Array.isArray(series) && series.length && series[0] && Array.isArray(series[0].points)) {
+      lines = series.map(s => ({ name: s.name, color: s.color, points: (s.points || []).filter(p => p && p.x !== undefined && p.y !== undefined) }));
+    } else {
+      lines = [{ name: null, color: opts.color, points: (series || []).filter(p => p && p.x !== undefined && p.y !== undefined) }];
+    }
+    lines = lines.filter(l => l.points.length);
+
+    const allPoints = lines.reduce((a, l) => a.concat(l.points), []);
+    if (!allPoints.length) return this._noData(width, height, opts.title);
+
+    const svg = this._svg('svg', { viewBox: `0 0 ${width} ${height}`, width, height, class: 'chart-svg chart-line' });
+    svg.appendChild(this._svg('rect', { x: 0, y: 0, width, height, fill: 'var(--paper)' }));
+
+    if (opts.title) {
+      const t = this._svg('text', { x: pad.left, y: 15, 'font-family': 'var(--font-mono)', 'font-size': 10, fill: 'var(--ink-soft)', 'letter-spacing': '0.1em' });
+      t.textContent = String(opts.title).toUpperCase();
+      svg.appendChild(t);
+    }
+
+    const plotX0 = pad.left, plotX1 = width - pad.right;
+    const plotY0 = pad.top, plotY1 = height - pad.bottom;
+    const plotW = Math.max(1, plotX1 - plotX0), plotH = Math.max(1, plotY1 - plotY0);
+
+    let yMin = Math.min(...allPoints.map(p => this._num(p.y)));
+    let yMax = Math.max(...allPoints.map(p => this._num(p.y)));
+    if (yMin === yMax) { yMin -= 1; yMax += 1; }
+    const headroom = (yMax - yMin) * 0.1;
+    yMin -= headroom; yMax += headroom;
+
+    const xCount = Math.max(...lines.map(l => l.points.length), 1);
+    const xScale = (i) => xCount <= 1 ? (plotX0 + plotW / 2) : plotX0 + (i / (xCount - 1)) * plotW;
+    const yScale = (v) => plotY1 - ((this._num(v) - yMin) / (yMax - yMin)) * plotH;
+
+    // outer frame
+    svg.appendChild(this._svg('rect', { x: plotX0, y: plotY0, width: plotW, height: plotH, fill: 'none', stroke: 'var(--rule-strong)', 'stroke-width': 1 }));
+
+    // gridlines + y labels
+    const gridRows = 4;
+    for (let i = 0; i <= gridRows; i++) {
+      const gy = plotY0 + (i / gridRows) * plotH;
+      const val = yMax - (i / gridRows) * (yMax - yMin);
+      svg.appendChild(this._svg('line', { x1: plotX0, y1: gy, x2: plotX1, y2: gy, stroke: 'var(--rule)', 'stroke-width': 1 }));
+      const lbl = this._svg('text', { x: plotX0 - 6, y: gy + 3, 'text-anchor': 'end', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
+      lbl.textContent = this._fmtY(val, opts.yFormat);
+      svg.appendChild(lbl);
+    }
+
+    // x labels
+    const xLabels = opts.xLabels || lines[0].points.map(p => p.x);
+    const maxLabels = Math.min(xLabels.length, 8);
+    const step = Math.max(1, Math.ceil(xLabels.length / maxLabels));
+    for (let i = 0; i < xLabels.length; i += step) {
+      const lx = xScale(i);
+      const lbl = this._svg('text', { x: lx, y: plotY1 + 15, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
+      lbl.textContent = String(xLabels[i]);
+      svg.appendChild(lbl);
+    }
+
+    // lines
+    const defaultColors = ['var(--accent)', 'var(--ink-soft)', 'var(--good)', 'var(--accent-soft)'];
+    lines.forEach((line, li) => {
+      const color = line.color || defaultColors[li % defaultColors.length];
+      if (line.points.length === 1) {
+        const p = line.points[0];
+        svg.appendChild(this._svg('circle', { cx: xScale(0), cy: yScale(p.y), r: 3, fill: color }));
+        return;
+      }
+      const d = line.points.map((p, i) => `${i === 0 ? 'M' : 'L'} ${xScale(i).toFixed(2)} ${yScale(p.y).toFixed(2)}`).join(' ');
+      svg.appendChild(this._svg('path', { d, fill: 'none', stroke: color, 'stroke-width': 1.6 }));
+    });
+
+    // legend, if multiple named lines
+    const named = lines.filter(l => l.name);
+    if (named.length > 1) {
+      let lx = plotX0;
+      const ly = pad.top - 12 > 8 ? pad.top - 12 : 8;
+      named.forEach((line, li) => {
+        const color = line.color || defaultColors[li % defaultColors.length];
+        svg.appendChild(this._svg('rect', { x: lx, y: ly - 7, width: 8, height: 8, fill: color }));
+        const lbl = this._svg('text', { x: lx + 12, y: ly, 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-soft)' });
+        lbl.textContent = line.name;
+        svg.appendChild(lbl);
+        lx += 12 + line.name.length * 5.5 + 14;
+      });
+    }
+
+    return svg;
+  },
+
+  /* ---------- bar chart ---------- */
+  chartBars(rows, opts) {
+    opts = opts || {};
+    const width = opts.width || 520, height = opts.height || 200;
+    const clean = (rows || []).filter(r => r && r.label !== undefined).map(r => ({ label: r.label, value: this._num(r.value), color: r.color }));
+    if (!clean.length) return this._noData(width, height, opts.title);
+
+    const svg = this._svg('svg', { viewBox: `0 0 ${width} ${height}`, width, height, class: 'chart-svg chart-bars' });
+    svg.appendChild(this._svg('rect', { x: 0, y: 0, width, height, fill: 'var(--paper)' }));
+
+    const titleH = opts.title ? 20 : 6;
+    if (opts.title) {
+      const t = this._svg('text', { x: 12, y: 15, 'font-family': 'var(--font-mono)', 'font-size': 10, fill: 'var(--ink-soft)', 'letter-spacing': '0.1em' });
+      t.textContent = String(opts.title).toUpperCase();
+      svg.appendChild(t);
+    }
+
+    const maxVal = Math.max(...clean.map(r => r.value), 1);
+    const fmtV = (v) => (typeof opts.valueFormat === 'function') ? opts.valueFormat(v) : this._fmtY(v);
+
+    if (opts.horizontal) {
+      const padLeft = 90, padRight = 56, padTop = titleH + 4, padBottom = 10;
+      const plotW = Math.max(1, width - padLeft - padRight);
+      const rowH = Math.max(1, (height - padTop - padBottom) / clean.length);
+      clean.forEach((r, i) => {
+        const y = padTop + i * rowH + rowH * 0.2;
+        const barH = rowH * 0.6;
+        const barW = (r.value / maxVal) * plotW;
+        const lbl = this._svg('text', { x: padLeft - 8, y: y + barH / 2 + 3, 'text-anchor': 'end', 'font-family': 'var(--font-mono)', 'font-size': 9.5, fill: 'var(--ink-soft)' });
+        lbl.textContent = String(r.label);
+        svg.appendChild(lbl);
+        svg.appendChild(this._svg('rect', {
+          x: padLeft, y, width: Math.max(0, barW), height: barH,
+          fill: r.color || 'var(--accent)', stroke: 'var(--rule-strong)', 'stroke-width': 0.75
+        }));
+        const val = this._svg('text', { x: padLeft + Math.max(0, barW) + 6, y: y + barH / 2 + 3, 'font-family': 'var(--font-mono)', 'font-size': 9.5, fill: 'var(--ink-faint)' });
+        val.textContent = fmtV(r.value);
+        svg.appendChild(val);
+      });
+    } else {
+      const padLeft = 34, padRight = 10, padTop = titleH + 14, padBottom = 24;
+      const plotW = Math.max(1, width - padLeft - padRight);
+      const plotH = Math.max(1, height - padTop - padBottom);
+      svg.appendChild(this._svg('line', { x1: padLeft, y1: padTop + plotH, x2: width - padRight, y2: padTop + plotH, stroke: 'var(--rule-strong)', 'stroke-width': 1 }));
+      const colW = plotW / clean.length;
+      clean.forEach((r, i) => {
+        const barW = Math.min(colW * 0.6, 48);
+        const barH = (r.value / maxVal) * plotH;
+        const x = padLeft + i * colW + (colW - barW) / 2;
+        const y = padTop + plotH - barH;
+        svg.appendChild(this._svg('rect', {
+          x, y, width: barW, height: Math.max(0, barH),
+          fill: r.color || 'var(--accent)', stroke: 'var(--rule-strong)', 'stroke-width': 0.75
+        }));
+        const val = this._svg('text', { x: x + barW / 2, y: y - 4, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
+        val.textContent = fmtV(r.value);
+        svg.appendChild(val);
+        const lbl = this._svg('text', { x: x + barW / 2, y: padTop + plotH + 14, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-soft)' });
+        lbl.textContent = String(r.label);
+        svg.appendChild(lbl);
+      });
+    }
+
+    return svg;
+  }
+};

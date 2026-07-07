@@ -74,9 +74,13 @@ const GameMap = {
       // listener. Deferring lets an un-captured click hit the real target
       // while a genuine drag still captures once movement starts.
       this.drag = { sx: e.clientX, sy: e.clientY, ox: this.view.x, oy: this.view.y, moved: false, pid: e.pointerId };
+      this.lastDragMoved = false;
     });
     svg.addEventListener('pointermove', (e) => {
       if (!this.drag || e.pointerId !== this.drag.pid) return;
+      // belt & braces: if the button was released outside the window we never
+      // saw the pointerup — the buttons bitmask being 0 means nothing is held.
+      if (e.buttons === 0) { this.endDrag(); return; }
       if (!this.drag.moved && Math.abs(e.clientX - this.drag.sx) + Math.abs(e.clientY - this.drag.sy) > 4) {
         this.drag.moved = true;
         try { svg.setPointerCapture(this.drag.pid); } catch (err) { /* pointer already gone */ }
@@ -90,11 +94,32 @@ const GameMap = {
       this.view.y = this.drag.oy + dy;
       this.applyTransform();
     });
+    // End the drag from a WINDOW-level capture listener: children clickable
+    // elements call stopPropagation() in their own pointerup, which would stop
+    // the svg's bubble-phase listener from ever clearing this.drag — leaving
+    // the next pointermove panning with no button held. A capture-phase
+    // listener on window runs before any target/bubble handler, so no
+    // stopPropagation can bypass it. It records whether we panned into
+    // lastDragMoved (read by child click handlers, which fire afterwards).
+    // mount() re-runs bindPanZoom on every visit to the map, but svg-scoped
+    // listeners die with the recreated svg. Window listeners would pile up, so
+    // bind them exactly once against the GameMap singleton.
+    if (!this._winPanBound) {
+      const endFromWindow = (e) => {
+        if (!this.drag) return;
+        if (e.pointerId !== undefined && this.drag.pid !== undefined && e.pointerId !== this.drag.pid) return;
+        this.endDrag();
+      };
+      window.addEventListener('pointerup', endFromWindow, true);
+      window.addEventListener('pointercancel', endFromWindow, true);
+      this._winPanBound = true;
+    }
+    // The map-click action (place / edit) stays on the svg's own bubble-phase
+    // pointerup so a child's stopPropagation still suppresses it. By now the
+    // window-capture handler has already cleared this.drag and set
+    // lastDragMoved, so consult that flag to tell a click from a pan.
     svg.addEventListener('pointerup', (e) => {
-      const moved = this.drag && this.drag.moved;
-      this.drag = null;
-      svg.classList.remove('dragging');
-      if (moved) return;
+      if (this.lastDragMoved) return;
       if (W.placing) {
         const [wx, wy] = this.clientToWorld(e.clientX, e.clientY);
         const cb = W.placing.cb;
@@ -174,9 +199,141 @@ const GameMap = {
     return { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
   },
 
+  /* ---------- isometric building glyphs ----------
+     Small pseudo-3D block clusters standing in for each property kind, in the
+     spirit of the little white extruded buildings on the reference clippings
+     (Newspaper examples/Isometric reference buildings.png). Pure SVG, no
+     assets: every box is three polygons (top / left-wall / right-wall) built
+     from a fixed isometric basis so they all read as the same "camera angle".
+     Walls stay paper-white; only the roof (top face) picks up a faint tint
+     of the owner's colour so ownership is still readable at a glance. */
+  isoBuilding(kind, color) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'iso-building');
+    // isometric basis: ground-plane "right" and "left" edge vectors (both
+    // point downward on screen, since screen y grows down); "up" is
+    // simply -y. A box's footprint is the diamond bx,by ± R ± L.
+    const RX = 0.87, RY = 0.5, LX = -0.87, LY = 0.5;
+    const poly = (pts, cls) => {
+      const p = document.createElementNS(NS, 'polygon');
+      p.setAttribute('points', pts.map(pt => pt.join(',')).join(' '));
+      p.setAttribute('class', cls);
+      return p;
+    };
+    // One box: (bx,by) is the footprint centre at ground level; hw/hd are
+    // the half-width/half-depth (iso units) of the footprint diamond; h is
+    // the wall height in screen px. Only the roof takes the owner tint.
+    const box = (bx, by, hw, hd, h, roofTint) => {
+      const rx = RX * hw, ry = RY * hw;
+      const lx = LX * hd, ly = LY * hd;
+      const N = [bx, by - ry - ly];           // far ground corner
+      const S = [bx, by + ry + ly];           // near ground corner
+      const Wc = [bx - rx + lx, by - ry + ly]; // left ground corner
+      const Ec = [bx + rx - lx, by + ry - ly]; // right ground corner
+      const up = (pt) => [pt[0], pt[1] - h];
+      const Nt = up(N), St = up(S), Wt = up(Wc), Et = up(Ec);
+      const bg = document.createElementNS(NS, 'g');
+      bg.appendChild(poly([Nt, Et, St, Wt], 'iso-top'));      // roof parallelogram
+      bg.appendChild(poly([Wc, Wt, St, S], 'iso-front'));     // left-facing wall (mid tone)
+      bg.appendChild(poly([S, St, Et, Ec], 'iso-side'));      // right-facing wall (darkest)
+      if (roofTint) bg.querySelector('.iso-top').style.fill = roofTint;
+      return bg;
+    };
+    const roofTint = color || 'var(--ink-soft)';
+    switch (kind) {
+      case 'factory': {
+        g.appendChild(box(-6, 6, 17, 11, 15, roofTint));
+        g.appendChild(box(10, -3, 4, 4, 28, roofTint)); // chimney
+        break;
+      }
+      case 'office': {
+        g.appendChild(box(0, 5, 10, 10, 40, roofTint));
+        break;
+      }
+      case 'bank': {
+        g.appendChild(box(0, 7, 16, 13, 18, roofTint));
+        g.appendChild(box(0, -2, 8, 7, 12, roofTint)); // portico block on top
+        break;
+      }
+      case 'government': {
+        g.appendChild(box(0, 7, 17, 14, 17, roofTint));
+        g.appendChild(box(0, -1, 7, 6, 16, roofTint)); // small dome/attic block
+        break;
+      }
+      case 'university': {
+        g.appendChild(box(-5, 7, 14, 11, 16, roofTint));
+        g.appendChild(box(11, 1, 5, 5, 25, roofTint)); // bell tower
+        break;
+      }
+      case 'house': {
+        const bx = 0, by = 9, hw = 12, hd = 10, h = 14;
+        g.appendChild(box(bx, by, hw, hd, h, null)); // white walls, no roof tint on the box itself
+        // simple prism/gable roof sitting on top of the box
+        const rx = RX * hw, ry = RY * hw, lx = LX * hd, ly = LY * hd;
+        const Wc = [bx - rx + lx, by - ry + ly - h];
+        const Ec = [bx + rx - lx, by + ry - ly - h];
+        const N = [bx, by - ry - ly - h];
+        const S = [bx, by + ry + ly - h];
+        const ridge = 9;
+        const apexN = [N[0], N[1] - ridge];
+        const apexS = [S[0], S[1] - ridge];
+        g.appendChild(poly([Wc, apexN, apexS, S], 'iso-front iso-roof'));
+        g.appendChild(poly([S, apexS, apexN, Ec], 'iso-side iso-roof'));
+        g.appendChild(poly([Wc, N, apexN], 'iso-top iso-roof'));
+        g.appendChild(poly([N, Ec, apexN], 'iso-top iso-roof'));
+        if (roofTint) for (const n of g.querySelectorAll('.iso-roof')) n.style.fill = roofTint;
+        break;
+      }
+      case 'military_base':
+      case 'military': {
+        g.appendChild(box(-8, 8, 13, 9, 9, roofTint));
+        g.appendChild(box(9, 6, 8, 8, 7, roofTint));
+        break;
+      }
+      case 'port': {
+        g.appendChild(box(-5, 10, 14, 10, 8, roofTint));
+        // crane: a thin mast + angled jib, drawn as slim polygons
+        const mastX = 11, mastY = 10;
+        g.appendChild(poly([[mastX - 1.6, mastY], [mastX + 1.6, mastY], [mastX + 1.6, mastY - 34], [mastX - 1.6, mastY - 34]], 'iso-crane'));
+        g.appendChild(poly([[mastX - 1.4, mastY - 33], [mastX + 1.4, mastY - 33], [mastX + 15, mastY - 27], [mastX + 13, mastY - 25]], 'iso-crane'));
+        break;
+      }
+      case 'airport': {
+        // runway strip hint, low and flat, behind the terminal block
+        g.appendChild(poly([[-17, 15], [17, 15], [11, 21], [-11, 21]], 'iso-runway'));
+        g.appendChild(box(-6, 8, 14, 8, 11, roofTint));
+        break;
+      }
+      case 'mine': {
+        g.appendChild(box(-3, 9, 12, 10, 8, roofTint));
+        g.appendChild(box(9, 1, 3.4, 3.4, 24, roofTint)); // headframe tower
+        break;
+      }
+      case 'farm': {
+        g.appendChild(box(-5, 9, 12, 9, 8, roofTint));
+        g.appendChild(box(9, 6, 3.6, 3.6, 17, roofTint)); // silo, approximated as a slim box
+        break;
+      }
+      case 'infrastructure': {
+        g.appendChild(box(0, 8, 14, 12, 10, roofTint));
+        break;
+      }
+      default: {
+        g.appendChild(box(0, 7, 15, 15, 18, roofTint));
+      }
+    }
+    return g;
+  },
+
   /* ---------- render ---------- */
   render() {
     if (!this.ready || !S()) return;
+    // While a vertex/marker/label is being dragged in the editor, a sync
+    // arriving mid-drag would replace the node the pointer is captured on and
+    // strand the drag. Skip the render; MapEdit re-renders on pointerup.
+    if (window.MapEdit && MapEdit.dragging) { this._renderQueued = true; return; }
+    this._renderQueued = false;
     const NS = 'http://www.w3.org/2000/svg';
     const mk = (tag, attrs, parent) => {
       const n = document.createElementNS(NS, tag);
@@ -327,6 +484,18 @@ const GameMap = {
       glyph.setAttribute('y', 9.6);
       glyph.textContent = KIND_GLYPH[pr.kind] || '•';
       g.appendChild(rect); g.appendChild(glyph);
+      // isometric building — shown instead of the flat square once zoomed in
+      // close enough to read it (toggled in updateMarkerScale). The flat
+      // rect stays in the DOM (and stays the pointerdown/pointerup target
+      // for select + edit-drag) even while hidden, so none of the existing
+      // interaction wiring above needs to change.
+      // .iso-building is pointer-events:none (see style.css) so the
+      // transparent .prop-marker rect underneath stays the sole hit target
+      // and its <title> (set above) still supplies the hover tooltip.
+      const iso = this.isoBuilding(pr.kind, owner ? owner.color || '#5c5340' : '#5c5340');
+      iso.classList.add('iso-hidden');
+      if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) iso.classList.add('selected');
+      g.appendChild(iso);
       this.markerLayer.appendChild(g);
     }
 
@@ -365,6 +534,45 @@ const GameMap = {
       this.cityLayer.appendChild(g);
     }
 
+    // event markers (counter-scaled pins — visible to everyone)
+    this.eventLayer = document.createElementNS(NS, 'g');
+    this.world.appendChild(this.eventLayer);
+    for (const mrk of (S().markers || [])) {
+      if (!mrk.pos) continue;
+      const editingHere = editing && MapEdit.mode === 'markers';
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('data-eventmarker', mrk.id);
+      g.setAttribute('data-x', mrk.pos[0]); g.setAttribute('data-y', mrk.pos[1]);
+      const circ = document.createElementNS(NS, 'circle');
+      circ.setAttribute('r', 20);
+      circ.setAttribute('class', 'event-marker' + (editingHere ? ' edit-draggable' : ''));
+      if (W.selection && W.selection.kind === 'marker' && W.selection.id === mrk.id) circ.classList.add('selected');
+      circ.addEventListener('pointerdown', (e) => {
+        if (!editingHere) return;
+        e.stopPropagation();
+        MapEdit.markerPointerDown(e, mrk, g);
+      });
+      circ.addEventListener('pointerup', (e) => {
+        if (editingHere || this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        select('marker', mrk.id, { noPan: true });
+      });
+      title(circ, mrk.title || 'Event marker');
+      const glyph = document.createElementNS(NS, 'text');
+      glyph.setAttribute('class', 'event-glyph');
+      glyph.setAttribute('font-size', 22);
+      glyph.setAttribute('text-anchor', 'middle');
+      glyph.setAttribute('y', 8);
+      glyph.textContent = (mrk.icon && mrk.icon.length <= 3) ? mrk.icon : '◈';
+      g.appendChild(circ); g.appendChild(glyph);
+      const lbl = document.createElementNS(NS, 'text');
+      lbl.setAttribute('class', 'event-label');
+      lbl.setAttribute('x', 27); lbl.setAttribute('y', 7);
+      lbl.textContent = mrk.title || '';
+      g.appendChild(lbl);
+      this.eventLayer.appendChild(g);
+    }
+
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;
     if (editing) MapEdit.renderOverlay(this);
@@ -372,6 +580,15 @@ const GameMap = {
     this.renderLayerBar();
     this.renderLegend();
     this.applyTransform();
+  },
+
+  // Called from the window-level pointerup/pointercancel capture listeners and
+  // the buttons===0 guard. Records the moved state (child click handlers read
+  // lastDragMoved right after) and clears the drag so no phantom pan follows.
+  endDrag() {
+    this.lastDragMoved = !!(this.drag && this.drag.moved);
+    this.drag = null;
+    if (this.svg) this.svg.classList.remove('dragging');
   },
 
   dragMoved() { return this.lastDragMoved; },
@@ -383,14 +600,36 @@ const GameMap = {
       for (const g of this.markerLayer.children) {
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
         const sel = W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker');
-        const s = (showProps || sel) ? 1 / k : 0.32 / k;
+        const shown = showProps || sel;
+        const s = shown ? 1 / k : 0.32 / k;
         g.setAttribute('transform', `translate(${x},${y}) scale(${Math.max(s, 0.034)})`);
         const glyph = g.querySelector('.prop-glyph');
-        if (glyph) glyph.style.display = (showProps || sel) ? '' : 'none';
+        const rect = g.querySelector('.prop-marker');
+        const iso = g.querySelector('.iso-building');
+        // Zoomed in (or ownership layer / property-edit mode): show the iso
+        // building, hide the flat square + glyph. Zoomed out: flat square
+        // reads better at tiny scale, so show that instead — including for
+        // a selected-but-distant property, so the selection ring stays
+        // visible even before the camera has zoomed in on it.
+        // The rect is only made transparent (never display:none): it must
+        // stay hit-testable for click-to-select and edit-mode dragging
+        // (MapEdit.propertyPointerDown / the pointerup select() handler are
+        // both wired to this exact node), even while the iso building is the
+        // visible thing standing over it.
+        const useIso = showProps;
+        if (iso) iso.classList.toggle('iso-hidden', !useIso);
+        if (rect) rect.style.opacity = useIso ? '0' : '1';
+        if (glyph) glyph.style.display = (!useIso && shown) ? '' : 'none';
       }
     }
     if (this.cityLayer) {
       for (const g of this.cityLayer.children) {
+        const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
+        g.setAttribute('transform', `translate(${x},${y}) scale(${1 / Math.max(1, k * 0.72)})`);
+      }
+    }
+    if (this.eventLayer) {
+      for (const g of this.eventLayer.children) {
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
         g.setAttribute('transform', `translate(${x},${y}) scale(${1 / Math.max(1, k * 0.72)})`);
       }
@@ -409,12 +648,19 @@ const GameMap = {
     for (const id in this.provNodes) this.provNodes[id].classList.toggle('selected', !!(W.selection && W.selection.kind === 'province' && W.selection.id === id));
     for (const id in (this.countryNodes || {})) this.countryNodes[id].classList.toggle('selected', !!(W.selection && W.selection.kind === 'entity' && W.selection.id === id));
     if (this.markerLayer) for (const g of this.markerLayer.children) {
+      const isSel = !!(W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker'));
       const r = g.querySelector('.prop-marker');
-      if (r) r.classList.toggle('selected', !!(W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker')));
+      if (r) r.classList.toggle('selected', isSel);
+      const iso = g.querySelector('.iso-building');
+      if (iso) iso.classList.toggle('selected', isSel);
     }
     if (this.cityLayer) for (const g of this.cityLayer.children) {
       const d = g.querySelector('.city-dot');
       if (d) d.classList.toggle('selected', !!(W.selection && W.selection.kind === 'city' && W.selection.id === g.getAttribute('data-city')));
+    }
+    if (this.eventLayer) for (const g of this.eventLayer.children) {
+      const c = g.querySelector('.event-marker');
+      if (c) c.classList.toggle('selected', !!(W.selection && W.selection.kind === 'marker' && W.selection.id === g.getAttribute('data-eventmarker')));
     }
     this.updateMarkerScale();
   },
@@ -485,7 +731,3 @@ const GameMap = {
     }
   }
 };
-
-// track whether last pointer interaction was a drag (used by child click handlers)
-document.addEventListener('pointermove', () => { if (GameMap.drag && GameMap.drag.moved) GameMap.lastDragMoved = true; });
-document.addEventListener('pointerdown', () => { GameMap.lastDragMoved = false; });

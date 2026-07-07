@@ -349,7 +349,8 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .map-rail-base{fill:none; stroke:#3a3028; stroke-opacity:.9; stroke-width:2.8px;}
 .map-rail-dash{fill:none; stroke:#efe6cf; stroke-opacity:.95; stroke-width:1.3px; stroke-dasharray:7 7;}
 .map-road.editing, .map-rail-base.editing{stroke:var(--accent); stroke-opacity:1;}
-.edit-hit{fill:none; stroke:#fff; stroke-opacity:0; stroke-width:16px; cursor:pointer; pointer-events:stroke;}
+.edit-hit{fill:none; stroke:var(--accent); stroke-opacity:0; stroke-width:16px; cursor:pointer; pointer-events:stroke;}
+.edit-hit:hover{stroke-opacity:.28;}
 .edit-preview{fill:none; stroke:var(--accent); stroke-width:2px; stroke-dasharray:5 5;}
 .edit-handle{fill:#fff; stroke:var(--accent); stroke-width:3; cursor:grab;}
 .edit-handle:hover{fill:var(--accent-soft);}
@@ -371,6 +372,31 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .prop-marker:hover{stroke:var(--accent); stroke-width:5; stroke-opacity:1;}
 .prop-marker.selected{stroke:var(--accent); stroke-width:6.4; stroke-opacity:1;}
 .prop-glyph{font-family:var(--font-mono); font-weight:700; fill:var(--paper); pointer-events:none;}
+
+/* Isometric property buildings — small extruded blocks shown once the map is
+   zoomed in close enough (see GameMap.isoBuilding / updateMarkerScale in
+   map.js). Walls stay near-white like the reference clippings; only the
+   roof (.iso-top) picks up a faint tint of the owner's colour. */
+.iso-building{pointer-events:none;}
+.iso-building.iso-hidden{display:none;}
+.iso-top{fill:#faf6ec; stroke:var(--ink); stroke-opacity:.55; stroke-width:1.6; stroke-linejoin:round; fill-opacity:.9;}
+.iso-front{fill:#ece4d0; stroke:var(--ink); stroke-opacity:.55; stroke-width:1.6; stroke-linejoin:round;}
+.iso-side{fill:#cfc6ac; stroke:var(--ink); stroke-opacity:.55; stroke-width:1.6; stroke-linejoin:round;}
+.iso-roof.iso-top{fill-opacity:1;}
+.iso-crane{fill:#4a463c; stroke:var(--ink); stroke-opacity:.5; stroke-width:1;}
+.iso-runway{fill:#8d846a; fill-opacity:.5; stroke:none;}
+.iso-building.selected .iso-top,
+.iso-building.selected .iso-front,
+.iso-building.selected .iso-side{stroke:var(--accent); stroke-opacity:1; stroke-width:3;}
+.event-marker{fill:var(--accent); stroke:var(--paper); stroke-width:3; cursor:pointer; opacity:.92;}
+.event-marker:hover{stroke:var(--ink);}
+.event-marker.selected{stroke:var(--ink); stroke-width:5;}
+.event-marker.edit-draggable{cursor:grab;}
+.event-glyph{font-family:var(--font-mono); font-weight:700; fill:var(--paper); pointer-events:none;}
+.event-label{
+  font-family:var(--font-mono); font-size:22px; letter-spacing:.06em; fill:var(--ink); pointer-events:none;
+  paint-order:stroke; stroke:rgba(238,230,210,.7); stroke-width:6px;
+}
 .graticule{stroke:#ffffff; stroke-opacity:.06;}
 
 #map-controls{
@@ -421,7 +447,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   padding:10px 14px; border-bottom:1px solid var(--rule-strong); flex-shrink:0;
 }
 .insp-kicker{font-family:var(--font-mono); font-size:9.5px; letter-spacing:0.24em; text-transform:uppercase; color:var(--accent); font-weight:700;}
+.insp-head-actions{display:flex; gap:2px; align-items:center;}
+#insp-edit:hover{color:var(--accent);}
 #insp-body{flex:1; overflow-y:auto; padding:18px 20px 40px;}
+.insp-edit-bar{border-top:1px dashed var(--rule-strong); padding-top:14px; margin-top:20px;}
 .insp-title{font-family:var(--font-voice); font-size:23px; font-weight:600; line-height:1.2;}
 .insp-sub{font-family:var(--font-mono); font-size:9.5px; letter-spacing:0.14em; text-transform:uppercase; color:var(--ink-faint); margin-top:4px;}
 .insp-desc{font-family:var(--font-voice); font-size:14.5px; line-height:1.65; color:var(--ink-soft); margin-top:12px; font-style:italic;}
@@ -578,3 +607,39 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   .doc-view{padding:18px 16px 60px;}
   .form-grid{grid-template-columns:1fr;}
 }
+
+/* ═══════════ ECONOMY CLUSTER — pick-lists, chips, badges (Phase 4/7) ═══════════ */
+.pick-list{max-height:220px; overflow-y:auto; border:1px solid var(--rule-strong); background:var(--paper-deep); margin-bottom:4px;}
+.pick-item{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:6px 10px; cursor:pointer; border-bottom:1px solid var(--rule);
+  font-size:12.5px; color:var(--ink);
+}
+.pick-item:last-child{border-bottom:none;}
+.pick-item:hover{background:rgba(122,35,24,0.06); color:var(--accent);}
+.pick-item.selected{background:rgba(122,35,24,0.10); color:var(--accent); font-weight:600;}
+.pick-item .pi-sub{font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); white-space:nowrap;}
+.recip-chip{
+  display:inline-flex; align-items:center; gap:4px;
+  border:1px solid var(--rule-strong); background:var(--paper);
+  padding:3px 10px; margin:2px 4px 2px 0; border-radius:12px;
+  font-size:11.5px; cursor:pointer;
+}
+.recip-chip:hover{border-color:var(--accent); color:var(--accent);}
+.count-badge{
+  display:inline-flex; align-items:center; justify-content:center;
+  min-width:16px; height:16px; padding:0 4px; margin-left:6px;
+  background:var(--accent); color:var(--paper);
+  font-family:var(--font-mono); font-size:9.5px; font-weight:700;
+  border-radius:8px; vertical-align:middle;
+}
+.tab.has-badge{position:relative;}
+.sparkline-cell{display:block; line-height:0;}
+.mono-num{font-family:var(--font-mono); font-size:12px;}
+.mono-num.pos{color:var(--good);}
+.mono-num.neg{color:var(--accent);}
+.trade-row{border:1px solid var(--rule-strong); background:var(--paper-deep); padding:10px 14px; margin-bottom:10px;}
+.trade-row .tr-parties{font-family:var(--font-voice); font-size:14.5px;}
+.trade-row .tr-meta{font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); letter-spacing:.06em; margin:2px 0 8px;}
+.trade-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:8px;}
+.trade-cols .tc-head{font-family:var(--font-mono); font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:3px;}

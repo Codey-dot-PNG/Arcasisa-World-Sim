@@ -56,6 +56,222 @@ const Views = {
     }, '✎ Open in GM Studio');
   },
 
+  /* ═══════════ INSPECTOR — edit mode (Phase 2) ═══════════
+     GM can inline-edit any inspected record via the generic
+     /api/gm/coll/<collection> PATCH endpoint. Non-GM entity owners get a
+     reduced field set on entities they control, saved via /api/entity/:id.
+     The collection name for each inspector "kind" (note: plural, matching
+     the server's COLLS map in api.js). */
+  EDIT_COLL: { province: 'provinces', city: 'cities', property: 'properties', entity: 'entities', item: 'items' },
+
+  // Approximate client-side "do I control this entity" check. The server is
+  // the real authority (ownership.controls) — this only decides whether to
+  // show the pencil / reduced-field form.
+  canEditEntity(id) {
+    if (isGM()) return true;
+    const mine = myEntity();
+    if (!mine) return false;
+    if (mine.id === id) return true;
+    const e = entById(id);
+    if (!e) return false;
+    if (e.ownerId === mine.id || e.ceoId === mine.id) return true;
+    if (e.type === 'party' && e.leaderId === mine.id) return true;
+    // one level of indirection: anything my controlled companies own/run
+    return S().entities.some(c => (c.ownerId === mine.id || c.ceoId === mine.id) && (e.ownerId === c.id || e.ceoId === c.id));
+  },
+  canEdit(kind, id) {
+    if (isGM()) return true;
+    if (kind === 'entity') return this.canEditEntity(id);
+    return false;
+  },
+
+  editBar(onSave, onCancel) {
+    return el('div.btn-row.insp-edit-bar',
+      el('button.solid-btn', {
+        onclick: async (e) => {
+          const btn = e.currentTarget; btn.disabled = true;
+          try { await onSave(); W.inspEdit = false; W.inspDraft = null; toast('Saved.'); }
+          catch (err) { toast(err.message, true); btn.disabled = false; }
+        }
+      }, 'Save'),
+      el('button.dash-btn', {
+        onclick: () => { W.inspEdit = false; W.inspDraft = null; if (onCancel) onCancel(); this.inspect(W.selection.kind, W.selection.id); }
+      }, 'Cancel'));
+  },
+
+  // small editable grid of a vars-like object {key: number}
+  editVarsGrid(draft, key, scope) {
+    draft[key] = draft[key] || {};
+    const defs = (S().variables || []).filter(v => v.scope === scope);
+    const box = el('div');
+    box.appendChild(this.secLabel(key === 'demographics' ? 'Demographics' : 'Variables'));
+    const table = el('div.form-grid');
+    const keys = new Set([...defs.map(d => d.key), ...Object.keys(draft[key])]);
+    for (const k of keys) {
+      const def = defs.find(d => d.key === k);
+      table.appendChild(Forms.field(def ? def.label : k, Forms.num(draft[key], k)));
+    }
+    box.appendChild(table);
+    return box;
+  },
+
+  /* ---- per-kind edit-mode renderers ---- */
+  editProvince(id) {
+    const p = provById(id);
+    const d = W.inspDraft || (W.inspDraft = JSON.parse(JSON.stringify(p)));
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Editing — ' + p.name));
+    wrap.appendChild(el('div.form-grid',
+      Forms.field('Name', Forms.text(d, 'name')),
+      Forms.field('Map colour', Forms.color(d, 'color')),
+      Forms.field('Label position "x,y"', el('input.text-input', { value: (d.labelPos || []).join(','), oninput: (e) => d.labelPos = e.target.value.split(',').map(Number) })),
+      Forms.field('Label rotation (°)', Forms.num(d, 'labelRot')),
+      Forms.field('Label size', Forms.num(d, 'labelSize'))));
+    wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+    wrap.appendChild(this.editVarsGrid(d, 'vars', 'province'));
+
+    d.demographics = d.demographics || {};
+    const groups = Object.keys(d.demographics);
+    if (groups.length) {
+      const metrics = S().settings.demographics.metrics || [];
+      wrap.appendChild(this.secLabel('Demographics'));
+      const head = el('tr', el('th', 'Group'));
+      metrics.forEach(mDef => head.appendChild(el('th.num', mDef.label)));
+      const tbody = el('tbody');
+      for (const gname of groups) {
+        const grp = d.demographics[gname];
+        const row = el('tr', el('td', gname));
+        for (const mDef of metrics) {
+          row.appendChild(el('td.num', el('input', { value: grp[mDef.key] ?? 0, oninput: (e) => grp[mDef.key] = Number(e.target.value) || 0 })));
+        }
+        tbody.appendChild(row);
+      }
+      wrap.appendChild(el('div', { style: 'overflow-x:auto;' }, el('table.data.demo-table', el('thead', head), tbody)));
+    }
+
+    wrap.appendChild(this.editBar(async () => {
+      await PATCH(`/api/gm/coll/provinces/${id}`, {
+        name: d.name, color: d.color, description: d.description, labelPos: d.labelPos, labelRot: Number(d.labelRot) || 0,
+        labelSize: Number(d.labelSize) || 0, vars: d.vars, demographics: d.demographics
+      });
+    }));
+    return wrap;
+  },
+
+  editCity(id) {
+    const c = cityById(id);
+    const d = W.inspDraft || (W.inspDraft = JSON.parse(JSON.stringify(c)));
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Editing — ' + c.name));
+    wrap.appendChild(el('div.form-grid',
+      Forms.field('Name', Forms.text(d, 'name')),
+      Forms.field('Province', Forms.sel(d, 'provinceId', Forms.provOptions())),
+      Forms.field('Size (1–3)', Forms.num(d, 'size')),
+      Forms.field('Position "x,y"', el('input.text-input', { value: (d.pos || []).join(','), oninput: (e) => d.pos = e.target.value.split(',').map(Number) }))));
+    wrap.appendChild(Forms.check(d, 'isCapital', 'National capital'));
+    wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+    wrap.appendChild(this.editBar(async () => {
+      await PATCH(`/api/gm/coll/cities/${id}`, { name: d.name, provinceId: d.provinceId, size: Number(d.size) || 1, isCapital: !!d.isCapital, description: d.description, pos: d.pos });
+    }));
+    return wrap;
+  },
+
+  editProperty(id) {
+    const pr = propById(id);
+    const d = W.inspDraft || (W.inspDraft = JSON.parse(JSON.stringify(pr)));
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Editing — ' + pr.name));
+    wrap.appendChild(el('div.form-grid',
+      Forms.field('Name', Forms.text(d, 'name')),
+      Forms.field('Owner', Forms.sel(d, 'ownerId', Forms.entOptions(null, true))),
+      Forms.field('Category', Forms.sel(d, 'type', [['residential', 'Residential'], ['commercial', 'Commercial'], ['industrial', 'Industrial'], ['agricultural', 'Agricultural'], ['government', 'Government'], ['military', 'Military'], ['infrastructure', 'Infrastructure']])),
+      Forms.field('Kind (marker glyph)', Forms.sel(d, 'kind', Object.keys(KIND_GLYPH).map(k => [k, k.replace('_', ' ') + ' [' + KIND_GLYPH[k] + ']']))),
+      Forms.field('Icon override', Forms.text(d, 'icon')),
+      Forms.field('Position "x,y"', el('input.text-input', { value: (d.pos || []).join(','), oninput: (e) => d.pos = e.target.value.split(',').map(Number) })),
+      Forms.field('Assessed value', Forms.num(d, 'value')),
+      Forms.field('Employees', Forms.num(d, 'employees')),
+      Forms.field('Monthly income', Forms.num(d, 'income')),
+      Forms.field('Monthly expenses', Forms.num(d, 'expenses'))));
+    wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+    wrap.appendChild(this.editBar(async () => {
+      await PATCH(`/api/gm/coll/properties/${id}`, {
+        name: d.name, ownerId: d.ownerId, type: d.type, kind: d.kind, icon: d.icon, pos: d.pos,
+        value: Number(d.value) || 0, employees: Number(d.employees) || 0, income: Number(d.income) || 0, expenses: Number(d.expenses) || 0,
+        description: d.description
+      });
+    }));
+    return wrap;
+  },
+
+  editEntity(id) {
+    const e = entById(id);
+    const gm = isGM();
+    const d = W.inspDraft || (W.inspDraft = JSON.parse(JSON.stringify(e)));
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Editing — ' + e.name));
+
+    if (!gm) {
+      // reduced field set for non-GM owners
+      wrap.appendChild(el('div.form-grid',
+        Forms.field('Name', el('input.text-input', { value: e.name, disabled: true })),
+        Forms.field('Marker colour', Forms.color(d, 'color')),
+        Forms.field('Logo / image path', Forms.text(d, 'logo', '/assets/…'))));
+      wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+      wrap.appendChild(this.editBar(async () => {
+        await PATCH(`/api/entity/${id}`, { description: d.description, color: d.color, logo: d.logo });
+      }));
+      return wrap;
+    }
+
+    wrap.appendChild(el('div.form-grid',
+      Forms.field('Name', Forms.text(d, 'name')),
+      Forms.field('Marker colour', Forms.color(d, 'color')),
+      Forms.field('Logo / image path', Forms.text(d, 'logo', '/assets/…')),
+      e.type === 'company' ? Forms.field('Industry', Forms.text(d, 'industry')) : null,
+      e.type === 'company' ? Forms.field('Controlled by', Forms.sel(d, 'ownerId', Forms.entOptions(null, true))) : null,
+      e.type === 'company' ? Forms.field('Chief Executive', Forms.sel(d, 'ceoId', Forms.entOptions(['person'], true))) : null,
+      e.type === 'company' ? Forms.field('Shares outstanding', Forms.num(d, 'sharesOutstanding')) : null,
+      e.type === 'party' ? Forms.field('Leader', Forms.sel(d, 'leaderId', Forms.entOptions(['person'], true))) : null,
+      e.type === 'person' ? Forms.field('Title', Forms.text(d, 'title')) : null,
+      (e.type === 'foreign' || e.type === 'org') ? Forms.field('Stance / relations', Forms.text(d, 'stance')) : null
+    ));
+    if (e.type === 'party') {
+      d.ideology = d.ideology || { econ: 0, soc: 0 };
+      wrap.appendChild(el('div.form-grid',
+        Forms.field('Ideology — economic (−100…+100)', Forms.num(d.ideology, 'econ')),
+        Forms.field('Ideology — social (−100…+100)', Forms.num(d.ideology, 'soc'))));
+      wrap.appendChild(Forms.check(d, 'inGovernment', 'Currently in government'));
+    }
+    wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+
+    wrap.appendChild(this.editBar(async () => {
+      const body = { name: d.name, color: d.color, logo: d.logo, description: d.description };
+      if (e.type === 'company') Object.assign(body, { industry: d.industry, ownerId: d.ownerId, ceoId: d.ceoId, sharesOutstanding: Number(d.sharesOutstanding) || 0 });
+      if (e.type === 'party') Object.assign(body, { leaderId: d.leaderId, ideology: d.ideology, inGovernment: !!d.inGovernment });
+      if (e.type === 'person') body.title = d.title;
+      if (e.type === 'foreign' || e.type === 'org') body.stance = d.stance;
+      await PATCH(`/api/gm/coll/entities/${id}`, body);
+    }));
+    return wrap;
+  },
+
+  editItem(id) {
+    const it = itemById(id);
+    const d = W.inspDraft || (W.inspDraft = JSON.parse(JSON.stringify(it)));
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Editing — ' + it.name));
+    wrap.appendChild(el('div.form-grid',
+      Forms.field('Name', Forms.text(d, 'name')),
+      Forms.field('Category', Forms.text(d, 'category')),
+      Forms.field('Market value (' + CUR() + ')', Forms.num(d, 'marketValue'))));
+    wrap.appendChild(Forms.check(d, 'tradable', 'Tradable between entities'));
+    wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
+    wrap.appendChild(this.editBar(async () => {
+      await PATCH(`/api/gm/coll/items/${id}`, { name: d.name, category: d.category, marketValue: Number(d.marketValue) || 0, tradable: !!d.tradable, description: d.description });
+    }));
+    return wrap;
+  },
+
   /* ═══════════ INSPECTOR ═══════════ */
   inspect(kind, id) {
     const panel = document.getElementById('inspector');
@@ -64,17 +280,36 @@ const Views = {
     panel.classList.remove('hidden');
     clear(body);
     let node = null, kick = 'DOSSIER';
-    if (kind === 'province') { node = this.inspProvince(id); kick = 'PROVINCE FILE'; }
-    else if (kind === 'city') { node = this.inspCity(id); kick = 'CITY FILE'; }
-    else if (kind === 'property') { node = this.inspProperty(id); kick = 'PROPERTY FILE'; }
-    else if (kind === 'entity') { const e = entById(id); node = this.inspEntity(id); kick = (TYPE_LABEL[e && e.type] || 'ENTITY').toUpperCase() + ' FILE'; }
-    else if (kind === 'item') { node = this.inspItem(id); kick = 'MARKET FILE'; }
+    const editing = W.inspEdit && this.canEdit(kind, id) && this.EDIT_COLL[kind];
+    if (editing) {
+      if (kind === 'province') { node = this.editProvince(id); kick = 'EDITING — PROVINCE'; }
+      else if (kind === 'city') { node = this.editCity(id); kick = 'EDITING — CITY'; }
+      else if (kind === 'property') { node = this.editProperty(id); kick = 'EDITING — PROPERTY'; }
+      else if (kind === 'entity') { node = this.editEntity(id); kick = 'EDITING — ENTITY'; }
+      else if (kind === 'item') { node = this.editItem(id); kick = 'EDITING — ITEM'; }
+      if (!node) { W.inspEdit = false; } // record vanished mid-edit — fall through
+    }
+    if (!node) {
+      if (kind === 'province') { node = this.inspProvince(id); kick = 'PROVINCE FILE'; }
+      else if (kind === 'city') { node = this.inspCity(id); kick = 'CITY FILE'; }
+      else if (kind === 'property') { node = this.inspProperty(id); kick = 'PROPERTY FILE'; }
+      else if (kind === 'entity') { const e = entById(id); node = this.inspEntity(id); kick = (TYPE_LABEL[e && e.type] || 'ENTITY').toUpperCase() + ' FILE'; }
+      else if (kind === 'item') { node = this.inspItem(id); kick = 'MARKET FILE'; }
+      else if (kind === 'marker') { node = this.inspMarker(id); kick = 'MAP MARKER'; }
+    }
     kicker.textContent = kick;
+    const editBtn = document.getElementById('insp-edit');
+    if (editBtn) {
+      const showPencil = !editing && this.EDIT_COLL[kind] && this.canEdit(kind, id);
+      editBtn.classList.toggle('hidden', !showPencil);
+      editBtn.onclick = () => { W.inspEdit = true; W.inspDraft = null; this.inspect(kind, id); };
+    }
     if (node) body.appendChild(node);
   },
   closeInspector() {
     document.getElementById('inspector').classList.add('hidden');
     W.selection = null;
+    W.inspEdit = false; W.inspDraft = null;
     if (GameMap.ready) GameMap.highlight();
     renderExplorer();
   },
@@ -281,31 +516,143 @@ const Views = {
     return wrap;
   },
 
+  inspMarker(id) {
+    const m = markerById(id);
+    if (!m) return el('div', 'Not on file.');
+    const wrap = el('div');
+    wrap.appendChild(el('div.insp-title', (m.icon && m.icon.length <= 3 ? m.icon + ' ' : '') + (m.title || 'Marker')));
+    wrap.appendChild(el('div.insp-sub', 'Event marker' + (m.createdTurn !== undefined ? ' · placed turn ' + m.createdTurn : '')));
+    if (m.description) wrap.appendChild(el('div.insp-desc', m.description));
+    if (isGM()) {
+      wrap.appendChild(el('div.insp-actions',
+        el('button.outline-btn', { onclick: () => this.markerEditor(m) }, '✎ Edit Marker'),
+        el('button.dash-btn', {
+          onclick: () => confirmModal('REMOVE MARKER', 'Delete this marker from the map?', async () => {
+            await DEL('/api/gm/coll/markers/' + m.id); toast('Marker removed.'); Views.closeInspector();
+          })
+        }, 'Delete')));
+    }
+    return wrap;
+  },
+
+  markerEditor(m) {
+    const title = el('input.text-input', { value: m.title || '' });
+    const icon = el('input.text-input', { value: m.icon || '◈', placeholder: 'emoji or symbol' });
+    const desc = el('textarea.text-input', { style: 'min-height:120px;' }, m.description || '');
+    openModal('MAP MARKER', el('div',
+      el('label.field-label', 'Title'), title,
+      el('label.field-label', 'Icon (emoji or symbol)'), icon,
+      el('label.field-label', 'Description'), desc
+    ), [
+      { label: 'Save', onClick: async () => { await PATCH('/api/gm/coll/markers/' + m.id, { title: title.value, icon: icon.value, description: desc.value }); toast('Saved.'); } },
+      { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }
+    ]);
+  },
+
   /* ═══════════ money & items modals ═══════════ */
+  /* Phase 4.2 — searchable From (controlled accounts) / To (entities + accounts,
+     one search box) with recent-recipient chips derived from the last ~20
+     visible transactions. Posts to the unchanged /api/transfer endpoint. */
+  recentRecipients() {
+    const myAccts = new Set(this.accountsOf(W.me.entityId).map(a => a.id));
+    const seen = new Set(), out = [];
+    const txns = [...(S().transactions || [])].reverse().slice(0, 20);
+    for (const t of txns) {
+      // "recipient" = the other side of a transaction I sent from one of my accounts
+      let otherAcctId = null;
+      if (t.from && myAccts.has(t.from) && t.to) otherAcctId = t.to;
+      if (!otherAcctId) continue;
+      const acct = acctById(otherAcctId);
+      if (!acct || acct.ownerId === W.me.entityId || seen.has(acct.ownerId)) continue;
+      seen.add(acct.ownerId);
+      out.push({ entityId: acct.ownerId, acctId: acct.id, name: entName(acct.ownerId) });
+      if (out.length >= 6) break;
+    }
+    return out;
+  },
   transferModal(prefToAcct) {
     const my = isGM() || perms().accounts === 'all' ? S().accounts : this.accountsOf(W.me.entityId);
     if (!my.length) return toast('You control no accounts.', true);
+
+    let fromId = my[0].id;
+    let to = null; // { kind:'account'|'entity', id, label }
+    if (prefToAcct) {
+      const a = acctById(prefToAcct);
+      if (a) to = { kind: 'account', id: a.id, label: `${entName(a.ownerId)} — ${a.name}` };
+    }
+
     const acctLabel = (a) => `${entName(a.ownerId)} — ${a.name} (${fmtMoney(a.balance)})`;
-    const fromSel = el('select.text-input', my.map(a => el('option', { value: a.id }, acctLabel(a))));
-    const toSel = el('select.text-input', S().accounts.map(a => el('option', { value: a.id, selected: a.id === prefToAcct ? 'selected' : undefined }, acctLabel(a))));
-    // citizens may not see other accounts — offer entity targets instead
-    const entSel = el('select.text-input', S().entities.filter(e => e.id !== W.me.entityId).map(e => el('option', { value: e.id }, e.name + ' (' + (TYPE_LABEL[e.type] || e.type) + ')')));
-    const useEntities = S().accounts.length <= my.length;
+
+    // ---- From: searchable pick-list of controlled accounts ----
+    const fromList = el('div.pick-list');
+    const fromSearch = el('input.text-input', { placeholder: 'Search your accounts…' });
+    const renderFromList = () => {
+      const q = fromSearch.value.trim().toLowerCase();
+      clear(fromList);
+      my.filter(a => !q || acctLabel(a).toLowerCase().includes(q)).forEach(a => {
+        fromList.appendChild(el('div.pick-item', { class: a.id === fromId ? 'selected' : '', onclick: () => { fromId = a.id; renderFromList(); } },
+          el('span', entName(a.ownerId) + ' — ' + a.name), el('span.pi-sub', fmtMoney(a.balance))));
+      });
+      if (!fromList.children.length) fromList.appendChild(el('div', { style: 'padding:10px; color:var(--ink-faint); font-size:12px;' }, 'No match.'));
+    };
+    fromSearch.addEventListener('input', renderFromList);
+
+    // ---- To: one search box over entities AND accounts ----
+    const toList = el('div.pick-list');
+    const toSearch = el('input.text-input', { placeholder: 'Search recipients (people, companies, accounts)…', value: to ? to.label : '' });
+    const canSeeAccounts = isGM() || perms().accounts === 'all';
+    const renderToList = () => {
+      const q = toSearch.value.trim().toLowerCase();
+      clear(toList);
+      const rows = [];
+      if (canSeeAccounts) {
+        for (const a of S().accounts) {
+          if (a.ownerId === W.me.entityId) continue;
+          const label = acctLabel(a);
+          if (q && !label.toLowerCase().includes(q)) continue;
+          rows.push({ kind: 'account', id: a.id, label: `${entName(a.ownerId)} — ${a.name}`, sub: fmtMoney(a.balance) });
+        }
+      } else {
+        for (const e of S().entities) {
+          if (e.id === W.me.entityId) continue;
+          if (q && !e.name.toLowerCase().includes(q)) continue;
+          rows.push({ kind: 'entity', id: e.id, label: e.name, sub: TYPE_LABEL[e.type] || e.type });
+        }
+      }
+      rows.slice(0, 40).forEach(r => {
+        toList.appendChild(el('div.pick-item', { class: (to && to.kind === r.kind && to.id === r.id) ? 'selected' : '', onclick: () => { to = r; toSearch.value = r.label; renderToList(); } },
+          el('span', r.label), el('span.pi-sub', r.sub)));
+      });
+      if (!rows.length) toList.appendChild(el('div', { style: 'padding:10px; color:var(--ink-faint); font-size:12px;' }, 'No match.'));
+    };
+    toSearch.addEventListener('input', () => { to = null; renderToList(); });
+
+    // ---- recent recipients as one-click chips ----
+    const recents = this.recentRecipients();
+    const chipRow = recents.length ? el('div.chip-row', recents.map(r =>
+      el('span.recip-chip', { onclick: () => { to = { kind: 'entity', id: r.entityId, label: r.name }; toSearch.value = r.name; renderToList(); } }, '↺ ' + r.name)
+    )) : null;
+
     const amount = el('input.text-input', { type: 'number', min: '0.01', step: '0.01', placeholder: '0.00' });
     const memo = el('input.text-input', { placeholder: 'Purpose of transfer' });
+
+    renderFromList(); renderToList();
+
     openModal('WIRE TRANSFER', el('div',
-      el('label.field-label', 'From account'), fromSel,
-      el('label.field-label', 'To ' + (useEntities ? 'recipient' : 'account')), useEntities ? entSel : toSel,
+      el('label.field-label', 'From account'), fromSearch, fromList,
+      el('label.field-label', 'To'), toSearch, toList,
+      chipRow ? el('div', el('label.field-label', 'Recent recipients'), chipRow) : null,
       el('label.field-label', 'Amount (' + CUR() + ')'), amount,
       el('label.field-label', 'Memo'), memo
     ), [{
       label: 'Send Wire', onClick: async () => {
-        const body = { fromAccountId: fromSel.value, amount: Number(amount.value), memo: memo.value };
-        if (useEntities) body.toEntityId = entSel.value; else body.toAccountId = toSel.value;
+        if (!to) throw new Error('Choose a recipient.');
+        const body = { fromAccountId: fromId, amount: Number(amount.value), memo: memo.value };
+        if (to.kind === 'account') body.toAccountId = to.id; else body.toEntityId = to.id;
         await POST('/api/transfer', body);
         toast('Wire sent.');
       }
-    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   tradeModal(prefItem, prefTo) {
@@ -474,16 +821,56 @@ const Views = {
   },
 
   /* ---- Economy ---- */
+  /* count of open trade offers addressed to entities I control — used for the
+     Economy tab badge and the Trade sub-tab badge */
+  openIncomingTrades() {
+    if (!W.me || !W.me.entityId) return [];
+    const mine = ownershipSetClient();
+    return (S().trades || []).filter(t => t.status === 'open' && mine.has(t.toEntityId));
+  },
+
   viewEconomy(inner) {
-    const g = S().globalVars || {};
+    if (!W.ecoTab) W.ecoTab = 'overview';
+    const incoming = this.openIncomingTrades();
     inner.appendChild(el('div.doc-title', 'The Economy'));
     inner.appendChild(el('div.doc-sub', S().settings.currencyName + ' (' + CUR() + ') · turn ' + S().settings.time.turn));
+
+    const tabs = el('div.chip-row',
+      el('button.chip', { class: W.ecoTab === 'overview' ? 'active' : '', onclick: () => { W.ecoTab = 'overview'; App.renderView(); } }, 'Overview'),
+      el('button.chip', { class: W.ecoTab === 'exchange' ? 'active' : '', onclick: () => { W.ecoTab = 'exchange'; App.renderView(); } }, 'Exchange'),
+      el('button.chip', { class: W.ecoTab === 'trade' ? 'active' : '', onclick: () => { W.ecoTab = 'trade'; App.renderView(); } },
+        'Trade', incoming.length ? el('span.count-badge', String(incoming.length)) : null)
+    );
+    inner.appendChild(tabs);
+
+    if (W.ecoTab === 'exchange') return this.viewExchange(inner);
+    if (W.ecoTab === 'trade') return this.viewTrade(inner);
+    this.viewEconomyOverview(inner);
+  },
+
+  viewEconomyOverview(inner) {
+    const g = S().globalVars || {};
     const cells = [];
     if (g.gdp !== undefined) cells.push(['National GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)]);
     if (g.moneySupply !== undefined) cells.push(['Money Supply', CUR() + fmtCompact(g.moneySupply)]);
     if (g.treasury !== undefined) cells.push(['Federal Treasury', CUR() + fmtCompact(g.treasury)]);
     cells.push(['Visible Accounts', fmtNum(S().accounts.length)]);
     inner.appendChild(this.statStrip(cells));
+
+    /* Phase 7.3 — GDP & money-supply history, gated on statistics clearance
+       (filterState only sends state.history when perms.statistics is set). */
+    const hist = S().history;
+    if (hist && hist.length) {
+      const xLabels = hist.map(h => 'T' + h.turn);
+      inner.appendChild(this.secLabel('National GDP Over Time'));
+      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.gdp || 0) })), {
+        title: 'GDP (' + CUR() + 'M)', xLabels, yFormat: (v) => fmtCompact(v)
+      }));
+      inner.appendChild(this.secLabel('Money Supply Over Time'));
+      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.moneySupply || 0) })), {
+        title: 'Money Supply (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
+      }));
+    }
 
     const myAccts = this.accountsOf(W.me.entityId);
     if (myAccts.length) {
@@ -522,6 +909,219 @@ const Views = {
       el('thead', el('tr', el('th', 'Item'), el('th', 'Category'), el('th.num', 'Market Value'), el('th', 'Tradable'))),
       el('tbody', S().items.map(it => el('tr.row-link', { onclick: () => select('item', it.id) },
         el('td', it.name), el('td', it.category), el('td.num', fmtMoney(it.marketValue)), el('td', it.tradable ? 'yes' : 'no'))))));
+  },
+
+  /* ---- Exchange (Phase 4.4) ---- */
+  viewExchange(inner) {
+    const companies = S().entities.filter(e => e.type === 'company' && e.sharePrice !== undefined);
+    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'Lachevan Exchange — market maker, no order book'));
+    if (!companies.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:20px 0;' }, 'No listed companies on file.'));
+      return;
+    }
+    const hist = S().history || [];
+    const controlsCompany = (c) => isGM() || (W.me.entityId && (c.ownerId === W.me.entityId || c.ceoId === W.me.entityId || ownership_controlsClient(W.me.entityId, c.id)));
+
+    for (const c of companies) {
+      const row = el('div.trade-row');
+      const priceHist = hist.filter(h => h.shares && h.shares[c.id] !== undefined).map(h => ({ x: h.turn, y: h.shares[c.id] }));
+      // day/week change from recorded history, else '—'
+      const chg = (n) => {
+        if (priceHist.length < n + 1) return '—';
+        const now = priceHist[priceHist.length - 1].y, then = priceHist[priceHist.length - 1 - n].y;
+        if (!then) return '—';
+        const pct = (now - then) / then * 100;
+        return (pct >= 0 ? '+' : '') + fmtNum(pct, 1) + '%';
+      };
+      const myHold = (() => {
+        const sh = (c.shareholders || []).find(x => x.entityId === W.me.entityId);
+        return sh ? sh.shares : 0;
+      })();
+
+      const head = el('div', { style: 'display:flex; justify-content:space-between; align-items:flex-start; gap:16px;' },
+        el('div',
+          el('div.tr-parties', c.name + ' — ' + (c.abbrev || c.industry || '')),
+          el('div.tr-meta', `PRICE ${CUR()}${fmtNum(c.sharePrice)} · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`)),
+        el('div', { style: 'text-align:right;' },
+          el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
+      row.appendChild(head);
+
+      const cols = el('div', { style: 'display:flex; gap:18px; align-items:flex-start; margin-top:8px; flex-wrap:wrap;' });
+      const sparkWrap = el('div.sparkline-cell');
+      sparkWrap.appendChild(priceHist.length ? Charts.chartLine(priceHist, { width: 320, height: 110, title: 'Price History' }) : Charts.chartLine([], { width: 320, height: 110, title: 'Price History' }));
+      cols.appendChild(sparkWrap);
+
+      const btns = el('div.btn-row', { style: 'flex-direction:column; align-items:flex-start; gap:8px;' });
+      const floatExhausted = market_treasuryPoolClient(c) <= 0;
+      btns.appendChild(el('div.btn-row',
+        el('button.solid-btn', { onclick: () => this.marketBuyModal(c) }, 'Buy'),
+        el('button.dash-btn', { onclick: () => this.marketSellModal(c) }, 'Sell')
+      ));
+      if (floatExhausted) btns.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint);' }, 'Public float fully subscribed — buying may be rejected.'));
+      if (controlsCompany(c)) {
+        btns.appendChild(el('button.outline-btn', { onclick: () => this.marketIssueModal(c) }, '⊕ Issue Shares'));
+      }
+      cols.appendChild(btns);
+      row.appendChild(cols);
+      inner.appendChild(row);
+    }
+  },
+
+  marketBuyModal(c) {
+    const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
+    openModal('BUY SHARES — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Price ${CUR()}${fmtNum(c.sharePrice)} per share.`),
+      el('label.field-label', 'Shares to buy'), shares
+    ), [{
+      label: 'Buy', onClick: async () => {
+        const n = Math.round(Number(shares.value));
+        if (!(n > 0)) throw new Error('Enter a positive share count.');
+        const r = await POST('/api/market/buy', { companyId: c.id, shares: n });
+        toast(`Bought ${r.shares} shares for ${fmtMoney(r.cost)}.`);
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+  marketSellModal(c) {
+    const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
+    openModal('SELL SHARES — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Price ${CUR()}${fmtNum(c.sharePrice)} per share.`),
+      el('label.field-label', 'Shares to sell'), shares
+    ), [{
+      label: 'Sell', onClick: async () => {
+        const n = Math.round(Number(shares.value));
+        if (!(n > 0)) throw new Error('Enter a positive share count.');
+        const r = await POST('/api/market/sell', { companyId: c.id, shares: n });
+        toast(`Sold ${r.shares} shares for ${fmtMoney(r.proceeds)}.`);
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+  marketIssueModal(c) {
+    const newShares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'New shares to issue' });
+    const floatPct = el('input.text-input', { type: 'number', min: '0', max: '100', step: '1', value: c.publicFloat || 0 });
+    openModal('ISSUE SHARES — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Currently ${fmtNum(c.sharesOutstanding)} shares outstanding, ${c.publicFloat || 0}% public float.`),
+      el('label.field-label', 'New shares to issue'), newShares,
+      el('label.field-label', 'New public float (%)'), floatPct
+    ), [{
+      label: 'Issue', onClick: async () => {
+        const n = Math.round(Number(newShares.value));
+        if (!(n > 0)) throw new Error('Enter a positive share count.');
+        await POST('/api/market/issue', { companyId: c.id, newShares: n, floatPct: Number(floatPct.value) });
+        toast('Shares issued.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+
+  /* ---- Trade offers (Phase 4.3) ---- */
+  viewTrade(inner) {
+    const myEnt = myEntity();
+    const mine = ownershipSetClient();
+    const trades = [...(S().trades || [])].reverse();
+    const open = trades.filter(t => t.status === 'open');
+    const closed = trades.filter(t => t.status !== 'open').slice(0, 20);
+
+    inner.appendChild(el('div.btn-row',
+      el('button.solid-btn', { onclick: () => this.tradeOfferComposer() }, '⇄ New Trade Offer'),
+      myEnt ? el('button.dash-btn', { onclick: () => this.tradeModal() }, '▣ Send Items (instant)') : null));
+
+    inner.appendChild(this.secLabel('Open Offers (' + open.length + ')'));
+    if (!open.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'No open offers.'));
+    for (const t of open) inner.appendChild(this.tradeOfferRow(t, mine));
+
+    if (closed.length) {
+      inner.appendChild(this.secLabel('Recently Closed'));
+      for (const t of closed) inner.appendChild(this.tradeOfferRow(t, mine));
+    }
+  },
+
+  tradeOfferRow(t, mine) {
+    const from = entById(t.fromEntityId), to = entById(t.toEntityId);
+    const rowsText = (rows) => rows.length ? rows.map(r => (itemById(r.itemId) || { name: r.itemId }).name + ' ×' + fmtNum(r.qty)).join(', ') : '—';
+    const row = el('div.trade-row');
+    row.appendChild(el('div.tr-parties', (from ? from.name : '—') + '  →  ' + (to ? to.name : '—')));
+    row.appendChild(el('div.tr-meta', `T${t.turn} · ${fmtDate ? '' : ''}STATUS ${t.status.toUpperCase()}${t.memo ? ' · ' + t.memo : ''}`));
+    const cols = el('div.trade-cols',
+      el('div', el('div.tc-head', from ? from.name + ' gives' : 'They give'),
+        el('div', { style: 'font-size:12.5px;' }, rowsText(t.give)),
+        t.money.give ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(t.money.give)) : null),
+      el('div', el('div.tc-head', to ? to.name + ' gives' : 'You give'),
+        el('div', { style: 'font-size:12.5px;' }, rowsText(t.get)),
+        t.money.get ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(t.money.get)) : null));
+    row.appendChild(cols);
+
+    if (t.status === 'open') {
+      const canAccept = isGM() || mine.has(t.toEntityId);
+      const canCancel = isGM() || mine.has(t.fromEntityId);
+      const btns = el('div.btn-row');
+      if (canAccept) {
+        btns.appendChild(el('button.solid-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST(`/api/trades/${t.id}/accept`); toast('Trade accepted.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, 'Accept'));
+        btns.appendChild(el('button.dash-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST(`/api/trades/${t.id}/decline`); toast('Trade declined.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, 'Decline'));
+      }
+      if (canCancel) {
+        btns.appendChild(el('button.dash-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST(`/api/trades/${t.id}/cancel`); toast('Trade cancelled.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, 'Cancel'));
+      }
+      if (btns.children.length) row.appendChild(btns);
+    }
+    return row;
+  },
+
+  tradeOfferComposer() {
+    const myEnt = myEntity();
+    if (!myEnt) return toast('You have no entity to trade from.', true);
+    const inv = myEnt.inventory || [];
+    const toSel = el('select.text-input', S().entities.filter(e => e.id !== myEnt.id).map(e => el('option', { value: e.id }, e.name)));
+    const memo = el('input.text-input', { placeholder: 'Memo (optional)' });
+    const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+    const moneyGet = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+
+    // give: checkboxes + qty over my own inventory
+    const giveRows = inv.map(r => {
+      const it = itemById(r.itemId);
+      if (!it) return null;
+      const check = el('input', { type: 'checkbox' });
+      const qty = el('input.text-input', { type: 'number', min: '1', max: String(r.qty), step: '1', value: '1', style: 'width:80px;' });
+      return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
+    }).filter(Boolean);
+
+    // get: any tradable item + free qty (validated server-side at accept time)
+    const getRows = [];
+    const getBox = el('div');
+    const addGetRow = () => {
+      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
+      const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1', style: 'width:80px;' });
+      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
+        el('button.icon-btn', { onclick: () => { getBox.removeChild(rowNode); getRows.splice(getRows.indexOf(entry), 1); } }, '✕'));
+      const entry = { itemSel, qty };
+      getRows.push(entry);
+      getBox.appendChild(rowNode);
+    };
+
+    openModal('NEW TRADE OFFER', el('div',
+      el('label.field-label', 'Offer to'), toSel,
+      el('label.field-label', 'You give (items)'), giveRows.length ? el('div', giveRows.map(r => r.node)) : el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Your inventory is empty.'),
+      el('label.field-label', 'Plus money you give (' + CUR() + ')'), moneyGive,
+      el('label.field-label', 'You request (items)'), getBox,
+      el('button.dash-btn', { style: 'margin:4px 0 10px;', onclick: addGetRow }, '+ Add requested item'),
+      el('label.field-label', 'Plus money you request (' + CUR() + ')'), moneyGet,
+      el('label.field-label', 'Memo'), memo
+    ), [{
+      label: 'Send Offer', onClick: async () => {
+        const give = giveRows.filter(r => r.check.checked).map(r => ({ itemId: r.itemId, qty: Number(r.qty.value) }));
+        const get = getRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
+        await POST('/api/trades', {
+          toEntityId: toSel.value, give, get,
+          money: { give: Number(moneyGive.value) || 0, get: Number(moneyGet.value) || 0 },
+          memo: memo.value
+        });
+        toast('Trade offer sent.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   /* ---- Population ---- */

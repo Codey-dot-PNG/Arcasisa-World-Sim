@@ -366,6 +366,82 @@ function applyEffect(fx, meta) {
       store.log('event', interpolate(fx.title, {}), interpolate(fx.detail, {}), actor, []);
       break;
     }
+    case 'recompute_employment': {
+      // Jobs → employment. Labour demand = Σ employees of the province's
+      // properties; labour force ≈ workingShare of population. All coefficients
+      // are effect data, not code. `blend` (0..1) drifts toward the target
+      // rather than hard-setting, keeping the world stable while GMs calibrate.
+      const k = evalExpr(fx.k !== undefined ? fx.k : 1, { vars: db.globalVars });
+      const workingShare = fx.workingShare !== undefined ? Number(fx.workingShare) : 0.6;
+      const blend = fx.blend !== undefined ? Math.min(1, Math.max(0, Number(fx.blend))) : 1;
+      for (const p of db.provinces) {
+        const demand = db.properties.filter(pr => pr.provinceId === p.id).reduce((s, pr) => s + (pr.employees || 0), 0);
+        const force = (p.vars.population || 0) * workingShare;
+        const target = force > 0 ? Math.min(98, Math.max(40, 100 * demand * k / force)) : (p.vars.employment || 60);
+        const cur = p.vars.employment !== undefined ? p.vars.employment : target;
+        p.vars.employment = Math.round((cur + (target - cur) * blend) * 100) / 100;
+        for (const gname in (p.demographics || {})) {
+          const g = p.demographics[gname];
+          const gc = g.employment !== undefined ? g.employment : p.vars.employment;
+          g.employment = Math.round((gc + (p.vars.employment - gc) * blend) * 100) / 100;
+        }
+      }
+      store.log('simulation', `${src}: employment recomputed from labour demand`, '', actor, []);
+      break;
+    }
+    case 'adjust_trust': {
+      // Move company trust toward a target expression. The context exposes the
+      // company's own vars plus `trust` and `avghappiness` (mean happiness of
+      // provinces where the company holds property) so events can wire the
+      // "trust follows local mood" chain without naming any world in code.
+      const rate = fx.rate !== undefined ? Math.min(1, Math.max(0, Number(fx.rate))) : 0.1;
+      const targets = fx.company === 'all'
+        ? db.entities.filter(e => e.type === 'company')
+        : [findEnt(fx.company)].filter(Boolean);
+      for (const co of targets) {
+        if (co.trust === undefined) co.trust = 50;
+        const owned = new Set(db.properties.filter(pr => pr.ownerId === co.id).map(pr => pr.provinceId));
+        const provs = db.provinces.filter(p => owned.has(p.id));
+        const avghappiness = provs.length
+          ? provs.reduce((s, p) => s + (p.vars.happiness || 0), 0) / provs.length
+          : (db.globalVars.avgHappiness || 50);
+        const target = evalExpr(fx.value, { vars: { ...(co.vars || {}), trust: co.trust, avghappiness } });
+        co.trust = Math.round(Math.min(100, Math.max(0, co.trust + (target - co.trust) * rate)) * 100) / 100;
+      }
+      break;
+    }
+    case 'reprice_shares': {
+      // price *= 1 + a·(profit/valuation) + b·gdpGrowth + c·((trust-50)/100) + rand(-e,e)
+      // Coefficients come from the effect data. gdpGrowth is a global var
+      // maintained monthly by advanceTurn.
+      const a = Number(fx.a || 0), b = Number(fx.b || 0), c = Number(fx.c || 0), e = Number(fx.e || 0);
+      const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
+      const targets = fx.company === 'all'
+        ? db.entities.filter(x => x.type === 'company' && x.sharePrice !== undefined)
+        : [findEnt(fx.company)].filter(Boolean);
+      const touched = [];
+      for (const co of targets) {
+        if (co.sharePrice === undefined) continue;
+        const profit = (co.vars && co.vars.profit) || 0;
+        const valuation = (co.vars && co.vars.valuation) || 1;
+        const trust = co.trust === undefined ? 50 : co.trust;
+        const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + (Math.random() * 2 - 1) * e;
+        co.sharePrice = Math.max(0.01, Math.round(co.sharePrice * factor * 100) / 100);
+        // keep the certificate item's market value in step with the share price
+        const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
+        if (shareItem) shareItem.marketValue = co.sharePrice;
+        touched.push(co);
+      }
+      // the new prices are captured in the next per-turn history entry (7.1)
+      if (touched.length) store.log('market', `${src}: share prices repriced`, touched.slice(0, 6).map(t => `${t.abbrev || t.name} → ${db.settings.currency}${t.sharePrice}`).join(' · '), actor, touched.map(t => t.id));
+      break;
+    }
+    case 'set_share_price': {
+      const co = findEnt(fx.company);
+      if (!co) throw new Error('set_share_price: unknown company');
+      co.sharePrice = Math.max(0.01, Math.round(evalExpr(fx.value, { vars: { price: co.sharePrice || 0, ...(co.vars || {}) } }) * 100) / 100);
+      break;
+    }
     default: throw new Error('Unknown effect type: ' + fx.type);
   }
 }
@@ -446,18 +522,61 @@ function advanceTurn(steps, actor) {
 
     const prevGdp = db.globalVars.gdp;
     updateDerived();
-    if (monthIndex(newMs) !== monthIndex(oldMs) && prevGdp) {
+    const monthBoundary = monthIndex(newMs) !== monthIndex(oldMs);
+    if (monthBoundary) {
+      // month-over-month growth, exposed to events (reprice_shares etc.)
+      const base = db.globalVars.gdpLastMonth || prevGdp || db.globalVars.gdp;
+      db.globalVars.gdpGrowth = base ? Math.round((db.globalVars.gdp - base) / base * 10000) / 10000 : 0;
+      db.globalVars.gdpLastMonth = db.globalVars.gdp;
+    }
+    if (monthBoundary && prevGdp) {
       const delta = ((db.globalVars.gdp - prevGdp) / prevGdp) * 100;
       draftNews(`Statistical Bureau: national output ${delta >= 0 ? 'up' : 'down'} ${Math.abs(delta).toFixed(1)}%`,
         `The State Statistical Bureau reports national GDP at ${db.settings.currency}${fmtNum(db.globalVars.gdp)}M, ` +
         `${delta >= 0 ? 'an increase' : 'a decline'} of ${Math.abs(delta).toFixed(1)}% for the month. ` +
         `Average approval of the government stands at ${db.globalVars.avgApproval}%.`, 'Economy', true, 'State Statistical Bureau');
     }
+    recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
   store.save();
   broadcast('sync');
   return db.settings.time;
+}
+
+// ---------- history (time-series for charts) ------------------------------
+// One row per turn, appended at the end of advanceTurn. Polling is O(n) so it
+// is only sampled on week boundaries. Capped so the world doc stays bounded.
+function recordHistory(weekly) {
+  const db = store.get();
+  db.history = db.history || [];
+  const g = db.globalVars;
+  const provinces = {};
+  for (const p of db.provinces) {
+    provinces[p.id] = {
+      gdp: p.vars.gdp || 0, happiness: p.vars.happiness || 0,
+      approval: p.vars.approval || 0, employment: p.vars.employment || 0
+    };
+  }
+  const shares = {};
+  for (const e of db.entities) if (e.type === 'company' && e.sharePrice !== undefined) shares[e.id] = e.sharePrice;
+  const entry = {
+    turn: db.settings.time.turn, date: db.settings.time.date,
+    gdp: g.gdp || 0, population: g.population || 0,
+    avgHappiness: g.avgHappiness || 0, avgApproval: g.avgApproval || 0,
+    moneySupply: g.moneySupply || 0, treasury: g.treasury || 0,
+    provinces, shares
+  };
+  if (weekly) {
+    try {
+      const { national, totalVotes } = computePolling(false);
+      const polling = {};
+      for (const pid in national) polling[pid] = Math.round(national[pid] / (totalVotes || 1) * 1000) / 10;
+      entry.polling = polling;
+    } catch (e) { /* polling is optional data */ }
+  }
+  db.history.push(entry);
+  if (db.history.length > 1000) db.history.splice(0, db.history.length - 1000);
 }
 
 // ---------- elections -----------------------------------------------------

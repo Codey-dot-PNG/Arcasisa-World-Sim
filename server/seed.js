@@ -124,42 +124,50 @@ function seed() {
   // ---- entities ----------------------------------------------------------
   const entities = [
     { id: 'ent_gov', type: 'government', name: 'Government of Arcasia', color: '#4a5560', logo: A + '/flags/seal.png',
-      description: 'The federal government of the Republic of Arcasia. Presidential republic; unicameral Parliament of 150 seats.', vars: {}, inventory: [{ itemId: 'item_gold', qty: 1200 }] },
+      description: 'The federal government of the Republic of Arcasia. Presidential republic; unicameral Parliament of 150 seats.',
+      ceoId: 'per_valen', vars: {}, inventory: [{ itemId: 'item_gold', qty: 1200 }] },
     { id: 'ent_bank', type: 'government', name: 'Bank of Arcasia', color: '#33424d', logo: A + '/flags/seal.png',
-      description: 'Central bank and issuer of the Arcasian Mark (₳).', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
+      description: 'Central bank and issuer of the Arcasian Mark (₳).',
+      ownerId: 'ent_gov', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
 
     { id: 'ent_arc', type: 'company', name: 'ARC', industry: 'State Corporation', color: '#33424d', logo: A + '/companies/arc.png',
       description: 'The Arcasian Republic Corporation. State holding company managing federal industrial assets.',
       ownerId: 'ent_gov', ceoId: 'per_orn', executives: ['per_orn'], sharesOutstanding: 1000000,
+      publicFloat: 0, sharePrice: 900, trust: 62,
       shareholders: [{ entityId: 'ent_gov', shares: 1000000 }],
       vars: { revenue: 310000000, profit: 22000000, valuation: 900000000 }, inventory: [] },
     { id: 'ent_leika', type: 'company', name: 'LEIKA', industry: 'Consumer Electronics', color: '#2f5c5a', logo: A + '/companies/leika.png',
       description: 'Radios, televisions and household electronics from the Lachevan works. The pride of Arcasian living rooms.',
       ownerId: 'per_moss', ceoId: 'per_moss', executives: ['per_moss', 'per_keller'], sharesOutstanding: 800000,
+      publicFloat: 22, sharePrice: 525, trust: 66,
       shareholders: [{ entityId: 'per_moss', shares: 440000 }, { entityId: 'ent_arc', shares: 120000 }, { entityId: 'per_keller', shares: 60000 }, { entityId: 'per_rill', shares: 500 }],
       vars: { revenue: 96000000, profit: 8400000, valuation: 420000000 },
       inventory: [{ itemId: 'item_radio', qty: 3800 }, { itemId: 'item_tv', qty: 900 }] },
     { id: 'ent_satrom', type: 'company', name: 'SATROM', industry: 'Military & High-End Electronics', color: '#5c3a4e', logo: A + '/companies/satrom.png',
       description: 'Defence electronics, radar and precision instruments. Principal supplier to the Arcasian armed forces.',
       ownerId: 'ent_gov', ceoId: 'per_hale', executives: ['per_hale'], sharesOutstanding: 600000,
+      publicFloat: 10, sharePrice: 1017, trust: 58,
       shareholders: [{ entityId: 'ent_gov', shares: 360000 }, { entityId: 'ent_arc', shares: 140000 }, { entityId: 'per_hale', shares: 100000 }],
       vars: { revenue: 74000000, profit: 9100000, valuation: 610000000 },
       inventory: [{ itemId: 'item_radar', qty: 12 }] },
     { id: 'ent_amco', type: 'company', name: 'AMCO', industry: 'Oil & Fuel', color: '#6e4a1f', logo: A + '/companies/amco.png',
       description: 'The Arcasian Mining & Carbon Oil company. Operates the Korota fields and the Razno refinery.',
       ownerId: 'per_keller', ceoId: 'per_keller', executives: ['per_keller'], sharesOutstanding: 900000,
+      publicFloat: 25, sharePrice: 867, trust: 54,
       shareholders: [{ entityId: 'per_keller', shares: 470000 }, { entityId: 'ent_arc', shares: 180000 }, { entityId: 'per_moss', shares: 50000 }, { entityId: 'per_rill', shares: 500 }],
       vars: { revenue: 128000000, profit: 15600000, valuation: 780000000 },
       inventory: [{ itemId: 'item_crude', qty: 45000 }, { itemId: 'item_fuel', qty: 12000 }] },
     { id: 'ent_alko', type: 'company', name: 'ALKO', industry: 'Mining & Oil', color: '#8a4a24', logo: A + '/companies/alko.png',
       description: 'Kordi-based mining and oil concern. Iron, copper and the K-7 field. The largest employer in the southern region.',
       ownerId: 'per_odek', ceoId: 'per_odek', executives: ['per_odek'], sharesOutstanding: 700000,
+      publicFloat: 25, sharePrice: 500, trust: 48,
       shareholders: [{ entityId: 'per_odek', shares: 380000 }, { entityId: 'ent_arc', shares: 160000 }, { entityId: 'per_grazi', shares: 60000 }],
       vars: { revenue: 61000000, profit: 5200000, valuation: 350000000 },
       inventory: [{ itemId: 'item_ore', qty: 12000 }, { itemId: 'item_copper', qty: 340 }, { itemId: 'item_crude', qty: 9000 }] },
     { id: 'ent_grazihall', type: 'company', name: 'GRAZIHALL', industry: 'Construction', color: '#7a2318', logo: A + '/companies/grazihall.png',
       description: 'Construction and civil engineering house of the Grazi family. Built half of Port Kradon and most of its politics.',
       ownerId: 'per_grazi', ceoId: 'per_grazi', executives: ['per_grazi'], sharesOutstanding: 500000,
+      publicFloat: 15, sharePrice: 580, trust: 57,
       shareholders: [{ entityId: 'per_grazi', shares: 410000 }, { entityId: 'per_moss', shares: 40000 }, { entityId: 'ent_arc', shares: 50000 }],
       vars: { revenue: 47000000, profit: 3900000, valuation: 290000000 },
       inventory: [{ itemId: 'item_cement', qty: 22000 }, { itemId: 'item_timber', qty: 8000 }] },
@@ -271,11 +279,11 @@ function seed() {
     { id: 'item_tv', name: 'LEIKA T-1 Television', description: 'First mass-market television set in the Republic.', icon: 'T', category: 'Goods', marketValue: 148, tradable: true, meta: { maker: 'ent_leika' } },
     { id: 'item_radar', name: 'SATROM R-4 Radar Array', description: 'Long-range early warning array. Export restricted.', icon: 'R', category: 'Military', marketValue: 86000, tradable: false, meta: { maker: 'ent_satrom' } },
     { id: 'item_gold', name: 'Gold Bar (400 oz)', description: 'Reserve bullion of the Bank of Arcasia.', icon: 'A', category: 'Reserves', marketValue: 15800, tradable: true, meta: {} },
-    { id: 'item_share_leika', name: 'LEIKA Shares', description: 'Ownership in LEIKA Consumer Electronics.', icon: 'S', category: 'Securities', marketValue: 26, tradable: true, meta: { companyId: 'ent_leika' } },
-    { id: 'item_share_satrom', name: 'SATROM Shares', description: 'Ownership in SATROM Military Electronics.', icon: 'S', category: 'Securities', marketValue: 58, tradable: true, meta: { companyId: 'ent_satrom' } },
-    { id: 'item_share_amco', name: 'AMCO Shares', description: 'Ownership in the Arcasian Mining & Carbon Oil company.', icon: 'S', category: 'Securities', marketValue: 41, tradable: true, meta: { companyId: 'ent_amco' } },
-    { id: 'item_share_alko', name: 'ALKO Shares', description: 'Ownership in the ALKO mining concern.', icon: 'S', category: 'Securities', marketValue: 19, tradable: true, meta: { companyId: 'ent_alko' } },
-    { id: 'item_share_grazihall', name: 'GRAZIHALL Shares', description: 'Ownership in the Grazihall construction house.', icon: 'S', category: 'Securities', marketValue: 33, tradable: true, meta: { companyId: 'ent_grazihall' } },
+    { id: 'item_share_leika', name: 'LEIKA Shares', description: 'Ownership in LEIKA Consumer Electronics.', icon: 'S', category: 'Securities', marketValue: 525, tradable: true, meta: { companyId: 'ent_leika' } },
+    { id: 'item_share_satrom', name: 'SATROM Shares', description: 'Ownership in SATROM Military Electronics.', icon: 'S', category: 'Securities', marketValue: 1017, tradable: true, meta: { companyId: 'ent_satrom' } },
+    { id: 'item_share_amco', name: 'AMCO Shares', description: 'Ownership in the Arcasian Mining & Carbon Oil company.', icon: 'S', category: 'Securities', marketValue: 867, tradable: true, meta: { companyId: 'ent_amco' } },
+    { id: 'item_share_alko', name: 'ALKO Shares', description: 'Ownership in the ALKO mining concern.', icon: 'S', category: 'Securities', marketValue: 500, tradable: true, meta: { companyId: 'ent_alko' } },
+    { id: 'item_share_grazihall', name: 'GRAZIHALL Shares', description: 'Ownership in the Grazihall construction house.', icon: 'S', category: 'Securities', marketValue: 580, tradable: true, meta: { companyId: 'ent_grazihall' } },
     { id: 'item_medal', name: 'Medal of the Republic', description: 'Highest civilian honour of Arcasia.', icon: 'M', category: 'Honours', marketValue: 0, tradable: false, meta: {} }
   ];
 
@@ -337,12 +345,20 @@ function seed() {
   // ---- simulation events --------------------------------------------------
   const events = [
     {
-      id: 'ev_econ_drift', name: 'Daily Economic Drift', enabled: true,
-      description: 'Provincial GDP follows employment; happiness follows approval. The heartbeat of the economy.',
+      id: 'ev_employment', name: 'Jobs → Employment', enabled: true,
+      description: 'STEP 1 of the causal chain. Provincial employment is recomputed from labour demand (Σ employees of every property in the province) against the working-age labour force. Blend keeps it gradual; k calibrates demand to the listed workforce sample. Tune k / workingShare / blend here.',
+      trigger: { type: 'every_turn' }, conditions: [],
+      effects: [
+        { type: 'recompute_employment', k: 200, workingShare: 0.6, blend: 0.15 }
+      ], lastTurn: 0, runs: 0
+    },
+    {
+      id: 'ev_econ_drift', name: 'Employment → GDP & Happiness', enabled: true,
+      description: 'STEP 2. Provincial GDP follows employment; happiness drifts toward an employment-anchored target (35 + employment·0.35), nudged by approval. Unemployment is the strongest depressor of mood — it outweighs approval roughly 2:1.',
       trigger: { type: 'every_turn' }, conditions: [],
       effects: [
         { type: 'adjust_var', scope: 'province', target: 'all', key: 'gdp', op: 'add', value: '$gdp * 0.00035 * ($employment - 88)' },
-        { type: 'adjust_var', scope: 'province', target: 'all', key: 'happiness', op: 'add', value: 'clamp(($approval - 50) * 0.012, -0.4, 0.4)' }
+        { type: 'adjust_var', scope: 'province', target: 'all', key: 'happiness', op: 'add', value: 'clamp(((35 + $employment * 0.35 + ($approval - 50) * 0.06) - $happiness) * 0.05, -0.5, 0.5)' }
       ], lastTurn: 0, runs: 0
     },
     {
@@ -370,19 +386,27 @@ function seed() {
       ], lastTurn: 0, runs: 0
     },
     {
-      id: 'ev_polling', name: 'Weekly Polling Drift', enabled: true,
-      description: 'Government support in every demographic group moves with happiness, plus noise.',
+      id: 'ev_polling', name: 'Economy → Opinion', enabled: true,
+      description: 'STEP 3. Government support in every demographic group moves with local happiness, household economic confidence, and national GDP growth (g(gdpGrowth)), plus a little noise. Approval of the government is the slower-moving cousin of happiness.',
       trigger: { type: 'weekly' }, conditions: [],
       effects: [
-        { type: 'adjust_demo', province: 'all', group: 'all', metric: 'governmentSupport', op: 'add', value: 'clamp(($happiness - 50) * 0.05, -1.5, 1.5) + rand(-1.4, 1.4)' }
+        { type: 'adjust_demo', province: 'all', group: 'all', metric: 'governmentSupport', op: 'add', value: 'clamp(($happiness - 50) * 0.05 + ($economicConfidence - 50) * 0.03 + g(gdpGrowth) * 60, -1.8, 1.8) + rand(-1.4, 1.4)' }
+      ], lastTurn: 0, runs: 0
+    },
+    {
+      id: 'ev_trust', name: 'Trust → Companies', enabled: true,
+      description: 'STEP 4. Each company’s citizen trust drifts toward the average happiness of the provinces where it holds property. Trust feeds share prices (the weekly market session) and can be used as a small revenue multiplier.',
+      trigger: { type: 'every_turn' }, conditions: [],
+      effects: [
+        { type: 'adjust_trust', company: 'all', value: '$avghappiness', rate: 0.06 }
       ], lastTurn: 0, runs: 0
     },
     {
       id: 'ev_market', name: 'Weekly Market Session', enabled: true,
-      description: 'Securities reprice on the Lachevan exchange. Every inventory holding shares updates automatically.',
+      description: 'Listed shares reprice on the Lachevan exchange. Price moves with earnings yield (profit/valuation), national growth, citizen trust, and a little noise. All coefficients live in this effect — tune them here.',
       trigger: { type: 'weekly' }, conditions: [],
       effects: [
-        { type: 'set_item_value', item: 'all', category: 'Securities', value: 'max(1, $value * rand(0.94, 1.07))' }
+        { type: 'reprice_shares', company: 'all', a: 0.6, b: 0.8, c: 0.15, e: 0.03 }
       ], lastTurn: 0, runs: 0
     },
     {
@@ -483,6 +507,9 @@ function seed() {
       ...COMPANY_VAR_DEFS.map(([key, label, format]) => ({ id: 'var_co_' + key, scope: 'company', key, label, format, default: 0 }))
     ],
     roles, users, entities, provinces, cities, properties, items, accounts,
+    markers: [],
+    history: [],
+    trades: [],
     transactions: [], events, news,
     timeline: [{
       id: 'tl_genesis', ts: now, turn: 0, simDate: '1962-03-01', type: 'system',

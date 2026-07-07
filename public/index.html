@@ -82,7 +82,10 @@
     <aside id="inspector" class="hidden">
       <div class="inspector-head">
         <span id="insp-kicker" class="insp-kicker">DOSSIER</span>
-        <button id="insp-close" class="icon-btn" title="Close">✕</button>
+        <span class="insp-head-actions">
+          <button id="insp-edit" class="icon-btn hidden" title="Edit">✎</button>
+          <button id="insp-close" class="icon-btn" title="Close">✕</button>
+        </span>
       </div>
       <div id="insp-body"></div>
     </aside>
@@ -98,6 +101,7 @@
 <div id="toast-root"></div>
 
 <script src="/js/core.js"></script>
+<script src="/js/charts.js"></script>
 <script src="/js/map.js"></script>
 <script src="/js/mapedit.js"></script>
 <script src="/js/views.js"></script>

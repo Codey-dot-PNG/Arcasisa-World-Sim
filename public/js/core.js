@@ -7,6 +7,8 @@ const W = {
   state: null,       // permission-filtered world
   view: 'map',
   selection: null,   // {kind, id}
+  inspEdit: false,   // inspector inline-edit mode toggle (Phase 2)
+  inspDraft: null,   // draft object being edited in the inspector
   layer: 'political',
   dataVar: 'gdp',
   placing: null,     // GM map-placement callback
@@ -92,6 +94,7 @@ const entById = (id) => S() && S().entities.find(e => e.id === id);
 const provById = (id) => S() && S().provinces.find(p => p.id === id);
 const cityById = (id) => S() && S().cities.find(c => c.id === id);
 const propById = (id) => S() && S().properties.find(p => p.id === id);
+const markerById = (id) => S() && (S().markers || []).find(m => m.id === id);
 const itemById = (id) => S() && S().items.find(i => i.id === id);
 const acctById = (id) => S() && S().accounts.find(a => a.id === id);
 const entName = (id) => { const e = entById(id); return e ? e.name : '—'; };
@@ -175,6 +178,37 @@ async function refreshState() {
   App.renderAll();
 }
 
+/* ---------- shared form helpers (bind into a draft object) ---------- */
+/* Used by both GM Studio (gm.js) and the inspector's inline edit mode
+   (views.js). Keep signatures stable — both call sites depend on them. */
+const Forms = {
+  field(label, input, hint) {
+    return el('div', el('label.field-label', label), input, hint ? el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:3px;' }, hint) : null);
+  },
+  text(obj, key, ph) { return el('input.text-input', { value: obj[key] ?? '', placeholder: ph || '', oninput: (e) => obj[key] = e.target.value }); },
+  num(obj, key, step) { return el('input.text-input', { type: 'number', step: step || 'any', value: obj[key] ?? '', oninput: (e) => obj[key] = e.target.value === '' ? undefined : Number(e.target.value) }); },
+  area(obj, key, style) { const t = el('textarea.text-input', { style: style || '', oninput: (e) => obj[key] = e.target.value }); t.value = obj[key] ?? ''; return t; },
+  check(obj, key, label) {
+    return el('label', { style: 'display:flex; gap:8px; align-items:center; margin-top:12px; font-size:13px; cursor:pointer;' },
+      el('input', { type: 'checkbox', checked: !!obj[key], onchange: (e) => obj[key] = e.target.checked }), label);
+  },
+  sel(obj, key, options, onchange) {
+    const s = el('select.text-input', options.map(o => el('option', { value: o[0], selected: String(obj[key]) === String(o[0]) ? 'selected' : undefined }, o[1])));
+    s.addEventListener('change', () => { obj[key] = s.value === '__null__' ? null : s.value; if (onchange) onchange(s.value); });
+    if (obj[key] === undefined && options.length) obj[key] = options[0][0] === '__null__' ? null : options[0][0];
+    return s;
+  },
+  color(obj, key) {
+    return el('input', { type: 'color', value: obj[key] || '#5c5340', style: 'width:52px; height:28px; border:1px solid var(--rule-strong); background:transparent; cursor:pointer;', oninput: (e) => obj[key] = e.target.value });
+  },
+  entOptions(types, allowNull) {
+    const opts = S().entities.filter(e => !types || types.includes(e.type)).map(e => [e.id, e.name + ' (' + (TYPE_LABEL[e.type] || e.type) + ')']);
+    return allowNull ? [['__null__', '— none —'], ...opts] : opts;
+  },
+  provOptions(extra) { return [...(extra || []), ...S().provinces.map(p => [p.id, p.name])]; },
+  itemOptions(extra) { return [...(extra || []), ...S().items.map(i => [i.id, i.name])]; },
+};
+
 /* ---------- toast & modal ---------- */
 function toast(msg, isErr) {
   const t = el('div.toast', { class: isErr ? 'err' : '' }, msg);
@@ -206,13 +240,16 @@ function confirmModal(title, text, onYes, yesLabel) {
 
 /* ---------- selection ---------- */
 function select(kind, id, opts) {
+  // switching the inspected record always discards any in-progress edit
+  if (!W.selection || W.selection.kind !== kind || W.selection.id !== id) { W.inspEdit = false; W.inspDraft = null; }
   W.selection = { kind, id };
   Views.inspect(kind, id);
   if (W.view === 'map' && GameMap.ready) {
     GameMap.highlight();
     const pos = kind === 'province' ? (provById(id) || {}).labelPos
       : kind === 'city' ? (cityById(id) || {}).pos
-        : kind === 'property' ? (propById(id) || {}).pos : null;
+        : kind === 'property' ? (propById(id) || {}).pos
+          : kind === 'marker' ? (markerById(id) || {}).pos : null;
     if (pos && (!opts || !opts.noPan)) GameMap.focus(pos);
   }
   renderExplorer();

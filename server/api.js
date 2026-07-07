@@ -2,6 +2,8 @@
 const crypto = require('crypto');
 const store = require('./store');
 const sim = require('./sim');
+const ownership = require('./ownership');
+const market = require('./market');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -66,15 +68,20 @@ function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
   const own = u.user.entityId;
+  // The ownership chain the operator commands (own entity + everything it
+  // controls). 'own' visibility follows this chain, so an owner sees the
+  // accounts/inventories of controlled companies and the President sees the
+  // government's holdings — the Bank of Arcasia included.
+  const controlled = own ? ownership.controlledSet(own) : new Set();
 
   const accounts = p.accounts === 'all' ? db.accounts
-    : p.accounts === 'own' ? db.accounts.filter(a => a.ownerId === own) : [];
+    : p.accounts === 'own' ? db.accounts.filter(a => controlled.has(a.ownerId)) : [];
   const visAcct = new Set(accounts.map(a => a.id));
 
   const transactions = (p.accounts === 'all' ? db.transactions
     : db.transactions.filter(t => (t.from && visAcct.has(t.from)) || (t.to && visAcct.has(t.to)))).slice(-400);
 
-  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && ownerId === own);
+  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId));
   const military = (p.mapLayers || []).includes('military');
 
   const entities = db.entities.map(e => {
@@ -103,6 +110,18 @@ function filterState(u) {
 
   const news = (p.manageNews ? db.news : db.news.filter(n => n.status === 'published')).slice(-300);
 
+  // Timeline visibility (Phase 6): non-GM operators see the public record
+  // (news / time / elections / system) plus entries that concern their own
+  // ownership chain. GM sees everything. Cap kept at 400 after filtering.
+  const publicTlTypes = new Set(['news', 'time', 'election', 'system']);
+  const timeline = (p.gm ? db.timeline
+    : db.timeline.filter(e => publicTlTypes.has(e.type) || (e.refs && e.refs.some(r => controlled.has(r))))).slice(-400);
+
+  // Trade offers (Phase 4.3): a user sees offers where either side is in their
+  // ownership chain; GM sees all.
+  const trades = p.gm ? (db.trades || [])
+    : (db.trades || []).filter(t => controlled.has(t.fromEntityId) || controlled.has(t.toEntityId));
+
   return {
     settings: db.settings,
     globalVars: p.statistics ? db.globalVars : { population: db.globalVars.population },
@@ -110,7 +129,9 @@ function filterState(u) {
     entities, provinces, properties, accounts, transactions, news,
     cities: db.cities,
     items: db.items,
-    timeline: db.timeline.slice(-400),
+    markers: db.markers || [],
+    history: p.statistics ? (db.history || []) : undefined,
+    timeline, trades,
     elections: db.elections,
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
@@ -121,7 +142,8 @@ function filterState(u) {
 // ---------- GM collection CRUD -------------------------------------------
 const COLLS = {
   entities: 'ent', provinces: 'prov', cities: 'city', properties: 'prop',
-  items: 'item', events: 'ev', variables: 'var', roles: 'role', accounts: 'acct'
+  items: 'item', events: 'ev', variables: 'var', roles: 'role', accounts: 'acct',
+  markers: 'mark'
 };
 
 function cascadeDelete(coll, obj) {
@@ -270,7 +292,7 @@ async function handle(req, res, pathname, method) {
       if (from.id === to.id) return bad('Cannot transfer to the same account.');
       if (!(amount > 0)) return bad('Amount must be positive.');
       const isGm = u.role.perms.gm;
-      if (!isGm && from.ownerId !== u.user.entityId) return deny('You do not control the source account.');
+      if (!isGm && !ownership.controls(u.user.entityId, from.ownerId)) return deny('You do not control the source account.');
       if (!isGm && from.balance < amount) return bad('Insufficient funds.');
       sim.txn(from.id, to.id, amount, String(b.memo || '').slice(0, 140), u.user.displayName, 'transfer');
       store.save(); broadcast('sync');
@@ -287,6 +309,12 @@ async function handle(req, res, pathname, method) {
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
       if (!(qty > 0)) return bad('Quantity must be positive.');
       if (!item.tradable && !u.role.perms.gm) return deny('That item is not tradable.');
+      // Share certificates are ownership records — route through the market so
+      // the shareholder register moves in lockstep with the certificate item.
+      if (item.meta && item.meta.companyId) {
+        try { market.transfer(item.meta.companyId, fromEnt.id, toEnt.id, qty, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, { ok: true }); }
+        catch (e) { return bad(e.message); }
+      }
       fromEnt.inventory = fromEnt.inventory || [];
       const row = fromEnt.inventory.find(r => r.itemId === item.id);
       if (!row || row.qty < qty) return bad('Not enough in inventory.');
@@ -298,6 +326,153 @@ async function handle(req, res, pathname, method) {
       store.log('inventory', `${qty} × ${item.name} traded`, `${fromEnt.name} → ${toEnt.name}`, u.user.displayName, [fromEnt.id, toEnt.id, item.id]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });
+    }
+
+    // ---- negotiated trade offers (Phase 4.3) ----
+    // Instant transfers (above) move goods immediately; these are proposals
+    // that sit in db.trades until the counterparty accepts/declines, or the
+    // creator cancels. Nothing is escrowed — balances/inventories are only
+    // checked (and moved) at accept time.
+    if (pathname === '/api/trades' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      const fromEntityId = gm && b.fromEntityId ? b.fromEntityId : u.user.entityId;
+      const fromEnt = db.entities.find(e => e.id === fromEntityId);
+      const toEnt = db.entities.find(e => e.id === b.toEntityId);
+      if (!fromEnt || !toEnt) return bad('Unknown entity.');
+      if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
+      if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
+      const cleanRows = (arr) => (Array.isArray(arr) ? arr : [])
+        .map(r => ({ itemId: String(r.itemId || ''), qty: Math.round(Number(r.qty)) }))
+        .filter(r => r.itemId && r.qty > 0 && db.items.some(i => i.id === r.itemId));
+      const give = cleanRows(b.give);
+      const get = cleanRows(b.get);
+      const money = { give: Math.max(0, Number((b.money || {}).give) || 0), get: Math.max(0, Number((b.money || {}).get) || 0) };
+      if (!give.length && !get.length && !money.give && !money.get) return bad('An offer needs at least one item or amount of money.');
+      const trade = {
+        id: store.uid('trade'), fromEntityId: fromEnt.id, toEntityId: toEnt.id,
+        give, get, money, memo: String(b.memo || '').slice(0, 240),
+        status: 'open', ts: Date.now(), turn: db.settings.time.turn
+      };
+      db.trades = db.trades || [];
+      db.trades.push(trade);
+      store.log('ownership', `Trade offer sent`, `${fromEnt.name} → ${toEnt.name}${trade.memo ? ' · ' + trade.memo : ''}`, u.user.displayName, [fromEnt.id, toEnt.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { trade });
+    }
+    m = pathname.match(/^\/api\/trades\/([\w-]+)\/(accept|decline|cancel)$/);
+    if (m) {
+      const trade = (db.trades || []).find(t => t.id === m[1]);
+      if (!trade) return bad('No such trade offer.');
+      const action = m[2];
+      const gm = u.role.perms.gm;
+      if (trade.status !== 'open') return bad('That offer is no longer open.');
+      const fromEnt = db.entities.find(e => e.id === trade.fromEntityId);
+      const toEnt = db.entities.find(e => e.id === trade.toEntityId);
+      if (!fromEnt || !toEnt) return bad('A party to this trade no longer exists.');
+
+      if (action === 'cancel') {
+        if (!gm && !ownership.controls(u.user.entityId, trade.fromEntityId)) return deny('Only the offering party may cancel this trade.');
+        trade.status = 'cancelled';
+        store.log('ownership', 'Trade offer cancelled', `${fromEnt.name} → ${toEnt.name}`, u.user.displayName, [fromEnt.id, toEnt.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { trade });
+      }
+      if (action === 'decline') {
+        if (!gm && !ownership.controls(u.user.entityId, trade.toEntityId)) return deny('Only the receiving party may decline this trade.');
+        trade.status = 'declined';
+        store.log('ownership', 'Trade offer declined', `${toEnt.name} declined an offer from ${fromEnt.name}`, u.user.displayName, [fromEnt.id, toEnt.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { trade });
+      }
+
+      // accept — validate everything before mutating anything
+      if (!gm && !ownership.controls(u.user.entityId, trade.toEntityId)) return deny('Only the receiving party may accept this trade.');
+      const hasQty = (ent, itemId, qty) => {
+        const row = (ent.inventory || []).find(r => r.itemId === itemId);
+        return row && row.qty >= qty;
+      };
+      for (const r of trade.give) if (!hasQty(fromEnt, r.itemId, r.qty)) return bad(`${fromEnt.name} no longer holds enough ${(db.items.find(i => i.id === r.itemId) || {}).name || r.itemId}.`);
+      for (const r of trade.get) if (!hasQty(toEnt, r.itemId, r.qty)) return bad(`${toEnt.name} no longer holds enough ${(db.items.find(i => i.id === r.itemId) || {}).name || r.itemId}.`);
+      const fromAcct = sim.primaryAccount(fromEnt.id, false);
+      const toAcct = sim.primaryAccount(toEnt.id, false);
+      if (trade.money.give > 0 && !gm && (!fromAcct || fromAcct.balance < trade.money.give)) return bad(`${fromEnt.name} has insufficient funds.`);
+      if (trade.money.get > 0 && !gm && (!toAcct || toAcct.balance < trade.money.get)) return bad(`${toEnt.name} has insufficient funds.`);
+
+      const moveItem = (fromE, toE, itemId, qty) => {
+        const item = db.items.find(i => i.id === itemId);
+        if (item && item.meta && item.meta.companyId) { market.transfer(item.meta.companyId, fromE.id, toE.id, qty, u.user.displayName); return; }
+        fromE.inventory = fromE.inventory || [];
+        const row = fromE.inventory.find(r => r.itemId === itemId);
+        row.qty -= qty;
+        fromE.inventory = fromE.inventory.filter(r => r.qty > 0);
+        toE.inventory = toE.inventory || [];
+        const trow = toE.inventory.find(r => r.itemId === itemId);
+        if (trow) trow.qty += qty; else toE.inventory.push({ itemId, qty });
+      };
+      for (const r of trade.give) moveItem(fromEnt, toEnt, r.itemId, r.qty);
+      for (const r of trade.get) moveItem(toEnt, fromEnt, r.itemId, r.qty);
+      if (trade.money.give > 0) sim.txn(sim.primaryAccount(fromEnt.id, true).id, sim.primaryAccount(toEnt.id, true).id, trade.money.give, trade.memo || 'Trade settlement', u.user.displayName, 'transfer');
+      if (trade.money.get > 0) sim.txn(sim.primaryAccount(toEnt.id, true).id, sim.primaryAccount(fromEnt.id, true).id, trade.money.get, trade.memo || 'Trade settlement', u.user.displayName, 'transfer');
+
+      trade.status = 'accepted';
+      store.log('ownership', 'Trade offer accepted', `${fromEnt.name} ⇄ ${toEnt.name}${trade.memo ? ' · ' + trade.memo : ''}`, u.user.displayName, [fromEnt.id, toEnt.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { trade });
+    }
+
+    // ---- owner-level entity editing (descriptive fields only) ----
+    m = pathname.match(/^\/api\/entity\/([\w-]+)$/);
+    if (m && method === 'PATCH') {
+      const target = db.entities.find(e => e.id === m[1]);
+      if (!target) return bad('No such entity.');
+      const isGm = u.role.perms.gm;
+      if (!isGm && !ownership.controls(u.user.entityId, target.id)) return deny('You do not control this entity.');
+      const b = await readBody(req);
+      const FIELDS = ['description', 'color', 'logo'];
+      let changed = false;
+      for (const k of FIELDS) {
+        if (b[k] !== undefined) { target[k] = String(b[k]).slice(0, k === 'description' ? 4000 : 400); changed = true; }
+      }
+      if (!changed) return bad('No editable fields supplied.');
+      store.log('gm', `Updated ${target.name || target.id}`, 'Description/appearance edited by owner.', u.user.displayName, [target.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, entity: target });
+    }
+
+    // ---- stock market (Phase 4.4) ----
+    if (pathname === '/api/market/buy' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      const buyerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
+      if (!buyerId) return bad('No entity to trade for.');
+      try { const r = market.buy(b.companyId, buyerId, b.shares, u.user.displayName, { gm }); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
+    }
+    if (pathname === '/api/market/sell' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      const sellerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
+      if (!sellerId) return bad('No entity to trade for.');
+      if (!gm && !ownership.controls(u.user.entityId, sellerId)) return deny('You do not control that holder.');
+      try { const r = market.sell(b.companyId, sellerId, b.shares, u.user.displayName, { gm }); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
+    }
+    if (pathname === '/api/market/transfer' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      const fromId = b.fromEntityId && (gm || ownership.controls(u.user.entityId, b.fromEntityId)) ? b.fromEntityId : u.user.entityId;
+      if (!gm && !ownership.controls(u.user.entityId, fromId)) return deny('You do not control that holder.');
+      if (!b.toEntityId) return bad('Recipient required.');
+      try { const r = market.transfer(b.companyId, fromId, b.toEntityId, b.shares, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
+    }
+    if (pathname === '/api/market/issue' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, b.companyId)) return deny('Only the company’s controller may issue shares.');
+      try { const r = market.issue(b.companyId, b.newShares, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
     }
 
     // ---- newsroom ----

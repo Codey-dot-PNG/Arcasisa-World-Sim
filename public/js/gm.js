@@ -268,6 +268,23 @@ const GM = {
     }
     main.appendChild(el('div', { style: 'overflow-x:auto;' }, el('table.data.demo-table', el('thead', head), tbody)));
 
+    // voter base — scripted party support for this province. When any
+    // percentage is set (> 0), elections and polling use exactly this split
+    // for the province instead of the demographic simulation.
+    main.appendChild(Views.secLabel('Voter Base'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Party support in this province, in percent (e.g. KFF 60). Leave everything at 0 to let the demographic simulation decide. Percentages are normalised, so they don’t have to add to 100.'));
+    d.voterBase = d.voterBase || {};
+    const parties = S().entities.filter(e => e.type === 'party');
+    const vbGrid = el('div.form-grid');
+    for (const pt of parties) {
+      vbGrid.appendChild(this.field(pt.abbrev || pt.name, el('input.text-input', {
+        type: 'number', min: '0', max: '100', step: '1', value: d.voterBase[pt.id] ?? 0,
+        oninput: (e) => { const v = Number(e.target.value) || 0; if (v > 0) d.voterBase[pt.id] = v; else delete d.voterBase[pt.id]; }
+      })));
+    }
+    main.appendChild(vbGrid);
+
     const bar = this.saveBar('provinces', d, isNew);
     bar.firstChild.addEventListener('click', () => {
       const txt = String(d.shapeText || '').trim();

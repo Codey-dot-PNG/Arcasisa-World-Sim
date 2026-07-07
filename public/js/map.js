@@ -8,6 +8,8 @@
 const GameMap = {
   ready: false,
   VIEW: { w: 3840, h: 2160 },
+  // fixed world-unit scale for texture buildings — constant at every zoom
+  TEX_SCALE: 1,
   view: { x: 0, y: 0, k: 1 },
   svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
   drag: null,
@@ -458,9 +460,19 @@ const GameMap = {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('data-marker', pr.id);
       g.setAttribute('data-x', pr.pos[0]); g.setAttribute('data-y', pr.pos[1]);
+      // textured buildings render at a fixed map scale and never show the flat
+      // square — flagged here so updateMarkerScale can treat them specially.
+      if (pr.texture) g.setAttribute('data-textured', '1');
       const rect = document.createElementNS(NS, 'rect');
-      rect.setAttribute('x', -17.6); rect.setAttribute('y', -17.6);
-      rect.setAttribute('width', 35.2); rect.setAttribute('height', 35.2);
+      if (pr.texture) {
+        // invisible hit target sized to the building art (never drawn), so the
+        // whole structure is clickable / draggable
+        rect.setAttribute('x', -40); rect.setAttribute('y', -84);
+        rect.setAttribute('width', 80); rect.setAttribute('height', 98);
+      } else {
+        rect.setAttribute('x', -17.6); rect.setAttribute('y', -17.6);
+        rect.setAttribute('width', 35.2); rect.setAttribute('height', 35.2);
+      }
       rect.setAttribute('class', 'prop-marker');
       rect.setAttribute('fill', owner ? owner.color || '#5c5340' : '#5c5340');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) rect.classList.add('selected');
@@ -503,7 +515,22 @@ const GameMap = {
       // .iso-building is pointer-events:none (see style.css) so the
       // transparent .prop-marker rect underneath stays the sole hit target
       // and its <title> (set above) still supplies the hover tooltip.
-      const iso = this.isoBuilding(pr.kind, owner ? owner.color || '#5c5340' : '#5c5340');
+      // A property with an assigned building texture (auto-picked per kind on
+      // the server) renders that art instead of the procedural block set —
+      // deliberately large so structures dominate the close-up map.
+      let iso;
+      if (pr.texture) {
+        iso = document.createElementNS(NS, 'image');
+        iso.setAttribute('class', 'iso-building tex-building');
+        const href = '/assets/buildings/' + pr.texture;
+        iso.setAttribute('href', href);
+        iso.setAttributeNS('http://www.w3.org/1999/xlink', 'href', href);
+        iso.setAttribute('width', 120); iso.setAttribute('height', 120);
+        iso.setAttribute('x', -60); iso.setAttribute('y', -100); // art's feet stand on the map point
+        iso.setAttribute('preserveAspectRatio', 'xMidYMax meet');
+      } else {
+        iso = this.isoBuilding(pr.kind, owner ? owner.color || '#5c5340' : '#5c5340');
+      }
       iso.classList.add('iso-hidden');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) iso.classList.add('selected');
       g.appendChild(iso);
@@ -620,6 +647,19 @@ const GameMap = {
     if (this.markerLayer) {
       for (const g of this.markerLayer.children) {
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
+        // Textured buildings are locked to the map: one fixed world-unit scale
+        // at every zoom level (no counter-scaling), and the texture is always
+        // shown — the flat square is never used for them.
+        if (g.getAttribute('data-textured') === '1') {
+          g.setAttribute('transform', `translate(${x},${y}) scale(${this.TEX_SCALE})`);
+          const rect = g.querySelector('.prop-marker');
+          const glyph = g.querySelector('.prop-glyph');
+          const iso = g.querySelector('.iso-building');
+          if (iso) iso.classList.remove('iso-hidden');
+          if (rect) rect.style.opacity = '0';
+          if (glyph) glyph.style.display = 'none';
+          continue;
+        }
         const sel = W.selection && W.selection.kind === 'property' && W.selection.id === g.getAttribute('data-marker');
         const shown = showProps || sel;
         const s = shown ? 1 / k : 0.32 / k;

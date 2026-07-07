@@ -157,6 +157,9 @@ function migrate(world) {
   // issue/reconcile property deed items against property.ownerId
   try { if (require('./deeds').syncAllDeeds(world)) changed = true; }
   catch (e) { /* deeds module optional during early boot */ }
+  // give every property a building texture fitting its kind
+  try { if (require('./buildings').syncAllTextures(world)) changed = true; }
+  catch (e) { /* buildings module optional during early boot */ }
 
   // Masthead logo images for the four fixed papers (additive — a GM-set
   // logo is left alone).

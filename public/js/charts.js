@@ -203,5 +203,78 @@ const Charts = {
     }
 
     return svg;
+  },
+
+  /* ---------- pie chart ----------
+     rows: [{label, value, color?}, ...]
+     opts: { width, height, title, valueFormat(v) } — slices are drawn
+     clockwise from 12 o'clock with a legend on the right showing each
+     label and its percentage share. */
+  chartPie(rows, opts) {
+    opts = opts || {};
+    const width = opts.width || 320, height = opts.height || 170;
+    const clean = (rows || [])
+      .filter(r => r && r.label !== undefined && this._num(r.value) > 0)
+      .map(r => ({ label: r.label, value: this._num(r.value), color: r.color }))
+      .sort((a, b) => b.value - a.value);
+    const total = clean.reduce((s, r) => s + r.value, 0);
+    if (!clean.length || total <= 0) return this._noData(width, height, opts.title);
+
+    const svg = this._svg('svg', { viewBox: `0 0 ${width} ${height}`, width, height, class: 'chart-svg chart-pie' });
+    svg.appendChild(this._svg('rect', { x: 0, y: 0, width, height, fill: 'var(--paper)' }));
+    const titleH = opts.title ? 20 : 4;
+    if (opts.title) {
+      const t = this._svg('text', { x: 12, y: 15, 'font-family': 'var(--font-mono)', 'font-size': 10, fill: 'var(--ink-soft)', 'letter-spacing': '0.1em' });
+      t.textContent = String(opts.title).toUpperCase();
+      svg.appendChild(t);
+    }
+
+    // fallback palette for slices without a colour of their own
+    const PALETTE = ['#8a3c34', '#3c5a74', '#7a6a34', '#4a6a48', '#6a4a68', '#a0763a', '#54666e', '#8a8054'];
+    const cx = 12 + (height - titleH - 16) / 2, cy = titleH + (height - titleH) / 2;
+    const R = (height - titleH - 16) / 2;
+    let angle = -Math.PI / 2; // start at 12 o'clock
+    const pt = (a) => [cx + R * Math.cos(a), cy + R * Math.sin(a)];
+    clean.forEach((r, i) => {
+      const sweep = (r.value / total) * Math.PI * 2;
+      const color = r.color || PALETTE[i % PALETTE.length];
+      let node;
+      if (clean.length === 1) {
+        node = this._svg('circle', { cx, cy, r: R, fill: color });
+      } else {
+        const [x1, y1] = pt(angle);
+        const [x2, y2] = pt(angle + sweep);
+        node = this._svg('path', {
+          d: `M ${cx} ${cy} L ${x1} ${y1} A ${R} ${R} 0 ${sweep > Math.PI ? 1 : 0} 1 ${x2} ${y2} Z`,
+          fill: color
+        });
+      }
+      node.setAttribute('stroke', 'var(--paper)');
+      node.setAttribute('stroke-width', '1.5');
+      const tip = this._svg('title');
+      tip.textContent = `${r.label} — ${Math.round(r.value / total * 1000) / 10}%`;
+      node.appendChild(tip);
+      svg.appendChild(node);
+      angle += sweep;
+    });
+
+    // legend, capped so long lists don't overflow the box
+    const legendX = cx + R + 16;
+    const maxRows = Math.floor((height - titleH - 8) / 15);
+    const shown = clean.slice(0, maxRows);
+    const fmtV = (v) => (typeof opts.valueFormat === 'function') ? opts.valueFormat(v) : (Math.round(v / total * 1000) / 10) + '%';
+    shown.forEach((r, i) => {
+      const y = titleH + 12 + i * 15;
+      svg.appendChild(this._svg('rect', { x: legendX, y: y - 8, width: 9, height: 9, fill: r.color || PALETTE[i % PALETTE.length], stroke: 'var(--rule-strong)', 'stroke-width': 0.5 }));
+      const t = this._svg('text', { x: legendX + 14, y, 'font-family': 'var(--font-mono)', 'font-size': 9.5, fill: 'var(--ink-soft)' });
+      t.textContent = `${String(r.label).slice(0, 22)} · ${fmtV(r.value)}`;
+      svg.appendChild(t);
+    });
+    if (clean.length > shown.length) {
+      const t = this._svg('text', { x: legendX + 14, y: titleH + 12 + shown.length * 15, 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
+      t.textContent = `+${clean.length - shown.length} more`;
+      svg.appendChild(t);
+    }
+    return svg;
   }
 };

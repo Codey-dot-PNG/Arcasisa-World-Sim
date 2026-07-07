@@ -151,7 +151,7 @@ function market_treasuryPoolClient(co) {
 }
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
-const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', port: 'P', airport: 'V', university: 'U', infrastructure: 'I' };
+const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };
 // Assignable SVG map icons (Phase 1.5). Filenames (no extension) under
 // public/assets/icons/. Properties and event markers may carry an `icon`
 // naming one of these; the map renders /assets/icons/<icon>.svg in place of the

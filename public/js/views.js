@@ -329,6 +329,15 @@ const Views = {
     renderExplorer();
   },
 
+  // province.voterBase ({ partyId: pct }) as pie rows, or null when unset
+  voterBaseRows(p) {
+    const vb = (p && p.voterBase) || {};
+    const rows = S().entities.filter(e => e.type === 'party')
+      .map(pt => ({ label: pt.abbrev || pt.name, value: Math.max(0, Number(vb[pt.id]) || 0), color: pt.color }))
+      .filter(r => r.value > 0);
+    return rows.length ? rows : null;
+  },
+
   inspProvince(id) {
     const p = provById(id);
     if (!p) return el('div', 'Not on file.');
@@ -348,8 +357,18 @@ const Views = {
     for (const k in p.vars) if (!shown.has(k)) wrap.appendChild(this.kv(k, fmtNum(p.vars[k])));
     if (!perms().statistics) wrap.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:8px;' }, 'FULL STATISTICS REQUIRE CLEARANCE.'));
 
+    // voter base — public political knowledge, set by the GM per province
+    const vbRows = this.voterBaseRows(p);
+    if (vbRows) {
+      wrap.appendChild(this.secLabel('Voter Base'));
+      wrap.appendChild(Charts.chartPie(vbRows, { width: 300, height: 160, title: 'Party Support' }));
+    }
+
     if (p.demographics && perms().statistics) {
       wrap.appendChild(this.secLabel('Population Groups'));
+      wrap.appendChild(Charts.chartPie(Object.keys(p.demographics).map(gname => ({
+        label: gname, value: (p.demographics[gname] || {}).population || 0
+      })), { width: 300, height: 160, title: 'Population Mix', valueFormat: undefined }));
       for (const gname in p.demographics) {
         const g = p.demographics[gname];
         wrap.appendChild(this.barRow(gname, (g.population / (p.vars.population || 1)) * 100, 'var(--ink-soft)', fmtCompact(g.population)));
@@ -389,6 +408,8 @@ const Views = {
     if (p) {
       wrap.appendChild(this.secLabel('Province'));
       wrap.appendChild(el('div.var-row', el('span.var-label', { style: 'cursor:pointer;', onclick: () => select('province', p.id) }, p.name), el('span.var-value', fmtCompact(p.vars.population))));
+      const vbRows = this.voterBaseRows(p);
+      if (vbRows) wrap.appendChild(Charts.chartPie(vbRows, { width: 300, height: 150, title: p.name + ' — Party Support' }));
     }
     if (props.length) {
       wrap.appendChild(this.secLabel('Nearby Properties'));
@@ -414,6 +435,13 @@ const Views = {
     wrap.appendChild(this.kv('Employees', fmtNum(pr.employees)));
     wrap.appendChild(this.kv('Monthly Income', fmtMoney(pr.income), 'pos'));
     wrap.appendChild(this.kv('Monthly Expenses', fmtMoney(pr.expenses), 'neg'));
+    if ((pr.income || 0) > 0 || (pr.expenses || 0) > 0) {
+      wrap.appendChild(Charts.chartBars([
+        { label: 'Income', value: pr.income || 0, color: '#4a6a48' },
+        { label: 'Expenses', value: pr.expenses || 0, color: '#8a3c34' },
+        { label: 'Net', value: Math.max(0, (pr.income || 0) - (pr.expenses || 0)), color: 'var(--ink-soft)' }
+      ], { width: 300, height: 140, title: 'Monthly P&L', valueFormat: (v) => CUR() + fmtCompact(v) }));
+    }
     for (const k in (pr.vars || {})) wrap.appendChild(this.kv(k, fmtNum(pr.vars[k])));
     if (pr.inventory) {
       wrap.appendChild(this.secLabel('Site Inventory'));
@@ -922,6 +950,22 @@ const Views = {
     if (g.treasury !== undefined) cells.push(['Federal Treasury', CUR() + fmtCompact(g.treasury)]);
     cells.push(['Visible Accounts', fmtNum(S().accounts.length)]);
     inner.appendChild(this.statStrip(cells));
+
+    // at-a-glance pies: who holds the (visible) money, and how the exchange
+    // values the listed companies
+    const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    const byOwner = {};
+    for (const a of S().accounts) byOwner[a.ownerId] = (byOwner[a.ownerId] || 0) + a.balance;
+    const holderRows = Object.keys(byOwner)
+      .map(oid => ({ label: entName(oid), value: byOwner[oid], color: (entById(oid) || {}).color }));
+    if (holderRows.filter(r => r.value > 0).length > 1) {
+      pies.appendChild(Charts.chartPie(holderRows, { width: 340, height: 180, title: (perms().accounts === 'all' || isGM()) ? 'Money by Holder' : 'Your Money by Holder' }));
+    }
+    const capRows = S().entities
+      .filter(e => e.type === 'company' && e.sharePrice !== undefined && e.sharesOutstanding)
+      .map(c => ({ label: c.abbrev || c.name, value: c.sharePrice * c.sharesOutstanding, color: c.color }));
+    if (capRows.length) pies.appendChild(Charts.chartPie(capRows, { width: 340, height: 180, title: 'Market Capitalisation' }));
+    if (pies.children.length) inner.appendChild(pies);
 
     /* Phase 7.3 — GDP & money-supply history, gated on statistics clearance
        (filterState strips gdp/moneySupply from state.history without

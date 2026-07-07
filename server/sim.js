@@ -614,7 +614,20 @@ function computePolling(noise) {
   let totalVotes = 0;
   for (const p of db.provinces) {
     const provVotes = {};
-    for (const gname in p.demographics) {
+    // GM-scripted voter base: province.voterBase = { partyId: percent }.
+    // When set (any positive entry), that split IS the province's vote —
+    // normalised over the given percentages, flat 55% turnout, a little
+    // wobble when polling noise is on. The demographic simulation below
+    // only runs for provinces without a scripted base.
+    const vb = p.voterBase || {};
+    const vbTotal = parties.reduce((s, pt) => s + Math.max(0, Number(vb[pt.id]) || 0), 0);
+    if (vbTotal > 0) {
+      const voters = (p.vars.population || 0) * 0.55;
+      for (const pt of parties) {
+        const share = Math.max(0, Number(vb[pt.id]) || 0) / vbTotal;
+        if (share > 0) provVotes[pt.id] = voters * share * (noise ? 1 + (Math.random() * 0.06 - 0.03) : 1);
+      }
+    } else for (const gname in p.demographics) {
       const g = p.demographics[gname];
       const turnout = Math.min(0.92, Math.max(0.25, 0.42 + (g.happiness || 50) * 0.004 + (g.education || 40) * 0.0015));
       const voters = (g.population || 0) * turnout;

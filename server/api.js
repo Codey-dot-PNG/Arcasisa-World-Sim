@@ -5,6 +5,7 @@ const sim = require('./sim');
 const ownership = require('./ownership');
 const market = require('./market');
 const deeds = require('./deeds');
+const buildings = require('./buildings');
 const geometry = require('./geometry');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
@@ -773,6 +774,7 @@ async function handle(req, res, pathname, method) {
             if (pid) b.provinceId = pid;
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
+          if (coll === 'properties') buildings.assignTexture(b); // random variant for the kind
           db[coll].push(b);
           if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
           store.log('gm', `Created ${coll.slice(0, -1)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
@@ -789,7 +791,9 @@ async function handle(req, res, pathname, method) {
           // re-home a dragged property/marker by geometry when pos moved and
           // the client didn't send an explicit provinceId override
           const posMoved = b.pos !== undefined && b.provinceId === undefined && (coll === 'properties' || coll === 'markers');
+          const kindChanged = coll === 'properties' && b.kind !== undefined && b.kind !== obj.kind && b.texture === undefined;
           Object.assign(obj, b);
+          if (kindChanged) buildings.assignTexture(obj, true); // re-roll the art for the new kind
           if (posMoved) {
             const pid = geometry.provinceAt(db.provinces, obj.pos);
             if (pid) obj.provinceId = pid;

@@ -389,6 +389,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .iso-building.selected .iso-top,
 .iso-building.selected .iso-front,
 .iso-building.selected .iso-side{stroke:var(--accent); stroke-opacity:1; stroke-width:3;}
+/* texture-image buildings (property.texture) — soft ground shadow; selection
+   glows since an <image> has no strokable faces */
+.tex-building{filter:drop-shadow(0 3px 3px rgba(0,0,0,.28));}
+.tex-building.selected{filter:drop-shadow(0 0 6px var(--accent)) drop-shadow(0 3px 3px rgba(0,0,0,.28));}
 .event-marker{fill:var(--accent); stroke:var(--paper); stroke-width:3; cursor:pointer; opacity:.92;}
 .event-marker:hover{stroke:var(--ink);}
 .event-marker.selected{stroke:var(--ink); stroke-width:5;}

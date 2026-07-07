@@ -139,6 +139,10 @@ async function connectStream() {
   let cfg = { realtime: 'sse' };
   try { cfg = await GET('/api/config'); } catch (e) { /* older server: default to SSE */ }
 
+  if (cfg.ephemeral && isGM()) {
+    toast('⚠ No database configured — the world will reset on redeploy. Set Supabase env vars (see DEPLOY.md).', true);
+  }
+
   if (cfg.realtime === 'supabase' && cfg.supabaseUrl && cfg.supabaseAnonKey) {
     try {
       await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js');

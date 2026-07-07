@@ -17,6 +17,17 @@ const sb = require('./supabase');
 
 const MODE = sb.enabled ? 'supabase' : 'file';
 
+// A serverless/container host in file mode has no durable storage — the world
+// is lost on every redeploy or cold start. Make that impossible to miss.
+if (MODE === 'file' && (process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT || process.env.K_SERVICE)) {
+  console.error('\n  ############################################################');
+  console.error('  ##  NO DATABASE CONFIGURED — DATA WILL NOT SURVIVE       ##');
+  console.error('  ##  redeploys or cold starts on this host.               ##');
+  console.error('  ##  Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY and     ##');
+  console.error('  ##  redeploy. See DEPLOY.md.                             ##');
+  console.error('  ############################################################\n');
+}
+
 // DATA_DIR is relocatable so the world file can live on a mounted persistent
 // volume rather than inside the app directory.
 const DATA_DIR = process.env.DATA_DIR ? path.resolve(process.env.DATA_DIR) : path.join(__dirname, '..', 'data');

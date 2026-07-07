@@ -156,9 +156,11 @@ async function handle(req, res, pathname, method) {
   try {
     // ---- public: client bootstrap config ----
     if (pathname === '/api/config' && method === 'GET') {
+      const ephemeral = store.MODE === 'file' && !!(process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT || process.env.K_SERVICE);
       return json(res, 200, store.MODE === 'supabase'
-        ? { realtime: 'supabase', supabaseUrl: sb.url, supabaseAnonKey: sb.anonKey }
-        : { realtime: 'sse' });
+        ? { storage: 'supabase', realtime: 'supabase', supabaseUrl: sb.url, supabaseAnonKey: sb.anonKey }
+        : { storage: 'file', realtime: 'sse', ephemeral,
+            warning: ephemeral ? 'No database configured. The world is stored on an ephemeral filesystem and will be lost on redeploy. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, then redeploy.' : undefined });
     }
 
     // ---- cron: advance overdue auto-turns (Vercel Cron or any pinger) ----

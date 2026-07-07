@@ -70,6 +70,32 @@ There is no resident process in serverless hosting, so scheduled ticks come from
   cadence you set there — the pinger just gives the engine chances to catch up.
 - Manual advancing from the GM Studio always works regardless.
 
+## Troubleshooting: "my world resets on every redeploy"
+
+That means the app is running in **file mode** (no database) — it's writing to an
+ephemeral filesystem that the host wipes on every deploy and cold start. Check which
+mode you're in by opening `https://YOUR-APP.vercel.app/api/config`:
+
+- `{"storage":"supabase",...}` → the database is active; a reset means something else.
+- `{"storage":"file","ephemeral":true,...}` → **Supabase is not switched on.** Fix it:
+
+1. **Are the env vars actually set?** In Vercel: **Project → Settings → Environment
+   Variables**. You need `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` (the
+   `SUPABASE_ANON_KEY` and `CRON_SECRET` too). Make sure each is enabled for the
+   **Production** environment.
+2. **Did you redeploy after adding them?** This is the most common cause — Vercel does
+   **not** apply env-var changes to existing deployments. After adding or changing any
+   variable you must trigger a new deploy: **Deployments → ⋯ on the latest → Redeploy**
+   (or push any commit).
+3. **Did the SQL run?** Confirm the `world` table exists in Supabase (**Table Editor**).
+   If not, run [`supabase-setup.sql`](supabase-setup.sql) in the SQL Editor.
+4. Re-check `/api/config`. Once it says `"storage":"supabase"`, redeploys no longer touch
+   your world — it lives in Postgres.
+
+> If you moved your existing file-mode world to Supabase and want to keep it, export it
+> first (GM Studio → Archive & Danger → Export World) — though switching on Supabase
+> starts a fresh seed, and there's no automatic import of a file-mode save.
+
 ## 5. Things worth knowing
 
 - **Free-tier fit:** Supabase free gives 500 MB database and 5 GB egress/month; Vercel Hobby

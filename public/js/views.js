@@ -815,6 +815,11 @@ const Views = {
   /* ═══════════ MODULE VIEWS ═══════════ */
   render(container) {
     if (W.view === 'map') { GameMap.mount(container); return; }
+    // Every sync (turn tick, another player's action) rebuilds this view from
+    // scratch, which used to snap the reader back to the top of the page.
+    // Carry the previous scroll offset across the rebuild instead.
+    const prevScroll = container.querySelector('.doc-view');
+    const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
     const doc = el('div.doc-view', el('div.doc-inner'));
     clear(container).appendChild(doc);
     const inner = doc.firstChild;
@@ -825,6 +830,7 @@ const Views = {
     else if (W.view === 'news') this.viewNews(inner);
     else if (W.view === 'timeline') this.viewTimeline(inner);
     else if (W.view === 'gm') GM.render(container);
+    if (scrollTop) doc.scrollTop = scrollTop;
   },
 
   statStrip(cells) {

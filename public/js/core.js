@@ -252,6 +252,15 @@ function scheduleRefresh() {
 }
 async function refreshState() {
   const data = await GET('/api/state');
+  // scheduleRefresh only checks MapEdit.dragging/drawing at schedule time —
+  // if the interaction starts *after* the timer was armed (or while this GET
+  // was already in flight), that guard never fires and W.state would be
+  // swapped out from under a live drag/pen-draw here instead. Re-check right
+  // before the swap and defer it the same way scheduleRefresh does.
+  if (window.MapEdit && (MapEdit.dragging || MapEdit.drawing)) {
+    if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
+    return;
+  }
   W.me = data.user;
   W.state = data.state;
   // per-province party support (public political knowledge) — cached so the

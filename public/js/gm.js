@@ -20,6 +20,11 @@ const GM = {
   ],
 
   render(container) {
+    // Every sync (turn tick, another player's action) rebuilds the whole
+    // studio, which used to snap the GM's scroll back to the top of whatever
+    // long form they were editing. Carry the previous offset across.
+    const prevMain = container.querySelector('.gm-main');
+    const scrollTop = prevMain ? prevMain.scrollTop : 0;
     clear(container);
     // a re-render discards whatever DOM the expression popover (Phase 8) was
     // anchored to — drop the stale refs rather than leaving a dangling
@@ -42,6 +47,7 @@ const GM = {
       roles: this.tabRoles, danger: this.tabDanger
     }[W.gmTab] || this.tabWorld;
     fn.call(this, main);
+    if (scrollTop) main.scrollTop = scrollTop;
   },
 
   /* ---------- form helpers (bind into a draft object) ----------

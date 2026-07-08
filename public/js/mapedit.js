@@ -303,11 +303,16 @@ const MapEdit = {
     const onUp = async () => {
       rect.removeEventListener('pointermove', onMove);
       rect.removeEventListener('pointerup', onUp);
-      this.dragging = false;
       if (moved) {
+        // Keep `dragging` set across the PATCH: clearing it first lets a
+        // deferred refresh swap W.state mid-round-trip, and the render below
+        // would then draw the marker at its pre-drag position until the next
+        // sync (the property "snap-back" desync).
         try { await PATCH('/api/gm/coll/properties/' + pr.id, { pos: pr.pos }); toast('Property moved.'); }
         catch (err) { toast(err.message, true); }
+        finally { this.dragging = false; }
       } else {
+        this.dragging = false;
         select('property', pr.id, { noPan: true });
       }
       GameMap.render();
@@ -345,11 +350,15 @@ const MapEdit = {
     const onUp = async () => {
       circ.removeEventListener('pointermove', onMove);
       circ.removeEventListener('pointerup', onUp);
-      this.dragging = false;
       if (moved) {
+        // Hold `dragging` across the PATCH (see propertyPointerDown): clearing
+        // it first lets a deferred refresh swap W.state mid-round-trip and the
+        // render below would revert the pin to its pre-drag spot until sync.
         try { await PATCH('/api/gm/coll/markers/' + mrk.id, { pos: mrk.pos }); toast('Marker moved.'); }
         catch (err) { toast(err.message, true); }
+        finally { this.dragging = false; }
       } else {
+        this.dragging = false;
         select('marker', mrk.id, { noPan: true });
       }
       GameMap.render();

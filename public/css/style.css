@@ -392,6 +392,12 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 /* texture-image buildings (property.texture) — soft ground shadow; selection
    glows since an <image> has no strokable faces */
 .tex-building{filter:drop-shadow(0 3px 3px rgba(0,0,0,.28));}
+/* chart interactivity: hover highlight, clickable slices/bars/legend rows */
+.chart-svg .chart-clickable{cursor:pointer;}
+.chart-svg .pie-slice.chart-hot,
+.chart-svg .bar-rect:hover{filter:brightness(1.15); stroke:var(--accent); stroke-width:2;}
+.chart-svg .pie-legend-row.chart-hot text{fill:var(--ink); font-weight:700;}
+.chart-svg .pie-legend-row.chart-hot rect{stroke:var(--accent); stroke-width:1.5;}
 .tex-building.selected{filter:drop-shadow(0 0 6px var(--accent)) drop-shadow(0 3px 3px rgba(0,0,0,.28));}
 .event-marker{fill:var(--accent); stroke:var(--paper); stroke-width:3; cursor:pointer; opacity:.92;}
 .event-marker:hover{stroke:var(--ink);}

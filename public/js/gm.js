@@ -246,39 +246,51 @@ const GM = {
     main.appendChild(this.field('Boundary — SVG path data ("M x y L x y … Z") or points "x,y x,y …" on the 3840×2160 map grid', this.area(d, 'shapeText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;')));
     main.appendChild(this.varsEditor(d, 'province'));
 
-    // demographics grid
+    // demographics — one metric at a time (the old grid crammed every metric
+    // into one table and was unreadable). Chips switch the visible metric.
     main.appendChild(Views.secLabel('Demographics'));
     d.demographics = d.demographics || {};
     const groups = S().settings.demographics.groups || [];
     const metrics = S().settings.demographics.metrics || [];
-    const head = el('tr', el('th', 'Group'));
-    metrics.forEach(mDef => head.appendChild(el('th.num', mDef.label)));
-    const tbody = el('tbody');
-    for (const gname of groups) {
-      d.demographics[gname] = d.demographics[gname] || {};
-      const row = el('tr', el('td', gname));
-      for (const mDef of metrics) {
-        const grp = d.demographics[gname];
-        row.appendChild(el('td.num', el('input', {
-          value: grp[mDef.key] ?? 0,
-          oninput: (e) => grp[mDef.key] = Number(e.target.value) || 0
-        })));
-      }
-      tbody.appendChild(row);
+    if (!W.gmDemoMetric || !metrics.some(mDef => mDef.key === W.gmDemoMetric)) W.gmDemoMetric = (metrics[0] || {}).key;
+    const metricBar = el('div.chip-row');
+    for (const mDef of metrics) {
+      metricBar.appendChild(el('button.chip', {
+        class: W.gmDemoMetric === mDef.key ? 'active' : '',
+        onclick: () => { W.gmDemoMetric = mDef.key; App.renderView(); }
+      }, mDef.label));
     }
-    main.appendChild(el('div', { style: 'overflow-x:auto;' }, el('table.data.demo-table', el('thead', head), tbody)));
+    main.appendChild(metricBar);
+    const mSel = metrics.find(mDef => mDef.key === W.gmDemoMetric) || metrics[0];
+    if (mSel) {
+      const tbody = el('tbody');
+      for (const gname of groups) {
+        d.demographics[gname] = d.demographics[gname] || {};
+        const grp = d.demographics[gname];
+        tbody.appendChild(el('tr',
+          el('td', gname),
+          el('td.num', el('input', {
+            value: grp[mSel.key] ?? 0,
+            oninput: (e) => grp[mSel.key] = Number(e.target.value) || 0
+          }))));
+      }
+      main.appendChild(el('table.data.demo-table', { style: 'max-width:440px;' },
+        el('thead', el('tr', el('th', 'Group'), el('th.num', mSel.label))), tbody));
+    }
 
     // voter base — scripted party support for this province. When any
     // percentage is set (> 0), elections and polling use exactly this split
     // for the province instead of the demographic simulation.
     main.appendChild(Views.secLabel('Voter Base'));
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Party support in this province, in percent (e.g. KFF 60). Leave everything at 0 to let the demographic simulation decide. Percentages are normalised, so they don’t have to add to 100.'));
+      'Party support in this province, in percent (e.g. KFF 60). Leave everything at 0 to let the demographic simulation decide — the greyed value beside each party is what the demographics currently poll at. Percentages are normalised, so they don’t have to add to 100.'));
     d.voterBase = d.voterBase || {};
     const parties = S().entities.filter(e => e.type === 'party');
+    const polled = (W.polling && W.polling.byProvince && W.polling.byProvince[selId]) || {};
     const vbGrid = el('div.form-grid');
     for (const pt of parties) {
-      vbGrid.appendChild(this.field(pt.abbrev || pt.name, el('input.text-input', {
+      const hint = polled[pt.id] !== undefined ? 'polling ' + polled[pt.id] + '%' : null;
+      vbGrid.appendChild(this.field((pt.abbrev || pt.name) + (hint ? ' — ' + hint : ''), el('input.text-input', {
         type: 'number', min: '0', max: '100', step: '1', value: d.voterBase[pt.id] ?? 0,
         oninput: (e) => { const v = Number(e.target.value) || 0; if (v > 0) d.voterBase[pt.id] = v; else delete d.voterBase[pt.id]; }
       })));

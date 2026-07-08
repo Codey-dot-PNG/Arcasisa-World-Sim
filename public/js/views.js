@@ -329,13 +329,26 @@ const Views = {
     renderExplorer();
   },
 
-  // province.voterBase ({ partyId: pct }) as pie rows, or null when unset
+  // Voter base pie rows for a province: the GM's scripted voterBase when set,
+  // otherwise the support polled FROM the demographics (W.polling cache, same
+  // simulation that decides elections). Returns { rows, scripted } or null.
   voterBaseRows(p) {
-    const vb = (p && p.voterBase) || {};
-    const rows = S().entities.filter(e => e.type === 'party')
-      .map(pt => ({ label: pt.abbrev || pt.name, value: Math.max(0, Number(vb[pt.id]) || 0), color: pt.color }))
+    if (!p) return null;
+    const parties = S().entities.filter(e => e.type === 'party');
+    const mk = (src) => parties
+      .map(pt => ({
+        label: pt.abbrev || pt.name, value: Math.max(0, Number(src[pt.id]) || 0),
+        color: pt.color, onClick: () => select('entity', pt.id)
+      }))
       .filter(r => r.value > 0);
-    return rows.length ? rows : null;
+    const scripted = mk((p.voterBase) || {});
+    if (scripted.length) return { rows: scripted, scripted: true };
+    const polled = W.polling && W.polling.byProvince && W.polling.byProvince[p.id];
+    if (polled) {
+      const rows = mk(polled);
+      if (rows.length) return { rows, scripted: false };
+    }
+    return null;
   },
 
   inspProvince(id) {
@@ -357,11 +370,12 @@ const Views = {
     for (const k in p.vars) if (!shown.has(k)) wrap.appendChild(this.kv(k, fmtNum(p.vars[k])));
     if (!perms().statistics) wrap.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:8px;' }, 'FULL STATISTICS REQUIRE CLEARANCE.'));
 
-    // voter base — public political knowledge, set by the GM per province
-    const vbRows = this.voterBaseRows(p);
-    if (vbRows) {
+    // voter base — public political knowledge. GM-scripted when set,
+    // otherwise polled straight from the demographic simulation.
+    const vb = this.voterBaseRows(p);
+    if (vb) {
       wrap.appendChild(this.secLabel('Voter Base'));
-      wrap.appendChild(Charts.chartPie(vbRows, { width: 300, height: 160, title: 'Party Support' }));
+      wrap.appendChild(Charts.chartPie(vb.rows, { width: 300, height: 160, title: vb.scripted ? 'Party Support (GM set)' : 'Party Support (polled)' }));
     }
 
     if (p.demographics && perms().statistics) {
@@ -408,8 +422,8 @@ const Views = {
     if (p) {
       wrap.appendChild(this.secLabel('Province'));
       wrap.appendChild(el('div.var-row', el('span.var-label', { style: 'cursor:pointer;', onclick: () => select('province', p.id) }, p.name), el('span.var-value', fmtCompact(p.vars.population))));
-      const vbRows = this.voterBaseRows(p);
-      if (vbRows) wrap.appendChild(Charts.chartPie(vbRows, { width: 300, height: 150, title: p.name + ' — Party Support' }));
+      const vb = this.voterBaseRows(p);
+      if (vb) wrap.appendChild(Charts.chartPie(vb.rows, { width: 300, height: 150, title: p.name + ' — Party Support' + (vb.scripted ? '' : ' (polled)') }));
     }
     if (props.length) {
       wrap.appendChild(this.secLabel('Nearby Properties'));
@@ -887,11 +901,15 @@ const Views = {
           el('td.num', String(r.seats))))));
       inner.appendChild(tbl);
 
-      /* Phase 7.3 — election results bar chart (seats by party). */
-      inner.appendChild(Charts.chartBars((lastElec.national || []).map(r => {
+      /* Phase 7.3 — election results: seats held by party, as a pie. */
+      inner.appendChild(Charts.chartPie((lastElec.national || []).map(r => {
         const party = parties.find(p => p.id === r.partyId);
-        return { label: party ? (party.abbrev || party.name) : entName(r.partyId), value: r.seats, color: party ? party.color : undefined };
-      }), { title: 'SEATS', valueFormat: v => v + ' seats' }));
+        return {
+          label: party ? (party.abbrev || party.name) : entName(r.partyId),
+          value: r.seats, color: party ? party.color : undefined,
+          onClick: party ? () => select('entity', party.id) : undefined
+        };
+      }), { title: 'Seats by Party', width: 380, height: 190, valueFormat: v => v + ' seats' }));
     }
   },
 
@@ -957,14 +975,14 @@ const Views = {
     const byOwner = {};
     for (const a of S().accounts) byOwner[a.ownerId] = (byOwner[a.ownerId] || 0) + a.balance;
     const holderRows = Object.keys(byOwner)
-      .map(oid => ({ label: entName(oid), value: byOwner[oid], color: (entById(oid) || {}).color }));
+      .map(oid => ({ label: entName(oid), value: byOwner[oid], color: (entById(oid) || {}).color, onClick: () => select('entity', oid) }));
     if (holderRows.filter(r => r.value > 0).length > 1) {
-      pies.appendChild(Charts.chartPie(holderRows, { width: 340, height: 180, title: (perms().accounts === 'all' || isGM()) ? 'Money by Holder' : 'Your Money by Holder' }));
+      pies.appendChild(Charts.chartPie(holderRows, { width: 420, height: 210, title: (perms().accounts === 'all' || isGM()) ? 'Money by Holder' : 'Your Money by Holder' }));
     }
     const capRows = S().entities
       .filter(e => e.type === 'company' && e.sharePrice !== undefined && e.sharesOutstanding)
-      .map(c => ({ label: c.abbrev || c.name, value: c.sharePrice * c.sharesOutstanding, color: c.color }));
-    if (capRows.length) pies.appendChild(Charts.chartPie(capRows, { width: 340, height: 180, title: 'Market Capitalisation' }));
+      .map(c => ({ label: c.abbrev || c.name, value: c.sharePrice * c.sharesOutstanding, color: c.color, onClick: () => select('entity', c.id) }));
+    if (capRows.length) pies.appendChild(Charts.chartPie(capRows, { width: 420, height: 210, title: 'Market Capitalisation' }));
     if (pies.children.length) inner.appendChild(pies);
 
     /* Phase 7.3 — GDP & money-supply history, gated on statistics clearance

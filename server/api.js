@@ -279,7 +279,8 @@ async function handle(req, res, pathname, method) {
     }
 
     if (pathname === '/api/polling' && method === 'GET') {
-      if (!u.role.perms.statistics && !u.role.perms.gm) return deny('Polling data requires statistics clearance.');
+      // public political knowledge — newspapers publish polls; every operator
+      // may see the party-support landscape (national and per province)
       const { national, totalVotes, byProvince } = sim.computePolling(false);
       const pct = {}; for (const pid in national) pct[pid] = Math.round(national[pid] / (totalVotes || 1) * 1000) / 10;
       const provPct = {};
@@ -772,6 +773,17 @@ async function handle(req, res, pathname, method) {
           if ((coll === 'properties' || coll === 'markers') && b.pos && !b.provinceId) {
             const pid = geometry.provinceAt(db.provinces, b.pos);
             if (pid) b.provinceId = pid;
+            else if (coll === 'properties') {
+              // point fell outside every polygon (coastline gaps etc.) —
+              // fall back to the nearest city's province
+              let best = null, bd = Infinity;
+              for (const c of db.cities) {
+                if (!c.pos || !c.provinceId) continue;
+                const d2 = (c.pos[0] - b.pos[0]) ** 2 + (c.pos[1] - b.pos[1]) ** 2;
+                if (d2 < bd) { bd = d2; best = c.provinceId; }
+              }
+              if (best) b.provinceId = best;
+            }
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
           if (coll === 'properties') buildings.assignTexture(b); // random variant for the kind

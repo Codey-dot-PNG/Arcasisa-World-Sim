@@ -218,6 +218,14 @@ async function connectStream() {
   sse.onerror = () => { /* EventSource retries automatically */ };
 }
 function scheduleRefresh() {
+  // Never swap in fresh state mid-interaction in the map editor: pointer
+  // drags and half-drawn lines mutate objects inside the CURRENT state, and
+  // replacing it would orphan those edits (the old "edits reset / don't
+  // apply" bug). Retry shortly — the interaction ends within a second or two.
+  if (window.MapEdit && (MapEdit.dragging || MapEdit.drawing)) {
+    if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
+    return;
+  }
   if (W.refreshTimer) return;
   W.refreshTimer = setTimeout(async () => {
     W.refreshTimer = null;
@@ -228,6 +236,9 @@ async function refreshState() {
   const data = await GET('/api/state');
   W.me = data.user;
   W.state = data.state;
+  // per-province party support (public political knowledge) — cached so the
+  // province/city dossiers can draw voter-base pies synchronously
+  try { W.polling = await GET('/api/polling'); } catch (e) { W.polling = null; }
   App.renderAll();
 }
 

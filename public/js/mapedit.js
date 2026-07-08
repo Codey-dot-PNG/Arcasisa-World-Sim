@@ -266,9 +266,12 @@ const MapEdit = {
   },
 
   async createProperty(pt) {
+    // no provinceId: the server assigns it by point-in-polygon geometry
+    // (the old nearest-CITY guess here mis-registered provinces whenever the
+    // closest city belonged to a neighbour)
     const body = {
       name: 'New Property', type: 'commercial', kind: 'office',
-      provinceId: this.nearestProvinceId(pt), pos: pt, ownerId: null,
+      pos: pt, ownerId: null,
       value: 100000, employees: 0, income: 0, expenses: 0, description: '', inventory: [], vars: {}
     };
     try {
@@ -440,6 +443,10 @@ const MapEdit = {
       handle.removeEventListener('pointermove', onMove);
       handle.removeEventListener('pointerup', onUp);
       this.dragging = false;
+      // a sync may have replaced W.state mid-drag, orphaning `obj` — write the
+      // dragged points back into whatever the current state holds for this id
+      const cur = this.coll().find(r => r.id === obj.id);
+      if (cur && cur !== obj) cur.pts = obj.pts;
       this.save();
       GameMap.render();
     };

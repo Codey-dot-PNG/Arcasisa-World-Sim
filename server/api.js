@@ -346,6 +346,37 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true });
     }
 
+    // ---- property site inventory: deposit/withdraw between a property and
+    // its owner entity. Anyone in the owner's control chain may move goods
+    // (the CEO stocking a company factory, the owner emptying a warehouse).
+    if (pathname === '/api/property/items' && method === 'POST') {
+      const b = await readBody(req);
+      const pr = db.properties.find(p => p.id === b.propertyId);
+      if (!pr) return bad('Unknown property.');
+      const gm = u.role.perms.gm;
+      if (!gm && (!pr.ownerId || !ownership.controls(u.user.entityId, pr.ownerId))) return deny('You do not control this property.');
+      const owner = db.entities.find(e => e.id === pr.ownerId);
+      if (!owner) return bad('The property has no owner entity to move goods to.');
+      const item = db.items.find(i => i.id === b.itemId);
+      const qty = Math.round(Number(b.qty));
+      if (!item || !(qty > 0)) return bad('Item and a positive quantity are required.');
+      if (item.meta && (item.meta.companyId || item.meta.propertyId)) return bad('Certificates and deeds are ownership records — they cannot be stored on site.');
+      const withdraw = b.direction === 'withdraw'; // site → owner; otherwise owner → site
+      const fromHolder = withdraw ? pr : owner;
+      const toHolder = withdraw ? owner : pr;
+      fromHolder.inventory = fromHolder.inventory || [];
+      const row = fromHolder.inventory.find(r => r.itemId === item.id);
+      if (!row || row.qty < qty) return bad('Not enough in ' + (withdraw ? 'the site inventory.' : `${owner.name}’s inventory.`));
+      row.qty -= qty;
+      fromHolder.inventory = fromHolder.inventory.filter(r => r.qty > 0);
+      toHolder.inventory = toHolder.inventory || [];
+      const trow = toHolder.inventory.find(r => r.itemId === item.id);
+      if (trow) trow.qty += qty; else toHolder.inventory.push({ itemId: item.id, qty });
+      store.log('inventory', `${qty} × ${item.name} ${withdraw ? 'withdrawn from' : 'deposited at'} ${pr.name}`, '', u.user.displayName, [pr.ownerId, pr.id, item.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true });
+    }
+
     // ---- negotiated trade offers (Phase 4.3) ----
     // Instant transfers (above) move goods immediately; these are proposals
     // that sit in db.trades until the counterparty accepts/declines, or the

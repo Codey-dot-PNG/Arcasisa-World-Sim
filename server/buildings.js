@@ -18,7 +18,8 @@ const TEXTURES = {
   mine: ['industrial.png', 'industrial-complex.png'],
   infrastructure: ['industrial.png'],
   farm: ['farm-1.png', 'farm-big-field.png'],
-  military_base: ['military-1.png', 'military-complex-1.png', 'military-complex-2.png', 'military-fort.png'],
+  military_base: ['military-1.png', 'military-complex-1.png', 'military-complex-2.png'],
+  fort: ['military-fort.png'],
   port: ['ports.png'],
   airport: ['airport.png'],
   prison: ['prison.png', 'prison-2.png']

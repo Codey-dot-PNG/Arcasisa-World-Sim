@@ -380,9 +380,18 @@ const Views = {
 
     if (p.demographics && perms().statistics) {
       wrap.appendChild(this.secLabel('Population Groups'));
-      wrap.appendChild(Charts.chartPie(Object.keys(p.demographics).map(gname => ({
-        label: gname, value: (p.demographics[gname] || {}).population || 0
-      })), { width: 300, height: 160, title: 'Population Mix', valueFormat: undefined }));
+      // The demographic groups are overlapping categorisations (class,
+      // settlement, life stage), so one combined pie is meaningless — split
+      // them into one pie per axis instead.
+      const axisOf = (g) => /class/i.test(g) ? 'class' : /rural|urban/i.test(g) ? 'settle' : 'cohort';
+      for (const [axis, title] of [['class', 'By Class'], ['settle', 'Urban vs Rural'], ['cohort', 'Life Stages']]) {
+        const rows = Object.keys(p.demographics)
+          .filter(g => axisOf(g) === axis)
+          .map(g => ({ label: g, value: (p.demographics[g] || {}).population || 0 }));
+        if (rows.filter(r => r.value > 0).length >= 2) {
+          wrap.appendChild(Charts.chartPie(rows, { width: 300, height: 130, title }));
+        }
+      }
       for (const gname in p.demographics) {
         const g = p.demographics[gname];
         wrap.appendChild(this.barRow(gname, (g.population / (p.vars.population || 1)) * 100, 'var(--ink-soft)', fmtCompact(g.population)));
@@ -457,14 +466,50 @@ const Views = {
       ], { width: 300, height: 140, title: 'Monthly P&L', valueFormat: (v) => CUR() + fmtCompact(v) }));
     }
     for (const k in (pr.vars || {})) wrap.appendChild(this.kv(k, fmtNum(pr.vars[k])));
+    const controlsProp = pr.ownerId && (isGM() || (W.me.entityId && ownership_controlsClient(W.me.entityId, pr.ownerId)));
     if (pr.inventory) {
       wrap.appendChild(this.secLabel('Site Inventory'));
       wrap.appendChild(this.inventoryTable(pr.inventory, pr.ownerId));
+    }
+    if (controlsProp) {
+      wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
+        el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
+        el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items')));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
     wrap.appendChild(el('div.insp-actions', this.gmJump('property', id)));
     return wrap;
+  },
+
+  // Move goods between a property's site inventory and its owner entity —
+  // deposit (owner → site) or withdraw (site → owner). Server re-checks the
+  // ownership chain.
+  propertyItemModal(pr, direction) {
+    const owner = entById(pr.ownerId);
+    const withdraw = direction === 'withdraw';
+    const src = withdraw ? (pr.inventory || []) : ((owner && owner.inventory) || []);
+    const eligible = src.filter(r => {
+      const it = itemById(r.itemId);
+      return it && r.qty > 0 && !(it.meta && (it.meta.companyId || it.meta.propertyId));
+    });
+    if (!eligible.length) return toast(withdraw ? 'The site holds nothing movable.' : (owner ? owner.name : 'The owner') + ' holds nothing movable.', true);
+    const itemSel = el('select.text-input', eligible.map(r => {
+      const it = itemById(r.itemId);
+      return el('option', { value: it.id }, `${it.name} (×${fmtNum(r.qty)})`);
+    }));
+    const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1' });
+    openModal(withdraw ? 'WITHDRAW FROM SITE — ' + pr.name : 'DEPOSIT AT SITE — ' + pr.name, el('div',
+      el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+        withdraw ? `Goods move from the site inventory to ${owner ? owner.name : 'the owner'}.` : `Goods move from ${owner ? owner.name : 'the owner'} to the site inventory.`),
+      el('label.field-label', 'Item'), itemSel,
+      el('label.field-label', 'Quantity'), qty
+    ), [{
+      label: withdraw ? 'Withdraw' : 'Deposit', onClick: async () => {
+        await POST('/api/property/items', { propertyId: pr.id, itemId: itemSel.value, qty: Number(qty.value), direction });
+        toast('Goods moved.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
 
   inspEntity(id) {
@@ -677,16 +722,17 @@ const Views = {
       const q = toSearch.value.trim().toLowerCase();
       clear(toList);
       const rows = [];
+      // own accounts/entity are valid recipients — that's how a CEO moves
+      // company money into their personal account (and back). Only sending an
+      // account to itself is blocked, at submit time.
       if (canSeeAccounts) {
         for (const a of S().accounts) {
-          if (a.ownerId === W.me.entityId) continue;
           const label = acctLabel(a);
           if (q && !label.toLowerCase().includes(q)) continue;
           rows.push({ kind: 'account', id: a.id, label: `${entName(a.ownerId)} — ${a.name}`, sub: fmtMoney(a.balance) });
         }
       } else {
         for (const e of S().entities) {
-          if (e.id === W.me.entityId) continue;
           if (q && !e.name.toLowerCase().includes(q)) continue;
           rows.push({ kind: 'entity', id: e.id, label: e.name, sub: TYPE_LABEL[e.type] || e.type });
         }
@@ -719,6 +765,7 @@ const Views = {
     ), [{
       label: 'Send Wire', onClick: async () => {
         if (!to) throw new Error('Choose a recipient.');
+        if (to.kind === 'account' && to.id === fromId) throw new Error('Source and destination are the same account.');
         const body = { fromAccountId: fromId, amount: Number(amount.value), memo: memo.value };
         if (to.kind === 'account') body.toAccountId = to.id; else body.toEntityId = to.id;
         await POST('/api/transfer', body);

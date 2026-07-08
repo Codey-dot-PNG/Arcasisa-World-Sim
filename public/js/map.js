@@ -293,6 +293,15 @@ const GameMap = {
         g.appendChild(box(9, 6, 8, 8, 7, roofTint));
         break;
       }
+      case 'fort': {
+        // squat keep with four corner turrets
+        g.appendChild(box(0, 7, 15, 13, 12, roofTint));
+        g.appendChild(box(-13, 2, 3.4, 3.4, 18, roofTint));
+        g.appendChild(box(13, 2, 3.4, 3.4, 18, roofTint));
+        g.appendChild(box(-4, 14, 3.4, 3.4, 18, roofTint));
+        g.appendChild(box(4, 14, 3.4, 3.4, 18, roofTint));
+        break;
+      }
       case 'port': {
         g.appendChild(box(-5, 10, 14, 10, 8, roofTint));
         // crane: a thin mast + angled jib, drawn as slim polygons

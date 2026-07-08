@@ -365,12 +365,29 @@ function applyEffect(fx, meta) {
         if (!net || !pr.ownerId) continue;
         perOwner[pr.ownerId] = perOwner[pr.ownerId] || { net: 0, n: 0 };
         perOwner[pr.ownerId].net += net; perOwner[pr.ownerId].n++;
+        // Property activity IS province economic output: the monthly net flows
+        // into the province's GDP figure (₳M), and national GDP / gdpGrowth
+        // follow through updateDerived — so property income moves the whole
+        // economy, not just a bank balance.
+        const prov = db.provinces.find(x => x.id === pr.provinceId);
+        if (prov && prov.vars) prov.vars.gdp = Math.max(0, Math.round(((prov.vars.gdp || 0) + net / 1e6) * 100) / 100);
       }
       for (const ownerId in perOwner) {
         const { net, n } = perOwner[ownerId];
         const acct = primaryAccount(ownerId, true);
         if (net > 0) txn(null, acct.id, net, `Net income from ${n} propert${n === 1 ? 'y' : 'ies'}`, actor, 'deposit');
         else txn(acct.id, null, -net, `Net upkeep of ${n} propert${n === 1 ? 'y' : 'ies'}`, actor, 'withdraw');
+        // Company owners: property earnings are company earnings. Annual
+        // profit = static base (stashed once from the seeded figure) +
+        // annualised property net — reprice_shares reads profit/valuation,
+        // so productive properties lift the share price and loss-makers
+        // drag it, without profit growing unboundedly.
+        const co = db.entities.find(e => e.id === ownerId && e.type === 'company');
+        if (co) {
+          co.vars = co.vars || {};
+          if (co.vars.profitBase === undefined) co.vars.profitBase = co.vars.profit || 0;
+          co.vars.profit = Math.round(co.vars.profitBase + net * 12);
+        }
       }
       break;
     }

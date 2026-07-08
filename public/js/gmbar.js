@@ -37,6 +37,7 @@ const GMBar = {
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.mintModal(); } }, 'Mint / Withdraw…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.assignOwnershipModal(); } }, 'Assign Ownership…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.influenceModal(); } }, 'Influence…'),
+      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.partySupportModal(); } }, 'Party Support…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.electionModal(); } }, 'Call Election…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.announcementModal(); } }, 'Announcement…')
     );
@@ -238,6 +239,40 @@ const GMBar = {
         }
         await POST('/api/gm/effect', { effect });
         toast('Influence applied.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => {} }]);
+  },
+
+  /* ---------- Party Support ----------
+     Adds a lasting bonus/penalty to how the population scores one party
+     (party.support[provId].all, read by scoreParty at ×1.2 weight). Unlike a
+     scripted voterBase this does NOT freeze anything: demographics, approval
+     and every other influence keep moving the polls on top of it. */
+  partySupportModal() {
+    const parties = S().entities.filter(e => e.type === 'party');
+    if (!parties.length) return toast('No parties on file.', true);
+    const d = { partyId: parties[0].id, province: 'all', amount: 5 };
+    openModal('PARTY SUPPORT', el('div',
+      el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px; line-height:1.5;' },
+        'Shifts how voters score this party from now on — a nudge, not a lock. The simulation keeps drifting on top of it; apply a negative amount to undo. Roughly: +5 is a clear boost, +15 is a landslide-maker.'),
+      el('label.field-label', 'Party'), Forms.sel(d, 'partyId', parties.map(p => [p.id, p.name])),
+      el('label.field-label', 'Province'), Forms.sel(d, 'province', Forms.provOptions([['all', '— all provinces —']])),
+      el('label.field-label', 'Support shift (+/- points)'), Forms.num(d, 'amount', '0.5')
+    ), [{
+      label: 'Apply', onClick: async () => {
+        const amt = Number(d.amount);
+        if (!amt) throw new Error('Enter a non-zero amount.');
+        const party = entById(d.partyId);
+        if (!party) throw new Error('Unknown party.');
+        const support = JSON.parse(JSON.stringify(party.support || {}));
+        const provIds = d.province === 'all' ? S().provinces.map(p => p.id) : [d.province];
+        for (const pid of provIds) {
+          support[pid] = support[pid] || {};
+          support[pid].all = Math.round(((support[pid].all || 0) + amt) * 10) / 10;
+          if (!support[pid].all) delete support[pid];
+        }
+        await PATCH('/api/gm/coll/entities/' + party.id, { support });
+        toast('Support shifted — polls will move with the next refresh.');
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => {} }]);
   },

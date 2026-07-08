@@ -320,15 +320,15 @@ function seed() {
   function role(id, name, perms) { return { id, name, builtin: true, perms }; }
   const roles = [
     role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['timeline', 'gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true }),
-    role('citizen', 'Citizen', { pages: ['map', 'companies', 'economy', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false }),
+    role('citizen', 'Citizen', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false }),
     role('mp', 'MP', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
     role('judge', 'Judge', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
-    role('executive', 'Executive (Company)', { pages: ['map', 'companies', 'economy', 'news', 'population'], inventories: 'own', accounts: 'own', companyFinancials: true, government: false, statistics: true, mapLayers: ['political', 'ownership'], manageNews: false, gm: false }),
+    role('executive', 'Executive (Company)', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: true, government: false, statistics: true, mapLayers: ['political', 'ownership'], manageNews: false, gm: false }),
     role('president', 'President', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: false, gm: false }),
     role('minister', 'Cabinet Minister', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
     role('journalist', 'Journalist', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: true, gm: false }),
-    role('police', 'Police', { pages: ['map', 'companies', 'economy', 'population', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
-    role('military', 'Military', { pages: ['map', 'economy', 'news'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
+    role('police', 'Police', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
+    role('military', 'Military', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
   ];
 
   // ---- users -------------------------------------------------------------

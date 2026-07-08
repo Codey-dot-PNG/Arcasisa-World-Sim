@@ -207,10 +207,17 @@ function migrate(world) {
   // Timeline tab is GM-only: strip the 'timeline' page from every non-GM
   // role so existing worlds pick up the tightened visibility. (The server
   // also filters timeline data itself in api.js filterState.)
+  // Conversely, every role gets the full set of INFO tabs — all dossiers are
+  // public knowledge; only the data inside them is clearance-filtered.
+  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news'];
   for (const r of (world.roles || [])) {
-    if (r.perms && !r.perms.gm && Array.isArray(r.perms.pages) && r.perms.pages.includes('timeline')) {
+    if (!r.perms || r.perms.gm || !Array.isArray(r.perms.pages)) continue;
+    if (r.perms.pages.includes('timeline')) {
       r.perms.pages = r.perms.pages.filter(pg => pg !== 'timeline');
       changed = true;
+    }
+    for (const pg of STD_PAGES) {
+      if (!r.perms.pages.includes(pg)) { r.perms.pages.push(pg); changed = true; }
     }
   }
 
@@ -222,6 +229,23 @@ function migrate(world) {
       world.settings.currencyName = 'Arcasian Koren'; changed = true;
     }
   }
+  // The currency was once named the "Arcasian Mark"; correct that phrase
+  // wherever it was baked into free text (entity/place descriptions, news),
+  // keeping the ₳ symbol. Idempotent string replace.
+  const fixMark = (obj, ...keys) => {
+    for (const k of keys) {
+      if (typeof obj[k] === 'string' && obj[k].includes('Arcasian Mark')) {
+        obj[k] = obj[k].replace(/Arcasian Mark/g, 'Arcasian Koren');
+        changed = true;
+      }
+    }
+  };
+  for (const e of (world.entities || [])) fixMark(e, 'description');
+  for (const p of (world.provinces || [])) fixMark(p, 'description');
+  for (const c of (world.cities || [])) fixMark(c, 'description');
+  for (const pr of (world.properties || [])) fixMark(pr, 'description');
+  for (const it of (world.items || [])) fixMark(it, 'description', 'name');
+  for (const n of (world.news || [])) fixMark(n, 'headline', 'body');
 
   // ---- Phase 11 — one-time world-data update -----------------------------
   // Gated on schema so this block runs exactly once per world: fresh seeds

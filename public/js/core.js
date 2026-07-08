@@ -151,7 +151,7 @@ function market_treasuryPoolClient(co) {
 }
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
-const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };
+const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', fort: 'T', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };
 // Assignable SVG map icons (Phase 1.5). Filenames (no extension) under
 // public/assets/icons/. Properties and event markers may carry an `icon`
 // naming one of these; the map renders /assets/icons/<icon>.svg in place of the
@@ -195,8 +195,18 @@ async function connectStream() {
   let cfg = { realtime: 'sse' };
   try { cfg = await GET('/api/config'); } catch (e) { /* older server: default to SSE */ }
 
-  if (cfg.ephemeral && isGM()) {
-    toast('⚠ No database configured — the world will reset on redeploy. Set Supabase env vars (see DEPLOY.md).', true);
+  if (cfg.ephemeral && isGM() && !document.getElementById('ephemeral-banner')) {
+    // a toast is missable — this stays up until dismissed, every session,
+    // because the world WILL be lost on the next redeploy or cold start
+    const banner = el('div#ephemeral-banner', {
+      style: 'position:fixed; top:0; left:50%; transform:translateX(-50%); z-index:9999;' +
+        'background:#7a2620; color:#f5eede; padding:8px 16px; font-family:var(--font-mono);' +
+        'font-size:11px; letter-spacing:.06em; display:flex; gap:14px; align-items:center;' +
+        'box-shadow:0 2px 8px rgba(0,0,0,.35);'
+    },
+      el('span', '⚠ NO DATABASE — THE WORLD RESETS ON EVERY REDEPLOY. Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (see DEPLOY.md), or export the world regularly.'),
+      el('button', { style: 'background:none; border:1px solid #f5eede; color:#f5eede; cursor:pointer; padding:2px 8px; font-family:inherit;', onclick: () => banner.remove() }, 'DISMISS'));
+    document.body.appendChild(banner);
   }
 
   if (cfg.realtime === 'supabase' && cfg.supabaseUrl && cfg.supabaseAnonKey) {
@@ -215,8 +225,16 @@ async function connectStream() {
   if (sse) sse.close();
   sse = new EventSource('/api/stream');
   sse.addEventListener('sync', () => scheduleRefresh());
+  // after a dropped connection reconnects, catch up on anything missed
+  sse.onopen = () => scheduleRefresh();
   sse.onerror = () => { /* EventSource retries automatically */ };
 }
+
+// Browsers throttle timers and defer events in background tabs, so a tab left
+// open on another screen can lag behind the live turn. Refresh the moment it
+// becomes visible/focused again so every browser converges.
+document.addEventListener('visibilitychange', () => { if (!document.hidden && W.state) scheduleRefresh(); });
+window.addEventListener('focus', () => { if (W.state) scheduleRefresh(); });
 function scheduleRefresh() {
   // Never swap in fresh state mid-interaction in the map editor: pointer
   // drags and half-drawn lines mutate objects inside the CURRENT state, and

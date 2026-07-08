@@ -104,3 +104,7 @@ public/              the client (vanilla JS, no build)
 public/assets/       your flags, seals, party & company logos
 data/                world.json + snapshots (created at runtime)
 ```
+
+## Troubleshooting sync & realtime
+
+For detailed sync layer architecture and debugging steps, see [docs/SYNC-ARCHITECTURE.md](docs/SYNC-ARCHITECTURE.md). Run `node tools/diagnose-sync.js https://your-app.vercel.app` to verify persistence, concurrency, and read-your-writes guarantees. Note: `supabase-setup.sql` must be re-run in the Supabase SQL editor whenever it changes (it creates/maintains the tables, RLS policies, and publication membership required for live updates).

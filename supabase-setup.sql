@@ -69,3 +69,18 @@ language sql security definer as $$
   delete from snapshots
    where ts < coalesce((select ts from snapshots order by ts desc offset 20 limit 1), 0);
 $$;
+
+-- Realtime change signal: a tiny version row clients subscribe to via
+-- postgres_changes. Contains no world data, so anon read access is harmless.
+create table if not exists world_version (
+  id         int primary key,
+  version    bigint not null,
+  updated_at timestamptz not null default now()
+);
+alter table world_version enable row level security;
+drop policy if exists world_version_read on world_version;
+create policy world_version_read on world_version for select to anon, authenticated using (true);
+-- add to the realtime publication (ignore if already added)
+do $$ begin
+  alter publication supabase_realtime add table world_version;
+exception when duplicate_object then null; end $$;

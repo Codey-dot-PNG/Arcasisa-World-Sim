@@ -44,6 +44,7 @@ const MapEdit = {
     const m = this.map();
     const payload = { labels: m.labels, roads: m.roads, rails: m.rails };
     const run = async () => {
+      this.saveTimer = null; // fired (or immediate) — no longer an unsaved-changes signal
       try { await PATCH('/api/gm/settings', { map: payload }); }
       catch (e) { toast(e.message, true); }
     };

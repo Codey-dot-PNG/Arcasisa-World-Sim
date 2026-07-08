@@ -265,7 +265,7 @@ async function handle(req, res, pathname, method) {
       store.save();
       return json(res, 200, { ok: true });
     }
-    if (pathname === '/api/state' && method === 'GET') return json(res, 200, { user: userPayload(u), state: filterState(u) });
+    if (pathname === '/api/state' && method === 'GET') return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
 
     if (pathname === '/api/stream' && method === 'GET') {
       // serverless deployments use Supabase Realtime instead of a held-open response
@@ -739,6 +739,13 @@ async function handle(req, res, pathname, method) {
         if (b.time) { Object.assign(s.time, b.time); if (b.time.auto) Object.assign(s.time.auto, b.time.auto); }
         if (b.registration) Object.assign(s.registration, b.registration);
         if (b.newsThresholds) Object.assign(s.newsThresholds, b.newsThresholds);
+        if (b.taxation) {
+          const clamp = (n) => Math.max(0, Math.min(100, Number(n) || 0));
+          const t = s.taxation = s.taxation || {};
+          if (b.taxation.enabled !== undefined) t.enabled = !!b.taxation.enabled;
+          if (b.taxation.corporateRate !== undefined) t.corporateRate = clamp(b.taxation.corporateRate);
+          if (b.taxation.propertyRate !== undefined) t.propertyRate = clamp(b.taxation.propertyRate);
+        }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
@@ -765,6 +772,7 @@ async function handle(req, res, pathname, method) {
         };
         db.users.push(nu);
         store.log('system', `Account created: ${nu.username} (${nu.roleId})`, '', actor, []);
+        sim.syncPresidency(db);
         store.save(); broadcast('sync');
         return json(res, 200, { user: { id: nu.id, username: nu.username } });
       }
@@ -789,6 +797,7 @@ async function handle(req, res, pathname, method) {
           if (b.password) { const { salt, hash } = hashPassword(String(b.password)); target.salt = salt; target.passHash = hash; }
           store.log('system', `Account updated: ${target.username}`, '', actor, []);
         }
+        sim.syncPresidency(db);
         store.save(); broadcast('sync');
         return json(res, 200, { ok: true });
       }

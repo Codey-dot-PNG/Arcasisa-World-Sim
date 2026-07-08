@@ -22,6 +22,11 @@ function directlyControls(controllerId, entity) {
   if (entity.ownerId && entity.ownerId === controllerId) return true;
   if (entity.ceoId && entity.ceoId === controllerId) return true;
   if (entity.type === 'party' && entity.leaderId === controllerId) return true;
+  // Government-type entities: the president(s) sitting in `executives` control
+  // it (mirrors ceoId but supports co-presidencies). Scoped to type
+  // 'government' so a company's `executives` array keeps its non-controlling
+  // meaning elsewhere.
+  if (entity.type === 'government' && Array.isArray(entity.executives) && entity.executives.includes(controllerId)) return true;
   if (entity.sharesOutstanding && Array.isArray(entity.shareholders)) {
     const held = entity.shareholders
       .filter(s => s.entityId === controllerId)

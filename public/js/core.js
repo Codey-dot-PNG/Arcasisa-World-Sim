@@ -114,6 +114,9 @@ function ownership_directlyControlsClient(controllerId, e) {
   if (e.ownerId && e.ownerId === controllerId) return true;
   if (e.ceoId && e.ceoId === controllerId) return true;
   if (e.type === 'party' && e.leaderId === controllerId) return true;
+  // presidency: executives on government-type entities share control
+  // (mirrors server/ownership.js — supports co-presidents)
+  if (e.type === 'government' && Array.isArray(e.executives) && e.executives.includes(controllerId)) return true;
   if (e.sharesOutstanding && Array.isArray(e.shareholders)) {
     const held = e.shareholders.filter(s => s.entityId === controllerId).reduce((sum, s) => sum + (s.shares || 0), 0);
     if (held > e.sharesOutstanding / 2) return true;
@@ -184,12 +187,30 @@ const DEL = (p) => api('DELETE', p);
 // held-open connections, so we subscribe to a Supabase Realtime broadcast
 // channel instead — with a slow poll as belt-and-braces.
 let sse = null, pollTimer = null;
+let rtBackoff = 2000;
+let winWakeBound = false; // guards against double-registering visibilitychange/focus across reconnects
 function loadScript(src) {
   return new Promise((ok, fail) => {
     const s = document.createElement('script');
     s.src = src; s.onload = ok; s.onerror = () => fail(new Error('failed to load ' + src));
     document.head.appendChild(s);
   });
+}
+// Subscribes to both the app's own broadcast pings and postgres_changes on
+// world_version (belt-and-braces — broadcasts sometimes never arrive on
+// Supabase's free tier). Re-subscribes with backoff on any non-SUBSCRIBED
+// status instead of silently going dark.
+function subscribeRealtime(client) {
+  const ch = client.channel('world')
+    .on('broadcast', { event: 'sync' }, () => scheduleRefresh())
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'world_version' }, () => scheduleRefresh())
+    .subscribe((status) => {
+      if (status === 'SUBSCRIBED') { rtBackoff = 2000; scheduleRefresh(); } // catch up on anything missed while offline
+      else if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+        setTimeout(() => { try { client.removeChannel(ch); } catch (e) { } subscribeRealtime(client); }, rtBackoff);
+        rtBackoff = Math.min(rtBackoff * 2, 30000);
+      }
+    });
 }
 async function connectStream() {
   let cfg = { realtime: 'sse' };
@@ -209,16 +230,20 @@ async function connectStream() {
     document.body.appendChild(banner);
   }
 
+  if (!winWakeBound) {
+    winWakeBound = true;
+    document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') scheduleRefresh(); });
+    window.addEventListener('focus', () => scheduleRefresh());
+  }
+
   if (cfg.realtime === 'supabase' && cfg.supabaseUrl && cfg.supabaseAnonKey) {
     try {
       await loadScript('https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js');
       const client = window.supabase.createClient(cfg.supabaseUrl, cfg.supabaseAnonKey);
-      client.channel('world')
-        .on('broadcast', { event: 'sync' }, () => scheduleRefresh())
-        .subscribe();
+      subscribeRealtime(client);
     } catch (e) { console.warn('Realtime unavailable, polling instead:', e.message); }
     if (pollTimer) clearInterval(pollTimer);
-    pollTimer = setInterval(() => scheduleRefresh(), 60000);
+    pollTimer = setInterval(() => scheduleRefresh(), 20000);
     return;
   }
 
@@ -229,12 +254,17 @@ async function connectStream() {
   sse.onopen = () => scheduleRefresh();
   sse.onerror = () => { /* EventSource retries automatically */ };
 }
-
-// Browsers throttle timers and defer events in background tabs, so a tab left
-// open on another screen can lag behind the live turn. Refresh the moment it
-// becomes visible/focused again so every browser converges.
-document.addEventListener('visibilitychange', () => { if (!document.hidden && W.state) scheduleRefresh(); });
-window.addEventListener('focus', () => { if (W.state) scheduleRefresh(); });
+// True while a refresh would clobber in-progress GM editing or destroy
+// keystrokes mid-type — scheduleRefresh defers instead of fetching. (Wake-up
+// refresh on tab focus/visibility is registered once in connectStream.)
+function editingBusy() {
+  if (window.MapEdit && MapEdit.active && (MapEdit.drawing || MapEdit.dragging || MapEdit.saveTimer)) return true;
+  if (W.inspEdit) return true;   // inspector inline-edit draft open
+  const ae = document.activeElement;
+  if (ae && ae.id === 'exp-search') return false; // search box shouldn't block sync
+  if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;  // typing anywhere (forms, modals, GM studio)
+  return false;
+}
 function scheduleRefresh() {
   // Never swap in fresh state mid-interaction in the map editor: pointer
   // drags and half-drawn lines mutate objects inside the CURRENT state, and
@@ -245,24 +275,36 @@ function scheduleRefresh() {
     return;
   }
   if (W.refreshTimer) return;
-  W.refreshTimer = setTimeout(async () => {
+  const attempt = async () => {
+    if (editingBusy()) { W.refreshTimer = setTimeout(attempt, 1000); return; } // re-arm and retry until the user frees up
     W.refreshTimer = null;
     try { await refreshState(); } catch (e) { /* transient */ }
-  }, 250);
+  };
+  W.refreshTimer = setTimeout(attempt, 250);
 }
-async function refreshState() {
+let lastV = undefined, refreshSeq = 0;
+async function refreshState(force) {
+  const seq = ++refreshSeq;
   const data = await GET('/api/state');
-  // scheduleRefresh only checks MapEdit.dragging/drawing at schedule time —
-  // if the interaction starts *after* the timer was armed (or while this GET
-  // was already in flight), that guard never fires and W.state would be
-  // swapped out from under a live drag/pen-draw here instead. Re-check right
-  // before the swap and defer it the same way scheduleRefresh does.
+  // overlapping refreshes (realtime ping + poll + post-write refetch) can
+  // resolve out of order — only the newest issued request may apply, and never
+  // a world OLDER than one already rendered (v is monotonic server-side).
+  // Applying a late stale response is what made turns "reverse" and fresh
+  // road edits vanish.
+  if (seq !== refreshSeq) return;
+  // an interaction may have started while this GET was in flight — re-check
+  // right before the swap and defer it the same way scheduleRefresh does.
   if (window.MapEdit && (MapEdit.dragging || MapEdit.drawing)) {
     if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
     return;
   }
+  if (!force && data.v !== undefined && lastV !== undefined && data.v <= lastV && W.state) {
+    W.me = data.user; // keep identity/role fresh even when the world itself hasn't changed
+    return;
+  }
   W.me = data.user;
   W.state = data.state;
+  if (data.v !== undefined) lastV = data.v;
   // per-province party support (public political knowledge) — cached so the
   // province/city dossiers can draw voter-base pies synchronously
   try { W.polling = await GET('/api/polling'); } catch (e) { W.polling = null; }

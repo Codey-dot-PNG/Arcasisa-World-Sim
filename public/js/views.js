@@ -1123,10 +1123,32 @@ const Views = {
         return sh ? sh.shares : 0;
       })();
 
+      // percent change vs the previous recorded price
+      const pct = (() => {
+        if (priceHist.length < 2) return null;
+        const now = priceHist[priceHist.length - 1].y, prev = priceHist[priceHist.length - 2].y;
+        if (!prev) return null;
+        return (now - prev) / prev * 100;
+      })();
+      const pctEl = pct === null
+        ? el('span.stk-chg.stk-flat', '—')
+        : pct > 0
+          ? el('span.stk-chg.stk-up', '▲ +' + fmtNum(pct, 1) + '%')
+          : pct < 0
+            ? el('span.stk-chg.stk-down', '▼ −' + fmtNum(Math.abs(pct), 1) + '%')
+            : el('span.stk-chg.stk-flat', '· 0.0%');
+
+      const openFile = () => select('entity', c.id);
+      const logoEl = c.logo
+        ? el('img.stk-logo', { src: c.logo, alt: c.name, title: 'Open company file', onclick: openFile })
+        : el('div.stk-logo.stk-logo-mono', { style: `background:${c.color || 'var(--accent)'};`, title: 'Open company file', onclick: openFile }, (c.name || '?').charAt(0).toUpperCase());
+
       const head = el('div', { style: 'display:flex; justify-content:space-between; align-items:flex-start; gap:16px;' },
-        el('div',
-          el('div.tr-parties', c.name + ' — ' + (c.abbrev || c.industry || '')),
-          el('div.tr-meta', `PRICE ${CUR()}${fmtNum(c.sharePrice)} · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`)),
+        el('div', { style: 'display:flex; align-items:flex-start; gap:12px;' },
+          logoEl,
+          el('div',
+            el('div.tr-parties', { style: 'cursor:pointer;', title: 'Open company file', onclick: openFile }, c.name + ' — ' + (c.abbrev || c.industry || '')),
+            el('div.tr-meta', `PRICE ${CUR()}${fmtNum(c.sharePrice)} · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`, ' ', pctEl))),
         el('div', { style: 'text-align:right;' },
           el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
       row.appendChild(head);

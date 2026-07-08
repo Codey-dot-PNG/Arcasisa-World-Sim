@@ -40,6 +40,7 @@ const LOG_FETCH = 400; // recent timeline/transactions loaded per request in clo
 let db = null;
 let seedFn = null;
 let version = 0;            // cloud: value of world.version we loaded
+let fileRev = Date.now();   // file mode: bumped on every save so getVersion() means something there too
 let dirty = false;
 let broadcastPending = false;
 let pendingTimeline = [];
@@ -247,6 +248,19 @@ function migrate(world) {
   for (const it of (world.items || [])) fixMark(it, 'description', 'name');
   for (const n of (world.news || [])) fixMark(n, 'headline', 'body');
 
+  // GM-adjustable taxation (additive default; off until a GM enables it)
+  if (world.settings && !world.settings.taxation) {
+    world.settings.taxation = { enabled: false, corporateRate: 10, propertyRate: 0 };
+    changed = true;
+  }
+
+  // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'
+  // role, so live worlds pick up role changes made outside the normal API
+  // paths (or before this feature existed) on next load. Lazy require avoids
+  // a require cycle (sim.js requires store.js at module scope).
+  try { if (require('./sim').syncPresidency(world, true)) changed = true; }
+  catch (e) { /* sim module optional during early boot */ }
+
   // ---- Phase 11 — one-time world-data update -----------------------------
   // Gated on schema so this block runs exactly once per world: fresh seeds
   // are born at schema 2 (see seed.js) and skip it entirely; a live world
@@ -372,6 +386,7 @@ async function firstSeed() {
   const seedTx = db.transactions.slice();
   version = Date.now();
   await sb.insert('world', [{ id: 1, version, doc: coreDoc() }]);
+  await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // realtime signal table; optional on older deployments
   if (seedTl.length) await sb.insert('timeline', seedTl.map(tlRow));
   if (seedTx.length) await sb.insert('transactions', seedTx.map(txRow));
   dirty = false;
@@ -384,17 +399,31 @@ async function firstSeed() {
 async function commit() {
   if (MODE === 'file') return;
   try {
+    if (dirty) {
+      // CAS write: only succeeds if nobody else committed since our begin()
+      // loaded `version`. A 0-row result means a concurrent request won —
+      // throw so the caller retries against fresh state instead of clobbering it.
+      const newVersion = Math.max(Date.now(), version + 1);
+      const rows = await sb.updateRep('world', 'id=eq.1&version=eq.' + version, { version: newVersion, doc: coreDoc() });
+      if (!rows || !rows.length) {
+        const err = new Error('world version conflict');
+        err.code = 'WORLD_CONFLICT';
+        throw err;
+      }
+      version = newVersion;
+    }
+    // Only reached once the CAS above has succeeded (or wasn't needed) — on a
+    // conflict nothing below must run, so a retry never duplicates log rows.
     if (pendingSnapshot) {
       await sb.upsert('snapshots', [pendingSnapshot]);
       await sb.rpc('prune_arcasia').catch(() => { }); // keeps logs/snapshots bounded
     }
     if (pendingTimeline.length) await sb.insert('timeline', pendingTimeline.map(tlRow));
     if (pendingTxns.length) await sb.insert('transactions', pendingTxns.map(txRow));
-    if (dirty) {
-      version = Date.now();
-      await sb.update('world', 'id=eq.1', { version, doc: coreDoc() });
+    if (dirty || broadcastPending) {
+      await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // table may not exist on older deployments
+      await sb.broadcast('world', 'sync');
     }
-    if (dirty || broadcastPending) await sb.broadcast('world', 'sync');
   } finally {
     pendingTimeline = []; pendingTxns = []; pendingSnapshot = null;
     dirty = false; broadcastPending = false;
@@ -403,12 +432,23 @@ async function commit() {
 
 function get() { return db; }
 
+// Current world version, usable by /api/state to let clients skip no-op
+// re-renders. File mode has no CAS version, but fileRev still changes on
+// every save so it serves the same purpose.
+function getVersion() { return MODE === 'file' ? fileRev : version; }
+
+// Drop the warm cache so the next begin() reloads from Postgres. Used when a
+// handler throws mid-mutation, so a half-applied in-memory db is never
+// reused or committed.
+function invalidate() { db = null; version = 0; }
+
 /* ---------- persistence primitives ---------- */
 function saveNow() {
   if (MODE !== 'file' || !db) return;
   const tmp = DB_FILE + '.tmp';
   fs.writeFileSync(tmp, JSON.stringify(db));
   fs.renameSync(tmp, DB_FILE);
+  fileRev++;
 }
 
 // Universal "something changed" marker. File mode debounces a disk write;
@@ -416,6 +456,7 @@ function saveNow() {
 function save() {
   dirty = true;
   if (MODE !== 'file') return;
+  fileRev++;
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
@@ -554,5 +595,6 @@ function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 
 module.exports = {
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
-  snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR
+  snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR,
+  getVersion, invalidate
 };

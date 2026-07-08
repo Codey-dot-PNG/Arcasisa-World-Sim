@@ -151,7 +151,14 @@ const GM = {
       unit: s.time.unit, perTurn: s.time.perTurn, date: s.time.date,
       autoEnabled: s.time.auto.enabled, autoSeconds: s.time.auto.seconds,
       regOpen: s.registration.open, regRole: s.registration.defaultRole, regStipend: s.registration.stipend,
-      newsTx: s.newsThresholds.transaction
+      newsTx: s.newsThresholds.transaction,
+      // Taxation lives in the same draft object (not a second getDraft() key)
+      // because tabWorld's single-slot draft cache is keyed on one string —
+      // two live keys in the same render would thrash each other's cache on
+      // every re-render (e.g. on 'sync' broadcasts) and drop unsaved edits.
+      taxEnabled: (s.taxation || {}).enabled || false,
+      taxCorporateRate: (s.taxation || {}).corporateRate || 0,
+      taxPropertyRate: (s.taxation || {}).propertyRate || 0
     });
     main.appendChild(el('div.doc-title', 'World & Time'));
     main.appendChild(el('div.doc-sub', 'turn ' + s.time.turn + ' · ' + fmtDate(s.time.date)));
@@ -200,6 +207,24 @@ const GM = {
         } catch (e) { toast(e.message, true); }
       }
     }, 'Save World Settings')));
+
+    main.appendChild(Views.secLabel('Taxation'));
+    main.appendChild(this.check(d, 'taxEnabled', 'Enable monthly taxation'));
+    main.appendChild(el('div.form-grid',
+      this.field('Corporate tax rate (%)', this.num(d, 'taxCorporateRate')),
+      this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate'))));
+    main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
+      'Collected monthly from net property income into the Federal Treasury.'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', {
+            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0 }
+          });
+          toast('Taxation settings saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Taxation')));
 
     main.appendChild(Views.secLabel('Snapshots & Rollback'));
     const snapBox = el('div', el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Consulting the archive…'));

@@ -30,6 +30,9 @@ const select = (table, query) => req('GET', `/rest/v1/${table}?${query}`);
 const insert = (table, rows, prefer) => req('POST', `/rest/v1/${table}`, rows, prefer || 'return=minimal');
 const upsert = (table, rows) => req('POST', `/rest/v1/${table}`, rows, 'return=minimal,resolution=merge-duplicates');
 const update = (table, query, patch) => req('PATCH', `/rest/v1/${table}?${query}`, patch, 'return=minimal');
+// Same as update(), but returns the updated rows so callers can detect a
+// 0-row (conflict) update — used for the world CAS write.
+const updateRep = (table, query, patch) => req('PATCH', `/rest/v1/${table}?${query}`, patch, 'return=representation');
 const del = (table, query) => req('DELETE', `/rest/v1/${table}?${query}`);
 const rpc = (name, args) => req('POST', `/rest/v1/rpc/${name}`, args || {});
 
@@ -43,4 +46,4 @@ async function broadcast(topic, event, payload) {
   }
 }
 
-module.exports = { enabled, url: URL_, anonKey: ANON, select, insert, upsert, update, del, rpc, broadcast };
+module.exports = { enabled, url: URL_, anonKey: ANON, select, insert, upsert, update, updateRep, del, rpc, broadcast };

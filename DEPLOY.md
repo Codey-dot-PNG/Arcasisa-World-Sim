@@ -17,6 +17,8 @@ Total setup time: about 15 minutes.
 2. When it finishes provisioning, open **SQL Editor** (left sidebar) → **New query**.
 3. Paste the entire contents of [`supabase-setup.sql`](supabase-setup.sql) and click **Run**.
    You should see "Success. No rows returned."
+   > **Existing deployments:** re-run `supabase-setup.sql` in the SQL Editor — it's safe to
+   > re-run and adds the new `world_version` table that powers live updates.
 4. Go to **Project Settings → API** and copy three values:
    - **Project URL** (like `https://abcdefgh.supabase.co`)
    - **anon / public** key

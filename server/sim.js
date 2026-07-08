@@ -183,6 +183,56 @@ function fmtNum(n) {
   return Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 }
 
+// ---------- presidency ----------------------------------------------------
+// Keep ent_gov's ceoId/executives in sync with whoever holds the 'president'
+// role. Multiple presidents (co-presidency) share ent_gov via `executives`;
+// ownership.js grants control to anyone in that array. Idempotent — returns
+// false (and touches nothing) when the desired state already matches, so
+// callers (including store.js migrate(), which runs on every load) never
+// dirty the doc needlessly. quiet=true skips the audit-log entry (used from
+// migrate, where logging on every boot would be noise).
+function syncPresidency(db, quiet) {
+  const gov = db.entities.find(e => e.id === 'ent_gov');
+  if (!gov) return false;
+  const entityIds = new Set(db.entities.map(e => e.id));
+  const seen = new Set();
+  const presidents = [];
+  for (const u of db.users) {
+    if (u.roleId === 'president' && u.entityId && entityIds.has(u.entityId) && !seen.has(u.entityId)) {
+      seen.add(u.entityId);
+      presidents.push(u.entityId);
+    }
+  }
+  const prevExecutives = Array.isArray(gov.executives) ? gov.executives : [];
+  const newCeo = presidents[0] || null;
+  const sameSet = presidents.length === prevExecutives.length && presidents.every(id => prevExecutives.includes(id));
+  if (gov.ceoId === newCeo && sameSet) return false;
+
+  gov.ceoId = newCeo;
+  gov.executives = presidents;
+
+  if (db.settings && db.settings.country) {
+    const names = presidents.map(id => { const e = db.entities.find(x => x.id === id); return e ? e.name : null; }).filter(Boolean);
+    db.settings.country.leader = names.length ? names.join(' & ') : null;
+  }
+
+  for (const id of presidents) {
+    const p = db.entities.find(e => e.id === id);
+    if (p && p.title !== 'President of the Republic') p.title = 'President of the Republic';
+  }
+  for (const id of prevExecutives) {
+    if (presidents.includes(id)) continue;
+    const p = db.entities.find(e => e.id === id);
+    if (p && p.title === 'President of the Republic') p.title = 'Former President';
+  }
+
+  if (!quiet) {
+    const label = presidents.length ? presidents.map(id => { const e = db.entities.find(x => x.id === id); return e ? e.name : id; }).join(' & ') : 'vacant';
+    store.log('system', `Presidency updated: ${label}`, '', 'REGISTRY', [gov.id, ...presidents]);
+  }
+  return true;
+}
+
 // Phase 5 — newspapers. `paperId` is optional; when the caller doesn't know
 // (or care) which paper an auto-drafted article belongs to, it's derived from
 // settings.newspaperRouting[category], falling back to paper_today. Existing
@@ -525,6 +575,43 @@ function updateDerived() {
   g.treasury = treasury ? Math.round(treasury.balance) : 0;
 }
 
+// ---------- taxation -------------------------------------------------------
+// Monthly, GM-gated. Corporate tax on companies' net property income;
+// property tax on everyone else's (persons, parties — not the government
+// itself). Both flow into acct_treasury. Skips entirely (no log) when
+// nothing was collected.
+function collectTaxes(db, actor) {
+  const t = db.settings.taxation;
+  const treasury = db.accounts.find(a => a.id === 'acct_treasury');
+  if (!treasury) return;
+  const netIncomeOf = (entityId) => db.properties
+    .filter(p => p.ownerId === entityId)
+    .reduce((sum, p) => sum + ((p.income || 0) - (p.expenses || 0)), 0);
+
+  let total = 0, payers = 0;
+  for (const e of db.entities) {
+    if (e.id === 'ent_gov' || e.id === 'ent_bank' || e.type === 'government') continue;
+    const isCompany = e.type === 'company';
+    const rate = isCompany ? (t.corporateRate || 0) : (t.propertyRate || 0);
+    if (!(rate > 0)) continue;
+    const net = netIncomeOf(e.id);
+    if (!(net > 0)) continue;
+    const tax = Math.round(net * rate / 100);
+    if (!(tax > 0)) continue;
+    const acct = primaryAccount(e.id, false);
+    if (!acct || !(acct.balance > 0)) continue;
+    const amount = Math.min(tax, acct.balance);
+    if (!(amount > 0)) continue;
+    const kindLabel = isCompany ? 'Corporate' : 'Property';
+    txn(acct.id, treasury.id, amount, `${kindLabel} tax (${rate}%)`, 'TREASURY', 'transfer');
+    total += amount;
+    payers++;
+  }
+  if (total > 0) {
+    store.log('economy', `Taxes collected: ${db.settings.currency}${fmtNum(total)}`, `${payers} payer${payers === 1 ? '' : 's'}`, 'TREASURY', []);
+  }
+}
+
 function advanceTurn(steps, actor) {
   const db = store.get();
   steps = Math.max(1, Math.min(60, steps || 1));
@@ -565,6 +652,7 @@ function advanceTurn(steps, actor) {
         `${delta >= 0 ? 'an increase' : 'a decline'} of ${Math.abs(delta).toFixed(1)}% for the month. ` +
         `Average approval of the government stands at ${db.globalVars.avgApproval}%.`, 'Economy', true, 'State Statistical Bureau');
     }
+    if (monthBoundary && db.settings.taxation && db.settings.taxation.enabled) collectTaxes(db, actor || 'ENGINE');
     recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
@@ -828,6 +916,6 @@ function autoTick(actor) {
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
   runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
-  scheduleAuto, setLongLived, autoTick,
+  scheduleAuto, setLongLived, autoTick, syncPresidency,
   findProv, findEnt, findItem
 };

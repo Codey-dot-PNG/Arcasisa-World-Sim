@@ -1,6 +1,37 @@
 'use strict';
 /* Boot, auth, navigation, shell orchestration. */
 
+// Tracks the view renderAll last painted, so periodic-refresh re-renders can
+// restore scroll positions while a real view switch (App.go) still lands at
+// the top as expected.
+let lastRenderedView = null;
+
+// The scrolling elements aren't #view itself (it's overflow:hidden — a pan/
+// zoom surface for the map) but a child rebuilt from scratch on every render:
+// .doc-view for the document-style views, .gm-main for GM Studio. Both are
+// class-selected since they carry no id and are torn down/recreated each call.
+function captureScroll() {
+  const saved = {};
+  const nodes = {
+    'exp-body': document.getElementById('exp-body'),
+    'insp-body': document.getElementById('insp-body'),
+    'view-inner': document.querySelector('#view .doc-view, #view .gm-main')
+  };
+  for (const key in nodes) {
+    const n = nodes[key];
+    if (n && (n.scrollTop || n.scrollLeft)) {
+      saved[key] = { top: n.scrollTop, left: n.scrollLeft, cls: n.classList.contains('doc-view') ? '.doc-view' : '.gm-main' };
+    }
+  }
+  return saved;
+}
+function restoreScroll(saved) {
+  for (const key in saved) {
+    const n = key === 'view-inner' ? document.querySelector('#view ' + saved[key].cls) : document.getElementById(key);
+    if (n) { n.scrollTop = saved[key].top; n.scrollLeft = saved[key].left; }
+  }
+}
+
 const App = {
   PAGES: [
     ['map', 'World Map'], ['parliament', 'Parliament'], ['companies', 'Companies'],
@@ -25,7 +56,7 @@ const App = {
 
     this.bindShell();
     try {
-      await refreshState();
+      await refreshState(true); // first paint must never be skipped by the v-unchanged fast path
       this.enter();
     } catch (e) {
       document.getElementById('login-screen').classList.remove('hidden');
@@ -55,7 +86,7 @@ const App = {
         } else {
           await POST('/api/auth/login', { username, password });
         }
-        await refreshState();
+        await refreshState(true); // first paint must never be skipped by the v-unchanged fast path
         this.enter();
       } catch (err) {
         errBox.textContent = '✕ ' + err.message;
@@ -129,6 +160,10 @@ const App = {
 
   renderAll() {
     if (!W.me || !S()) return;
+    // only preserve scroll when this is a re-render of the same view (a
+    // periodic refresh) — an actual view switch should land at the top
+    const sameView = W.view === lastRenderedView;
+    const saved = sameView ? captureScroll() : null;
     this.renderTopbar();
     this.renderTabs();
     renderExplorer();
@@ -143,6 +178,8 @@ const App = {
     // Phase 10 — reflect settings.music into the shared <audio> element +
     // top-bar widget on every state refresh / sync broadcast.
     if (typeof Music !== 'undefined') Music.apply();
+    if (saved) restoreScroll(saved);
+    lastRenderedView = W.view;
   }
 };
 

@@ -503,6 +503,7 @@ function seed() {
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
       newsThresholds: { transaction: 5000000 },
+      taxation: { enabled: false, corporateRate: 10, propertyRate: 0 },
       demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS },
       // Phase 5 — exactly four newspapers. Fixed list: the GM may rename
       // fields here but the UI offers no "add paper" control.

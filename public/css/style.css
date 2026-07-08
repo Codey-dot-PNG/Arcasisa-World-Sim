@@ -16,6 +16,8 @@
   --map-sea:#8ea3b4;
   --good:#3f5c3a;
   --bad:#7a2318;
+  --stk-up:#2456a8;
+  --stk-down:#a83232;
   --font-voice:'Fraunces', serif;
   --font-mono:'JetBrains Mono', monospace;
   --font-ui:'Inter', sans-serif;
@@ -733,6 +735,18 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 .trade-row .tr-meta{font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); letter-spacing:.06em; margin:2px 0 8px;}
 .trade-cols{display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-bottom:8px;}
 .trade-cols .tc-head{font-family:var(--font-mono); font-size:9px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:3px;}
+.stk-logo{
+  width:26px; height:26px; flex-shrink:0; object-fit:contain; cursor:pointer;
+  border:1px solid var(--rule-strong); background:var(--paper); margin-top:1px;
+}
+.stk-logo-mono{
+  display:flex; align-items:center; justify-content:center;
+  font-family:var(--font-voice); font-size:13px; font-weight:600; color:var(--paper);
+}
+.stk-chg{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.04em;}
+.stk-up{color:var(--stk-up);}
+.stk-down{color:var(--stk-down);}
+.stk-flat{color:var(--ink-faint);}
 
 /* ═══════════ GM COMMAND BAR (Phase 3) ═══════════
    Slim always-available toolbar, GM-only, any view. Sits directly above the

@@ -111,16 +111,31 @@ const Entertainment = {
     const stakeIn = el('input.text-input', { type: 'number', min: String(v.minBet || 1), value: this.stake, style: 'width:100px;', oninput: (e) => this.stake = Math.max(v.minBet || 1, Number(e.target.value) || 0) });
     const presets = el('div.chip-presets', [10, 50, 100, 500, 1000, 5000].map(amt =>
       el('button.chip-preset', { onclick: () => { SFX.click(); this.stake = amt; stakeIn.value = amt; } }, CUR() + fmtCompact(amt))));
+    // All-in: push the whole balance onto one chip (never above the table max)
+    presets.appendChild(el('button.chip-preset.chip-allin', {
+      onclick: () => {
+        const bal = this.myBalance();
+        if (!(bal > 0)) return toast('No balance to go all in with.', true);
+        const amt = Math.max(v.minBet || 1, Math.min(bal, v.maxBet || bal));
+        SFX.chip(); this.stake = amt; stakeIn.value = amt;
+        toast('All in — ' + fmtMoney(amt) + ' chip. Now pick a bet.');
+      }
+    }, '★ ALL IN'));
     panel.appendChild(el('div.bet-stake-row', el('label.field-label', { style: 'margin:0;' }, 'Chip size (' + CUR() + ')'), stakeIn));
     panel.appendChild(presets);
     panel.appendChild(el('div.bet-limits', `table limits ${fmtMoney(v.minBet || 1)} – ${fmtMoney(v.maxBet || 0)} per bet`));
 
-    // outside bets
+    // outside bets — keep a handle on every button so the live wheel position
+    // can pulse the matching odds while it spins (keyed by "type:value")
+    this.betEls = {};
     const outside = el('div.bet-outside');
     const addBet = (type, value, label) => this.addBet(type, value, label);
     [['red', null, 'RED'], ['black', null, 'BLACK'], ['odd', null, 'ODD'], ['even', null, 'EVEN'], ['low', null, '1–18'], ['high', null, '19–36'],
-    ['dozen', 1, '1st 12'], ['dozen', 2, '2nd 12'], ['dozen', 3, '3rd 12']].forEach(([t, val, lab]) =>
-      outside.appendChild(el('button', { class: 'bet-btn bet-' + t, onclick: () => addBet(t, val, lab) }, lab)));
+    ['dozen', 1, '1st 12'], ['dozen', 2, '2nd 12'], ['dozen', 3, '3rd 12']].forEach(([t, val, lab]) => {
+      const b = el('button', { class: 'bet-btn bet-' + t, onclick: () => addBet(t, val, lab) }, lab);
+      this.betEls[t + ':' + val] = b;
+      outside.appendChild(b);
+    });
     panel.appendChild(outside);
 
     // number table — classic 3×12 layout, zero on the left, 2:1 column bets
@@ -143,10 +158,12 @@ const Entertainment = {
         table.appendChild(cell);
       }
       const colVal = 3 - row; // top row: n%3===0 → value 3, middle 2, bottom 1
-      table.appendChild(el('button.bet-cell.bet-col', {
+      const colBtn = el('button.bet-cell.bet-col', {
         style: `grid-row:${row + 1}; grid-column:14;`,
         onclick: () => addBet('column', colVal, `Col ${colVal} (2:1)`)
-      }, '2:1'));
+      }, '2:1');
+      this.betEls['column:' + colVal] = colBtn;
+      table.appendChild(colBtn);
     }
     panel.appendChild(table);
 
@@ -186,15 +203,33 @@ const Entertainment = {
       path.setAttribute('fill', this.colorOf(num) === 'green' ? '#2f7a44' : this.colorOf(num) === 'red' ? '#a3241c' : '#1c1c1c');
       path.setAttribute('stroke', '#d8caa8'); path.setAttribute('stroke-width', '0.6');
       svg.appendChild(path);
-      // number labels sit in the OUTER half of the pocket, clear of the hub
+      // Numbers read RADIALLY (like a real wheel): the digits run along the
+      // spoke so a two-digit number uses the pocket's deep radial span instead
+      // of its narrow tangential width — otherwise the second digit spills over
+      // the separators and gets clipped into the rim.
       const am = ((i + 0.5) * step - 90) * Math.PI / 180;
-      const tr = r - 11;
+      const tr = r - 18; // radial distance
+
+      // Tangent direction at this angle
+      const tangentX = -Math.sin(am);
+      const tangentY =  Math.cos(am);
+
+      // Adjust this to move the text around the wheel
+      const tangentOffset = -8;
+
+      const tx = cx + tr * Math.cos(am) + tangentX * tangentOffset;
+      const ty = cy + tr * Math.sin(am) + tangentY * tangentOffset;
+
       const t = document.createElementNS(NS, 'text');
-      t.setAttribute('x', cx + tr * Math.cos(am)); t.setAttribute('y', cy + tr * Math.sin(am));
-      t.setAttribute('fill', '#f5eede'); t.setAttribute('font-size', '10'); t.setAttribute('font-weight', '700');
+      t.setAttribute('x', tx);
+      t.setAttribute('y', ty);
+      t.setAttribute('fill', '#f5eede');
+      t.setAttribute('font-size', '9');
+      t.setAttribute('font-weight', '700');
       t.setAttribute('font-family', 'JetBrains Mono, monospace');
-      t.setAttribute('text-anchor', 'middle'); t.setAttribute('dominant-baseline', 'central');
-      t.setAttribute('transform', `rotate(${(i + 0.5) * step} ${cx + tr * Math.cos(am)} ${cy + tr * Math.sin(am)})`);
+      t.setAttribute('text-anchor', 'middle');
+      t.setAttribute('dominant-baseline', 'central');
+      t.setAttribute('transform', `rotate(${(i + 0.5) * step + 90} ${tx} ${ty})`);
       t.textContent = String(num);
       svg.appendChild(t);
     });
@@ -261,6 +296,7 @@ const Entertainment = {
     try {
       const r = await POST('/api/casino/roulette', { venueId: v.id, bets: this.bets.map(b => ({ type: b.type, value: b.value, amount: b.amount })) });
       await this.animateWheel(r.number);
+      this.highlightPocket(r.number); // leave the winning odds glowing on settle
       const c = r.color.toUpperCase();
       const net = r.playerDelta;
       const cls = net > 0 ? 'win' : net < 0 ? 'lose' : '';
@@ -291,6 +327,35 @@ const Entertainment = {
     return Math.atan2(Number(m[2]), Number(m[1])) * 180 / Math.PI;
   },
 
+  // Which pocket is under the top pointer right now (from the wheel's live
+  // rotation). Pocket i sits step*i clockwise from the top before rotation, so
+  // a CSS rotation θ puts pocket ≡ round(-θ/step) at the top.
+  liveTopNumber() {
+    if (!this.wheelEl) return null;
+    const n = this.WHEEL.length, step = 360 / n;
+    let i = Math.round(-this.currentAngle(this.wheelEl) / step) % n;
+    return this.WHEEL[((i % n) + n) % n];
+  },
+  clearPocketHighlights() {
+    document.querySelectorAll('.bet-btn.pocket-live, .bet-cell.pocket-live')
+      .forEach(e => e.classList.remove('pocket-live'));
+  },
+  // Pulse every bet that would win on `n` — the number, its colour, parity,
+  // half, dozen and column — so the odds light up as the wheel rolls past them.
+  highlightPocket(n) {
+    this.clearPocketHighlights();
+    if (n === null || n === undefined) return;
+    const cell = this.gridCells && this.gridCells[n];
+    if (cell) cell.classList.add('pocket-live');
+    if (n === 0) return;
+    const add = (k) => { const e = this.betEls && this.betEls[k]; if (e) e.classList.add('pocket-live'); };
+    add(this.colorOf(n) + ':null');
+    add((n % 2 ? 'odd' : 'even') + ':null');
+    add((n <= 18 ? 'low' : 'high') + ':null');
+    add('dozen:' + Math.ceil(n / 12));
+    add('column:' + (n % 3 === 0 ? 3 : n % 3));
+  },
+
   /* The anticipation package: the wheel takes a long, hard-braking spin one
      way while the ball orbits the rim the other way, drops into the pockets
      near the end, and the pocket separators tick past the ball the whole
@@ -304,6 +369,8 @@ const Entertainment = {
       const WHEEL_MS = 6400, BALL_MS = 5600;
 
       // normalise the wheel's angle so consecutive spins never accumulate
+      this._liveNum = undefined;
+      this.clearPocketHighlights();
       const from = ((this.wheelAngle || 0) % 360 + 360) % 360;
       this.wheelEl.style.transition = 'none';
       this.wheelEl.style.transform = `rotate(${from}deg)`;
@@ -336,6 +403,9 @@ const Entertainment = {
           lastPocket = pocket;
           if (now - lastTick > 26) { SFX.tick(); lastTick = now; }
         }
+        // light up the odds under the pointer as the wheel rolls past them
+        const topN = this.liveTopNumber();
+        if (topN !== this._liveNum) { this._liveNum = topN; this.highlightPocket(topN); }
         if (now < tickEnd) requestAnimationFrame(tickLoop);
       };
       const tickEnd = performance.now() + WHEEL_MS - 250;
@@ -377,6 +447,15 @@ const Entertainment = {
       controls.appendChild(el('label.field-label', 'Bet (' + CUR() + ')'));
       controls.appendChild(bet);
       controls.appendChild(el('button.solid-btn', { onclick: () => this.bjAction(v, 'deal', Number(bet.value)) }, 'Deal'));
+      controls.appendChild(el('button.outline-btn.chip-allin', {
+        title: 'Deal for your whole balance',
+        onclick: () => {
+          const bal = this.myBalance();
+          if (!(bal > 0)) return toast('No balance to go all in with.', true);
+          const amt = Math.max(v.minBet || 1, Math.min(bal, v.maxBet || bal));
+          bet.value = amt; this.stake = amt; this.bjAction(v, 'deal', amt);
+        }
+      }, '★ All In'));
     } else {
       controls.appendChild(el('button.solid-btn', { onclick: () => this.bjAction(v, 'hit') }, 'Hit'));
       controls.appendChild(el('button.dash-btn', { onclick: () => this.bjAction(v, 'stand') }, 'Stand'));

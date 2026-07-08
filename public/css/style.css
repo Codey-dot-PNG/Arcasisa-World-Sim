@@ -490,6 +490,14 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .bet-cell:hover{outline:2px solid var(--accent);}
 .bet-cell.hit{outline:3px solid var(--accent); animation:hitPulse .9s ease infinite;}
 @keyframes hitPulse{50%{filter:brightness(1.6);}}
+/* live wheel position — the odds under the pointer pulse as the wheel rolls */
+.bet-btn.pocket-live, .bet-cell.pocket-live{position:relative; z-index:1; animation:pocketLive 1s ease-in-out infinite;}
+@keyframes pocketLive{
+  0%,100%{box-shadow:0 0 0 2px var(--accent), 0 0 5px 1px var(--accent); filter:brightness(1.12);}
+  50%{box-shadow:0 0 0 2px var(--accent), 0 0 16px 4px var(--accent); filter:brightness(1.35);}
+}
+.chip-allin{border-color:var(--accent); color:var(--accent); font-weight:700;}
+.chip-allin:hover{background:var(--accent); color:var(--paper);}
 .slip-list{margin-top:12px; border-top:1px dashed var(--rule-strong); padding-top:8px;}
 .slip-row{display:flex; gap:8px; align-items:center; justify-content:space-between; font-size:12px; padding:2px 0;}
 .slip-total{font-family:var(--font-mono); font-size:12px; margin-top:6px; color:var(--ink-soft);}

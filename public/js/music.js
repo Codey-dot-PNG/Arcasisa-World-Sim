@@ -41,6 +41,7 @@ const Music = {
   armed: false,      // first-interaction unlock done
   mode: null,        // 'yt' | 'audio' — backend of the current track
   vol: 0.7,
+  volTouched: false, // user moved the local slider — GM/global volume no longer overrides
   muted: false,
   yt: null,          // hidden YT.Player instance
   ytReady: false,
@@ -48,6 +49,13 @@ const Music = {
 
   init() {
     if (this.audio) return; // idempotent
+    // The volume slider is a personal, per-browser preference. Restore it
+    // before the first apply() so a sync never snaps it back to the default.
+    const savedVol = localStorage.getItem('arcasia-music-vol');
+    if (savedVol !== null && !isNaN(Number(savedVol))) {
+      this.vol = Math.max(0, Math.min(1, Number(savedVol)));
+      this.volTouched = true;
+    }
     this.audio = new Audio();
     this.audio.preload = 'auto';
     this.audio.addEventListener('ended', () => this.onEnded());
@@ -154,7 +162,15 @@ const Music = {
       return;
     }
 
-    this.setVolume(Math.max(0, Math.min(1, cfg.volume === undefined ? 0.7 : Number(cfg.volume))), true);
+    // settings.music.volume is only the world DEFAULT. Once the user touches
+    // their local slider (persisted in localStorage) it wins forever — the
+    // old behaviour re-applied the global volume on EVERY sync/re-render,
+    // resetting the slider each page update.
+    if (!this.volTouched) {
+      this.setVolume(Math.max(0, Math.min(1, cfg.volume === undefined ? 0.7 : Number(cfg.volume))), true);
+    } else {
+      this.setVolume(this.vol, true); // keep backends in sync with the local choice
+    }
 
     // ---- forced track wins over everything ----
     if (cfg.forcedTrack) {
@@ -276,7 +292,12 @@ const Music = {
     this.vol = v;
     if (this.audio) this.audio.volume = v;
     if (this.yt && this.ytReady) { try { this.yt.setVolume(Math.round(v * 100)); } catch (e) {} }
-    if (!fromSync) this.renderWidget();
+    if (!fromSync) {
+      // user-initiated: remember it locally so syncs stop overriding it
+      this.volTouched = true;
+      try { localStorage.setItem('arcasia-music-vol', String(v)); } catch (e) {}
+      this.renderWidget();
+    }
   },
   toggleMute() {
     this.muted = !this.muted;

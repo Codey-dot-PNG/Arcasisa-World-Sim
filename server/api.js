@@ -349,6 +349,19 @@ async function handle(req, res, pathname, method) {
         if (!u.role.perms.gm && !ownership.controls(u.user.entityId, venue.ownerId)) return deny('You do not run this venue.');
         const num = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n)));
         if (b.enabled !== undefined && u.role.perms.gm) venue.enabled = !!b.enabled;
+        // GM-only venue stewardship: rename, re-blurb, or hand the house to a
+        // different company — the new owner's primary account starts paying
+        // winnings and banking losses from the next round.
+        if (u.role.perms.gm) {
+          if (b.name !== undefined && String(b.name).trim()) venue.name = String(b.name).trim().slice(0, 80);
+          if (b.blurb !== undefined) venue.blurb = String(b.blurb).slice(0, 240);
+          if (b.ownerId !== undefined && b.ownerId !== venue.ownerId) {
+            if (!db.entities.some(e => e.id === b.ownerId)) return bad('Unknown owner entity.');
+            const prev = venue.ownerId;
+            venue.ownerId = b.ownerId;
+            store.log('ownership', `${venue.name} changes hands`, `House passes from ${(db.entities.find(e => e.id === prev) || {}).name || '—'} to ${(db.entities.find(e => e.id === b.ownerId) || {}).name || '—'}.`, 'GM ' + u.user.displayName, [venue.ownerId, prev].filter(Boolean));
+          }
+        }
         if (b.minBet !== undefined) venue.minBet = Math.max(1, Math.round(Number(b.minBet) || 1));
         if (b.maxBet !== undefined) venue.maxBet = Math.max(venue.minBet || 1, Math.round(Number(b.maxBet) || 1));
         if (b.roulette && venue.roulette) { if (b.roulette.greenSlots !== undefined) venue.roulette.greenSlots = num(b.roulette.greenSlots, 1, 6); }
@@ -358,6 +371,17 @@ async function handle(req, res, pathname, method) {
         }
         if (b.ticketPrice !== undefined && venue.kind === 'lottery') venue.ticketPrice = Math.max(1, Math.round(Number(b.ticketPrice) || 1));
         if (b.houseCutPct !== undefined && venue.kind === 'lottery') venue.houseCutPct = num(b.houseCutPct, 0, 90);
+        // Jackpot controls — the venue's owner (or GM) may set the pot and
+        // the seed floor directly. Publicity money, not an accounting entry:
+        // no funds move until a draw pays out.
+        if (b.pot !== undefined && venue.kind === 'lottery') {
+          const newPot = Math.max(0, Math.round(Number(b.pot) || 0));
+          if (newPot !== (venue.pot || 0)) {
+            venue.pot = newPot;
+            store.log('economy', `${venue.name} jackpot set to ${db.settings.currency}${newPot}`, '', u.user.displayName, [venue.ownerId]);
+          }
+        }
+        if (b.jackpotSeed !== undefined && venue.kind === 'lottery') venue.jackpotSeed = Math.max(0, Math.round(Number(b.jackpotSeed) || 0));
         store.save(); broadcast('sync');
         return json(res, 200, { venue });
       }

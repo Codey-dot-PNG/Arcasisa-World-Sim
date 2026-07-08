@@ -315,6 +315,97 @@ function migrate(world) {
   try { if (require('./sim').syncPresidency(world, true)) changed = true; }
   catch (e) { /* sim module optional during early boot */ }
 
+  // ---- one-time lore corrections (July 2026) ----
+  if (!world._loreFixes1) {
+    // 1. Fix SATROM ownership and description
+    const satrom = (world.entities || []).find(e => e.id === 'ent_satrom');
+    if (satrom) {
+      if (satrom.ownerId !== 'for_sarom') { satrom.ownerId = 'for_sarom'; changed = true; }
+      if (satrom.industry !== 'Defence & Electronics (Saromite)') { satrom.industry = 'Defence & Electronics (Saromite)'; changed = true; }
+      const newDesc = 'Saromite defence-electronics conglomerate, headquartered in the Federation of Sarom. Its Arcasian presence is regional offices at Razno and the Satrom Grand Casino on the Lachevan strip — SATROM builds no weapons for the Republic.';
+      if (satrom.description !== newDesc) { satrom.description = newDesc; changed = true; }
+      const newShareholders = [{ entityId: 'for_sarom', shares: 500000 }, { entityId: 'per_hale', shares: 100000 }];
+      if (!satrom.shareholders || satrom.shareholders.length !== 2 || satrom.shareholders[0].entityId !== 'for_sarom') {
+        satrom.shareholders = newShareholders; changed = true;
+      }
+    }
+
+    // 2. Fix SATROM Radar Works description
+    const satromWorks = (world.properties || []).find(p => p.id === 'prop_satrom_works');
+    if (satromWorks) {
+      const newDesc = 'Radar arrays and precision instruments, built for export to the Federation of Sarom. Restricted site.';
+      if (satromWorks.description !== newDesc) { satromWorks.description = newDesc; changed = true; }
+    }
+
+    // 3. Add Satrom Grand Casino if not present
+    if (!(world.properties || []).find(p => p.id === 'prop_satrom_casino')) {
+      world.properties.push({
+        id: 'prop_satrom_casino', name: 'Satrom Grand Casino', type: 'commercial', kind: 'office',
+        provinceId: 'prov_lachevan', pos: [2278, 499], ownerId: 'ent_satrom', value: 24000000,
+        employees: 650, income: 300000, expenses: 140000,
+        description: 'The Republic\'s glittering house of chance on the Lachevan strip, operated by the Saromite SATROM group.',
+        inventory: [], vars: {}
+      });
+      changed = true;
+    }
+
+    // 4. Remove Port of Razno
+    if ((world.properties || []).find(p => p.id === 'prop_razno_port')) {
+      world.properties = world.properties.filter(p => p.id !== 'prop_razno_port');
+      changed = true;
+    }
+
+    // 5. Rename Assembly of Nations to United Nations
+    const assembly = (world.entities || []).find(e => e.id === 'org_assembly' || (e.type === 'org' && e.name === 'Assembly of Nations'));
+    if (assembly) {
+      if (assembly.name !== 'United Nations') { assembly.name = 'United Nations'; changed = true; }
+      if (assembly.description !== 'The United Nations. Arcasia is a founding member.') {
+        assembly.description = 'The United Nations. Arcasia is a founding member.'; changed = true;
+      }
+    }
+
+    // 6. Fix GRACE membership status
+    const grace = (world.entities || []).find(e => e.id === 'org_grace');
+    if (grace) {
+      if (grace.stance === 'Member') { grace.stance = 'Observer'; changed = true; }
+    }
+
+    // 7. Add users for named persons
+    const newUsers = [
+      { id: 'user_verenne', username: 'verenne', displayName: 'Ilya Verenne', roleId: 'mp', entityId: 'per_verenne' },
+      { id: 'user_stahl', username: 'stahl', displayName: 'Gregor Stahl', roleId: 'mp', entityId: 'per_stahl' },
+      { id: 'user_kandel', username: 'kandel', displayName: 'Rosa Kandel', roleId: 'mp', entityId: 'per_kandel' },
+      { id: 'user_suri', username: 'suri', displayName: 'Aran Suri', roleId: 'mp', entityId: 'per_suri' },
+      { id: 'user_hale', username: 'hale', displayName: 'Viktor Hale', roleId: 'executive', entityId: 'per_hale' },
+      { id: 'user_keller', username: 'keller', displayName: 'Dana Keller', roleId: 'executive', entityId: 'per_keller' },
+      { id: 'user_odek', username: 'odek', displayName: 'Baran Odek', roleId: 'executive', entityId: 'per_odek' },
+      { id: 'user_grazi', username: 'grazi', displayName: 'Marta Grazi', roleId: 'executive', entityId: 'per_grazi' },
+      { id: 'user_orn', username: 'orn', displayName: 'Pavel Orn', roleId: 'executive', entityId: 'per_orn' },
+      { id: 'user_krenn', username: 'krenn', displayName: 'Halvard Krenn', roleId: 'judge', entityId: 'per_krenn' },
+      { id: 'user_voss', username: 'voss', displayName: 'Gen. Petra Voss', roleId: 'military', entityId: 'per_voss' },
+      { id: 'user_falk', username: 'falk', displayName: 'Erik Falk', roleId: 'police', entityId: 'per_falk' }
+    ];
+    for (const nu of newUsers) {
+      if (!(world.users || []).find(u => u.username === nu.username) && !(world.users || []).find(u => u.entityId === nu.entityId)) {
+        try {
+          const { salt, hash } = require('./seed').hashPassword('arcasia');
+          world.users.push({
+            id: nu.id, username: nu.username, displayName: nu.displayName, salt, passHash: hash,
+            roleId: nu.roleId, entityId: nu.entityId, created: Date.now(), lastLogin: null
+          });
+          changed = true;
+        } catch (e) { /* hashPassword not available during early boot */ }
+      }
+    }
+
+    // the SATROM share register changed above — re-reconcile the certificate
+    // items now rather than waiting for the next load's early sync pass
+    try { if (require('./market').syncAllCertificates(world)) changed = true; }
+    catch (e) { /* market module optional during early boot */ }
+
+    world._loreFixes1 = true; changed = true;
+  }
+
   // ---- Phase 11 — one-time world-data update -----------------------------
   // Gated on schema so this block runs exactly once per world: fresh seeds
   // are born at schema 2 (see seed.js) and skip it entirely; a live world

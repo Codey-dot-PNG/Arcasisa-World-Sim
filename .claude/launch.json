@@ -6,6 +6,12 @@
       "runtimeExecutable": "node",
       "runtimeArgs": ["server.js"],
       "port": 4820
+    },
+    {
+      "name": "mock",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["tools/mock-client-server.py"],
+      "port": 8765
     }
   ]
 }

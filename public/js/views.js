@@ -614,7 +614,11 @@ const Views = {
     if (myEnt && myEnt.inventory && myEnt.inventory.length && id !== W.me.entityId) {
       actions.appendChild(el('button.outline-btn', { onclick: () => this.tradeModal(null, id) }, '▣ Send Items'));
     }
-    actions.appendChild(this.gmJump('entity', id));
+    // gmJump() is null for non-GM operators — appending it unguarded threw
+    // and killed the whole dossier for players (the "can't view info files
+    // on foreign powers / companies" bug).
+    const jump = this.gmJump('entity', id);
+    if (jump) actions.appendChild(jump);
     wrap.appendChild(actions);
     return wrap;
   },
@@ -1017,13 +1021,53 @@ const Views = {
       el('button.chip', { class: W.ecoTab === 'overview' ? 'active' : '', onclick: () => { W.ecoTab = 'overview'; App.renderView(); } }, 'Overview'),
       el('button.chip', { class: W.ecoTab === 'exchange' ? 'active' : '', onclick: () => { W.ecoTab = 'exchange'; App.renderView(); } }, 'Exchange'),
       el('button.chip', { class: W.ecoTab === 'trade' ? 'active' : '', onclick: () => { W.ecoTab = 'trade'; App.renderView(); } },
-        'Trade', incoming.length ? el('span.count-badge', String(incoming.length)) : null)
+        'Trade', incoming.length ? el('span.count-badge', String(incoming.length)) : null),
+      el('button.chip', { class: W.ecoTab === 'inventory' ? 'active' : '', onclick: () => { W.ecoTab = 'inventory'; App.renderView(); } }, 'Inventory')
     );
     inner.appendChild(tabs);
 
     if (W.ecoTab === 'exchange') return this.viewExchange(inner);
     if (W.ecoTab === 'trade') return this.viewTrade(inner);
+    if (W.ecoTab === 'inventory') return this.viewInventory(inner);
     this.viewEconomyOverview(inner);
+  },
+
+  /* ---- Inventory (everything the operator's ownership chain holds) ---- */
+  viewInventory(inner) {
+    const mine = ownershipSetClient();
+    const gm = isGM();
+    const holders = S().entities.filter(e => (gm || mine.has(e.id)) && (e.inventory || []).length);
+    const sites = S().properties.filter(pr => (pr.inventory || []).length && (gm || (pr.ownerId && mine.has(pr.ownerId))));
+
+    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' },
+      gm ? 'Gamemaster view — every visible holding' : 'Holdings of your entity and the companies you control'));
+
+    if (!holders.length && !sites.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' },
+        'Nothing on the shelves — you and your companies hold no items.'));
+      return;
+    }
+
+    // grand total across everything listed
+    let grand = 0;
+    const rowsValue = (inv) => inv.reduce((s, r) => { const it = itemById(r.itemId); return s + (it ? r.qty * it.marketValue : 0); }, 0);
+    holders.forEach(e => grand += rowsValue(e.inventory));
+    sites.forEach(pr => grand += rowsValue(pr.inventory));
+    inner.appendChild(this.statStrip([
+      ['Holders', fmtNum(holders.length + sites.length)],
+      ['Combined market value', fmtMoney(grand)]
+    ]));
+
+    for (const e of holders) {
+      inner.appendChild(this.secLabel(e.name + ' — ' + fmtMoney(rowsValue(e.inventory)),
+        el('button.outline-btn', { style: 'margin-left:8px;', onclick: () => this.tradeModal() }, '▣ Send Items')));
+      inner.appendChild(this.inventoryTable(e.inventory, e.id));
+    }
+    for (const pr of sites) {
+      inner.appendChild(this.secLabel(pr.name + ' (site) — ' + fmtMoney(rowsValue(pr.inventory)),
+        el('button.outline-btn', { style: 'margin-left:8px;', onclick: () => select('property', pr.id) }, 'Open site file')));
+      inner.appendChild(this.inventoryTable(pr.inventory, pr.ownerId));
+    }
   },
 
   viewEconomyOverview(inner) {

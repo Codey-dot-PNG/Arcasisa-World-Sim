@@ -143,11 +143,11 @@ function seed() {
       shareholders: [{ entityId: 'per_moss', shares: 440000 }, { entityId: 'ent_arc', shares: 120000 }, { entityId: 'per_keller', shares: 60000 }, { entityId: 'per_rill', shares: 500 }],
       vars: { revenue: 96000000, profit: 8400000, valuation: 420000000 },
       inventory: [{ itemId: 'item_radio', qty: 3800 }, { itemId: 'item_tv', qty: 900 }] },
-    { id: 'ent_satrom', type: 'company', name: 'SATROM', industry: 'Military & High-End Electronics', color: '#5c3a4e', logo: A + '/companies/satrom.png',
-      description: 'Defence electronics, radar and precision instruments. Principal supplier to the Arcasian armed forces.',
-      ownerId: 'ent_gov', ceoId: 'per_hale', executives: ['per_hale'], sharesOutstanding: 600000,
+    { id: 'ent_satrom', type: 'company', name: 'SATROM', industry: 'Defence & Electronics (Saromite)', color: '#5c3a4e', logo: A + '/companies/satrom.png',
+      description: 'Saromite defence-electronics conglomerate, headquartered in the Federation of Sarom. Its Arcasian presence is regional offices at Razno and the Satrom Grand Casino on the Lachevan strip — SATROM builds no weapons for the Republic.',
+      ownerId: 'for_sarom', ceoId: 'per_hale', executives: ['per_hale'], sharesOutstanding: 600000,
       publicFloat: 10, sharePrice: 1017, trust: 58,
-      shareholders: [{ entityId: 'ent_gov', shares: 360000 }, { entityId: 'ent_arc', shares: 140000 }, { entityId: 'per_hale', shares: 100000 }],
+      shareholders: [{ entityId: 'for_sarom', shares: 500000 }, { entityId: 'per_hale', shares: 100000 }],
       vars: { revenue: 74000000, profit: 9100000, valuation: 610000000 },
       inventory: [{ itemId: 'item_radar', qty: 12 }] },
     { id: 'ent_amco', type: 'company', name: 'AMCO', industry: 'Oil & Fuel', color: '#6e4a1f', logo: A + '/companies/amco.png',
@@ -219,8 +219,8 @@ function seed() {
     { id: 'for_qinal', type: 'foreign', name: 'People’s Republic of Qinal', color: '#726a58', logo: A + '/flags/qinal.png', stance: 'Hostile', description: 'Revolutionary power. Prints pamphlets that keep turning up in Mezdov.', vars: {}, inventory: [] },
     { id: 'for_markasia', type: 'foreign', name: 'Kingdom of Markasia', color: '#726a58', logo: A + '/flags/markasia.png', stance: 'Friendly', description: 'Old kingdom, older money. Buys Arcasian oil.', vars: {}, inventory: [] },
     { id: 'for_estal', type: 'foreign', name: 'Estal Federation', color: '#726a58', logo: A + '/flags/estal.png', stance: 'Neutral', description: 'Distant federation; occasional trade delegations.', vars: {}, inventory: [] },
-    { id: 'org_grace', type: 'org', name: 'GRACE', color: '#5b5e2c', logo: A + '/flags/grace.png', stance: 'Member', description: 'Guild of Royal Allies for Commercial Exchange. Trade bloc; Arcasia holds observer status.', vars: {}, inventory: [] },
-    { id: 'org_assembly', type: 'org', name: 'Assembly of Nations', color: '#5b5e2c', logo: A + '/flags/assembly.png', stance: 'Member', description: 'The world assembly. Arcasia is a founding member.', vars: {}, inventory: [] }
+    { id: 'org_grace', type: 'org', name: 'GRACE', color: '#5b5e2c', logo: A + '/flags/grace.png', stance: 'Observer', description: 'Guild of Royal Allies for Commercial Exchange. Trade bloc; Arcasia holds observer status.', vars: {}, inventory: [] },
+    { id: 'org_assembly', type: 'org', name: 'United Nations', color: '#5b5e2c', logo: A + '/flags/assembly.png', stance: 'Member', description: 'The United Nations. Arcasia is a founding member.', vars: {}, inventory: [] }
   ];
 
   // ---- properties --------------------------------------------------------
@@ -238,6 +238,7 @@ function seed() {
     { id: 'prop_herald', name: 'Herald House', type: 'commercial', kind: 'office', provinceId: 'prov_lachevan', pos: [716, 148], ownerId: 'per_halden', value: 2400000, employees: 120, income: 40000, expenses: 28000, description: 'Offices and presses of The Arcasian Herald.', inventory: [], vars: {} },
     { id: 'prop_valgos_port', name: 'Port of Cape Valgos', type: 'infrastructure', kind: 'port', provinceId: 'prov_lachevan', pos: [796, 208], ownerId: 'ent_gov', value: 30000000, employees: 800, income: 130000, expenses: 90000, description: 'Eastern harbour on the strait.', inventory: [], vars: {} },
     { id: 'prop_rill_house', name: 'Rill Residence', type: 'residential', kind: 'house', provinceId: 'prov_lachevan', pos: [738, 164], ownerId: 'per_rill', value: 18000, employees: 0, income: 0, expenses: 40, description: 'A modest house with a very good television.', inventory: [], vars: {} },
+    { id: 'prop_satrom_casino', name: 'Satrom Grand Casino', type: 'commercial', kind: 'office', provinceId: 'prov_lachevan', pos: [712, 156], ownerId: 'ent_satrom', value: 24000000, employees: 650, income: 300000, expenses: 140000, description: 'The Republic’s glittering house of chance on the Lachevan strip, operated by the Saromite SATROM group.', inventory: [], vars: {} },
     // Grazi
     { id: 'prop_grazihall_hq', name: 'GRAZIHALL Headquarters', type: 'commercial', kind: 'office', provinceId: 'prov_grazi', pos: [354, 194], ownerId: 'ent_grazihall', value: 9000000, employees: 300, income: 120000, expenses: 70000, description: 'The family seat above the Kradon docks.', inventory: [], vars: {} },
     { id: 'prop_kradon_port', name: 'Port of Kradon', type: 'infrastructure', kind: 'port', provinceId: 'prov_grazi', pos: [338, 182], ownerId: 'ent_gov', value: 28000000, employees: 1100, income: 150000, expenses: 100000, description: 'Western deep-water port.', inventory: [], vars: {} },
@@ -251,10 +252,9 @@ function seed() {
     { id: 'prop_mez_power', name: 'Mezdov Power Station', type: 'infrastructure', kind: 'infrastructure', provinceId: 'prov_mezdov', pos: [400, 372], ownerId: 'ent_arc', value: 17000000, employees: 400, income: 90000, expenses: 60000, description: 'Coal-fired plant supplying the western grid.', inventory: [], vars: {} },
     // Korota
     { id: 'prop_satrom_hq', name: 'SATROM Headquarters', type: 'commercial', kind: 'office', provinceId: 'prov_korota', pos: [748, 312], ownerId: 'ent_satrom', value: 11000000, employees: 350, income: 150000, expenses: 80000, description: 'Razno offices of the defence concern.', inventory: [], vars: {} },
-    { id: 'prop_satrom_works', name: 'SATROM Radar Works', type: 'industrial', kind: 'factory', provinceId: 'prov_korota', pos: [722, 324], ownerId: 'ent_satrom', value: 34000000, employees: 3100, income: 380000, expenses: 250000, description: 'Radar arrays and precision instruments. Restricted site.', inventory: [{ itemId: 'item_radar', qty: 4 }], vars: {} },
+    { id: 'prop_satrom_works', name: 'SATROM Radar Works', type: 'industrial', kind: 'factory', provinceId: 'prov_korota', pos: [722, 324], ownerId: 'ent_satrom', value: 34000000, employees: 3100, income: 380000, expenses: 250000, description: 'Radar arrays and precision instruments, built for export to the Federation of Sarom. Restricted site.', inventory: [{ itemId: 'item_radar', qty: 4 }], vars: {} },
     { id: 'prop_oilfield', name: 'AMCO Field Korota-1', type: 'industrial', kind: 'mine', provinceId: 'prov_korota', pos: [688, 344], ownerId: 'ent_amco', value: 52000000, employees: 2400, income: 520000, expenses: 300000, description: 'The Republic’s largest producing oil field.', inventory: [{ itemId: 'item_crude', qty: 8000 }], vars: {} },
     { id: 'prop_refinery', name: 'AMCO Razno Refinery', type: 'industrial', kind: 'factory', provinceId: 'prov_korota', pos: [764, 318], ownerId: 'ent_amco', value: 38000000, employees: 1900, income: 340000, expenses: 220000, description: 'Crude in, fuel out, smoke always.', inventory: [{ itemId: 'item_fuel', qty: 5000 }], vars: {} },
-    { id: 'prop_razno_port', name: 'Port of Razno', type: 'infrastructure', kind: 'port', provinceId: 'prov_korota', pos: [736, 296], ownerId: 'ent_gov', value: 26000000, employees: 900, income: 120000, expenses: 80000, description: 'Eastern port and oil terminal.', inventory: [], vars: {} },
     { id: 'prop_naval_base', name: 'Razno Naval Base', type: 'military', kind: 'military_base', provinceId: 'prov_korota', pos: [772, 288], ownerId: 'ent_gov', value: 42000000, employees: 3500, income: 0, expenses: 300000, description: 'Home of the Eastern Fleet, facing the strait.', inventory: [], vars: {} },
     // Kordi
     { id: 'prop_alko_hq', name: 'ALKO Headquarters', type: 'commercial', kind: 'office', provinceId: 'prov_kordi', pos: [556, 396], ownerId: 'ent_alko', value: 7000000, employees: 260, income: 90000, expenses: 55000, description: 'Surat seat of the mining concern.', inventory: [], vars: {} },
@@ -346,7 +346,19 @@ function seed() {
     user('user_president', 'president', 'Miron Valen', 'president', 'per_valen'),
     user('user_journalist', 'journalist', 'Jana Halden', 'journalist', 'per_halden', { newspaperId: 'paper_today' }),
     user('user_executive', 'executive', 'Kira Moss', 'executive', 'per_moss'),
-    user('user_citizen', 'citizen', 'Toma Rill', 'citizen', 'per_rill')
+    user('user_citizen', 'citizen', 'Toma Rill', 'citizen', 'per_rill'),
+    user('user_verenne', 'verenne', 'Ilya Verenne', 'mp', 'per_verenne'),
+    user('user_stahl', 'stahl', 'Gregor Stahl', 'mp', 'per_stahl'),
+    user('user_kandel', 'kandel', 'Rosa Kandel', 'mp', 'per_kandel'),
+    user('user_suri', 'suri', 'Aran Suri', 'mp', 'per_suri'),
+    user('user_hale', 'hale', 'Viktor Hale', 'executive', 'per_hale'),
+    user('user_keller', 'keller', 'Dana Keller', 'executive', 'per_keller'),
+    user('user_odek', 'odek', 'Baran Odek', 'executive', 'per_odek'),
+    user('user_grazi', 'grazi', 'Marta Grazi', 'executive', 'per_grazi'),
+    user('user_orn', 'orn', 'Pavel Orn', 'executive', 'per_orn'),
+    user('user_krenn', 'krenn', 'Halvard Krenn', 'judge', 'per_krenn'),
+    user('user_voss', 'voss', 'Gen. Petra Voss', 'military', 'per_voss'),
+    user('user_falk', 'falk', 'Erik Falk', 'police', 'per_falk')
   ];
 
   // ---- simulation events --------------------------------------------------

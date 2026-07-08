@@ -653,6 +653,8 @@ function advanceTurn(steps, actor) {
         `Average approval of the government stands at ${db.globalVars.avgApproval}%.`, 'Economy', true, 'State Statistical Bureau');
     }
     if (monthBoundary && db.settings.taxation && db.settings.taxation.enabled) collectTaxes(db, actor || 'ENGINE');
+    // lottery draws (Phase 12) — lazy require avoids a sim↔casino cycle
+    try { require('./casino').drawDueLotteries(db, actor || 'ENGINE'); } catch (e) { /* casino optional */ }
     recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }

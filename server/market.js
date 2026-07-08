@@ -117,11 +117,19 @@ function buy(companyId, buyerEntityId, shares, actor, opts) {
   const buyAcct = sim.primaryAccount(buyerEntityId, true);
   const coAcct = sim.primaryAccount(co.id, true);
   const gm = opts && opts.gm;
-  if (!gm && buyAcct.balance < cost) throw new Error('Insufficient funds');
+  // VAT (Phase 12): a GM-set percentage of the purchase flows to the treasury
+  // on top of the price paid to the company.
+  const tax = db.settings.taxation || {};
+  const vat = tax.enabled && tax.vatRate > 0 ? Math.round(cost * tax.vatRate / 100) : 0;
+  if (!gm && buyAcct.balance < cost + vat) throw new Error('Insufficient funds (incl. VAT)');
   sim.txn(buyAcct.id, coAcct.id, cost, `Bought ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  if (vat > 0) {
+    const treasury = db.accounts.find(a => a.id === 'acct_treasury');
+    if (treasury) sim.txn(buyAcct.id, treasury.id, vat, `VAT (${tax.vatRate}%) on share purchase`, 'TREASURY', 'transfer');
+  }
   setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
-  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each`, actor, [co.id, buyerEntityId]);
-  return { shares, cost, price };
+  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${vat ? ' + VAT ' + db.settings.currency + vat : ''}`, actor, [co.id, buyerEntityId]);
+  return { shares, cost, price, vat };
 }
 
 // Player sells `shares` back into the float; company account pays out.

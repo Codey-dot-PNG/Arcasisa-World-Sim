@@ -29,14 +29,24 @@ const Views = {
       el('span.when', `T${t.turn} · ${fmtDate(t.simDate)}`), t.title + (t.detail ? ' — ' + t.detail : ''))));
   },
   accountsOf(entId) { return (S().accounts || []).filter(a => a.ownerId === entId); },
+  // A small icon chip for an item — a searched SVG (/assets/icons/<icon>.svg
+  // when the icon names one from the manifest) or the text glyph otherwise.
+  itemIcon(it) {
+    if (!it) return el('span.item-chip', '·');
+    if (it.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(it.icon)) {
+      return el('span.item-chip', el('img', { src: iconHref(it.icon), alt: it.icon, style: 'width:18px; height:18px;' }));
+    }
+    return el('span.item-chip', it.icon || (it.name || '?')[0].toUpperCase());
+  },
   inventoryTable(inv, ownerEntId) {
     if (!inv || !inv.length) return el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Empty.');
     const mine = W.me.entityId === ownerEntId;
-    return el('table.data', el('thead', el('tr', el('th', 'Item'), el('th.num', 'Qty'), el('th.num', 'Market Value'), mine ? el('th', '') : null)),
+    return el('table.data', el('thead', el('tr', el('th', ''), el('th', 'Item'), el('th.num', 'Qty'), el('th.num', 'Market Value'), mine ? el('th', '') : null)),
       el('tbody', inv.map(row => {
         const it = itemById(row.itemId);
         if (!it) return null;
         return el('tr.row-link', { onclick: () => select('item', it.id) },
+          el('td', this.itemIcon(it)),
           el('td', it.name),
           el('td.num', fmtNum(row.qty)),
           el('td.num', fmtMoney(row.qty * it.marketValue)),
@@ -613,7 +623,9 @@ const Views = {
     const it = itemById(id);
     if (!it) return el('div', 'Not on file.');
     const wrap = el('div');
-    wrap.appendChild(el('div.insp-title', it.name));
+    wrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px;' },
+      el('span.item-chip.item-chip-lg', it.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(it.icon) ? el('img', { src: iconHref(it.icon), alt: '', style: 'width:26px; height:26px;' }) : (it.icon || (it.name || '?')[0].toUpperCase())),
+      el('div.insp-title', { style: 'margin:0;' }, it.name)));
     wrap.appendChild(el('div.insp-sub', it.category + (it.tradable ? ' · tradable' : ' · restricted')));
     if (it.description) wrap.appendChild(el('div.insp-desc', it.description));
     wrap.appendChild(this.secLabel('Market'));
@@ -828,6 +840,7 @@ const Views = {
     else if (W.view === 'economy') this.viewEconomy(inner);
     else if (W.view === 'population') this.viewPopulation(inner);
     else if (W.view === 'news') this.viewNews(inner);
+    else if (W.view === 'entertainment') Entertainment.render(inner);
     else if (W.view === 'timeline') this.viewTimeline(inner);
     else if (W.view === 'gm') GM.render(container);
     if (scrollTop) doc.scrollTop = scrollTop;

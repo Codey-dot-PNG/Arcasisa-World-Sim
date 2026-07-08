@@ -210,9 +210,13 @@ function migrate(world) {
   // also filters timeline data itself in api.js filterState.)
   // Conversely, every role gets the full set of INFO tabs — all dossiers are
   // public knowledge; only the data inside them is clearance-filtered.
-  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news'];
+  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'entertainment'];
   for (const r of (world.roles || [])) {
-    if (!r.perms || r.perms.gm || !Array.isArray(r.perms.pages)) continue;
+    if (!r.perms || !Array.isArray(r.perms.pages)) continue;
+    if (r.perms.gm) { // GM keeps everything; just make sure it has entertainment
+      if (!r.perms.pages.includes('entertainment')) { r.perms.pages.push('entertainment'); changed = true; }
+      continue;
+    }
     if (r.perms.pages.includes('timeline')) {
       r.perms.pages = r.perms.pages.filter(pg => pg !== 'timeline');
       changed = true;
@@ -251,6 +255,56 @@ function migrate(world) {
   // GM-adjustable taxation (additive default; off until a GM enables it)
   if (world.settings && !world.settings.taxation) {
     world.settings.taxation = { enabled: false, corporateRate: 10, propertyRate: 0 };
+    changed = true;
+  }
+  // VAT + gambling tax extend the taxation object (added later than the base).
+  if (world.settings && world.settings.taxation) {
+    const t = world.settings.taxation;
+    if (t.vatRate === undefined) { t.vatRate = 0; changed = true; }          // % added to market purchases → treasury
+    if (t.gamblingRate === undefined) { t.gamblingRate = 15; changed = true; } // % of gambling losses → treasury
+  }
+
+  // Every dossier (company / nation / person) is public knowledge — flip
+  // companyFinancials on for every non-GM role so the files are fully
+  // viewable. It stays a per-role toggle in the Roles editor, so a GM can
+  // still lock a role down later. Idempotent (only flips false→true once the
+  // world hasn't been hand-tuned away from it).
+  if (!world._dossiersOpened) {
+    for (const r of (world.roles || [])) {
+      if (r.perms && !r.perms.gm && !r.perms.companyFinancials) { r.perms.companyFinancials = true; changed = true; }
+    }
+    world._dossiersOpened = true; changed = true;
+  }
+
+  // Entertainment & gambling venues (Phase 12). Seed two: a Satrom casino
+  // (roulette + blackjack) and an ARC national lottery drawn every 3 turns.
+  // GMs add/remove venues and CEOs tune odds. Additive; never clobbers a
+  // GM's edits.
+  if (world.settings && !world.settings.entertainment) {
+    world.settings.entertainment = {
+      venues: [
+        {
+          id: 'venue_satrom', name: 'Satrom Grand Casino', kind: 'casino',
+          ownerId: 'ent_satrom', enabled: true,
+          blurb: 'The Republic’s glittering house of chance, on the Lachevan strip.',
+          games: ['roulette', 'blackjack'],
+          minBet: 10, maxBet: 100000,
+          // house edge knobs (CEO/GM adjustable): roulette pays true 35:1 on a
+          // wheel with `greenSlots` zeros; blackjack pays `blackjackPays`.
+          roulette: { greenSlots: 1 },
+          blackjack: { blackjackPays: 1.5, dealerStandsOn: 17 }
+        },
+        {
+          id: 'venue_arc_lottery', name: 'ARC National Lottery', kind: 'lottery',
+          ownerId: 'ent_arc', enabled: true,
+          blurb: 'A flutter for the Republic. Drawn every third turn — pick 3 numbers, 1 to 40.',
+          ticketPrice: 50, pick: 3, maxNumber: 40, drawEveryTurns: 3,
+          houseCutPct: 40,     // % of the pot ARC keeps; rest is the jackpot
+          jackpotSeed: 100000, // pot floor each draw
+          lastDrawTurn: 0, pot: 100000, tickets: [] // tickets: {userId, entityId, numbers, turn}
+        }
+      ]
+    };
     changed = true;
   }
 
@@ -346,7 +400,7 @@ async function load(seed, reseed) {
   if (MODE === 'file') {
     fs.mkdirSync(SNAP_DIR, { recursive: true });
     if (!reseed && fs.existsSync(DB_FILE)) { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); if (migrate(db)) saveNow(); }
-    else { db = seedFn(); saveNow(); }
+    else { db = seedFn(); migrate(db); saveNow(); } // run migrations on a fresh seed too, so structural upgrades live only in migrate()
     return db;
   }
   if (reseed) await reset(seedFn);
@@ -381,7 +435,7 @@ async function begin() {
 }
 
 async function firstSeed() {
-  db = seedFn();
+  db = seedFn(); migrate(db);
   const seedTl = db.timeline.slice();
   const seedTx = db.transactions.slice();
   version = Date.now();
@@ -543,7 +597,7 @@ async function importWorld(world, currentGmUser) {
 }
 
 async function reset(seed) {
-  db = (seed || seedFn)();
+  db = (seed || seedFn)(); migrate(db);
   if (MODE === 'file') {
     // a new world starts with a clean archive
     for (const f of fs.readdirSync(SNAP_DIR)) {

@@ -209,17 +209,21 @@ const GM = {
     }, 'Save World Settings')));
 
     main.appendChild(Views.secLabel('Taxation'));
-    main.appendChild(this.check(d, 'taxEnabled', 'Enable monthly taxation'));
+    d.taxVatRate = d.taxVatRate === undefined ? ((s.taxation || {}).vatRate || 0) : d.taxVatRate;
+    d.taxGamblingRate = d.taxGamblingRate === undefined ? ((s.taxation || {}).gamblingRate || 0) : d.taxGamblingRate;
+    main.appendChild(this.check(d, 'taxEnabled', 'Enable taxation (corporate/property monthly; VAT & gambling duty on every transaction)'));
     main.appendChild(el('div.form-grid',
       this.field('Corporate tax rate (%)', this.num(d, 'taxCorporateRate')),
-      this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate'))));
+      this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate')),
+      this.field('VAT on purchases (%)', this.num(d, 'taxVatRate')),
+      this.field('Gambling duty (%)', this.num(d, 'taxGamblingRate'))));
     main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-      'Collected monthly from net property income into the Federal Treasury.'));
+      'Corporate/property tax is collected monthly from net property income. VAT is added to market purchases; gambling duty skims the casinos’ winnings. All flow into the Federal Treasury (raising it, shrinking the money supply).'));
     main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
       onclick: async () => {
         try {
           await PATCH('/api/gm/settings', {
-            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0 }
+            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0, vatRate: Number(d.taxVatRate) || 0, gamblingRate: Number(d.taxGamblingRate) || 0 }
           });
           toast('Taxation settings saved.');
         } catch (e) { toast(e.message, true); }
@@ -548,7 +552,7 @@ const GM = {
       this.field('Name', this.text(d, 'name')),
       this.field('Category', this.text(d, 'category')),
       this.field('Market value (' + CUR() + ')', this.num(d, 'marketValue')),
-      this.field('Marker glyph (1 char)', this.text(d, 'icon'))));
+      this.field('Icon (emoji, a letter, or an icon name)', this.text(d, 'icon'), 'e.g. 🛢, R, or one of: ' + (typeof ICON_MANIFEST !== 'undefined' ? ICON_MANIFEST.join(', ') : ''))));
     main.appendChild(this.check(d, 'tradable', 'Tradable between entities'));
     main.appendChild(this.field('Description', this.area(d, 'description')));
     main.appendChild(this.field('Metadata (JSON)', el('textarea.text-input', {
@@ -1209,7 +1213,7 @@ const GM = {
     main.appendChild(Views.secLabel(isNew ? 'New Role' : 'Edit — ' + source.name));
     main.appendChild(el('div.form-grid', this.field('Role name', this.text(d, 'name'))));
 
-    const PAGES = [['map', 'World Map'], ['parliament', 'Parliament'], ['companies', 'Companies'], ['economy', 'Economy'], ['population', 'Population'], ['news', 'News'], ['timeline', 'Timeline'], ['gm', 'GM Studio']];
+    const PAGES = [['map', 'World Map'], ['parliament', 'Parliament'], ['companies', 'Companies'], ['economy', 'Economy'], ['population', 'Population'], ['news', 'News'], ['entertainment', 'Entertainment'], ['timeline', 'Timeline'], ['gm', 'GM Studio']];
     main.appendChild(Views.secLabel('Pages Visible'));
     const pageGrid = el('div.perm-grid');
     d.perms.pages = d.perms.pages || [];

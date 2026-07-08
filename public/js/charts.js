@@ -152,7 +152,89 @@ const Charts = {
       svg.appendChild(this._svg('path', { d, fill: 'none', stroke: color, 'stroke-width': 1.6 }));
     });
 
+    // click to open a big, interactive (hover + drag-zoom) version, unless the
+    // caller opted out or this already IS the zoom view
+    if (opts.zoomable !== false && !opts.__zoomView) {
+      svg.classList.add('chart-openable');
+      svg.style.cursor = 'zoom-in';
+      svg.addEventListener('click', () => Charts.openZoom(series, opts));
+    }
     return svg;
+  },
+
+  /* ---------- zoomed, interactive line chart (modal) ----------
+     Opens a large chartLine with a hover crosshair + value readout and
+     drag-over-the-plot to zoom into an x-range. Double-click resets. */
+  openZoom(series, opts) {
+    opts = opts || {};
+    const linesFull = (Array.isArray(series) && series.length && series[0] && Array.isArray(series[0].points))
+      ? series.map(s => ({ name: s.name, color: s.color, points: (s.points || []).slice() }))
+      : [{ name: null, color: opts.color, points: (series || []).slice() }];
+    const total = Math.max(...linesFull.map(l => l.points.length), 0);
+    if (total < 2) return;
+    let lo = 0, hi = total - 1;
+
+    const root = el('div.chart-zoom-modal', { onclick: (e) => { if (e.target === root) close(); } });
+    const inner = el('div.chart-zoom-inner');
+    const head = el('div.zoom-head',
+      el('span', String(opts.title || 'CHART').toUpperCase()),
+      el('button.icon-btn', { onclick: () => close() }, '✕'));
+    const plot = el('div', { style: 'position:relative;' });
+    const readout = el('div.chart-zoom-hint', 'Drag across the chart to zoom · double-click to reset');
+    inner.appendChild(head); inner.appendChild(plot); inner.appendChild(readout);
+    root.appendChild(inner);
+    document.body.appendChild(root);
+    const close = () => root.remove();
+    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
+
+    const W_ = Math.min(900, window.innerWidth - 120), H_ = Math.min(460, window.innerHeight - 200);
+    const pad = { top: 40, right: 20, bottom: 34, left: 60 };
+    const draw = () => {
+      clear(plot);
+      const sliced = linesFull.map(l => ({ name: l.name, color: l.color, points: l.points.slice(lo, hi + 1) }));
+      const xLabels = (opts.xLabels || linesFull[0].points.map(p => p.x)).slice(lo, hi + 1);
+      const svg = this.chartLine(sliced, Object.assign({}, opts, { width: W_, height: H_, pad, xLabels, __zoomView: true }));
+      plot.appendChild(svg);
+
+      // interaction overlay across the plot area
+      const plotX0 = pad.left, plotX1 = W_ - pad.right, plotW = plotX1 - plotX0;
+      const n = hi - lo + 1;
+      const overlay = el('div', { style: `position:absolute; left:${plotX0 / W_ * 100}%; top:${pad.top / H_ * 100}%; width:${plotW / W_ * 100}%; height:${(H_ - pad.top - pad.bottom) / H_ * 100}%; cursor:crosshair;` });
+      const crosshair = el('div', { style: 'position:absolute; top:0; bottom:0; width:1px; background:var(--accent); display:none; pointer-events:none;' });
+      const sel = el('div', { style: 'position:absolute; top:0; bottom:0; background:rgba(140,90,40,.18); display:none; pointer-events:none;' });
+      overlay.appendChild(crosshair); overlay.appendChild(sel);
+      let dragStart = null;
+      const idxAt = (clientX) => {
+        const r = overlay.getBoundingClientRect();
+        const f = Math.max(0, Math.min(1, (clientX - r.left) / r.width));
+        return Math.round(f * (n - 1));
+      };
+      overlay.addEventListener('mousemove', (e) => {
+        const r = overlay.getBoundingClientRect();
+        const x = e.clientX - r.left;
+        crosshair.style.display = 'block'; crosshair.style.left = x + 'px';
+        const i = idxAt(e.clientX);
+        const xl = xLabels[i];
+        const parts = sliced.map(l => (l.name ? l.name + ' ' : '') + this._fmtY((l.points[i] || {}).y, opts.yFormat)).join(' · ');
+        readout.textContent = `${xl}: ${parts}`;
+        if (dragStart !== null) {
+          const a = Math.min(dragStart, x), b = Math.max(dragStart, x);
+          sel.style.display = 'block'; sel.style.left = a + 'px'; sel.style.width = (b - a) + 'px';
+        }
+      });
+      overlay.addEventListener('mouseleave', () => { crosshair.style.display = 'none'; });
+      overlay.addEventListener('mousedown', (e) => { dragStart = e.clientX - overlay.getBoundingClientRect().left; });
+      overlay.addEventListener('mouseup', (e) => {
+        if (dragStart === null) return;
+        const i0 = idxAt(dragStart + overlay.getBoundingClientRect().left), i1 = idxAt(e.clientX);
+        dragStart = null; sel.style.display = 'none';
+        const a = Math.min(i0, i1), b = Math.max(i0, i1);
+        if (b - a >= 1) { const nlo = lo + a, nhi = lo + b; lo = nlo; hi = nhi; draw(); }
+      });
+      overlay.addEventListener('dblclick', () => { lo = 0; hi = total - 1; draw(); });
+      plot.appendChild(overlay);
+    };
+    draw();
   },
 
   /* ---------- bar chart ---------- */

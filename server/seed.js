@@ -71,7 +71,7 @@ function seed() {
   const provinces = [
     {
       id: 'prov_grazi', name: 'Grazi', color: '#9c4a3c',
-      description: 'North-western coastal province. Fjords, shipyards and the great port of Kradon. Heartland of the Grazihall construction dynasty.',
+      description: 'North-western maritime province and the Republic’s foremost port region. Fjords, shipyards and the great deep-water Port of Kradon — the western gateway through which most Arcasian trade passes. Heartland of the Grazihall construction dynasty.',
       path: [[368,142],[400,120],[452,100],[506,84],[520,78],[536,118],[528,158],[544,198],[538,242],[552,282],[524,278],[492,286],[448,270],[400,282],[356,268],[316,262],[296,240],[312,220],[294,200],[308,184],[330,196],[322,164],[302,150],[282,120],[296,96],[318,108],[330,86],[352,98],[348,128]],
       labelPos: [428,192], capital: 'city_kradon',
       vars: pvars({ population: 2400000, gdp: 720, employment: 89, industry: 58, agriculture: 40, oilProduction: 0, trade: 62, crime: 44, education: 52, healthcare: 50, approval: 51, infrastructure: 54, happiness: 55, politicalLeaning: 2 }),
@@ -87,26 +87,26 @@ function seed() {
     },
     {
       id: 'prov_mezdov', name: 'Mezdov', color: '#5a4632',
-      description: 'Rugged western highlands. Iron mines, quarries and a long tradition of hard labour and harder politics.',
+      description: 'Coastal western province where the highlands meet the sea. Fertile valleys and terraced farms run down to fishing harbours, while iron mines and quarries work the ridges above. An agricultural and mining region with a long tradition of hard labour and harder politics.',
       path: [[316,262],[356,268],[400,282],[448,270],[492,286],[524,278],[552,282],[570,300],[576,330],[566,356],[530,368],[494,360],[458,374],[430,386],[402,380],[378,398],[356,420],[340,446],[320,470],[298,460],[276,448],[300,422],[280,394],[302,368],[286,338],[310,314],[292,286]],
       labelPos: [398,330], capital: 'city_mezdov',
-      vars: pvars({ population: 1900000, gdp: 540, employment: 87.5, industry: 64, agriculture: 28, oilProduction: 4, trade: 40, crime: 52, education: 44, healthcare: 42, approval: 44, infrastructure: 40, happiness: 48, politicalLeaning: -18 }),
+      vars: pvars({ population: 1900000, gdp: 540, employment: 87.5, industry: 60, agriculture: 62, oilProduction: 4, trade: 44, crime: 52, education: 44, healthcare: 42, approval: 44, infrastructure: 40, happiness: 48, politicalLeaning: -18 }),
       demographics: makeDemo(1900000, { lean: -18, wealth: 0.35, urban: 0.4, edu: -6, gs: 44, hap: 48, conf: 44, emp: 87 })
     },
     {
       id: 'prov_korota', name: 'Korota', color: '#6b655c',
-      description: 'Industrial east. Oil fields, the SATROM defence works at Razno and the Republic’s largest refinery. Faces Valksland across the strait.',
+      description: 'Landlocked industrial east, seated at Razno. Once the roaring heart of Arcasian manufacture and oil extraction — the SATROM defence works, the old fields and the great refineries — the region has slid into stagnation, its plant ageing and its fields past their peak. No coastline: everything moves out by rail through Lachevan.',
       path: [[570,300],[608,290],[646,300],[684,288],[716,300],[742,290],[774,290],[788,318],[806,352],[796,388],[810,420],[818,458],[824,470],[770,452],[730,470],[688,498],[700,444],[686,418],[664,394],[636,376],[600,366],[566,356],[576,330]],
       labelPos: [700,368], capital: 'city_razno',
-      vars: pvars({ population: 2800000, gdp: 1120, employment: 90, industry: 76, agriculture: 34, oilProduction: 46, trade: 58, crime: 46, education: 50, healthcare: 48, approval: 49, infrastructure: 52, happiness: 52, politicalLeaning: -6 }),
-      demographics: makeDemo(2800000, { lean: -6, wealth: 0.55, urban: 0.6, edu: 0, gs: 49, hap: 52, conf: 50, emp: 90 })
+      vars: pvars({ population: 2800000, gdp: 920, employment: 84, industry: 62, agriculture: 34, oilProduction: 34, trade: 46, crime: 50, education: 50, healthcare: 48, approval: 45, infrastructure: 48, happiness: 47, politicalLeaning: -6 }),
+      demographics: makeDemo(2800000, { lean: -6, wealth: 0.48, urban: 0.6, edu: 0, gs: 45, hap: 47, conf: 44, emp: 84 })
     },
     {
       id: 'prov_kordi', name: 'Kordi', color: '#cbb98c',
-      description: 'Semi-autonomous southern region. Dry plains over deep mineral and oil wealth, worked by ALKO. The Kordish question dominates its politics.',
+      description: 'Semi-autonomous, landlocked southern region. Dry inland plains over deep mineral and oil wealth, drilled by a growing forest of ALKO and AMCO wells. The Kordish question dominates its politics.',
       path: [[566,356],[600,366],[636,376],[664,394],[686,418],[700,444],[688,498],[640,520],[600,538],[560,528],[520,540],[470,522],[430,500],[402,470],[360,486],[320,470],[340,446],[356,420],[378,398],[402,380],[430,386],[458,374],[494,360],[530,368]],
       labelPos: [528,456], capital: 'city_surat',
-      vars: pvars({ population: 2300000, gdp: 610, employment: 85, industry: 50, agriculture: 48, oilProduction: 38, trade: 44, crime: 58, education: 38, healthcare: 36, approval: 38, infrastructure: 34, happiness: 42, politicalLeaning: -24 }),
+      vars: pvars({ population: 2300000, gdp: 610, employment: 85, industry: 50, agriculture: 48, oilProduction: 52, trade: 44, crime: 58, education: 38, healthcare: 36, approval: 38, infrastructure: 34, happiness: 42, politicalLeaning: -24 }),
       demographics: makeDemo(2300000, { lean: -24, wealth: 0.3, urban: 0.35, edu: -10, gs: 38, hap: 42, conf: 38, emp: 85 })
     }
   ];
@@ -114,11 +114,11 @@ function seed() {
   const cities = [
     { id: 'city_lachevan', provinceId: 'prov_lachevan', name: 'Lachevan', pos: [730, 150], size: 3, isCapital: true, description: 'Federal capital of the Republic of Arcasia. Seat of Parliament, the Presidency and the great ministries.' },
     { id: 'city_kradon', provinceId: 'prov_grazi', name: 'Port Kradon', pos: [348, 186], size: 2, isCapital: false, description: 'Western gateway of the Republic. Shipyards, docks and the Grazihall works.' },
-    { id: 'city_razno', provinceId: 'prov_korota', name: 'Razno', pos: [742, 308], size: 2, isCapital: false, description: 'Eastern industrial port. Refineries, the SATROM plant and the eastern fleet.' },
+    { id: 'city_razno', provinceId: 'prov_korota', name: 'Razno', pos: [742, 308], size: 2, isCapital: false, description: 'Inland industrial seat of the east. Ageing refineries, the SATROM plant and rows of idle workshops — once the busiest manufacturing town in Arcasia, now working well below capacity.' },
     { id: 'city_surat', provinceId: 'prov_kordi', name: 'Surat', pos: [560, 390], size: 2, isCapital: false, description: 'Administrative seat of the semi-autonomous Kordi region.' },
     { id: 'city_mezdov', provinceId: 'prov_mezdov', name: 'Mezdov', pos: [390, 360], size: 1, isCapital: false, description: 'Highland mining town and provincial seat.' },
     { id: 'city_valgos', provinceId: 'prov_lachevan', name: 'Cape Valgos', pos: [798, 205], size: 1, isCapital: false, description: 'Harbour town on the Strait of Valgos.' },
-    { id: 'city_kradesh', provinceId: 'prov_grazi', name: 'Kradesh', pos: [452, 232], size: 1, isCapital: false, description: 'Inland market town on the Kradon road.' }
+    { id: 'city_kradesh', provinceId: 'prov_grazi', name: 'Kradesh', pos: [588, 169], size: 1, isCapital: false, description: 'Market town at the Lachevan road intersection, where the western approach from Kradon meets the federal road into the capital. A busy waystation of hauliers, coaching inns and freight sheds.' }
   ];
 
   // ---- entities ----------------------------------------------------------
@@ -260,6 +260,9 @@ function seed() {
     { id: 'prop_alko_hq', name: 'ALKO Headquarters', type: 'commercial', kind: 'office', provinceId: 'prov_kordi', pos: [556, 396], ownerId: 'ent_alko', value: 7000000, employees: 260, income: 90000, expenses: 55000, description: 'Surat seat of the mining concern.', inventory: [], vars: {} },
     { id: 'prop_mine_k1', name: 'ALKO Mine K-1', type: 'industrial', kind: 'mine', provinceId: 'prov_kordi', pos: [514, 428], ownerId: 'ent_alko', value: 16000000, employees: 2600, income: 210000, expenses: 150000, description: 'Copper and iron under the dry plain.', inventory: [{ itemId: 'item_copper', qty: 120 }], vars: {} },
     { id: 'prop_field_k7', name: 'ALKO Field K-7', type: 'industrial', kind: 'mine', provinceId: 'prov_kordi', pos: [604, 442], ownerId: 'ent_alko', value: 30000000, employees: 1500, income: 300000, expenses: 190000, description: 'The southern oil field. Politically combustible.', inventory: [{ itemId: 'item_crude', qty: 4000 }], vars: {} },
+    { id: 'prop_well_k9', name: 'AMCO Well K-9', type: 'industrial', kind: 'mine', provinceId: 'prov_kordi', pos: [640, 460], ownerId: 'ent_amco', value: 22000000, employees: 900, income: 240000, expenses: 150000, description: 'A cluster of oil wells on the eastern Kordi plain, newly drilled by AMCO.', inventory: [{ itemId: 'item_crude', qty: 3000 }], vars: {} },
+    { id: 'prop_well_k12', name: 'AMCO Well K-12', type: 'industrial', kind: 'mine', provinceId: 'prov_kordi', pos: [576, 468], ownerId: 'ent_amco', value: 18000000, employees: 760, income: 200000, expenses: 128000, description: 'Southern oil wells nodding over the dry plain. AMCO’s push into the Kordish fields.', inventory: [{ itemId: 'item_crude', qty: 2600 }], vars: {} },
+    { id: 'prop_well_k15', name: 'ALKO Well K-15', type: 'industrial', kind: 'mine', provinceId: 'prov_kordi', pos: [540, 452], ownerId: 'ent_alko', value: 15000000, employees: 640, income: 180000, expenses: 116000, description: 'A field of ALKO oil wells west of Surat, worked around the clock.', inventory: [{ itemId: 'item_crude', qty: 2200 }], vars: {} },
     { id: 'prop_bazaar', name: 'Surat Grand Bazaar', type: 'commercial', kind: 'office', provinceId: 'prov_kordi', pos: [566, 384], ownerId: 'ent_gov', value: 2600000, employees: 400, income: 70000, expenses: 30000, description: 'The commercial heart of the Kordish south.', inventory: [], vars: {} },
     { id: 'prop_fort_surat', name: 'Fort Surat', type: 'military', kind: 'military_base', provinceId: 'prov_kordi', pos: [582, 412], ownerId: 'ent_gov', value: 13000000, employees: 1600, income: 0, expenses: 140000, description: 'Southern garrison. Its presence is itself a policy.', inventory: [], vars: {} },
     { id: 'prop_aqueduct', name: 'Kordi Aqueduct', type: 'infrastructure', kind: 'infrastructure', provinceId: 'prov_kordi', pos: [534, 380], ownerId: 'ent_gov', value: 9000000, employees: 200, income: 0, expenses: 50000, description: 'Waters the dry plain; built 1931, patched since.', inventory: [], vars: {} }
@@ -499,7 +502,7 @@ function seed() {
       worldName: 'Republic of Arcasia',
       currency: '₳',
       currencyName: 'Arcasian Koren',
-      time: { turn: 0, unit: 'day', perTurn: 1, date: '1962-03-01', auto: { enabled: false, seconds: 3600 } },
+      time: { turn: 0, unit: 'day', perTurn: 1, date: '1960-01-01', auto: { enabled: false, seconds: 3600 } },
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
       newsThresholds: { transaction: 5000000 },
@@ -579,7 +582,36 @@ function seed() {
     ],
     roles, users, entities, provinces, cities, properties, items, accounts,
     markers: [],
-    history: [],
+    // Seeded GDP / share history so the charts read cleanly at game start.
+    // 24 monthly rows across 1958–1959 leading up to turn 0 (1960-01-01).
+    // Rows carry ascending turns -24..-1; charts plot by array order and
+    // label by turn/date. Shares drift gently up to their seeded prices.
+    history: [
+      { turn: -24, date: '1958-01-01', gdp: 11000, population: 37200000, avgHappiness: 49, avgApproval: 47, moneySupply: 2300000000, treasury: 1150000000, provinces: {}, shares: { ent_leika: 462, ent_satrom: 895, ent_amco: 763, ent_alko: 440, ent_grazihall: 510, ent_arc: 792 } },
+      { turn: -23, date: '1958-02-01', gdp: 11108.7, population: 37278261, avgHappiness: 49.1, avgApproval: 47.2, moneySupply: 2306521739, treasury: 1152173913, provinces: {}, shares: { ent_leika: 466.77, ent_satrom: 904.24, ent_amco: 770.87, ent_alko: 444.54, ent_grazihall: 515.29, ent_arc: 800.17 } },
+      { turn: -22, date: '1958-03-01', gdp: 11217.39, population: 37356522, avgHappiness: 49.3, avgApproval: 47.3, moneySupply: 2313043478, treasury: 1154347826, provinces: {}, shares: { ent_leika: 470.58, ent_satrom: 911.62, ent_amco: 777.17, ent_alko: 448.17, ent_grazihall: 519.52, ent_arc: 806.71 } },
+      { turn: -21, date: '1958-04-01', gdp: 11326.09, population: 37434783, avgHappiness: 49.4, avgApproval: 47.5, moneySupply: 2319565217, treasury: 1156521739, provinces: {}, shares: { ent_leika: 472.94, ent_satrom: 916.18, ent_amco: 781.06, ent_alko: 450.42, ent_grazihall: 522.13, ent_arc: 810.75 } },
+      { turn: -20, date: '1958-05-01', gdp: 11434.78, population: 37513043, avgHappiness: 49.5, avgApproval: 47.7, moneySupply: 2326086957, treasury: 1158695652, provinces: {}, shares: { ent_leika: 474.01, ent_satrom: 918.26, ent_amco: 782.83, ent_alko: 451.44, ent_grazihall: 523.34, ent_arc: 812.59 } },
+      { turn: -19, date: '1958-06-01', gdp: 11543.48, population: 37591304, avgHappiness: 49.7, avgApproval: 47.9, moneySupply: 2332608696, treasury: 1160869565, provinces: {}, shares: { ent_leika: 474.59, ent_satrom: 919.38, ent_amco: 783.78, ent_alko: 451.99, ent_grazihall: 524, ent_arc: 813.58 } },
+      { turn: -18, date: '1958-07-01', gdp: 11652.17, population: 37669565, avgHappiness: 49.8, avgApproval: 48, moneySupply: 2339130435, treasury: 1163043478, provinces: {}, shares: { ent_leika: 475.69, ent_satrom: 921.51, ent_amco: 785.6, ent_alko: 453.04, ent_grazihall: 525.23, ent_arc: 815.47 } },
+      { turn: -17, date: '1958-08-01', gdp: 11760.87, population: 37747826, avgHappiness: 49.9, avgApproval: 48.2, moneySupply: 2345652174, treasury: 1165217391, provinces: {}, shares: { ent_leika: 478.08, ent_satrom: 926.14, ent_amco: 789.54, ent_alko: 455.31, ent_grazihall: 527.89, ent_arc: 819.56 } },
+      { turn: -16, date: '1958-09-01', gdp: 11869.57, population: 37826087, avgHappiness: 50, avgApproval: 48.4, moneySupply: 2352173913, treasury: 1167391304, provinces: {}, shares: { ent_leika: 481.92, ent_satrom: 933.58, ent_amco: 795.89, ent_alko: 458.98, ent_grazihall: 532.15, ent_arc: 826.16 } },
+      { turn: -15, date: '1958-10-01', gdp: 11978.26, population: 37904348, avgHappiness: 50.2, avgApproval: 48.6, moneySupply: 2358695652, treasury: 1169565217, provinces: {}, shares: { ent_leika: 486.71, ent_satrom: 942.84, ent_amco: 803.78, ent_alko: 463.53, ent_grazihall: 537.45, ent_arc: 834.35 } },
+      { turn: -14, date: '1958-11-01', gdp: 12086.96, population: 37982609, avgHappiness: 50.3, avgApproval: 48.7, moneySupply: 2365217391, treasury: 1171739130, provinces: {}, shares: { ent_leika: 491.46, ent_satrom: 952.05, ent_amco: 811.64, ent_alko: 468.06, ent_grazihall: 542.72, ent_arc: 842.5 } },
+      { turn: -13, date: '1958-12-01', gdp: 12195.65, population: 38060870, avgHappiness: 50.4, avgApproval: 48.9, moneySupply: 2371739130, treasury: 1173913043, provinces: {}, shares: { ent_leika: 495.24, ent_satrom: 959.38, ent_amco: 817.88, ent_alko: 471.66, ent_grazihall: 546.92, ent_arc: 848.99 } },
+      { turn: -12, date: '1959-01-01', gdp: 12304.35, population: 38139130, avgHappiness: 50.6, avgApproval: 49.1, moneySupply: 2378260870, treasury: 1176086957, provinces: {}, shares: { ent_leika: 497.56, ent_satrom: 963.87, ent_amco: 821.71, ent_alko: 473.87, ent_grazihall: 549.5, ent_arc: 852.96 } },
+      { turn: -11, date: '1959-02-01', gdp: 12413.04, population: 38217391, avgHappiness: 50.7, avgApproval: 49.3, moneySupply: 2384782609, treasury: 1178260870, provinces: {}, shares: { ent_leika: 498.61, ent_satrom: 965.9, ent_amco: 823.44, ent_alko: 474.87, ent_grazihall: 550.68, ent_arc: 854.77 } },
+      { turn: -10, date: '1959-03-01', gdp: 12521.74, population: 38295652, avgHappiness: 50.8, avgApproval: 49.4, moneySupply: 2391304348, treasury: 1180434783, provinces: {}, shares: { ent_leika: 499.19, ent_satrom: 967.02, ent_amco: 824.4, ent_alko: 475.42, ent_grazihall: 551.33, ent_arc: 855.76 } },
+      { turn: -9, date: '1959-04-01', gdp: 12630.43, population: 38373913, avgHappiness: 51, avgApproval: 49.6, moneySupply: 2397826087, treasury: 1182608696, provinces: {}, shares: { ent_leika: 500.32, ent_satrom: 969.2, ent_amco: 826.25, ent_alko: 476.49, ent_grazihall: 552.59, ent_arc: 857.68 } },
+      { turn: -8, date: '1959-05-01', gdp: 12739.13, population: 38452174, avgHappiness: 51.1, avgApproval: 49.8, moneySupply: 2404347826, treasury: 1184782609, provinces: {}, shares: { ent_leika: 502.74, ent_satrom: 973.89, ent_amco: 830.25, ent_alko: 478.8, ent_grazihall: 555.29, ent_arc: 861.84 } },
+      { turn: -7, date: '1959-06-01', gdp: 12847.83, population: 38530435, avgHappiness: 51.2, avgApproval: 50, moneySupply: 2410869565, treasury: 1186956522, provinces: {}, shares: { ent_leika: 506.62, ent_satrom: 981.4, ent_amco: 836.65, ent_alko: 482.49, ent_grazihall: 559.59, ent_arc: 868.49 } },
+      { turn: -6, date: '1959-07-01', gdp: 12956.52, population: 38608696, avgHappiness: 51.3, avgApproval: 50.1, moneySupply: 2417391304, treasury: 1189130435, provinces: {}, shares: { ent_leika: 511.41, ent_satrom: 990.68, ent_amco: 844.57, ent_alko: 487.06, ent_grazihall: 564.9, ent_arc: 876.7 } },
+      { turn: -5, date: '1959-08-01', gdp: 13065.22, population: 38686957, avgHappiness: 51.5, avgApproval: 50.3, moneySupply: 2423913043, treasury: 1191304348, provinces: {}, shares: { ent_leika: 516.15, ent_satrom: 999.87, ent_amco: 852.4, ent_alko: 491.57, ent_grazihall: 570.16, ent_arc: 884.83 } },
+      { turn: -4, date: '1959-09-01', gdp: 13173.91, population: 38765217, avgHappiness: 51.6, avgApproval: 50.5, moneySupply: 2430434783, treasury: 1193478261, provinces: {}, shares: { ent_leika: 519.9, ent_satrom: 1007.13, ent_amco: 858.59, ent_alko: 495.15, ent_grazihall: 574.32, ent_arc: 891.26 } },
+      { turn: -3, date: '1959-10-01', gdp: 13282.61, population: 38843478, avgHappiness: 51.7, avgApproval: 50.7, moneySupply: 2436956522, treasury: 1195652174, provinces: {}, shares: { ent_leika: 522.19, ent_satrom: 1011.55, ent_amco: 862.36, ent_alko: 497.32, ent_grazihall: 576.86, ent_arc: 895.18 } },
+      { turn: -2, date: '1959-11-01', gdp: 13391.3, population: 38921739, avgHappiness: 51.9, avgApproval: 50.8, moneySupply: 2443478261, treasury: 1197826087, provinces: {}, shares: { ent_leika: 523.22, ent_satrom: 1013.55, ent_amco: 864.06, ent_alko: 498.3, ent_grazihall: 578.01, ent_arc: 896.94 } },
+      { turn: -1, date: '1959-12-01', gdp: 13500, population: 39000000, avgHappiness: 52, avgApproval: 51, moneySupply: 2450000000, treasury: 1200000000, provinces: {}, shares: { ent_leika: 525, ent_satrom: 1017, ent_amco: 867, ent_alko: 500, ent_grazihall: 580, ent_arc: 900 } }
+    ],
     trades: [],
     transactions: [], events, news,
     timeline: [{

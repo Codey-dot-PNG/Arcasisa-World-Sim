@@ -6,6 +6,7 @@ const ownership = require('./ownership');
 const market = require('./market');
 const deeds = require('./deeds');
 const buildings = require('./buildings');
+const casino = require('./casino');
 const geometry = require('./geometry');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
@@ -307,6 +308,59 @@ async function handle(req, res, pathname, method) {
       sim.txn(from.id, to.id, amount, String(b.memo || '').slice(0, 140), u.user.displayName, 'transfer');
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });
+    }
+
+    // ---- Entertainment & gambling (Phase 12) ----
+    // Outcomes are computed server-side; the client only animates to them.
+    if (pathname.startsWith('/api/casino/') && method === 'POST') {
+      const b = await readBody(req);
+      const entityId = u.user.entityId;
+      if (!entityId) return deny('You need a citizen persona to play.');
+      const venue = casino.venueById(db, b.venueId);
+      if (!venue || !venue.enabled) return bad('That venue is not open.');
+      try {
+        let result;
+        if (pathname === '/api/casino/roulette') {
+          if (!(venue.games || []).includes('roulette')) return bad('No roulette here.');
+          result = casino.playRoulette(db, venue, entityId, b.bets, u.user.displayName);
+        } else if (pathname === '/api/casino/blackjack') {
+          if (!(venue.games || []).includes('blackjack')) return bad('No blackjack here.');
+          const act = b.action;
+          if (act === 'deal') result = casino.bjDeal(db, venue, entityId, u.user.id, b.bet, u.user.displayName);
+          else if (act === 'hit') result = casino.bjHit(db, venue, u.user.id, u.user.displayName);
+          else if (act === 'stand') result = casino.bjStand(db, venue, u.user.id, u.user.displayName);
+          else if (act === 'double') result = casino.bjDouble(db, venue, u.user.id, u.user.displayName);
+          else return bad('Unknown blackjack action.');
+        } else if (pathname === '/api/casino/lottery') {
+          if (venue.kind !== 'lottery') return bad('Not a lottery.');
+          result = casino.buyTicket(db, venue, entityId, u.user.id, b.numbers, u.user.displayName);
+        } else return bad('Unknown casino action.');
+        store.save(); broadcast('sync');
+        return json(res, 200, result);
+      } catch (e) { return bad(e.message); }
+    }
+    // CEO/GM tuning of a venue's odds & limits (must control the owner entity)
+    {
+      const mv = pathname.match(/^\/api\/casino\/venue\/([\w-]+)$/);
+      if (mv && method === 'PATCH') {
+        const b = await readBody(req);
+        const venue = casino.venueById(db, mv[1]);
+        if (!venue) return bad('No such venue.');
+        if (!u.role.perms.gm && !ownership.controls(u.user.entityId, venue.ownerId)) return deny('You do not run this venue.');
+        const num = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n)));
+        if (b.enabled !== undefined && u.role.perms.gm) venue.enabled = !!b.enabled;
+        if (b.minBet !== undefined) venue.minBet = Math.max(1, Math.round(Number(b.minBet) || 1));
+        if (b.maxBet !== undefined) venue.maxBet = Math.max(venue.minBet || 1, Math.round(Number(b.maxBet) || 1));
+        if (b.roulette && venue.roulette) { if (b.roulette.greenSlots !== undefined) venue.roulette.greenSlots = num(b.roulette.greenSlots, 1, 6); }
+        if (b.blackjack && venue.blackjack) {
+          if (b.blackjack.blackjackPays !== undefined) venue.blackjack.blackjackPays = num(b.blackjack.blackjackPays, 1, 3);
+          if (b.blackjack.dealerStandsOn !== undefined) venue.blackjack.dealerStandsOn = num(b.blackjack.dealerStandsOn, 15, 21);
+        }
+        if (b.ticketPrice !== undefined && venue.kind === 'lottery') venue.ticketPrice = Math.max(1, Math.round(Number(b.ticketPrice) || 1));
+        if (b.houseCutPct !== undefined && venue.kind === 'lottery') venue.houseCutPct = num(b.houseCutPct, 0, 90);
+        store.save(); broadcast('sync');
+        return json(res, 200, { venue });
+      }
     }
 
     if (pathname === '/api/trade' && method === 'POST') {
@@ -745,8 +799,11 @@ async function handle(req, res, pathname, method) {
           if (b.taxation.enabled !== undefined) t.enabled = !!b.taxation.enabled;
           if (b.taxation.corporateRate !== undefined) t.corporateRate = clamp(b.taxation.corporateRate);
           if (b.taxation.propertyRate !== undefined) t.propertyRate = clamp(b.taxation.propertyRate);
+          if (b.taxation.vatRate !== undefined) t.vatRate = clamp(b.taxation.vatRate);
+          if (b.taxation.gamblingRate !== undefined) t.gamblingRate = clamp(b.taxation.gamblingRate);
         }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
+        if (b.entertainment) s.entertainment = b.entertainment; // GM Studio entertainment editor writes the whole object
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
         if (b.music) s.music = b.music; // Phase 10 — GM Studio Presentation tab writes the whole object

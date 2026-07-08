@@ -259,6 +259,7 @@ async function connectStream() {
 // refresh on tab focus/visibility is registered once in connectStream.)
 function editingBusy() {
   if (window.MapEdit && MapEdit.active && (MapEdit.drawing || MapEdit.dragging || MapEdit.saveTimer)) return true;
+  if (window.Entertainment && Entertainment.spinning) return true; // don't rebuild the roulette table mid-spin
   if (W.inspEdit) return true;   // inspector inline-edit draft open
   const ae = document.activeElement;
   if (ae && ae.id === 'exp-search') return false; // search box shouldn't block sync

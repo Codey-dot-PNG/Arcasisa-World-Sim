@@ -89,11 +89,7 @@ function filterState(u) {
   const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId));
   const military = (p.mapLayers || []).includes('military');
 
-  const entities = db.entities
-    // The Exchange (Workstream A1) is a system market-maker holder, not a
-    // player-facing entity — hide it from everyone but the GM.
-    .filter(e => p.gm || e.id !== 'ent_exchange')
-    .map(e => {
+  const entities = db.entities.map(e => {
     const out = { ...e };
     if (!seeInv(e.id)) delete out.inventory;
     if (e.type === 'company' && !p.companyFinancials && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
@@ -135,7 +131,9 @@ function filterState(u) {
 
   return {
     settings: db.settings,
-    globalVars: p.statistics ? db.globalVars : { population: db.globalVars.population },
+    // Economic confidence is public market information (like share prices), so
+    // it is exposed even without the statistics clearance.
+    globalVars: p.statistics ? db.globalVars : { population: db.globalVars.population, econConfidence: db.globalVars.econConfidence },
     variables: db.variables,
     entities, provinces, properties, accounts, transactions, news,
     cities: db.cities,
@@ -270,7 +268,14 @@ async function handle(req, res, pathname, method) {
       store.save();
       return json(res, 200, { ok: true });
     }
-    if (pathname === '/api/state' && method === 'GET') return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
+    if (pathname === '/api/state' && method === 'GET') {
+      // Serverless-friendly Day Market advance: ride this fetch to tick the
+      // market on wall-clock cadence (gated, so at most once per window). On a
+      // real tick, persist + signal so every client refetches the new prices —
+      // this is what gives Vercel deployments a live ~5s market with no timer.
+      try { if (market.maybeDayTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* market optional */ }
+      return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
+    }
 
     if (pathname === '/api/stream' && method === 'GET') {
       // serverless deployments use Supabase Realtime instead of a held-open response

@@ -129,11 +129,6 @@ function seed() {
     { id: 'ent_bank', type: 'government', name: 'Bank of Arcasia', color: '#33424d', logo: A + '/flags/seal.png',
       description: 'Central bank and issuer of the Arcasian Koren (₳, ARK).',
       ownerId: 'ent_gov', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
-    // The Exchange — system market-maker and counterparty for every secondary
-    // (float) share transaction. Hidden from player-facing lists (filterState).
-    { id: 'ent_exchange', type: 'org', system: true, name: 'Lachevan Exchange', color: '#3a4653',
-      description: 'The central securities exchange. Holds the free float and settles all secondary share trades.',
-      vars: {}, inventory: [] },
 
     { id: 'ent_arc', type: 'company', name: 'ARC', industry: 'State Corporation', color: '#33424d', logo: A + '/companies/arc.png',
       description: 'The Arcasian Republic Corporation. State holding company managing federal industrial assets.',
@@ -298,9 +293,6 @@ function seed() {
   const accounts = [
     { id: 'acct_treasury', ownerId: 'ent_gov', name: 'Federal Treasury', balance: 1200000000 },
     { id: 'acct_reserve', ownerId: 'ent_bank', name: 'Reserve Account', balance: 400000000 },
-    // Market-maker book: seeded deep so the Exchange can always settle a float
-    // trade. It is allowed to run negative (system holder).
-    { id: 'acct_exchange', ownerId: 'ent_exchange', name: 'Exchange Settlement', balance: 1000000000000 },
     { id: 'acct_arc', ownerId: 'ent_arc', name: 'ARC Operating', balance: 120000000 },
     { id: 'acct_leika', ownerId: 'ent_leika', name: 'LEIKA Operating', balance: 38000000 },
     { id: 'acct_satrom', ownerId: 'ent_satrom', name: 'SATROM Operating', balance: 45000000 },
@@ -599,7 +591,7 @@ function seed() {
       // mapdata.applyMap(db) below, which also upgrades all coordinates
       // to the 3840×2160 SVG map grid.
     },
-    globalVars: {},
+    globalVars: { econConfidence: 50 },
     variables: [
       ...PROV_VAR_DEFS.map(([key, label, format]) => ({ id: 'var_prov_' + key, scope: 'province', key, label, format, default: 0 })),
       ...COMPANY_VAR_DEFS.map(([key, label, format]) => ({ id: 'var_co_' + key, scope: 'company', key, label, format, default: 0 }))

@@ -157,23 +157,21 @@ function migrate(world) {
       }
     }
   }
-  // Workstream A1 — the Exchange system holder + its settlement account. Created
-  // idempotently so live worlds gain the market-maker counterparty without a
-  // reseed. Follows the additive-migration pattern.
-  if (world.entities && !world.entities.some(e => e.id === 'ent_exchange')) {
-    world.entities.push({
-      id: 'ent_exchange', type: 'org', system: true, name: 'Lachevan Exchange', color: '#3a4653',
-      description: 'The central securities exchange. Holds the free float and settles all secondary share trades.',
-      vars: {}, inventory: []
-    });
-    changed = true;
+  // The old off-book "Exchange" (ent_exchange/acct_exchange) is retired — the
+  // National Bank is now the market maker. Delete it from live worlds so its
+  // (often negative) settlement book stops distorting the economy. Historical
+  // transactions referencing acct_exchange are left as-is (name lookups degrade
+  // gracefully).
+  if (world.entities && world.entities.some(e => e.id === 'ent_exchange')) {
+    world.entities = world.entities.filter(e => e.id !== 'ent_exchange'); changed = true;
   }
-  if (world.accounts && !world.accounts.some(a => a.id === 'acct_exchange')) {
-    world.accounts.push({ id: 'acct_exchange', ownerId: 'ent_exchange', name: 'Exchange Settlement', balance: 1000000000000 });
-    changed = true;
+  if (world.accounts && world.accounts.some(a => a.id === 'acct_exchange')) {
+    world.accounts = world.accounts.filter(a => a.id !== 'acct_exchange'); changed = true;
   }
+  // Economic confidence — the Day-Market feedback aggregate.
+  if (world.globalVars && world.globalVars.econConfidence === undefined) { world.globalVars.econConfidence = 50; changed = true; }
 
-  // Phase 4.4 — stock-market fields on companies (trust also used by Phase 9)
+  // Stock-market fields on companies (trust also used by Phase 9).
   for (const e of (world.entities || [])) {
     if (e.type !== 'company') continue;
     if (e.trust === undefined) { e.trust = 50; changed = true; }
@@ -183,14 +181,19 @@ function migrate(world) {
       e.sharePrice = e.sharesOutstanding ? Math.max(1, Math.round(val / e.sharesOutstanding * 100) / 100) : 100;
       changed = true;
     }
-    // Workstream A4/A5 — live-market tunables + the deterministic price-path
-    // anchor. Additive; a GM's tuned values are never clobbered.
+    // Day-Market fields: tradeable speculative price + its rolling history +
+    // company confidence + the live-wander anchor. Additive; a GM's tuned depth/
+    // vol are never clobbered. (Retires the old single priceAnchor.)
     if (e.marketDepth === undefined) { e.marketDepth = 5; changed = true; }
     if (e.vol === undefined) { e.vol = 0.02; changed = true; }
-    if (!e.priceAnchor || e.priceAnchor.price === undefined) {
-      e.priceAnchor = { price: e.sharePrice, t0: Date.now(), seed: (Math.floor(Math.random() * 0x7fffffff) + 1) >>> 0 };
+    if (e.confidence === undefined) { e.confidence = 50; changed = true; }
+    if (e.dayPrice === undefined) { e.dayPrice = e.sharePrice; changed = true; }
+    if (!Array.isArray(e.dayHistory)) { e.dayHistory = [e.dayPrice]; changed = true; }
+    if (!e.dayAnchor || e.dayAnchor.price === undefined) {
+      e.dayAnchor = { price: e.dayPrice, t0: Date.now(), seed: (Math.floor(Math.random() * 0x7fffffff) + 1) >>> 0 };
       changed = true;
     }
+    if (e.priceAnchor !== undefined) { delete e.priceAnchor; changed = true; }
   }
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }

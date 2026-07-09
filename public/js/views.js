@@ -1256,7 +1256,9 @@ const Views = {
         el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, c.name),
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, (c.industry || '') + ' · CEO ' + (c.ceoId ? entName(c.ceoId) : '—')))));
     inner.appendChild(this.statStrip([
-      ['Share Price', c.sharePrice !== undefined ? fmtMoney(c.sharePrice) : '—'],
+      ['Value / share', c.sharePrice !== undefined ? fmtMoney(c.sharePrice) : '—'],
+      ['Day price', c.dayPrice !== undefined ? fmtMoney(c.dayPrice) : '—'],
+      ['Confidence', c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'],
       ['Trust', c.trust !== undefined ? c.trust + '' : '—'],
       ['Annual Revenue', c.vars && c.vars.revenue !== undefined ? CUR() + fmtCompact(c.vars.revenue) : '—'],
       ['Annual Profit', c.vars && c.vars.profit !== undefined ? CUR() + fmtCompact(c.vars.profit) : '—'],
@@ -1658,10 +1660,21 @@ const Views = {
   /* ---- Exchange (Phase 4.4) ---- */
   viewExchange(inner) {
     const companies = S().entities.filter(e => e.type === 'company' && e.sharePrice !== undefined);
-    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'Lachevan Exchange — market maker, no order book'));
+    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'Lachevan Exchange — Company Value updates each turn; the Day Market moves live'));
     if (!companies.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:20px 0;' }, 'No listed companies on file.'));
       return;
+    }
+    // Economic-confidence banner — the Day-Market feedback aggregate that scales
+    // revenue and civilian mood.
+    const econC = S().globalVars ? S().globalVars.econConfidence : undefined;
+    if (econC !== undefined) {
+      const tone = econC >= 60 ? 'var(--good)' : econC <= 40 ? 'var(--accent)' : 'var(--ink-soft)';
+      const mood = econC >= 70 ? 'buoyant' : econC >= 55 ? 'steady' : econC >= 45 ? 'cautious' : econC >= 30 ? 'anxious' : 'panicked';
+      inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:6px 0 12px; font-family:var(--font-mono); font-size:11px;' },
+        el('span', { style: 'color:var(--ink-faint);' }, 'ECONOMIC CONFIDENCE'),
+        el('span', { style: 'font-weight:700; color:' + tone }, fmtNum(econC, 0) + '% · ' + mood),
+        el('span', { style: 'color:var(--ink-faint);' }, '— consumer speculation drives revenue and public mood')));
     }
     const hist = S().history || [];
     const controlsCompany = (c) => isGM() || (W.me.entityId && (c.ownerId === W.me.entityId || c.ceoId === W.me.entityId || ownership_controlsClient(W.me.entityId, c.id)));
@@ -1707,15 +1720,20 @@ const Views = {
           logoEl,
           el('div',
             el('div.tr-parties', { style: 'cursor:pointer;', title: 'Open company file', onclick: openFile }, c.name + ' — ' + (c.abbrev || c.industry || '')),
-            el('div.tr-meta', 'PRICE ', this.livePriceEl(c), ` · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`, ' ', pctEl))),
+            el('div.tr-meta', 'DAY ', this.livePriceEl(c), ` · VALUE ${CUR()}${fmtNum(c.sharePrice)} · WK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · CONF ${c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'}`, ' ', pctEl))),
         el('div', { style: 'text-align:right;' },
           el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
       row.appendChild(head);
 
       const cols = el('div', { style: 'display:flex; gap:18px; align-items:flex-start; margin-top:8px; flex-wrap:wrap;' });
-      const sparkWrap = el('div.sparkline-cell');
-      sparkWrap.appendChild(priceHist.length ? Charts.chartLine(priceHist, { width: 320, height: 110, title: 'Price History' }) : Charts.chartLine([], { width: 320, height: 110, title: 'Price History' }));
-      cols.appendChild(sparkWrap);
+      // Left: turn-based Company Value (fundamentals). Right: live Day Market.
+      const dayHist = (c.dayHistory || []).map((p, i) => ({ x: i, y: p }));
+      const valWrap = el('div.sparkline-cell');
+      valWrap.appendChild(Charts.chartLine(priceHist.length ? priceHist : [], { width: 300, height: 110, title: 'COMPANY VALUE / TURN', yFormat: v => CUR() + fmtNum(v) }));
+      cols.appendChild(valWrap);
+      const dayWrap = el('div.sparkline-cell');
+      dayWrap.appendChild(Charts.chartLine(dayHist.length ? [{ name: 'Day', color: 'var(--accent)', points: dayHist }] : [], { width: 300, height: 110, title: 'DAY MARKET (LIVE)', xLabels: dayHist.map(() => ''), yFormat: v => CUR() + fmtNum(v) }));
+      cols.appendChild(dayWrap);
 
       const btns = el('div.btn-row', { style: 'flex-direction:column; align-items:flex-start; gap:8px;' });
       const floatExhausted = market_treasuryPoolClient(c) <= 0;
@@ -1737,15 +1755,17 @@ const Views = {
     this.startPriceTicker();
   },
 
-  // Live-price element + ticker (Workstream A5). The label renders the shared
-  // deterministic price path (PricePath) at Date.now() and a low-frequency
-  // interval refreshes every such label in place — so the quote visibly wanders
-  // between turns, identically on every client, without a full re-render.
+  // Live DAY-MARKET price element + ticker. The label renders the shared
+  // deterministic path (PricePath) around the committed dayPrice at Date.now(),
+  // and a low-frequency interval refreshes every such label in place — so the
+  // speculative quote visibly wanders, identically on every client, between the
+  // server's 5s ticks without a full re-render.
   livePrice(c) {
     if (!c) return 0;
-    if (!c.priceAnchor || typeof PricePath === 'undefined') return c.sharePrice || 0;
-    const a = c.priceAnchor;
-    return PricePath.price(a.price, a.t0, a.seed, Date.now(), c.vol === undefined ? 0.02 : c.vol, c.sharePrice);
+    const day = c.dayPrice === undefined ? c.sharePrice : c.dayPrice;
+    if (!c.dayAnchor || typeof PricePath === 'undefined') return day || 0;
+    const a = c.dayAnchor;
+    return PricePath.price(a.price, a.t0, a.seed, Date.now(), c.vol === undefined ? 0.02 : c.vol, day);
   },
   livePriceEl(c) {
     return el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(this.livePrice(c)));

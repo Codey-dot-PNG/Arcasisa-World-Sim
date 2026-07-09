@@ -91,3 +91,16 @@ function shutdown() {
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);
 setInterval(() => { try { store.saveNow(); } catch (e) { /* disk hiccup; retry next tick */ } }, 60000).unref();
+
+// Day Market — in this LONG-LIVED process (local `node server.js`) a timer
+// advances the market every 5s even when nobody is fetching, so it feels live
+// during solo testing. On SERVERLESS hosting (Vercel) there is no persistent
+// process and this file never runs; there the market advances via the same
+// gated `maybeDayTick` ridden by GET /api/state (see server/api.js) plus once
+// per turn. Both paths share the `_lastDayTick` gate, so they never double-tick.
+setInterval(() => {
+  try {
+    const market = require('./server/market');
+    if (market.maybeDayTick(store.get())) { store.save(); api.broadcast('sync'); }
+  } catch (e) { /* transient; retry next tick */ }
+}, 5000).unref();

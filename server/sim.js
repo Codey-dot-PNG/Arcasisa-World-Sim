@@ -495,6 +495,7 @@ function applyEffect(fx, meta) {
       // maintained monthly by advanceTurn.
       const a = Number(fx.a || 0), b = Number(fx.b || 0), c = Number(fx.c || 0), e = Number(fx.e || 0);
       const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
+      const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
       const targets = fx.company === 'all'
         ? db.entities.filter(x => x.type === 'company' && x.sharePrice !== undefined)
         : [findEnt(fx.company)].filter(Boolean);
@@ -504,13 +505,11 @@ function applyEffect(fx, meta) {
         const profit = (co.vars && co.vars.profit) || 0;
         const valuation = (co.vars && co.vars.valuation) || 1;
         const trust = co.trust === undefined ? 50 : co.trust;
-        const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + (Math.random() * 2 - 1) * e;
+        // TURN price = fundamentals: earnings yield, growth, trust, and economic
+        // confidence (the knock-on from the Day Market). Not the day price — that
+        // lives in market.js and moves on its own.
+        const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + 0.05 * ((econC - 50) / 100) + (Math.random() * 2 - 1) * e;
         co.sharePrice = Math.max(0.01, Math.round(co.sharePrice * factor * 100) / 100);
-        // keep the certificate item's market value in step with the share price
-        const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
-        if (shareItem) shareItem.marketValue = co.sharePrice;
-        // Workstream A6 — re-seed the live price path off the new fair value
-        try { require('./market').reanchor(co); } catch (e) { /* market optional */ }
         touched.push(co);
       }
       // the new prices are captured in the next per-turn history entry (7.1)
@@ -572,11 +571,12 @@ function updateDerived() {
   const n = db.provinces.length || 1;
   g.avgHappiness = Math.round(db.provinces.reduce((s, p) => s + (p.vars.happiness || 0), 0) / n * 10) / 10;
   g.avgApproval = Math.round(db.provinces.reduce((s, p) => s + (p.vars.approval || 0), 0) / n * 10) / 10;
-  // Exclude the Exchange settlement book (a system market-maker seeded very
-  // deep, allowed to run negative) — it is not real circulating money.
-  g.moneySupply = Math.round(db.accounts.reduce((s, a) => s + (a.ownerId === 'ent_exchange' ? 0 : a.balance), 0));
+  g.moneySupply = Math.round(db.accounts.reduce((s, a) => s + a.balance, 0));
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || db.accounts.find(a => { const e = db.entities.find(x => x.id === a.ownerId); return e && e.type === 'government'; });
   g.treasury = treasury ? Math.round(treasury.balance) : 0;
+  // Economic confidence is written live by the Day Market; keep the derived
+  // aggregate fresh here too (cap-weighted mean of company confidence).
+  try { require('./market').recomputeEconConfidence(db); } catch (e) { /* market optional at early boot */ }
 }
 
 // ---------- taxation -------------------------------------------------------
@@ -753,14 +753,20 @@ function runEconomy(db, actor) {
     }
   }
 
-  // settle each owner: net abstract money-in, government purchases, tax
+  // settle each owner: net abstract money-in, government purchases, tax.
+  // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
+  // economy spends, a spooked one doesn't. Domestic consumer sales scale by
+  // confFactor; government contracts (govRev) are not confidence-sensitive.
+  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
+  const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
   let settledOwners = 0, netTotal = 0, taxTotal = 0;
   for (const ownerId in perOwner) {
     const o = perOwner[ownerId];
     const owner = db.entities.find(e => e.id === ownerId);
     const acct = primaryAccount(ownerId, true);
     const govRev = govPay[ownerId] || 0;
-    let netAbstract = o.dom - o.upkeep - o.wage; // created/destroyed at the market edge
+    const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
+    let netAbstract = dom - o.upkeep - o.wage; // created/destroyed at the market edge
 
     // per-turn tax on positive operating net (rates are the same %; net is 1/30
     // of the old monthly figure, so the monthly burden matches the old system)
@@ -783,8 +789,8 @@ function runEconomy(db, actor) {
     // company earnings vars (annualised run-rate keeps parity with authored figures)
     if (owner && owner.type === 'company') {
       owner.vars = owner.vars || {};
-      owner.vars.revenue = Math.round((o.dom + govRev) * 365);
-      owner.vars.profit = Math.round((o.dom + govRev - o.upkeep - o.wage) * 365);
+      owner.vars.revenue = Math.round((dom + govRev) * 365);
+      owner.vars.profit = Math.round((dom + govRev - o.upkeep - o.wage) * 365);
     }
     settledOwners++;
     netTotal += netAbstract;
@@ -805,6 +811,18 @@ function runEconomy(db, actor) {
     if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment + econ.wageEmploymentK * delta) * 100) / 100, 0, 100);
   }
 
+  // economic confidence → civilian mood (other-systems knock-on). A confident
+  // economy lifts happiness/approval slightly; a market crash drags them.
+  const cShift = Math.round(((econC - 50) / 100) * 0.4 * 100) / 100;
+  if (cShift !== 0) for (const p of db.provinces) {
+    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness + cShift) * 100) / 100, 0, 100);
+    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval + cShift * 0.6) * 100) / 100, 0, 100);
+  }
+
+  // advance the Day Market one step per turn too, so speculation keeps moving in
+  // deployments without the long-lived 5s ticker (e.g. serverless).
+  try { require('./market').dayMarketTick(db); } catch (e) { /* market optional at early boot */ }
+
   // built-in daily share reprice (folds in the retired Market Session event).
   // Workstream A6 — coefficients halved so a single turn of live TRADING now
   // dominates the fundamentals drift; the noise term stays tiny.
@@ -823,18 +841,16 @@ function runEconomy(db, actor) {
 // effect share one implementation.
 function repriceAllShares(db, a, b, c, e, actor) {
   const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
+  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
   for (const co of db.entities) {
     if (co.type !== 'company' || co.sharePrice === undefined) continue;
     const profit = (co.vars && co.vars.profit) || 0;
     const valuation = (co.vars && co.vars.valuation) || 1;
     const trust = co.trust === undefined ? 50 : co.trust;
-    const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + (Math.random() * 2 - 1) * e;
+    // TURN price (fundamental company value). Economic confidence (the Day-Market
+    // knock-on) feeds in here; the day price itself is handled in market.js.
+    const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + 0.05 * ((econC - 50) / 100) + (Math.random() * 2 - 1) * e;
     co.sharePrice = Math.max(0.01, Math.round(co.sharePrice * factor * 100) / 100);
-    const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
-    if (shareItem) shareItem.marketValue = co.sharePrice;
-    // Workstream A6 — re-seed the live intra-turn path off the new fundamental
-    // fair value so the ticker wanders around the freshly-committed price.
-    try { require('./market').reanchor(co); } catch (e) { /* market optional at early boot */ }
   }
 }
 

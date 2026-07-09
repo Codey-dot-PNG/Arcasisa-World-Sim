@@ -1,4 +1,5 @@
-data
+data/*
+!data/baseline-world.json
 Arcasia extra resources
 style-demo.html
 .claude

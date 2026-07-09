@@ -14,6 +14,17 @@ const Entertainment = {
   spinning: false,
   wheelAngle: 0,    // last landed wheel rotation — survives re-renders
   history: [],      // recent roulette results (client-side, this session)
+  _resultAt: 0,     // Date.now() a result was last shown (E1 render-hold window)
+
+  // True while a casino round or a freshly-shown result must not be torn down
+  // by an unrelated sync re-render (Workstream E1). editingBusy() consults this;
+  // the state still updates underneath — only the DOM rebuild is deferred.
+  busy() {
+    if (this.spinning) return true;                     // roulette mid-spin
+    if (this.bjState && !this.bjState.done) return true; // blackjack hand in play
+    if (this._resultAt && (Date.now() - this._resultAt) < 6000) return true; // result on screen
+    return false;
+  },
 
   venues() { return ((S().settings.entertainment || {}).venues || []).filter(v => v.enabled || isGM()); },
   active() { const vs = this.venues(); return vs.find(v => v.id === this.venue) || vs[0] || null; },
@@ -302,6 +313,7 @@ const Entertainment = {
       const cls = net > 0 ? 'win' : net < 0 ? 'lose' : '';
       const text = `${r.number} ${c} — ${net > 0 ? 'You win ' + fmtMoney(net) : net < 0 ? 'You lose ' + fmtMoney(-net) : 'Push'}. Balance ${fmtMoney(r.balance)}`;
       this.lastResult = { text, cls };
+      this._resultAt = Date.now(); // hold re-renders briefly so the number stays put (E1)
       this.resultEl.className = 'roulette-result ' + cls;
       this.resultEl.textContent = text;
       if (net > 0) SFX.win(net >= r.staked * 5); else if (net < 0) SFX.lose(); else SFX.push();
@@ -505,6 +517,7 @@ const Entertainment = {
       for (let i = 0; i < dealt; i++) setTimeout(() => SFX.card(), i * 130);
       if (this.bjState.done && this.bjState.outcome) {
         const o = this.bjState.outcome;
+        this._resultAt = Date.now(); // hold re-renders briefly so the hand stays put (E1)
         setTimeout(() => {
           if (o === 'blackjack') SFX.win(true);
           else if (o === 'win' || o === 'dealer_bust') SFX.win(false);

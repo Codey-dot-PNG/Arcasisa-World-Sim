@@ -157,6 +157,22 @@ function migrate(world) {
       }
     }
   }
+  // Workstream A1 — the Exchange system holder + its settlement account. Created
+  // idempotently so live worlds gain the market-maker counterparty without a
+  // reseed. Follows the additive-migration pattern.
+  if (world.entities && !world.entities.some(e => e.id === 'ent_exchange')) {
+    world.entities.push({
+      id: 'ent_exchange', type: 'org', system: true, name: 'Lachevan Exchange', color: '#3a4653',
+      description: 'The central securities exchange. Holds the free float and settles all secondary share trades.',
+      vars: {}, inventory: []
+    });
+    changed = true;
+  }
+  if (world.accounts && !world.accounts.some(a => a.id === 'acct_exchange')) {
+    world.accounts.push({ id: 'acct_exchange', ownerId: 'ent_exchange', name: 'Exchange Settlement', balance: 1000000000000 });
+    changed = true;
+  }
+
   // Phase 4.4 — stock-market fields on companies (trust also used by Phase 9)
   for (const e of (world.entities || [])) {
     if (e.type !== 'company') continue;
@@ -165,6 +181,14 @@ function migrate(world) {
     if (e.sharePrice === undefined) {
       const val = (e.vars && e.vars.valuation) || 0;
       e.sharePrice = e.sharesOutstanding ? Math.max(1, Math.round(val / e.sharesOutstanding * 100) / 100) : 100;
+      changed = true;
+    }
+    // Workstream A4/A5 — live-market tunables + the deterministic price-path
+    // anchor. Additive; a GM's tuned values are never clobbered.
+    if (e.marketDepth === undefined) { e.marketDepth = 5; changed = true; }
+    if (e.vol === undefined) { e.vol = 0.02; changed = true; }
+    if (!e.priceAnchor || e.priceAnchor.price === undefined) {
+      e.priceAnchor = { price: e.sharePrice, t0: Date.now(), seed: (Math.floor(Math.random() * 0x7fffffff) + 1) >>> 0 };
       changed = true;
     }
   }
@@ -322,6 +346,24 @@ function migrate(world) {
       ]
     };
     changed = true;
+  }
+
+  // Workstream B — self-heal casino edit permission. The Satrom Grand Casino
+  // must be owned by `ent_satrom` (privately controlled, CEO `per_hale`), not by
+  // a government-controlled entity — otherwise the President's gov/ARC control
+  // chain leaks in and the SATROM CEO is locked out. Additive & idempotent: only
+  // corrects a drifted owner when `ent_satrom` still exists.
+  if (world.settings && world.settings.entertainment) {
+    const venues = world.settings.entertainment.venues || [];
+    const satromCo = (world.entities || []).find(e => e.id === 'ent_satrom');
+    const casino = venues.find(v => v.id === 'venue_satrom');
+    if (satromCo && casino && casino.ownerId !== 'ent_satrom') { casino.ownerId = 'ent_satrom'; changed = true; }
+    // A CEO pointing at a non-existent entity would deny the real CEO; restore
+    // the seed's `per_hale` when the referenced entity is gone.
+    if (satromCo && satromCo.ceoId && !(world.entities || []).some(e => e.id === satromCo.ceoId)
+        && (world.entities || []).some(e => e.id === 'per_hale')) {
+      satromCo.ceoId = 'per_hale'; changed = true;
+    }
   }
 
   // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'

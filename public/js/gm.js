@@ -56,6 +56,7 @@ const GM = {
     ['mapobjects', 'Cities & Properties'],
     ['registry', 'Entity Registry'],
     ['economy', 'Money & Accounts'],
+    ['assets', 'Assets & Ownership'],
     ['items', 'Items & Market'],
     ['trade', 'Trade Desk'],
     ['variables', 'Variables'],
@@ -88,7 +89,7 @@ const GM = {
     container.appendChild(layout);
     const fn = {
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
-      registry: this.tabRegistry, economy: this.tabEconomy, items: this.tabItems,
+      registry: this.tabRegistry, economy: this.tabEconomy, assets: this.tabAssets, items: this.tabItems,
       trade: this.tabTrade,
       variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
       presentation: this.tabPresentation,
@@ -169,15 +170,25 @@ const GM = {
     draft.inventory = draft.inventory || [];
     const box = el('div');
     box.appendChild(Views.secLabel('Inventory'));
+    // Share certificates (meta.companyId) and property deeds (meta.propertyId)
+    // are driven by the Share Register / Properties — editing them here would
+    // just be overwritten by syncAllCertificates/syncAllDeeds on save. Hide
+    // them from the picker and from the rows, and point the GM at the register.
+    const isDriven = (id) => { const it = S().items.find(x => x.id === id); return !!(it && it.meta && (it.meta.companyId || it.meta.propertyId)); };
+    const opts = this.itemOptions().filter(([id]) => !isDriven(id));
     draft.inventory.forEach((row, i) => {
+      if (isDriven(row.itemId)) return; // managed via Share Register / deeds
       box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:4px;' },
-        el('div', { style: 'flex:1' }, this.sel(row, 'itemId', this.itemOptions())),
+        el('div', { style: 'flex:1' }, this.sel(row, 'itemId', opts)),
         el('div', { style: 'width:110px' }, this.num(row, 'qty')),
         el('button.icon-btn', { onclick: () => { draft.inventory.splice(i, 1); App.renderView(); } }, '✕')));
     });
+    const first = opts[0] && opts[0][0];
     box.appendChild(el('div.btn-row', el('button.dash-btn', {
-      onclick: () => { if (S().items.length) { draft.inventory.push({ itemId: S().items[0].id, qty: 1 }); App.renderView(); } }
+      onclick: () => { if (first) { draft.inventory.push({ itemId: first, qty: 1 }); App.renderView(); } }
     }, '+ Add item')));
+    box.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-top:4px;' },
+      'Assign shares via the Share Register; property deeds are issued automatically.'));
     return box;
   },
 
@@ -623,6 +634,90 @@ const GM = {
       el('tbody', [...S().accounts].sort((a, b) => b.balance - a.balance).map(a => el('tr',
         el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance)),
         el('td', el('button.icon-btn', { title: 'Close account', onclick: () => this.deleteColl('accounts', a.id, a.name) }, '✕')))))));
+  },
+
+  /* ═══════════ ASSETS & OWNERSHIP (Workstream C) ═══════════
+     A single desk for moving items, assigning/transferring shares and
+     reassigning company/property control — the ergonomic twin of Money &
+     Accounts, so a GM never has to hand-edit an entity record for these. Every
+     action hits a small /api/gm/* route that store.save()s + broadcasts and
+     runs the relevant reconciliation (syncAllCertificates / syncAllDeeds). */
+  tabAssets(main) {
+    main.appendChild(el('div.doc-title', 'Assets & Ownership'));
+    main.appendChild(el('div.doc-sub', 'move items, assign shares and reassign control — no record-editing required'));
+
+    const ents = S().entities;
+    const companies = ents.filter(e => e.type === 'company' && e.sharesOutstanding);
+
+    // ---- Item transfer ----
+    main.appendChild(Views.secLabel('Move an Item'));
+    const it = this._assetItem || (this._assetItem = { fromEntityId: (ents[0] || {}).id, toEntityId: (ents[1] || {}).id, itemId: (S().items[0] || {}).id, qty: 1 });
+    main.appendChild(el('div.form-grid',
+      this.field('From holder', this.sel(it, 'fromEntityId', this.entOptions())),
+      this.field('To holder', this.sel(it, 'toEntityId', this.entOptions())),
+      this.field('Item', this.sel(it, 'itemId', this.itemOptions())),
+      this.field('Quantity', this.num(it, 'qty'))));
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => { try { await POST('/api/gm/give-item', it); toast('Item moved.'); } catch (e) { toast(e.message, true); } }
+    }, 'Move Item')));
+
+    // ---- Share transfer / assignment ----
+    main.appendChild(Views.secLabel('Assign / Transfer Shares'));
+    const sh = this._assetShare || (this._assetShare = { companyId: (companies[0] || {}).id, fromEntityId: 'float', toEntityId: (ents[0] || {}).id, shares: 1 });
+    const holderOpts = [['float', '— Float (Exchange) —'], ...this.entOptions()];
+    main.appendChild(el('div.form-grid',
+      this.field('Company', this.sel(sh, 'companyId', companies.map(c => [c.id, c.name]), () => App.renderView())),
+      this.field('From', this.sel(sh, 'fromEntityId', holderOpts)),
+      this.field('To', this.sel(sh, 'toEntityId', holderOpts)),
+      this.field('Shares', this.num(sh, 'shares'))));
+    const co = entById(sh.companyId);
+    if (co) {
+      const pool = market_treasuryPoolClient(co);
+      main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-soft); margin:2px 0 8px; font-family:var(--font-mono);' },
+        'Outstanding ' + fmtNum(co.sharesOutstanding) + ' · Float ' + fmtNum(pool) +
+        ((co.shareholders || []).length ? ' · ' + (co.shareholders || []).map(s => entName(s.entityId) + ' ' + fmtNum(s.shares)).join(' · ') : '')));
+    }
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => { try { await POST('/api/gm/set-holding', sh); toast('Shares reassigned.'); } catch (e) { toast(e.message, true); } }
+    }, 'Assign Shares')));
+
+    // ---- Company ownership ----
+    main.appendChild(Views.secLabel('Company Ownership'));
+    const ownCo = entById(W.gmAssetCo) || companies[0];
+    if (ownCo) {
+      const draft = (this._assetOwn && this._assetOwn.id === ownCo.id) ? this._assetOwn
+        : (this._assetOwn = { id: ownCo.id, ownerId: ownCo.ownerId || '', ceoId: ownCo.ceoId || '' });
+      main.appendChild(el('div.form-grid',
+        this.field('Company', this.sel({ v: ownCo.id }, 'v', companies.map(c => [c.id, c.name]), (v) => { W.gmAssetCo = v; this._assetOwn = null; App.renderView(); })),
+        this.field('Owner', this.sel(draft, 'ownerId', this.entOptions())),
+        this.field('CEO', this.sel(draft, 'ceoId', this.entOptions()))));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: async () => {
+          try {
+            await PATCH('/api/gm/coll/entities/' + ownCo.id, { ownerId: draft.ownerId, ceoId: draft.ceoId });
+            this._assetOwn = null; toast('Ownership updated.');
+          } catch (e) { toast(e.message, true); }
+        }
+      }, 'Save Ownership')));
+    }
+
+    // ---- Property ownership ----
+    main.appendChild(Views.secLabel('Property Ownership'));
+    const props = S().properties || [];
+    if (props.length) {
+      const prop = props.find(p => p.id === W.gmAssetProp) || props[0];
+      const pd = (this._assetProp && this._assetProp.id === prop.id) ? this._assetProp
+        : (this._assetProp = { id: prop.id, ownerId: prop.ownerId || '' });
+      main.appendChild(el('div.form-grid',
+        this.field('Property', this.sel({ v: prop.id }, 'v', props.map(p => [p.id, p.name]), (v) => { W.gmAssetProp = v; this._assetProp = null; App.renderView(); })),
+        this.field('Owner', this.sel(pd, 'ownerId', this.entOptions()))));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: async () => {
+          try { await PATCH('/api/gm/coll/properties/' + prop.id, { ownerId: pd.ownerId }); this._assetProp = null; toast('Property reassigned.'); }
+          catch (e) { toast(e.message, true); }
+        }
+      }, 'Save Property Owner')));
+    }
   },
 
   /* ═══════════ ITEMS ═══════════ */

@@ -104,11 +104,21 @@ const Charts = {
     const plotY0 = pad.top, plotY1 = height - pad.bottom;
     const plotW = Math.max(1, plotX1 - plotX0), plotH = Math.max(1, plotY1 - plotY0);
 
-    let yMin = Math.min(...allPoints.map(p => this._num(p.y)));
-    let yMax = Math.max(...allPoints.map(p => this._num(p.y)));
-    if (yMin === yMax) { yMin -= 1; yMax += 1; }
-    const headroom = (yMax - yMin) * 0.1;
-    yMin -= headroom; yMax += headroom;
+    let yMin, yMax;
+    // Fixed domain: percentage charts (and anything passing explicit bounds)
+    // pin the y-axis instead of auto-scaling with headroom, so 0–100% reads
+    // consistently across turns rather than zooming to the data.
+    const fixedMin = opts.percent ? 0 : opts.yMin;
+    const fixedMax = opts.percent ? 100 : opts.yMax;
+    if (fixedMin !== undefined && fixedMax !== undefined) {
+      yMin = fixedMin; yMax = fixedMax;
+    } else {
+      yMin = Math.min(...allPoints.map(p => this._num(p.y)));
+      yMax = Math.max(...allPoints.map(p => this._num(p.y)));
+      if (yMin === yMax) { yMin -= 1; yMax += 1; }
+      const headroom = (yMax - yMin) * 0.1;
+      yMin -= headroom; yMax += headroom;
+    }
 
     const xCount = Math.max(...lines.map(l => l.points.length), 1);
     const xScale = (i) => xCount <= 1 ? (plotX0 + plotW / 2) : plotX0 + (i / (xCount - 1)) * plotW;

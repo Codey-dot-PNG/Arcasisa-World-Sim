@@ -269,6 +269,11 @@ function mapEditBusy() {
 function editingBusy() {
   if (mapEditBusy()) return true;
   if (window.Entertainment && Entertainment.spinning) return true; // don't rebuild the roulette table mid-spin
+  // A casino round or a freshly-shown result is on screen: an unrelated sync
+  // (another player, an autosave, a turn) must not tear down and re-animate the
+  // cards/wheel out from under the player. State still updates underneath; only
+  // the re-render waits (Workstream E1).
+  if (window.Entertainment && Entertainment.busy && Entertainment.busy()) return true;
   if (W.inspEdit) return true;   // inspector inline-edit draft open
   const ae = document.activeElement;
   if (ae && ae.id === 'exp-search') return false; // search box shouldn't block sync

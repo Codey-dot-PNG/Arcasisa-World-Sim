@@ -89,7 +89,11 @@ function filterState(u) {
   const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId));
   const military = (p.mapLayers || []).includes('military');
 
-  const entities = db.entities.map(e => {
+  const entities = db.entities
+    // The Exchange (Workstream A1) is a system market-maker holder, not a
+    // player-facing entity — hide it from everyone but the GM.
+    .filter(e => p.gm || e.id !== 'ent_exchange')
+    .map(e => {
     const out = { ...e };
     if (!seeInv(e.id)) delete out.inventory;
     if (e.type === 'company' && !p.companyFinancials && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
@@ -346,6 +350,16 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         const venue = casino.venueById(db, mv[1]);
         if (!venue) return bad('No such venue.');
+        // Regression note (Workstream B): a venue is editable by GM or by
+        // whoever controls the venue's OWNING entity. The Satrom casino's owner
+        // is `ent_satrom` (owned by the foreign `for_sarom`, CEO `per_hale`), so
+        // the SATROM CEO passes here while the President — who only controls the
+        // government/ARC chain, which never reaches `ent_satrom` — is denied.
+        // The reported "CEO can't edit" bug was live-world DATA drift (venue
+        // re-owned to a gov entity, or `ent_satrom.ceoId` cleared); store.migrate
+        // now self-heals the casino owner, and the seed keeps ceoId=`per_hale`.
+        // The client mirror (`ownership_controlsClient` in entertainment.js) uses
+        // the identical rule — keep them in lockstep.
         if (!u.role.perms.gm && !ownership.controls(u.user.entityId, venue.ownerId)) return deny('You do not run this venue.');
         const num = (n, lo, hi) => Math.max(lo, Math.min(hi, Number(n)));
         if (b.enabled !== undefined && u.role.perms.gm) venue.enabled = !!b.enabled;
@@ -545,6 +559,19 @@ async function handle(req, res, pathname, method) {
       if (trade.money.give > 0) sim.txn(sim.primaryAccount(fromEnt.id, true).id, sim.primaryAccount(toEnt.id, true).id, trade.money.give, trade.memo || 'Trade settlement', u.user.displayName, 'transfer');
       if (trade.money.get > 0) sim.txn(sim.primaryAccount(toEnt.id, true).id, sim.primaryAccount(fromEnt.id, true).id, trade.money.get, trade.memo || 'Trade settlement', u.user.displayName, 'transfer');
 
+      // Workstream A5 — P2P re-mark. A share certificate traded for money moves
+      // the public quote (implied price = money / shares, clamped ±25%). Only
+      // re-mark when a single company's cert sits opposite the cash, so a bundle
+      // trade doesn't produce a garbage implied price.
+      try {
+        const certGive = {}, certGet = {};
+        for (const r of trade.give) { const it = db.items.find(i => i.id === r.itemId); if (it && it.meta && it.meta.companyId) certGive[it.meta.companyId] = (certGive[it.meta.companyId] || 0) + r.qty; }
+        for (const r of trade.get) { const it = db.items.find(i => i.id === r.itemId); if (it && it.meta && it.meta.companyId) certGet[it.meta.companyId] = (certGet[it.meta.companyId] || 0) + r.qty; }
+        const giveCos = Object.keys(certGive), getCos = Object.keys(certGet);
+        if (giveCos.length === 1 && trade.money.get > 0) market.remarkFromTrade(giveCos[0], trade.money.get, certGive[giveCos[0]], u.user.displayName);
+        if (getCos.length === 1 && trade.money.give > 0) market.remarkFromTrade(getCos[0], trade.money.give, certGet[getCos[0]], u.user.displayName);
+      } catch (e) { /* re-mark is best-effort; never blocks a settled trade */ }
+
       trade.status = 'accepted';
       store.log('ownership', 'Trade offer accepted', `${fromEnt.name} ⇄ ${toEnt.name}${trade.memo ? ' · ' + trade.memo : ''}`, u.user.displayName, [fromEnt.id, toEnt.id]);
       store.save(); broadcast('sync');
@@ -669,11 +696,28 @@ async function handle(req, res, pathname, method) {
       try { const r = market.transfer(b.companyId, fromId, b.toEntityId, b.shares, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
+    // Bonus mint (dilution). Kept at /api/market/issue for back-compat.
     if (pathname === '/api/market/issue' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
       if (!gm && !ownership.controls(u.user.entityId, b.companyId)) return deny('Only the company’s controller may issue shares.');
-      try { const r = market.issue(b.companyId, b.newShares, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      try { const r = market.bonusMint(b.companyId, b.newShares, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
+    }
+    // Offering (Workstream A2) — primary capital raise: sell new shares for cash.
+    if (pathname === '/api/market/offer' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, b.companyId)) return deny('Only the company’s controller may raise capital.');
+      try { const r = market.offer(b.companyId, b.newShares, b.price, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      catch (e) { return bad(e.message); }
+    }
+    // Buyback (Workstream A3) — retire shares from the float, price up.
+    if (pathname === '/api/market/buyback' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, b.companyId)) return deny('Only the company’s controller may buy back shares.');
+      try { const r = market.buyback(b.companyId, b.shares, u.user.displayName, { gm }); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
 
@@ -844,6 +888,67 @@ async function handle(req, res, pathname, method) {
         store.save(); broadcast('sync');
         return json(res, 200, { ok: true });
       }
+      // Workstream C — GM Assets & Ownership front doors.
+      // Move any item between holders (routes cert/deed items through the same
+      // machinery as accept-trade's moveItem).
+      if (pathname === '/api/gm/give-item' && method === 'POST') {
+        const b = await readBody(req);
+        const fromE = db.entities.find(e => e.id === b.fromEntityId);
+        const toE = db.entities.find(e => e.id === b.toEntityId);
+        const item = db.items.find(i => i.id === b.itemId);
+        const qty = Math.round(Number(b.qty));
+        if (!fromE || !toE) return bad('Pick a valid source and destination holder.');
+        if (fromE.id === toE.id) return bad('Source and destination are the same.');
+        if (!item) return bad('Unknown item.');
+        if (!(qty > 0)) return bad('Quantity must be positive.');
+        try {
+          if (item.meta && item.meta.companyId) {
+            market.transfer(item.meta.companyId, fromE.id, toE.id, qty, actor);
+          } else if (item.meta && item.meta.propertyId) {
+            deeds.transfer(item.meta.propertyId, fromE.id, toE.id, actor);
+          } else {
+            fromE.inventory = fromE.inventory || [];
+            const row = fromE.inventory.find(r => r.itemId === item.id);
+            if (!row || row.qty < qty) return bad(`${fromE.name} does not hold ${qty} × ${item.name}.`);
+            row.qty -= qty;
+            fromE.inventory = fromE.inventory.filter(r => r.qty > 0);
+            toE.inventory = toE.inventory || [];
+            const trow = toE.inventory.find(r => r.itemId === item.id);
+            if (trow) trow.qty += qty; else toE.inventory.push({ itemId: item.id, qty });
+            store.log('inventory', `${qty} × ${item.name} moved`, `${fromE.name} → ${toE.name}`, actor, [fromE.id, toE.id]);
+          }
+        } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true });
+      }
+      // Assign / transfer shares. from|to may be 'float' (the Exchange-held
+      // unallocated pool). This is the GM-friendly front door for A7.
+      if (pathname === '/api/gm/set-holding' && method === 'POST') {
+        const b = await readBody(req);
+        const co = db.entities.find(e => e.id === b.companyId && e.type === 'company');
+        if (!co) return bad('Unknown company.');
+        const shares = Math.round(Number(b.shares));
+        if (!(shares > 0)) return bad('Share count must be positive.');
+        const from = b.fromEntityId, to = b.toEntityId;
+        try {
+          if ((!from || from === 'float') && to && to !== 'float') {
+            if (market.treasuryPool(co) < shares) return bad('Not enough shares in the float.');
+            market.setHolding(co, to, market.holdingOf(co, to) + shares);
+          } else if (from && from !== 'float' && (!to || to === 'float')) {
+            if (market.holdingOf(co, from) < shares) return bad('That holder does not have that many shares.');
+            market.setHolding(co, from, market.holdingOf(co, from) - shares);
+          } else if (from && to) {
+            market.transfer(b.companyId, from, to, shares, actor);
+          } else {
+            return bad('Pick a source and destination (holder or float).');
+          }
+        } catch (e) { return bad(e.message); }
+        market.syncAllCertificates(db);
+        store.log('ownership', `${shares} ${co.abbrev || co.name} shares reassigned`,
+          `${from === 'float' || !from ? 'float' : (db.entities.find(e => e.id === from) || {}).name || from} → ${to === 'float' || !to ? 'float' : (db.entities.find(e => e.id === to) || {}).name || to}`, actor, [co.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true });
+      }
       if (pathname === '/api/gm/snapshots' && method === 'GET') return json(res, 200, { snapshots: await store.listSnapshots() });
       if (pathname === '/api/gm/export' && method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="arcasia-world.json"' });
@@ -988,6 +1093,7 @@ async function handle(req, res, pathname, method) {
           if (coll === 'properties') buildings.assignTexture(b); // random variant for the kind
           db[coll].push(b);
           if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
+          if (coll === 'entities') market.syncAllCertificates(db); // mirror register edits into inventories
           store.log('gm', `Created ${coll.slice(0, -1)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { id: b.id, obj: b });
@@ -1013,6 +1119,7 @@ async function handle(req, res, pathname, method) {
             obj.vars.population = Object.values(obj.demographics).reduce((s, g) => s + (g.population || 0), 0);
           }
           if (coll === 'properties') deeds.syncAllDeeds(db); // rename/revalue/re-home the deed
+          if (coll === 'entities') market.syncAllCertificates(db); // Share-Register edits mirror into inventories immediately (no restart)
           store.log('gm', `Updated ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, [obj.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { obj });
@@ -1024,6 +1131,7 @@ async function handle(req, res, pathname, method) {
           cascadeDelete(coll, obj);
           db[coll] = db[coll].filter(x => x.id !== obj.id);
           if (coll === 'properties') deeds.syncAllDeeds(db); // retire the deed item
+          if (coll === 'entities') market.syncAllCertificates(db); // drop stale certs when a shareholder entity is removed
           store.log('gm', `Deleted ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, []);
           store.save(); broadcast('sync');
           return json(res, 200, { ok: true });

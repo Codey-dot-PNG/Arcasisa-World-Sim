@@ -509,6 +509,8 @@ function applyEffect(fx, meta) {
         // keep the certificate item's market value in step with the share price
         const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
         if (shareItem) shareItem.marketValue = co.sharePrice;
+        // Workstream A6 — re-seed the live price path off the new fair value
+        try { require('./market').reanchor(co); } catch (e) { /* market optional */ }
         touched.push(co);
       }
       // the new prices are captured in the next per-turn history entry (7.1)
@@ -570,7 +572,9 @@ function updateDerived() {
   const n = db.provinces.length || 1;
   g.avgHappiness = Math.round(db.provinces.reduce((s, p) => s + (p.vars.happiness || 0), 0) / n * 10) / 10;
   g.avgApproval = Math.round(db.provinces.reduce((s, p) => s + (p.vars.approval || 0), 0) / n * 10) / 10;
-  g.moneySupply = Math.round(db.accounts.reduce((s, a) => s + a.balance, 0));
+  // Exclude the Exchange settlement book (a system market-maker seeded very
+  // deep, allowed to run negative) — it is not real circulating money.
+  g.moneySupply = Math.round(db.accounts.reduce((s, a) => s + (a.ownerId === 'ent_exchange' ? 0 : a.balance), 0));
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || db.accounts.find(a => { const e = db.entities.find(x => x.id === a.ownerId); return e && e.type === 'government'; });
   g.treasury = treasury ? Math.round(treasury.balance) : 0;
 }
@@ -801,8 +805,10 @@ function runEconomy(db, actor) {
     if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment + econ.wageEmploymentK * delta) * 100) / 100, 0, 100);
   }
 
-  // built-in daily share reprice (folds in the retired Market Session event)
-  repriceAllShares(db, 0.6, 0.8, 0.15, 0.015, actor);
+  // built-in daily share reprice (folds in the retired Market Session event).
+  // Workstream A6 — coefficients halved so a single turn of live TRADING now
+  // dominates the fundamentals drift; the noise term stays tiny.
+  repriceAllShares(db, 0.3, 0.4, 0.075, 0.015, actor);
 
   // per-turn government income samples for the finance graphs (recordHistory)
   g.lastTaxIncome = Math.round(taxTotal * 100) / 100;
@@ -826,6 +832,9 @@ function repriceAllShares(db, a, b, c, e, actor) {
     co.sharePrice = Math.max(0.01, Math.round(co.sharePrice * factor * 100) / 100);
     const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
     if (shareItem) shareItem.marketValue = co.sharePrice;
+    // Workstream A6 — re-seed the live intra-turn path off the new fundamental
+    // fair value so the ticker wanders around the freshly-committed price.
+    try { require('./market').reanchor(co); } catch (e) { /* market optional at early boot */ }
   }
 }
 

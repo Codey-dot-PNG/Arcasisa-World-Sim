@@ -245,6 +245,42 @@ const Music = {
     if (!this.curTrackId && this.queue.length) this.advanceQueue(forceRestart);
   },
 
+  /* The ordered track list of the effective playlist (for the picker UI),
+     excluding forcedOnly tracks and never shuffled — this is what the player
+     sees and clicks, independent of the shuffled playback `queue`. */
+  effectiveTracks(cfg) {
+    const lib = cfg.library || [];
+    const pl = (cfg.playlists || []).find(p => p.id === this.effectivePlaylistId(cfg));
+    let ids = pl ? (pl.tracks || []).filter(id => lib.some(t => t.id === id)) : lib.map(t => t.id);
+    ids = ids.filter(id => { const t = this.trackById(id); return t && !t.forcedOnly; });
+    return ids.map(id => this.trackById(id)).filter(Boolean);
+  },
+
+  /* Personal, local jump to a specific track in the current playlist. Like
+     the playlist pick it never touches the server; a GM forcedTrack still
+     overrides (apply() re-loops it on the next sync). */
+  playTrackById(id) {
+    if (!this.audio) return;
+    this.armed = true;
+    const cfg = this.cfg();
+    if (!cfg || !cfg.enabled) return;
+    if (cfg.forcedTrack) return; // GM is forcing a track — local choice is ignored
+    const t = this.trackById(id);
+    if (!t) return;
+    // make sure the playback queue reflects the effective playlist, then
+    // position it on the chosen track so next/prev continue from here.
+    const effId = this.effectivePlaylistId(cfg);
+    if (this.curPlaylist !== effId || !this.queue.length) {
+      this.queue = this.buildQueue(cfg);
+      this.curPlaylist = effId;
+      this.curShuffle = !!cfg.shuffle;
+    }
+    const idx = this.queue.indexOf(id);
+    if (idx !== -1) this.queuePos = idx;
+    this.loadAndPlay(t, true);
+    this.renderWidget();
+  },
+
   advanceQueue(forceRestart) {
     if (!this.queue.length) { this.curTrackId = null; this.stopAll(); this.renderWidget(); return; }
     this.queuePos = (this.queuePos + 1) % this.queue.length;
@@ -395,11 +431,13 @@ const Music = {
     const cfg = this.cfg();
     if (!cfg) return;
 
-    // GM has locked playback — players cannot choose.
+    // GM has locked playback — players cannot choose the playlist, but they
+    // may still pick which track within the pinned playlist plays for them.
     if (cfg.lockPlaylist) {
       const pl = (cfg.playlists || []).find(p => p.id === cfg.activePlaylist);
       menu.appendChild(el('div.music-pl-locked',
         '🔒 The gamemaster is controlling the music' + (pl ? ' — ' + pl.name : '') + '.'));
+      this.appendTrackMenu(menu, cfg);
       return;
     }
 
@@ -417,6 +455,27 @@ const Music = {
     const rows = (cfg.playlists || []).filter(p => allowed.includes(p.id));
     rows.forEach(p => menu.appendChild(mkRow(p.id, p.name, !followingGM && pick === p.id)));
     if (!rows.length) menu.appendChild(el('div.music-pl-empty', 'The gamemaster has not shared any playlists.'));
+    this.appendTrackMenu(menu, cfg);
+  },
+
+  /* Track picker: list the effective playlist's tracks so a player can jump
+     straight to one. Disabled while a GM forcedTrack is active (it would just
+     be overridden). Keep it local — no server writes. */
+  appendTrackMenu(menu, cfg) {
+    const tracks = this.effectiveTracks(cfg);
+    if (!tracks.length) return;
+    menu.appendChild(el('div.music-pl-head', 'Tracks'));
+    if (cfg.forcedTrack) {
+      menu.appendChild(el('div.music-pl-empty', 'The gamemaster is forcing a track.'));
+      return;
+    }
+    tracks.forEach(t => {
+      const selected = !this.curForced && this.curTrackId === t.id;
+      menu.appendChild(el('div.music-pl-item', {
+        class: selected ? 'selected' : '',
+        onclick: () => { this.playTrackById(t.id); this.closePlaylistMenu(); }
+      }, el('span.music-pl-check', selected ? '▶' : '○'), el('span', t.title || 'Untitled track')));
+    });
   },
 
   renderWidget() {

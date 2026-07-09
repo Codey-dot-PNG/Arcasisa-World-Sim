@@ -14,7 +14,7 @@ from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 ROOT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "public")
-PORT = 8765
+PORT = int(os.environ.get("PORT", "8765"))
 
 # ---------------- world state ----------------
 VENUES = [
@@ -62,13 +62,21 @@ PROPERTIES = [
     {"id": "prop_satrom_casino", "name": "Satrom Grand Casino", "type": "commercial", "kind": "office",
      "provinceId": "prov_lachevan", "pos": [2278, 499], "ownerId": "ent_satrom", "value": 24000000,
      "employees": 650, "income": 300000, "expenses": 4667, "prodMode": "cash", "cashPerTurn": 10000,
-     "produces": [],
+     "produces": [], "texture": "civ-tall.png",
      "description": "House of chance on the Lachevan strip.", "inventory": [], "vars": {}},
     {"id": "prop_satrom_works", "name": "SATROM Radar Works", "type": "industrial", "kind": "factory",
      "provinceId": "prov_lachevan", "pos": [2290, 510], "ownerId": "ent_satrom", "value": 34000000,
      "employees": 3100, "income": 380000, "expenses": 8333, "prodMode": "goods",
-     "produces": [{"itemId": "item_crude", "perTurn": 4400}],
+     "produces": [{"itemId": "item_crude", "perTurn": 4400}], "texture": "industrial-complex.png",
      "description": "Restricted site.", "inventory": [], "vars": {}},
+    {"id": "prop_gov_house", "name": "Government House", "type": "government", "kind": "government",
+     "provinceId": "prov_lachevan", "pos": [2400, 470], "ownerId": "ent_gov", "value": 40000000,
+     "employees": 900, "income": 0, "expenses": 4000, "prodMode": "none", "produces": [],
+     "texture": "bank-court.png", "description": "Seat of government.", "inventory": [], "vars": {}},
+    {"id": "prop_arc_mill", "name": "ARC Timber Mill", "type": "industrial", "kind": "factory",
+     "provinceId": "prov_lachevan", "pos": [2200, 620], "ownerId": "ent_arc", "value": 9000000,
+     "employees": 400, "income": 60000, "expenses": 1500, "prodMode": "cash", "cashPerTurn": 2000,
+     "produces": [], "texture": "industrial.png", "description": "State sawmill.", "inventory": [], "vars": {}},
     {"id": "prop_rill_house", "name": "Rill Residence", "type": "residential", "kind": "house",
      "provinceId": "prov_lachevan", "pos": [2361, 524], "ownerId": "per_rill", "value": 18000,
      "employees": 0, "income": 0, "expenses": 40, "description": "A modest house.",
@@ -140,13 +148,20 @@ TRANSACTIONS = [
      "amount": 120, "memo": "Gambling tax (15%)", "actor": "TREASURY", "kind": "transfer"},
 ]
 
-PAGES = ["parliament", "companies", "economy", "population", "news", "entertainment"]
+PAGES = ["map", "parliament", "companies", "economy", "population", "news", "entertainment"]
+
+PROVINCES = [
+    {"id": "prov_lachevan", "name": "Lachevan", "color": "#c99a2e",
+     "path": [[2000, 300], [2600, 250], [2700, 700], [2200, 800], [1950, 600]],
+     "labelPos": [2300, 520], "vars": {"population": 4600000, "gdp": 1850, "happiness": 61},
+     "description": "The federal heartland."},
+]
 
 def role_perms(gm):
     if gm:
         return {"pages": PAGES + ["timeline", "gm"], "inventories": "all", "accounts": "all",
                 "companyFinancials": True, "government": True, "statistics": True,
-                "mapLayers": ["political"], "manageNews": True, "gm": True}
+                "mapLayers": ["political", "data", "ownership"], "manageNews": True, "gm": True}
     return {"pages": PAGES, "inventories": "own", "accounts": "own", "companyFinancials": True,
             "government": False, "statistics": False, "mapLayers": ["political"],
             "manageNews": False, "gm": False}
@@ -166,6 +181,7 @@ def make_state():
             "music": {"enabled": False, "library": [], "playlists": [], "activePlaylist": None,
                       "forcedTrack": None, "volume": 0.7, "shuffle": False},
             "trade": TRADE,
+            "map": {"schema": 1, "countries": [], "labels": [], "roads": [], "rails": []},
             "economy": {"baseDailyWage": 4, "wageHappinessK": 0.03, "wageEmploymentK": 0.03,
                         "dailyVariance": 0.06, "happinessOutputK": 0.15},
         },
@@ -173,7 +189,7 @@ def make_state():
                        "treasury": 1200000000, "avgHappiness": 51.6, "avgApproval": 47.3,
                        "lastTaxIncome": 10200, "lastExportIncome": 1817, "lastImportSpend": 3380},
         "variables": [],
-        "entities": ENTITIES, "provinces": [], "cities": [], "properties": PROPERTIES,
+        "entities": ENTITIES, "provinces": PROVINCES, "cities": [], "properties": PROPERTIES,
         "accounts": ACCOUNTS, "transactions": TRANSACTIONS, "news": [], "items": ITEMS, "markers": [],
         "history": HISTORY, "timeline": [], "trades": [], "elections": [],
         "roles": [{"id": "citizen", "name": "Citizen"}],

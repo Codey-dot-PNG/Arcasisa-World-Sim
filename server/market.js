@@ -13,6 +13,50 @@
 // many shares ordinary (person) investors may hold.
 const store = require('./store');
 const sim = require('./sim');
+const pricepath = require('./pricepath'); // byte-identical with public/js/pricepath.js (client copy)
+
+// The Exchange (Workstream A1) is the system counterparty for every SECONDARY
+// (float) transaction — buy/sell/buyback cash flows through it, never back to
+// the company. The company itself is only paid on a primary offering.
+const EXCHANGE_ID = 'ent_exchange';
+const DEFAULT_DEPTH = 5;   // price impact per unit of (qty / sharesOutstanding)
+const MAX_TICK = 0.25;     // a single trade can move the quote at most ±25%
+const DEFAULT_VOL = 0.02;  // intra-turn wiggle amplitude
+
+function round2(n) { return Math.round(n * 100) / 100; }
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+function newSeed() { return (Math.floor(Math.random() * 0x7fffffff) + 1) >>> 0; }
+
+function exchangeAccount() { return sim.primaryAccount(EXCHANGE_ID, true); }
+
+// Re-anchor the deterministic price path to the currently committed price with
+// a fresh seed. Called after every commit (turn reprice, trade, offer, buyback,
+// P2P re-mark) so the live ticker resumes wandering from the real number.
+function reanchor(co) {
+  co.priceAnchor = { price: co.sharePrice, t0: Date.now(), seed: newSeed() };
+}
+
+// The live quote right now: evaluate the seeded path at Date.now(). All trades
+// execute at this price. Falls back to the committed sharePrice if no anchor
+// has been set yet (older worlds before migration).
+function currentPrice(co) {
+  const base = co.sharePrice || 0.01;
+  if (!co.priceAnchor) return round2(base);
+  const a = co.priceAnchor;
+  return pricepath.price(a.price, a.t0, a.seed, Date.now(), co.vol === undefined ? DEFAULT_VOL : co.vol, base);
+}
+
+// Live price impact (Workstream A4). signedQty: +buy pressure, −sell pressure.
+// Moves the committed quote from the executed price and re-anchors the path.
+function applyImpact(co, signedQty, execPrice) {
+  const depth = co.marketDepth || DEFAULT_DEPTH;
+  const frac = signedQty / Math.max(1, co.sharesOutstanding || 1);
+  const next = execPrice * (1 + clamp(depth * frac, -MAX_TICK, MAX_TICK));
+  co.sharePrice = Math.max(0.01, round2(next));
+  reanchor(co);
+  const it = shareItemFor(co.id);
+  if (it) it.marketValue = co.sharePrice;
+}
 
 function shareItemFor(companyId) {
   return store.get().items.find(i => i.meta && i.meta.companyId === companyId) || null;
@@ -112,43 +156,49 @@ function buy(companyId, buyerEntityId, shares, actor, opts) {
   if (buyer.type === 'person' || (opts && opts.enforceFloat)) {
     if (personPublicHeld(co) + shares > maxPublic(co)) throw new Error('That would exceed the company’s public float');
   }
-  const price = co.sharePrice || 0;
+  // secondary trades execute at the live (wandered) price, not the flat quote
+  const price = currentPrice(co);
   const cost = Math.round(price * shares * 100) / 100;
   const buyAcct = sim.primaryAccount(buyerEntityId, true);
-  const coAcct = sim.primaryAccount(co.id, true);
+  const exAcct = exchangeAccount();
   const gm = opts && opts.gm;
   // VAT (Phase 12): a GM-set percentage of the purchase flows to the treasury
-  // on top of the price paid to the company.
+  // on top of the price paid for the float.
   const tax = db.settings.taxation || {};
   const vat = tax.enabled && tax.vatRate > 0 ? Math.round(cost * tax.vatRate / 100) : 0;
   if (!gm && buyAcct.balance < cost + vat) throw new Error('Insufficient funds (incl. VAT)');
-  sim.txn(buyAcct.id, coAcct.id, cost, `Bought ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  // cash flows to the Exchange (the float's counterparty), never to the company
+  sim.txn(buyAcct.id, exAcct.id, cost, `Bought ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
   if (vat > 0) {
     const treasury = db.accounts.find(a => a.id === 'acct_treasury');
     if (treasury) sim.txn(buyAcct.id, treasury.id, vat, `VAT (${tax.vatRate}%) on share purchase`, 'TREASURY', 'transfer');
   }
   setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
+  applyImpact(co, +shares, price); // buying pressure nudges the quote up
   store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${vat ? ' + VAT ' + db.settings.currency + vat : ''}`, actor, [co.id, buyerEntityId]);
-  return { shares, cost, price, vat };
+  return { shares, cost, price, vat, sharePrice: co.sharePrice };
 }
 
-// Player sells `shares` back into the float; company account pays out.
+// Player sells `shares` back into the float; the Exchange pays out.
 function sell(companyId, sellerEntityId, shares, actor, opts) {
   const db = store.get();
   const co = findCompany(companyId);
   shares = Math.round(Number(shares));
   if (!(shares > 0)) throw new Error('Share count must be positive');
   if (holdingOf(co, sellerEntityId) < shares) throw new Error('You do not hold that many shares');
-  const price = co.sharePrice || 0;
+  const price = currentPrice(co);
   const proceeds = Math.round(price * shares * 100) / 100;
-  const coAcct = sim.primaryAccount(co.id, true);
+  const exAcct = exchangeAccount();
   const sellAcct = sim.primaryAccount(sellerEntityId, true);
-  if (coAcct.balance < proceeds) throw new Error('The company cannot cover the buy-back');
-  sim.txn(coAcct.id, sellAcct.id, proceeds, `Sold ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  // The Exchange is the market maker for the float; it always absorbs a sale
+  // (system holder — allowed to run its book negative), so a player can always
+  // exit a position.
+  sim.txn(exAcct.id, sellAcct.id, proceeds, `Sold ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
   setHolding(co, sellerEntityId, holdingOf(co, sellerEntityId) - shares);
+  applyImpact(co, -shares, price); // selling pressure nudges the quote down
   const seller = db.entities.find(e => e.id === sellerEntityId);
   store.log('market', `${seller ? seller.name : sellerEntityId} sold ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each`, actor, [co.id, sellerEntityId]);
-  return { shares, proceeds, price };
+  return { shares, proceeds, price, sharePrice: co.sharePrice };
 }
 
 // Private transfer of shares between holders (no cash) — like moving any item.
@@ -166,22 +216,126 @@ function transfer(companyId, fromEntityId, toEntityId, shares, actor) {
   return { shares };
 }
 
-// Company issues new shares into its own treasury pool and (re)sets its float.
-function issue(companyId, newShares, floatPct, actor) {
+// Offering (Workstream A2) — primary capital raise. The company SELLS new
+// shares and is paid cash immediately; those shares land in the Exchange-held
+// float. Because value (cash) came in, the price stays ≈ flat: market cap rises
+// by exactly the cash raised. This is NOT dilution.
+function offer(companyId, newShares, price, floatPct, actor) {
   const db = store.get();
   const co = findCompany(companyId);
   newShares = Math.round(Number(newShares));
-  if (!(newShares > 0)) throw new Error('Issue count must be positive');
-  co.sharesOutstanding = (co.sharesOutstanding || 0) + newShares;
+  price = Math.round(Number(price) * 100) / 100;
+  if (!(newShares > 0)) throw new Error('Offering size must be positive');
+  if (!(price > 0)) throw new Error('Offering price must be positive');
+  const newOutstanding = (co.sharesOutstanding || 0) + newShares;
+  if (newOutstanding > Number.MAX_SAFE_INTEGER) throw new Error('Share count would overflow');
+  const raised = Math.round(newShares * price * 100) / 100;
+
+  co.sharesOutstanding = newOutstanding;
+  // pay the company immediately, from the Exchange (books balance; the Exchange
+  // now holds the float it just "sold" on the company's behalf).
+  const coAcct = sim.primaryAccount(co.id, true);
+  sim.txn(exchangeAccount().id, coAcct.id, raised, `Share offering: ${newShares} new ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  // new shares sit in the float (outstanding − Σ register) automatically, held
+  // by the Exchange. Market cap rises by the cash raised → price flat.
+  co.vars = co.vars || {};
+  co.vars.valuation = (co.vars.valuation || 0) + raised;
   if (floatPct !== undefined && floatPct !== null && !isNaN(Number(floatPct))) {
     co.publicFloat = Math.min(100, Math.max(0, Number(floatPct)));
   }
-  // new shares sit in the treasury pool (outstanding − Σ register) automatically
-  store.log('market', `${co.name} issued ${newShares} new shares`, `Outstanding now ${newShares + (co.sharesOutstanding - newShares)}; public float ${co.publicFloat}%`, actor, [co.id]);
-  return { sharesOutstanding: co.sharesOutstanding, publicFloat: co.publicFloat };
+  reanchor(co); // price unchanged, but re-seed the live path off the new state
+  const it = shareItemFor(co.id); if (it) it.marketValue = co.sharePrice;
+  store.log('market', `${co.name} raised ${db.settings.currency}${raised.toLocaleString()}`,
+    `Sold ${newShares} new shares @ ${db.settings.currency}${price}; outstanding now ${newOutstanding}`, actor, [co.id]);
+  return { sharesOutstanding: co.sharesOutstanding, raised, price, sharePrice: co.sharePrice, publicFloat: co.publicFloat };
+}
+
+// Bonus mint (Workstream A2) — free new shares, NO cash. Market cap is
+// preserved, so spreading it over more shares DILUTES the price. This is the
+// corrected form of the old broken issue() (which minted shares and left the
+// price frozen).
+function bonusMint(companyId, newShares, floatPct, actor) {
+  const db = store.get();
+  const co = findCompany(companyId);
+  newShares = Math.round(Number(newShares));
+  if (!(newShares > 0)) throw new Error('Bonus issue size must be positive');
+  const oldOutstanding = co.sharesOutstanding || 0;
+  const newOutstanding = oldOutstanding + newShares;
+  if (newOutstanding > Number.MAX_SAFE_INTEGER) throw new Error('Share count would overflow');
+
+  co.sharesOutstanding = newOutstanding;
+  // preserve market cap (price × outstanding) → dilute the per-share price
+  const oldPrice = co.sharePrice || 0.01;
+  co.sharePrice = Math.max(0.01, Math.round(oldPrice * oldOutstanding / newOutstanding * 100) / 100);
+  if (floatPct !== undefined && floatPct !== null && !isNaN(Number(floatPct))) {
+    co.publicFloat = Math.min(100, Math.max(0, Number(floatPct)));
+  }
+  reanchor(co);
+  const it = shareItemFor(co.id); if (it) it.marketValue = co.sharePrice;
+  store.log('market', `${co.name} issued ${newShares} bonus shares`,
+    `Diluted: ${db.settings.currency}${oldPrice} → ${db.settings.currency}${co.sharePrice}; outstanding now ${newOutstanding}`, actor, [co.id]);
+  return { sharesOutstanding: co.sharesOutstanding, sharePrice: co.sharePrice, publicFloat: co.publicFloat };
+}
+
+// Back-compat: the old issue() name now performs a bonus mint (the corrected
+// dilution behaviour). The /api/market/issue route points here.
+function issue(companyId, newShares, floatPct, actor) {
+  return bonusMint(companyId, newShares, floatPct, actor);
+}
+
+// Buyback (Workstream A3) — the mirror of an offering. The company spends cash
+// to pull shares out of the Exchange float and RETIRE them (sharesOutstanding
+// drops), pushing the price up. Route enforces controller/GM.
+function buyback(companyId, shares, actor, opts) {
+  const db = store.get();
+  const co = findCompany(companyId);
+  shares = Math.round(Number(shares));
+  if (!(shares > 0)) throw new Error('Buyback size must be positive');
+  const float = treasuryPool(co);
+  if (float <= 0) throw new Error('No shares in the float to buy back');
+  // cap to the available float (the tender path — buying from holders at a
+  // premium — is left as a future opts.tender stretch).
+  if (shares > float) shares = float;
+  const price = currentPrice(co);
+  const cost = Math.round(price * shares * 100) / 100;
+  const coAcct = sim.primaryAccount(co.id, true);
+  const gm = opts && opts.gm;
+  if (!gm && coAcct.balance < cost) throw new Error('The company cannot fund that buyback');
+  // pay the Exchange, then retire the shares
+  sim.txn(coAcct.id, exchangeAccount().id, cost, `Buyback: ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  co.sharesOutstanding = Math.max(0, (co.sharesOutstanding || 0) - shares);
+  co.vars = co.vars || {};
+  co.vars.valuation = Math.max(0, (co.vars.valuation || 0) - cost); // cash left the business
+  applyImpact(co, +shares, price); // retiring float pushes the quote up
+  store.log('market', `${co.name} bought back ${shares} shares`,
+    `Spent ${db.settings.currency}${cost.toLocaleString()}; outstanding now ${co.sharesOutstanding}; ${db.settings.currency}${price} → ${db.settings.currency}${co.sharePrice}`, actor, [co.id]);
+  return { shares, cost, price, sharesOutstanding: co.sharesOutstanding, sharePrice: co.sharePrice };
+}
+
+// P2P re-mark (Workstream A5). When a share certificate changes hands for money
+// through the trade-offer system, the implied price (money / shares) re-marks
+// the quote, clamped to ±25% of the current price, then re-anchors. This is
+// where the big, headline moves come from.
+function remarkFromTrade(companyId, money, shares, actor) {
+  const co = store.get().entities.find(e => e.id === companyId);
+  if (!co || co.type !== 'company') return;
+  shares = Math.round(Number(shares));
+  money = Number(money);
+  if (!(shares > 0) || !(money > 0)) return;
+  const implied = money / shares;
+  const cur = currentPrice(co);
+  const target = clamp(implied, cur * (1 - MAX_TICK), cur * (1 + MAX_TICK));
+  co.sharePrice = Math.max(0.01, round2(target));
+  reanchor(co);
+  const it = shareItemFor(co.id); if (it) it.marketValue = co.sharePrice;
+  store.log('market', `${co.abbrev || co.name} re-marked by a block trade`,
+    `Implied ${store.get().settings.currency}${round2(implied)} → quote ${store.get().settings.currency}${co.sharePrice}`, actor, [co.id]);
 }
 
 module.exports = {
   shareItemFor, holdingOf, treasuryPool, personPublicHeld, maxPublic,
-  setHolding, syncAllCertificates, buy, sell, transfer, issue
+  setHolding, syncAllCertificates, buy, sell, transfer, issue,
+  offer, bonusMint, buyback, remarkFromTrade,
+  currentPrice, applyImpact, reanchor, EXCHANGE_ID,
+  DEFAULT_DEPTH, DEFAULT_VOL
 };

@@ -975,7 +975,7 @@ const Views = {
           inner.appendChild(Charts.chartLine(parties.map(p => ({
             name: p.abbrev || p.name, color: p.color,
             points: pollRows.map(r => ({ x: r.turn, y: r.polling[p.id] }))
-          })), { title: 'NATIONAL POLLING', yFormat: v => v + '%' }));
+          })), { title: 'NATIONAL POLLING', yFormat: v => v + '%', percent: true }));
         }
       }
     }
@@ -1707,7 +1707,7 @@ const Views = {
           logoEl,
           el('div',
             el('div.tr-parties', { style: 'cursor:pointer;', title: 'Open company file', onclick: openFile }, c.name + ' — ' + (c.abbrev || c.industry || '')),
-            el('div.tr-meta', `PRICE ${CUR()}${fmtNum(c.sharePrice)} · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`, ' ', pctEl))),
+            el('div.tr-meta', 'PRICE ', this.livePriceEl(c), ` · DAY ${chg(1)} · WEEK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · TRUST ${c.trust !== undefined ? c.trust : '—'}`, ' ', pctEl))),
         el('div', { style: 'text-align:right;' },
           el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
       row.appendChild(head);
@@ -1725,18 +1725,47 @@ const Views = {
       ));
       if (floatExhausted) btns.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint);' }, 'Public float fully subscribed — buying may be rejected.'));
       if (controlsCompany(c)) {
-        btns.appendChild(el('button.outline-btn', { onclick: () => this.marketIssueModal(c) }, '⊕ Issue Shares'));
+        btns.appendChild(el('div.btn-row',
+          el('button.outline-btn', { onclick: () => this.marketOfferModal(c) }, '⊕ Raise Capital'),
+          el('button.outline-btn', { onclick: () => this.marketIssueModal(c) }, '⊕ Bonus Issue'),
+          el('button.outline-btn', { onclick: () => this.marketBuybackModal(c) }, '⊖ Buy Back')));
       }
       cols.appendChild(btns);
       row.appendChild(cols);
       inner.appendChild(row);
     }
+    this.startPriceTicker();
+  },
+
+  // Live-price element + ticker (Workstream A5). The label renders the shared
+  // deterministic price path (PricePath) at Date.now() and a low-frequency
+  // interval refreshes every such label in place — so the quote visibly wanders
+  // between turns, identically on every client, without a full re-render.
+  livePrice(c) {
+    if (!c) return 0;
+    if (!c.priceAnchor || typeof PricePath === 'undefined') return c.sharePrice || 0;
+    const a = c.priceAnchor;
+    return PricePath.price(a.price, a.t0, a.seed, Date.now(), c.vol === undefined ? 0.02 : c.vol, c.sharePrice);
+  },
+  livePriceEl(c) {
+    return el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(this.livePrice(c)));
+  },
+  startPriceTicker() {
+    if (this._priceTicker) return;
+    this._priceTicker = setInterval(() => {
+      const nodes = document.querySelectorAll('.live-price[data-co]');
+      if (!nodes.length) return;
+      nodes.forEach(n => {
+        const c = S().entities.find(e => e.id === n.getAttribute('data-co'));
+        if (c) n.textContent = CUR() + fmtNum(this.livePrice(c));
+      });
+    }, 900);
   },
 
   marketBuyModal(c) {
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
     openModal('BUY SHARES — ' + c.name, el('div',
-      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Price ${CUR()}${fmtNum(c.sharePrice)} per share.`),
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you buy.'),
       el('label.field-label', 'Shares to buy'), shares
     ), [{
       label: 'Buy', onClick: async () => {
@@ -1750,7 +1779,7 @@ const Views = {
   marketSellModal(c) {
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
     openModal('SELL SHARES — ' + c.name, el('div',
-      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Price ${CUR()}${fmtNum(c.sharePrice)} per share.`),
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you sell.'),
       el('label.field-label', 'Shares to sell'), shares
     ), [{
       label: 'Sell', onClick: async () => {
@@ -1761,19 +1790,57 @@ const Views = {
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
-  marketIssueModal(c) {
-    const newShares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'New shares to issue' });
+  // Raise capital (Workstream A2) — sell NEW shares for cash. Company is paid
+  // immediately; price stays ≈ flat because value came in.
+  marketOfferModal(c) {
+    const newShares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'New shares to sell' });
+    const price = el('input.text-input', { type: 'number', min: '0.01', step: '0.01', value: fmtNum(this.livePrice(c)) });
     const floatPct = el('input.text-input', { type: 'number', min: '0', max: '100', step: '1', value: c.publicFloat || 0 });
-    openModal('ISSUE SHARES — ' + c.name, el('div',
-      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Currently ${fmtNum(c.sharesOutstanding)} shares outstanding, ${c.publicFloat || 0}% public float.`),
-      el('label.field-label', 'New shares to issue'), newShares,
+    openModal('RAISE CAPITAL — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Sell new shares into the float for cash. ${fmtNum(c.sharesOutstanding)} outstanding. The company is paid immediately and the price stays roughly flat (no dilution).`),
+      el('label.field-label', 'New shares to sell'), newShares,
+      el('label.field-label', 'Offer price (' + CUR() + '/share)'), price,
       el('label.field-label', 'New public float (%)'), floatPct
     ), [{
-      label: 'Issue', onClick: async () => {
+      label: 'Raise capital', onClick: async () => {
+        const n = Math.round(Number(newShares.value)), p = Number(price.value);
+        if (!(n > 0)) throw new Error('Enter a positive share count.');
+        if (!(p > 0)) throw new Error('Enter a positive offer price.');
+        const r = await POST('/api/market/offer', { companyId: c.id, newShares: n, price: p, floatPct: Number(floatPct.value) });
+        toast(`Raised ${fmtMoney(r.raised)} selling ${n} shares.`);
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+  // Bonus issue (Workstream A2) — print free shares. No cash; the price DILUTES.
+  marketIssueModal(c) {
+    const newShares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Bonus shares to mint' });
+    const floatPct = el('input.text-input', { type: 'number', min: '0', max: '100', step: '1', value: c.publicFloat || 0 });
+    openModal('BONUS ISSUE (DILUTE) — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Print free shares. ${fmtNum(c.sharesOutstanding)} outstanding, ${c.publicFloat || 0}% float. No cash comes in — the per-share price drops proportionally (dilution).`),
+      el('label.field-label', 'Bonus shares to mint'), newShares,
+      el('label.field-label', 'New public float (%)'), floatPct
+    ), [{
+      label: 'Bonus issue', onClick: async () => {
         const n = Math.round(Number(newShares.value));
         if (!(n > 0)) throw new Error('Enter a positive share count.');
         await POST('/api/market/issue', { companyId: c.id, newShares: n, floatPct: Number(floatPct.value) });
-        toast('Shares issued.');
+        toast('Bonus shares issued — price diluted.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+  // Buyback (Workstream A3) — retire shares from the float, pushing price up.
+  marketBuybackModal(c) {
+    const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Shares to retire' });
+    const pool = market_treasuryPoolClient(c);
+    openModal('BUY BACK SHARES — ' + c.name, el('div',
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Spend company cash to pull shares out of the float and retire them (price up). About ${fmtNum(pool)} shares are in the float. Live price ~${CUR()}${fmtNum(this.livePrice(c))}/share.`),
+      el('label.field-label', 'Shares to buy back'), shares
+    ), [{
+      label: 'Buy back', onClick: async () => {
+        const n = Math.round(Number(shares.value));
+        if (!(n > 0)) throw new Error('Enter a positive share count.');
+        const r = await POST('/api/market/buyback', { companyId: c.id, shares: n });
+        toast(`Bought back ${r.shares} shares for ${fmtMoney(r.cost)}.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
@@ -1946,7 +2013,7 @@ const Views = {
         inner.appendChild(Charts.chartLine([
           { name: 'Happiness', color: 'var(--good)', points: provRows.map(r => ({ x: r.turn, y: (r.provinces[p.id] || {}).happiness })) },
           { name: 'Approval', color: 'var(--accent)', points: provRows.map(r => ({ x: r.turn, y: (r.provinces[p.id] || {}).approval })) }
-        ], { title: 'HAPPINESS & APPROVAL', yFormat: v => v + '%' }));
+        ], { title: 'HAPPINESS & APPROVAL', yFormat: v => v + '%', percent: true }));
       }
     }
 

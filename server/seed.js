@@ -129,6 +129,11 @@ function seed() {
     { id: 'ent_bank', type: 'government', name: 'Bank of Arcasia', color: '#33424d', logo: A + '/flags/seal.png',
       description: 'Central bank and issuer of the Arcasian Koren (₳, ARK).',
       ownerId: 'ent_gov', vars: {}, inventory: [{ itemId: 'item_gold', qty: 800 }] },
+    // The Exchange — system market-maker and counterparty for every secondary
+    // (float) share transaction. Hidden from player-facing lists (filterState).
+    { id: 'ent_exchange', type: 'org', system: true, name: 'Lachevan Exchange', color: '#3a4653',
+      description: 'The central securities exchange. Holds the free float and settles all secondary share trades.',
+      vars: {}, inventory: [] },
 
     { id: 'ent_arc', type: 'company', name: 'ARC', industry: 'State Corporation', color: '#33424d', logo: A + '/companies/arc.png',
       description: 'The Arcasian Republic Corporation. State holding company managing federal industrial assets.',
@@ -293,6 +298,9 @@ function seed() {
   const accounts = [
     { id: 'acct_treasury', ownerId: 'ent_gov', name: 'Federal Treasury', balance: 1200000000 },
     { id: 'acct_reserve', ownerId: 'ent_bank', name: 'Reserve Account', balance: 400000000 },
+    // Market-maker book: seeded deep so the Exchange can always settle a float
+    // trade. It is allowed to run negative (system holder).
+    { id: 'acct_exchange', ownerId: 'ent_exchange', name: 'Exchange Settlement', balance: 1000000000000 },
     { id: 'acct_arc', ownerId: 'ent_arc', name: 'ARC Operating', balance: 120000000 },
     { id: 'acct_leika', ownerId: 'ent_leika', name: 'LEIKA Operating', balance: 38000000 },
     { id: 'acct_satrom', ownerId: 'ent_satrom', name: 'SATROM Operating', balance: 45000000 },
@@ -425,7 +433,7 @@ function seed() {
       description: 'Listed shares reprice on the Lachevan exchange every turn. Price moves with earnings yield (profit/valuation), national growth, citizen trust, and a little noise. All coefficients live in this effect — tune them here.',
       trigger: { type: 'every_turn' }, conditions: [],
       effects: [
-        { type: 'reprice_shares', company: 'all', a: 0.6, b: 0.8, c: 0.15, e: 0.015 }
+        { type: 'reprice_shares', company: 'all', a: 0.3, b: 0.4, c: 0.075, e: 0.015 }
       ], lastTurn: 0, runs: 0
     },
     {

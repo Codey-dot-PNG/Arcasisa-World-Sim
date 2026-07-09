@@ -514,6 +514,7 @@ const GameMap = {
     // property markers (counter-scaled)
     this.markerLayer = document.createElementNS(NS, 'g');
     this.world.appendChild(this.markerLayer);
+    this._tintDefs = null; this._tintFilters = {}; // per-render owner-tint filter cache
     for (const pr of S().properties) {
       if (!pr.pos) continue;
       const owner = entById(pr.ownerId);
@@ -594,6 +595,25 @@ const GameMap = {
       iso.classList.add('iso-hidden');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) iso.classList.add('selected');
       g.appendChild(iso);
+      // Ownership layer: the PNG building art carries no owner colour, so a
+      // second copy of the same art is stamped over it, reduced to a solid
+      // silhouette in the owner's colour (feFlood ∩ SourceAlpha) at partial
+      // opacity — the structure stays readable, the colour matches the key.
+      // Procedural (untextured) buildings already draw in the owner colour.
+      if (pr.texture) {
+        const tint = document.createElementNS(NS, 'image');
+        tint.setAttribute('class', 'iso-building tex-building tex-tint');
+        const href = '/assets/buildings/' + pr.texture;
+        tint.setAttribute('href', href);
+        tint.setAttributeNS('http://www.w3.org/1999/xlink', 'href', href);
+        tint.setAttribute('width', 120); tint.setAttribute('height', 120);
+        tint.setAttribute('x', -60); tint.setAttribute('y', -100);
+        tint.setAttribute('preserveAspectRatio', 'xMidYMax meet');
+        tint.setAttribute('filter', 'url(#' + this.tintFilterId(owner ? owner.color || '#5c5340' : '#5c5340') + ')');
+        tint.setAttribute('opacity', '0.55');
+        tint.classList.add('iso-hidden');
+        g.appendChild(tint);
+      }
       this.markerLayer.appendChild(g);
     }
 
@@ -690,6 +710,34 @@ const GameMap = {
     this.applyTransform();
   },
 
+  // One <filter> per owner colour, created lazily inside the marker layer
+  // (rebuilt every render, so ids never go stale). feFlood ∩ SourceAlpha turns
+  // the building PNG into a solid silhouette of the owner's colour.
+  tintFilterId(color) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const key = String(color || '').replace(/[^a-zA-Z0-9]/g, '') || 'default';
+    this._tintFilters = this._tintFilters || {};
+    if (this._tintFilters[key]) return this._tintFilters[key];
+    if (!this._tintDefs) {
+      this._tintDefs = document.createElementNS(NS, 'defs');
+      this.markerLayer.appendChild(this._tintDefs);
+    }
+    const id = 'owner-tint-' + key;
+    const f = document.createElementNS(NS, 'filter');
+    f.setAttribute('id', id);
+    f.setAttribute('x', '-10%'); f.setAttribute('y', '-10%');
+    f.setAttribute('width', '120%'); f.setAttribute('height', '120%');
+    const flood = document.createElementNS(NS, 'feFlood');
+    flood.setAttribute('flood-color', color || '#5c5340');
+    const comp = document.createElementNS(NS, 'feComposite');
+    comp.setAttribute('in2', 'SourceAlpha');
+    comp.setAttribute('operator', 'in');
+    f.appendChild(flood); f.appendChild(comp);
+    this._tintDefs.appendChild(f);
+    this._tintFilters[key] = id;
+    return id;
+  },
+
   // Called from the window-level pointerup/pointercancel capture listeners and
   // the buttons===0 guard. Records the moved state (child click handlers read
   // lastDragMoved right after) and clears the drag so no phantom pan follows.
@@ -716,6 +764,9 @@ const GameMap = {
           const glyph = g.querySelector('.prop-glyph');
           const iso = g.querySelector('.iso-building');
           if (iso) iso.classList.remove('iso-hidden');
+          // owner-colour overlay reads only on the ownership layer
+          const tint = g.querySelector('.tex-tint');
+          if (tint) tint.classList.toggle('iso-hidden', W.layer !== 'ownership');
           if (rect) rect.style.opacity = '0';
           if (glyph) glyph.style.display = 'none';
           continue;

@@ -851,16 +851,25 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   /* Panels overlay the whole width instead of a fixed sidebar that overflows */
   #explorer{width:min(300px, 86vw);}
   #inspector{width:min(340px, 92vw); box-shadow:-16px 0 40px rgba(0,0,0,.28);}
-  #topbar{height:auto; min-height:46px; gap:8px; padding:0 8px; flex-wrap:wrap;}
+  /* Keep the whole control cluster (brand · clock · music · theme · logout) on
+     ONE line; only the tabs drop to their own scrolling row below. The top
+     Advance button is hidden here — the GM command bar already carries
+     Advance +1/+7/+30, and non-GM players never see it — which frees the width
+     that used to push the theme swatches + logout onto a second line. */
+  #topbar{height:auto; min-height:46px; gap:5px; padding:3px 6px; flex-wrap:wrap; row-gap:3px;}
   #tabs{order:5; flex-basis:100%; margin-left:0; border-top:1px solid var(--rule);}
   .tab{padding:11px 9px 10px;}
   .topbar-spacer{display:none;}
+  #advance-btn{display:none;}
+  #simclock{gap:5px;}
   #simclock #clock-turn{font-size:10px;}
-  /* keep the palette from eating the row — one compact swatch strip */
-  .mood-row{gap:5px;}
-  .swatch{width:17px; height:17px;}
-  /* bigger tap targets for the icon controls */
-  #topbar .icon-btn, .inspector-head .icon-btn{min-width:34px; min-height:34px; font-size:16px;}
+  /* compact swatch strip so the theme picker fits alongside logout */
+  .mood-row{gap:4px;}
+  .swatch{width:14px; height:14px; border-width:1px;}
+  .swatch.active{box-shadow:0 0 0 1px var(--paper), 0 0 0 2px var(--ink);}
+  /* touch-friendly but tight enough to keep the row single-line */
+  #topbar .icon-btn{min-width:30px; min-height:30px; font-size:15px; padding:4px 5px;}
+  .inspector-head .icon-btn{min-width:34px; min-height:34px; font-size:16px;}
   .doc-view{padding:14px 12px 70px;}
   .doc-title{font-size:24px;}
   .card-grid{grid-template-columns:1fr;}
@@ -871,6 +880,14 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   .modal{padding:18px 16px;}
   #ticker{gap:8px; padding:0 8px;}
   .ticker-label{display:none;}
+}
+
+/* smallest phones — reclaim the brand seal's width so the theme swatches +
+   logout still share the single control row */
+@media (max-width:360px){
+  #topbar{gap:4px;}
+  #brand{display:none;}
+  .swatch{width:13px; height:13px;}
 }
 
 /* ═══════════ ECONOMY CLUSTER — pick-lists, chips, badges (Phase 4/7) ═══════════ */

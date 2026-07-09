@@ -701,23 +701,29 @@ const GM = {
         F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
         F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
         F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
-      p.exports = p.exports || []; p.prices = p.prices || {};
-      box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, 'Exports to this partner & price'));
-      comms.forEach(it => {
-        const on = p.exports.includes(it.id);
-        const priceInput = el('input.text-input', {
-          type: 'number', style: 'max-width:120px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
-          oninput: (e) => { p.prices[it.id] = Number(e.target.value) || 0; }
+      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {};
+      // shared row builder: `list` is p.exports (goods they buy from us) or
+      // p.imports (goods they sell to us). Prices live in the same per-item map.
+      const commRows = (listKey, label) => {
+        box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
+        comms.forEach(it => {
+          const on = p[listKey].includes(it.id);
+          const priceInput = el('input.text-input', {
+            type: 'number', style: 'max-width:120px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
+            oninput: (e) => { p.prices[it.id] = Number(e.target.value) || 0; }
+          });
+          box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0;' },
+            el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1; font-size:12.5px; cursor:pointer;' },
+              el('input', {
+                type: 'checkbox', checked: on,
+                onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
+              }),
+              it.name),
+            on ? priceInput : null));
         });
-        box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0;' },
-          el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1; font-size:12.5px; cursor:pointer;' },
-            el('input', {
-              type: 'checkbox', checked: on,
-              onchange: (e) => { if (e.target.checked) { p.exports = [...new Set([...p.exports, it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; } else { p.exports = p.exports.filter(x => x !== it.id); } App.renderView(); }
-            }),
-            it.name),
-          on ? priceInput : null));
-      });
+      };
+      commRows('exports', 'Exports to this partner & price (their demand)');
+      commRows('imports', 'Imports from this partner & price (their supply — the President orders these)');
       main.appendChild(box);
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', {

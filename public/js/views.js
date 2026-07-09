@@ -1039,19 +1039,18 @@ const Views = {
       return box;
     }
     const draft = { sellPct: sell, govPct: govp, wage: wage };
-    const numField = (key, label, hint) => Forms.field(label,
-      el('input.text-input', { type: 'number', value: draft[key], oninput: (ev) => draft[key] = Number(ev.target.value) }), hint);
     box.appendChild(el('div.form-grid',
-      numField('sellPct', 'Sell to market %', 'Domestic sales → your revenue'),
-      numField('govPct', 'Sell to government %', 'Bought by the state at its set price'),
-      numField('wage', 'Wage index (100 = base)', 'Higher pay lifts local happiness/employment but costs more')));
+      Forms.field('Sell to market %', Forms.slider(draft, 'sellPct', 0, 100, { suffix: '%' }), 'Domestic sales → your revenue'),
+      Forms.field('Sell to government %', Forms.slider(draft, 'govPct', 0, 100, { suffix: '%' }), 'Bought by the state at its set price'),
+      Forms.field('Wage index (100 = base)', Forms.slider(draft, 'wage', 0, 200, {}), 'Higher pay lifts local happiness/employment but costs more')));
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true;
         try { await PATCH('/api/company/' + e.id + '/controls', draft); toast('Operations updated.'); }
         catch (err) { toast(err.message, true); b.disabled = false; }
       }
-    }, 'Save Operations')));
+    }, 'Save Operations'),
+      el('button.dash-btn', { onclick: () => { W.ecoTab = 'company'; W.opsCo = e.id; W.opsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Full Operations Desk')));
     return box;
   },
 
@@ -1085,9 +1084,9 @@ const Views = {
     });
     inner.appendChild(table);
 
-    // latest-turn export flows
+    // latest-turn export flows (positive values only — negative flows are imports)
     const byPartner = {}, byItem = {};
-    flows.forEach(f => { byPartner[f.partnerId] = (byPartner[f.partnerId] || 0) + f.value; byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value; });
+    flows.filter(f => f.value > 0).forEach(f => { byPartner[f.partnerId] = (byPartner[f.partnerId] || 0) + f.value; byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value; });
     if (Object.keys(byPartner).length) {
       inner.appendChild(this.secLabel('Exports by Partner (latest turn)'));
       inner.appendChild(Charts.chartBars(Object.entries(byPartner).map(([pid, v]) => ({ label: nameOf(pid), value: v, color: (entById(pid) || {}).color || 'var(--accent)' })),
@@ -1114,12 +1113,362 @@ const Views = {
         { width: 560, height: 180, title: itemName(W.tradeItem).toUpperCase() + ' — PRICE BY PARTNER' + (mkt ? ' (market ' + CUR() + fmtNum(mkt.marketValue) + ')' : ''), valueFormat: v => CUR() + fmtNum(v) }));
     }
 
-    // export value over time
+    // export/import value over time
     if (hist.length > 1) {
-      inner.appendChild(this.secLabel('Export Value Over Time'));
-      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })),
-        { width: 560, height: 150, title: 'EXPORTS / TURN', yFormat: v => CUR() + fmtCompact(v) }));
+      inner.appendChild(this.secLabel('Trade Value Over Time'));
+      const hasImports = hist.some(h => (h.importValue || 0) > 0);
+      inner.appendChild(Charts.chartLine(hasImports ? [
+        { name: 'Exports', color: 'var(--good)', points: hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })) },
+        { name: 'Imports', color: 'var(--accent)', points: hist.map(h => ({ x: h.turn, y: h.importValue || 0 })) }
+      ] : hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })),
+        { width: 560, height: 150, title: 'FOREIGN TRADE / TURN', yFormat: v => CUR() + fmtCompact(v) }));
     }
+
+    // ---- national trade directives (President / GM) ----
+    if (this.controlsGov()) this.intlTradeControls(inner, trade, partners);
+  },
+
+  /* The President's desk inside International Trade: per-item split of
+     state-bought goods between the export pool and the national inventory
+     (sliders), plus standing import orders from foreign partners. */
+  intlTradeControls(inner, trade, partners) {
+    const gov = this.govEntity();
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const govStock = (iid) => { const r = ((gov && gov.inventory) || []).find(x => x.itemId === iid); return r ? r.qty : 0; };
+    const poolStock = (iid) => Math.floor((trade.exportPool || {})[iid] || 0);
+
+    // items the desk can direct: anything partners buy, anything already in
+    // the pool or the national inventory
+    const itemSet = new Set();
+    partners.forEach(p => (p.exports || []).forEach(iid => itemSet.add(iid)));
+    Object.keys(trade.exportPool || {}).forEach(iid => itemSet.add(iid));
+    ((gov && gov.inventory) || []).forEach(r => { const it = itemById(r.itemId); if (it && ['Commodities', 'Goods', 'Military'].includes(it.category)) itemSet.add(r.itemId); });
+    const items = [...itemSet].filter(iid => itemById(iid));
+
+    // importable items: anything any partner offers for sale
+    const importable = [...new Set(partners.flatMap(p => (p.imports || [])))].filter(iid => itemById(iid));
+
+    // draft survives re-renders; discarded when the saved state catches up
+    const dr = (W.tradeCtlDraft && W.tradeCtlDraft._v === 1) ? W.tradeCtlDraft : (W.tradeCtlDraft = {
+      _v: 1,
+      exportAlloc: JSON.parse(JSON.stringify(trade.exportAlloc || {})),
+      imports: JSON.parse(JSON.stringify(trade.imports || []))
+    });
+
+    inner.appendChild(this.secLabel('National Trade Directives (Presidential Desk)'));
+    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+      'Goods that companies sell to the government are split by your allocation: the export share is sold abroad at partner prices, the rest is stored in the national inventory. Standing import orders are bought each turn from the treasury.'));
+
+    if (items.length) {
+      const box = el('div.stage');
+      box.appendChild(el('div.mono-label', 'Export allocation — % of state-bought goods sold abroad (rest → national inventory)'));
+      for (const iid of items) {
+        if (dr.exportAlloc[iid] === undefined) dr.exportAlloc[iid] = 100;
+        box.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; padding:4px 0;' },
+          el('span', { style: 'width:190px; font-size:12.5px; flex-shrink:0;' }, itemName(iid)),
+          el('div', { style: 'flex:1;' }, Forms.slider(dr.exportAlloc, iid, 0, 100, { suffix: '% export' })),
+          el('span', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); width:170px; text-align:right;' },
+            'pool ' + fmtNum(poolStock(iid)) + ' · stored ' + fmtNum(govStock(iid)))));
+      }
+      inner.appendChild(box);
+    }
+
+    // national inventory composition
+    const invRows = ((gov && gov.inventory) || [])
+      .map(r => { const it = itemById(r.itemId); return it ? { label: it.name, value: r.qty * (it.marketValue || 0) } : null; })
+      .filter(r => r && r.value > 0);
+    if (invRows.length) {
+      inner.appendChild(Charts.chartPie(invRows, { width: 420, height: 190, title: 'National Inventory (by value)' }));
+    }
+
+    // ---- standing import orders ----
+    inner.appendChild(this.secLabel('Import Orders (per turn, paid by the Treasury)'));
+    const impBox = el('div.stage');
+    const renderImports = () => {
+      clear(impBox);
+      if (!importable.length) {
+        impBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+          'No partner currently offers goods for import — the GM sets partner import lists in GM Studio → Trade Desk.'));
+        return;
+      }
+      dr.imports.forEach((row, ri) => {
+        const sellers = partners.filter(p => (p.imports || []).includes(row.itemId));
+        const itemSel = el('select.text-input', { style: 'max-width:220px;' }, importable.map(iid =>
+          el('option', { value: iid, selected: iid === row.itemId ? 'selected' : undefined }, itemName(iid))));
+        itemSel.addEventListener('change', () => { row.itemId = itemSel.value; row.partnerId = null; renderImports(); });
+        const partnerSel = el('select.text-input', { style: 'max-width:200px;' },
+          [el('option', { value: '' }, '— best available —'),
+          ...sellers.map(p => el('option', { value: p.entityId, selected: p.entityId === row.partnerId ? 'selected' : undefined }, entName(p.entityId)))]);
+        partnerSel.addEventListener('change', () => { row.partnerId = partnerSel.value || null; });
+        const priceP = sellers.find(p => p.entityId === row.partnerId) || sellers[0];
+        const unit = priceP && priceP.prices && priceP.prices[row.itemId] > 0 ? priceP.prices[row.itemId] : (itemById(row.itemId) || {}).marketValue || 0;
+        impBox.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; padding:5px 0; flex-wrap:wrap;' },
+          itemSel, partnerSel,
+          el('div', { style: 'flex:1; min-width:180px;' }, Forms.slider(row, 'qtyPerTurn', 0, 500, { suffix: ' / turn' })),
+          el('span', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); width:110px; text-align:right;' }, '≈' + fmtMoney(unit * (row.qtyPerTurn || 0)) + '/t'),
+          el('button.icon-btn', { title: 'Remove order', onclick: () => { dr.imports.splice(ri, 1); renderImports(); } }, '✕')));
+      });
+      impBox.appendChild(el('div.btn-row',
+        el('button.dash-btn', {
+          onclick: () => { dr.imports.push({ itemId: importable[0], partnerId: null, qtyPerTurn: 10 }); renderImports(); }
+        }, '+ Add import order')));
+    };
+    renderImports();
+    inner.appendChild(impBox);
+
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          await PATCH('/api/trade/controls', { exportAlloc: dr.exportAlloc, imports: dr.imports.filter(r => r.itemId && r.qtyPerTurn > 0) });
+          W.tradeCtlDraft = null;
+          toast('Trade directives saved.');
+        } catch (err) { toast(err.message, true); btn.disabled = false; }
+      }
+    }, 'Save Trade Directives')));
+  },
+
+  /* ---- Company Operations (CEO desk) ---- */
+  viewCompanyOps(inner) {
+    const cos = this.opsCompanies();
+    if (!cos.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' }, 'You direct no company.'));
+      return;
+    }
+    if (!W.opsCo || !cos.some(c => c.id === W.opsCo)) W.opsCo = cos[0].id;
+    if (cos.length > 1) {
+      inner.appendChild(el('div.chip-row', cos.map(c =>
+        el('button.chip', { class: c.id === W.opsCo ? 'active' : '', onclick: () => { W.opsCo = c.id; W.opsDraft = null; App.renderView(); } }, c.abbrev || c.name))));
+    }
+    const c = entById(W.opsCo);
+    if (!c) return;
+    const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const props = S().properties.filter(pr => pr.ownerId === c.id);
+    const propRev = (pr) => pr.prodMode === 'goods'
+      ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
+      : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
+    const employees = props.reduce((s, pr) => s + (pr.employees || 0), 0);
+    const cash = this.accountsOf(c.id).reduce((s, a) => s + a.balance, 0);
+
+    inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
+      c.logo ? el('img', { src: c.logo, alt: '', style: 'width:38px; height:38px; object-fit:contain;' }) : null,
+      el('div',
+        el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, c.name),
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, (c.industry || '') + ' · CEO ' + (c.ceoId ? entName(c.ceoId) : '—')))));
+    inner.appendChild(this.statStrip([
+      ['Share Price', c.sharePrice !== undefined ? fmtMoney(c.sharePrice) : '—'],
+      ['Trust', c.trust !== undefined ? c.trust + '' : '—'],
+      ['Annual Revenue', c.vars && c.vars.revenue !== undefined ? CUR() + fmtCompact(c.vars.revenue) : '—'],
+      ['Annual Profit', c.vars && c.vars.profit !== undefined ? CUR() + fmtCompact(c.vars.profit) : '—'],
+      ['Cash', fmtMoney(cash)],
+      ['Employees', fmtNum(employees)]
+    ]));
+
+    // ---- controls draft (survives re-renders until saved) ----
+    const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
+      id: c.id,
+      sellPct: c.sellPct === undefined ? 100 : c.sellPct,
+      govPct: c.govPct === undefined ? 0 : c.govPct,
+      wage: c.wage === undefined ? 100 : c.wage,
+      govPctByItem: JSON.parse(JSON.stringify(c.govPctByItem || {}))
+    });
+
+    inner.appendChild(this.secLabel('Company-wide Controls'));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Sell to market %', Forms.slider(dr, 'sellPct', 0, 100, { suffix: '%' }), 'Domestic sales → your revenue'),
+      Forms.field('Sell to government %', Forms.slider(dr, 'govPct', 0, 100, { suffix: '%' }), 'Bought by the state at its trade-desk price'),
+      Forms.field('Wage index (100 = baseline)', Forms.slider(dr, 'wage', 0, 200, { suffix: '' }), 'Higher pay lifts local happiness & employment, but costs more')));
+
+    // per-item government routing overrides
+    const producedItems = [...new Set(props.flatMap(pr => (pr.produces || []).map(e => e.itemId)))].filter(iid => itemById(iid));
+    if (producedItems.length) {
+      inner.appendChild(this.secLabel('Government Routing by Item'));
+      inner.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:6px;' },
+        'Override the government share per product; items without an override follow the company-wide %.'));
+      const box = el('div.stage');
+      for (const iid of producedItems) {
+        const it = itemById(iid);
+        const hasOverride = dr.govPctByItem[iid] !== undefined;
+        const proxy = { v: hasOverride ? dr.govPctByItem[iid] : dr.govPct };
+        const slider = Forms.slider(proxy, 'v', 0, 100, { suffix: '%', onInput: (v) => { dr.govPctByItem[iid] = v; } });
+        box.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; padding:4px 0;' },
+          el('span', { style: 'width:190px; font-size:12.5px; flex-shrink:0;' }, it.name),
+          el('div', { style: 'flex:1;' }, slider),
+          el('button.dash-btn', {
+            style: hasOverride ? '' : 'opacity:.45;',
+            title: 'Remove the override — follow the company-wide %',
+            onclick: () => { delete dr.govPctByItem[iid]; App.renderView(); }
+          }, hasOverride ? 'custom ✕' : 'global')));
+      }
+      inner.appendChild(box);
+    }
+
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          // explicit nulls clear overrides removed from the draft
+          const govPctByItem = {};
+          for (const iid in (c.govPctByItem || {})) govPctByItem[iid] = null;
+          for (const iid in dr.govPctByItem) govPctByItem[iid] = dr.govPctByItem[iid];
+          await PATCH('/api/company/' + c.id + '/controls', { sellPct: dr.sellPct, govPct: dr.govPct, wage: dr.wage, govPctByItem });
+          W.opsDraft = null;
+          toast('Operations saved.');
+        } catch (err) { toast(err.message, true); btn.disabled = false; }
+      }
+    }, 'Save Operations')));
+
+    // ---- where the output goes ----
+    const destRows = [
+      { label: 'Domestic market', value: Math.max(0, Math.min(100, dr.sellPct)), color: '#4a6a48' },
+      { label: 'Government', value: Math.max(0, Math.min(100 - Math.min(100, dr.sellPct), dr.govPct)), color: '#3c5a74' }
+    ];
+    const stockpiled = Math.max(0, 100 - destRows[0].value - destRows[1].value);
+    if (stockpiled > 0) destRows.push({ label: 'Stockpiled on site', value: stockpiled, color: '#8a8054' });
+    const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    pies.appendChild(Charts.chartPie(destRows, { width: 340, height: 170, title: 'Output Destination (company-wide)' }));
+
+    const revByProp = props.map(pr => ({ label: pr.name, value: propRev(pr), onClick: () => select('property', pr.id) })).filter(r => r.value > 0);
+    if (revByProp.length > 1) pies.appendChild(Charts.chartPie(revByProp, { width: 340, height: 170, title: 'Revenue by Property' }));
+    const byItem = {};
+    props.forEach(pr => (pr.produces || []).forEach(e => { byItem[e.itemId] = (byItem[e.itemId] || 0) + (e.perTurn || 0) * priceOf(e.itemId); }));
+    const prodRows = Object.entries(byItem).map(([iid, v]) => ({ label: (itemById(iid) || { name: iid }).name, value: v }));
+    if (prodRows.length > 1) pies.appendChild(Charts.chartPie(prodRows, { width: 340, height: 170, title: 'Production by Item (value)' }));
+    inner.appendChild(pies);
+
+    // ---- all properties ----
+    inner.appendChild(this.secLabel('Properties (' + props.length + ')'));
+    if (!props.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'The company holds no property.'));
+    else {
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Property'), el('th', 'Province'), el('th.num', 'Employees'), el('th', 'Production / turn'), el('th.num', 'Revenue'), el('th.num', 'Upkeep'), el('th.num', 'Net'))),
+        el('tbody', props.map(pr => {
+          const rev = propRev(pr), upk = pr.expenses || 0;
+          const prodText = pr.prodMode === 'goods'
+            ? (pr.produces || []).map(e => fmtNum(e.perTurn) + ' × ' + (itemById(e.itemId) || { name: e.itemId }).name).join(', ')
+            : pr.prodMode === 'cash' ? 'cash operation' : 'upkeep only';
+          const p = provById(pr.provinceId);
+          return el('tr.row-link', { onclick: () => select('property', pr.id) },
+            el('td', pr.name), el('td', p ? p.name : '—'), el('td.num', fmtNum(pr.employees)),
+            el('td', { style: 'font-size:12px; color:var(--ink-soft);' }, prodText),
+            el('td.num', fmtMoney(rev)), el('td.num', fmtMoney(upk)),
+            el('td.num', { style: 'color:' + (rev - upk >= 0 ? 'var(--good)' : 'var(--accent)') }, fmtMoney(rev - upk)));
+        }))));
+    }
+
+    // ---- historical graphs ----
+    const hist = S().history || [];
+    const profRows = hist.filter(h => h.profits && h.profits[c.id] !== undefined);
+    const revRows = hist.filter(h => h.revenues && h.revenues[c.id] !== undefined);
+    if (profRows.length >= 2) {
+      inner.appendChild(this.secLabel('Profit & Revenue Over Time (annualised run-rate)'));
+      inner.appendChild(Charts.chartLine([
+        { name: 'Profit', color: 'var(--good)', points: profRows.map(h => ({ x: h.turn, y: h.profits[c.id] })) },
+        revRows.length >= 2 ? { name: 'Revenue', color: 'var(--ink-soft)', points: revRows.map(h => ({ x: h.turn, y: h.revenues[c.id] })) } : null
+      ].filter(Boolean), { title: 'COMPANY FINANCES', yFormat: v => CUR() + fmtCompact(v) }));
+    }
+    const priceHist = hist.filter(h => h.shares && h.shares[c.id] !== undefined).map(h => ({ x: h.turn, y: h.shares[c.id] }));
+    if (priceHist.length >= 2) {
+      inner.appendChild(this.secLabel('Share Price Over Time'));
+      inner.appendChild(Charts.chartLine(priceHist, { title: 'SHARE PRICE', yFormat: v => CUR() + v }));
+    }
+  },
+
+  /* ---- Government Finances (President & cabinet) ---- */
+  viewGovFinance(inner) {
+    if (!this.canGovFinance()) {
+      inner.appendChild(el('div.stage', el('div', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:.1em;' }, 'GOVERNMENT FINANCIAL RECORDS REQUIRE CABINET CLEARANCE.')));
+      return;
+    }
+    const g = S().globalVars || {};
+    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'The public purse — income, spending and reserves'));
+    inner.appendChild(this.statStrip([
+      ['Federal Treasury', CUR() + fmtCompact(g.treasury || 0)],
+      ['Money Supply', CUR() + fmtCompact(g.moneySupply || 0)],
+      ['Tax / turn', fmtMoney(g.lastTaxIncome || 0)],
+      ['Exports / turn', fmtMoney(g.lastExportIncome || 0)],
+      ['Imports / turn', fmtMoney(g.lastImportSpend || 0)]
+    ]));
+
+    const hist = (S().history || []).filter(h => h.treasury !== undefined);
+    if (hist.length >= 2) {
+      inner.appendChild(this.secLabel('Federal Treasury Over Time'));
+      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: h.treasury || 0 })),
+        { title: 'FEDERAL TREASURY (' + CUR() + ')', yFormat: v => fmtCompact(v) }));
+      inner.appendChild(this.secLabel('Money Supply Over Time'));
+      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: h.moneySupply || 0 })),
+        { title: 'MONEY SUPPLY (' + CUR() + ')', yFormat: v => fmtCompact(v) }));
+      const finRows = hist.filter(h => h.tax !== undefined);
+      if (finRows.length >= 2) {
+        inner.appendChild(this.secLabel('Government Trade & Tax Income Over Time'));
+        inner.appendChild(Charts.chartLine([
+          { name: 'Taxation', color: 'var(--accent)', points: finRows.map(h => ({ x: h.turn, y: h.tax || 0 })) },
+          { name: 'Exports', color: 'var(--good)', points: finRows.map(h => ({ x: h.turn, y: h.exports || 0 })) },
+          { name: 'Imports (spend)', color: 'var(--ink-soft)', points: finRows.map(h => ({ x: h.turn, y: h.imports || 0 })) }
+        ], { title: 'INCOME & SPEND / TURN', yFormat: v => CUR() + fmtCompact(v) }));
+      }
+    }
+
+    // ---- income & spending breakdown from the visible ledger ----
+    const govAcctIds = new Set(S().accounts.filter(a => { const e = entById(a.ownerId); return e && e.type === 'government'; }).map(a => a.id));
+    const income = {}, spend = {};
+    let incomeTotal = 0, taxTotal = 0;
+    for (const t of (S().transactions || [])) {
+      const intoGov = t.to && govAcctIds.has(t.to) && !(t.from && govAcctIds.has(t.from));
+      const outOfGov = t.from && govAcctIds.has(t.from) && !(t.to && govAcctIds.has(t.to));
+      const memo = t.memo || '';
+      if (intoGov) {
+        const cat = /tax|levy/i.test(memo) ? 'Taxation'
+          : /^export/i.test(memo) ? 'Exports'
+            : /gambl|lotter|casino/i.test(memo) ? 'Gambling'
+              : 'Other income';
+        income[cat] = (income[cat] || 0) + t.amount;
+        incomeTotal += t.amount;
+        if (cat === 'Taxation') taxTotal += t.amount;
+      } else if (outOfGov) {
+        const cat = /^import/i.test(memo) ? 'Imports'
+          : /goods purchase/i.test(memo) ? 'Goods purchases'
+            : /programme|works|stipend|subsid/i.test(memo) ? 'Programmes'
+              : 'Other spending';
+        spend[cat] = (spend[cat] || 0) + t.amount;
+      }
+    }
+    const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    const incRows = Object.entries(income).map(([label, value]) => ({ label, value }));
+    if (incRows.length) pies.appendChild(Charts.chartPie(incRows, { width: 420, height: 200, title: 'Government Income by Source (recent ledger)' }));
+    const spRows = Object.entries(spend).map(([label, value]) => ({ label, value }));
+    if (spRows.length) pies.appendChild(Charts.chartPie(spRows, { width: 420, height: 200, title: 'Government Spending (recent ledger)' }));
+    if (pies.children.length) inner.appendChild(pies);
+    if (incomeTotal > 0) {
+      inner.appendChild(this.kv('Share of income from taxation', fmtNum(taxTotal / incomeTotal * 100, 1) + '%'));
+    }
+
+    // ---- government funds ----
+    inner.appendChild(this.secLabel('Government Funds'));
+    const govAccts = S().accounts.filter(a => govAcctIds.has(a.id));
+    if (!govAccts.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'No government accounts are visible to you.'));
+    else {
+      const box = el('div.stage');
+      govAccts.forEach(a => box.appendChild(this.kv(entName(a.ownerId) + ' — ' + a.name, fmtMoney(a.balance))));
+      box.appendChild(this.kv('Combined', fmtMoney(govAccts.reduce((s, a) => s + a.balance, 0)), 'pos'));
+      inner.appendChild(box);
+    }
+
+    // ---- recent treasury movements ----
+    const govTxns = [...(S().transactions || [])].filter(t => (t.from && govAcctIds.has(t.from)) || (t.to && govAcctIds.has(t.to))).slice(-40).reverse();
+    inner.appendChild(this.secLabel('Recent Treasury Movements'));
+    if (!govTxns.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'Nothing on record.'));
+    else inner.appendChild(el('table.data',
+      el('thead', el('tr', el('th', 'When'), el('th', 'From'), el('th', 'To'), el('th.num', 'Amount'), el('th', 'Memo'))),
+      el('tbody', govTxns.map(t => {
+        const fa = acctById(t.from), ta = acctById(t.to);
+        return el('tr',
+          el('td', { style: 'font-family:var(--font-mono); font-size:10px; white-space:nowrap;' }, `T${t.turn}`),
+          el('td', fa ? entName(fa.ownerId) : (t.from ? '(account)' : '—')),
+          el('td', ta ? entName(ta.ownerId) : (t.to ? '(account)' : '—')),
+          el('td.num', { style: 'color:' + (t.to && govAcctIds.has(t.to) ? 'var(--good)' : 'var(--accent)') }, fmtMoney(t.amount)),
+          el('td', { style: 'color:var(--ink-soft); font-size:12px;' }, t.memo || ''));
+      }))));
   },
 
   /* ---- Economy ---- */
@@ -1131,9 +1480,30 @@ const Views = {
     return (S().trades || []).filter(t => t.status === 'open' && mine.has(t.toEntityId));
   },
 
+  /* Companies whose day-to-day operations this user may direct: any company
+     where their entity is the CEO or sits anywhere in the ownership chain —
+     deliberately NOT gated on the "executive" role. GM sees all. */
+  opsCompanies() {
+    if (!S()) return [];
+    const mine = W.me && W.me.entityId;
+    return S().entities.filter(e => e.type === 'company' &&
+      (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
+  },
+  govEntity() {
+    return S().entities.find(e => e.id === 'ent_gov') || S().entities.find(e => e.type === 'government');
+  },
+  controlsGov() {
+    const gov = this.govEntity();
+    return !!(gov && (isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, gov.id))));
+  },
+  canGovFinance() { return isGM() || !!perms().government || this.controlsGov(); },
+
   viewEconomy(inner) {
     if (!W.ecoTab) W.ecoTab = 'overview';
     const incoming = this.openIncomingTrades();
+    const opsCos = this.opsCompanies();
+    if (W.ecoTab === 'company' && !opsCos.length) W.ecoTab = 'overview';
+    if (W.ecoTab === 'government' && !this.canGovFinance()) W.ecoTab = 'overview';
     inner.appendChild(el('div.doc-title', 'The Economy'));
     inner.appendChild(el('div.doc-sub', S().settings.currencyName + ' (' + CUR() + ') · turn ' + S().settings.time.turn));
 
@@ -1143,7 +1513,9 @@ const Views = {
       el('button.chip', { class: W.ecoTab === 'trade' ? 'active' : '', onclick: () => { W.ecoTab = 'trade'; App.renderView(); } },
         'Trade Offers', incoming.length ? el('span.count-badge', String(incoming.length)) : null),
       el('button.chip', { class: W.ecoTab === 'intl' ? 'active' : '', onclick: () => { W.ecoTab = 'intl'; App.renderView(); } }, 'International Trade'),
-      el('button.chip', { class: W.ecoTab === 'inventory' ? 'active' : '', onclick: () => { W.ecoTab = 'inventory'; App.renderView(); } }, 'Inventory')
+      el('button.chip', { class: W.ecoTab === 'inventory' ? 'active' : '', onclick: () => { W.ecoTab = 'inventory'; App.renderView(); } }, 'Inventory'),
+      opsCos.length ? el('button.chip', { class: W.ecoTab === 'company' ? 'active' : '', onclick: () => { W.ecoTab = 'company'; App.renderView(); } }, 'Company Ops') : null,
+      this.canGovFinance() ? el('button.chip', { class: W.ecoTab === 'government' ? 'active' : '', onclick: () => { W.ecoTab = 'government'; App.renderView(); } }, 'Gov. Finances') : null
     );
     inner.appendChild(tabs);
 
@@ -1151,6 +1523,8 @@ const Views = {
     if (W.ecoTab === 'trade') return this.viewTrade(inner);
     if (W.ecoTab === 'intl') return this.viewIntlTrade(inner);
     if (W.ecoTab === 'inventory') return this.viewInventory(inner);
+    if (W.ecoTab === 'company') return this.viewCompanyOps(inner);
+    if (W.ecoTab === 'government') return this.viewGovFinance(inner);
     this.viewEconomyOverview(inner);
   },
 
@@ -1231,6 +1605,12 @@ const Views = {
       inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.moneySupply || 0) })), {
         title: 'Money Supply (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
       }));
+      if (hist.some(h => h.treasury !== undefined)) {
+        inner.appendChild(this.secLabel('Federal Treasury Over Time'));
+        inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.treasury || 0) })), {
+          title: 'Federal Treasury (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
+        }));
+      }
     }
 
     // your accounts = the whole ownership chain: own entity plus any company

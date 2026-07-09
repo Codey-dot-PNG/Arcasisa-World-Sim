@@ -665,6 +665,21 @@ function runEconomy(db, actor) {
   const govBuy = (db.settings.trade && db.settings.trade.govBuyPrices) || {};
   const tax = db.settings.taxation && db.settings.taxation.enabled ? db.settings.taxation : null;
 
+  const trade = db.settings.trade;
+
+  // Output breathes with the citizenry: province happiness scales production
+  // around its authored baseline, and a small daily wobble keeps profits from
+  // being a flat line. Both knobs live in settings.economy.
+  const variance = econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06;
+  const hapK = econ.happinessOutputK !== undefined ? Number(econ.happinessOutputK) : 0.15;
+  const provFactor = {};
+  for (const p of db.provinces) {
+    const hap = p.vars.happiness !== undefined ? Number(p.vars.happiness) : 50;
+    provFactor[p.id] = 1 + ((hap - 50) / 50) * hapK;
+  }
+  const outFactor = (pr) => Math.max(0.4,
+    (provFactor[pr.provinceId] || 1) * (1 + (Math.random() * 2 - 1) * variance));
+
   const perOwner = {};      // ownerId -> { dom, upkeep, wage, gross }
   const govPay = {};        // ownerId -> treasury money owed for gov-bought goods
   const provGross = {};     // provinceId -> production value this turn
@@ -676,13 +691,14 @@ function runEconomy(db, actor) {
     const owner = db.entities.find(e => e.id === pr.ownerId);
     const co = owner && owner.type === 'company' ? owner : null;
     const sellPct = co ? clampPct(co.sellPct, 100) : 100;
-    const govPct = co ? clampPct(co.govPct, 0) : 0;
+    const govPctBase = co ? clampPct(co.govPct, 0) : 0;
     const wageIdx = co ? (co.wage === undefined ? 100 : Number(co.wage)) : 100;
+    const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
 
     // gross production value (drives GDP): private at output, public at cost
     let gross;
-    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0);
-    else if (pr.prodMode === 'cash') gross = pr.cashPerTurn || 0;
+    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + Math.round((e.perTurn || 0) * f) * priceOf(e.itemId), 0);
+    else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f;
     else gross = pr.expenses || 0;
     if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
 
@@ -693,19 +709,33 @@ function runEconomy(db, actor) {
     if (pr.prodMode === 'goods') {
       for (const e of (pr.produces || [])) {
         const price = priceOf(e.itemId);
-        const produced = e.perTurn || 0;
+        const produced = Math.round((e.perTurn || 0) * f);
+        // per-item government routing (CEO override) falls back to the global %
+        const govPct = co && co.govPctByItem && co.govPctByItem[e.itemId] !== undefined
+          ? clampPct(co.govPctByItem[e.itemId], govPctBase) : govPctBase;
         const domQty = Math.floor(produced * sellPct / 100);
-        const govQty = Math.floor(produced * govPct / 100);
+        const govQty = Math.min(Math.floor(produced * govPct / 100), Math.max(0, produced - domQty));
         const keep = produced - domQty - govQty;
         o.dom += domQty * price;
         if (keep > 0) addInventory(pr, e.itemId, keep); // unsold accrues as stock
         if (govQty > 0 && gov) {
           govPay[pr.ownerId] = (govPay[pr.ownerId] || 0) + govQty * (govBuy[e.itemId] || price);
-          addInventory(gov, e.itemId, govQty); // government stockpile for export
+          // The President's trade desk splits state purchases between the
+          // export pool and the national inventory (settings.trade.exportAlloc,
+          // % for export; default: everything is resold abroad, the old flow).
+          const alloc = trade && trade.exportAlloc && trade.exportAlloc[e.itemId] !== undefined
+            ? clampPct(trade.exportAlloc[e.itemId], 100) : 100;
+          const exportQty = Math.round(govQty * alloc / 100);
+          if (trade && exportQty > 0) {
+            trade.exportPool = trade.exportPool || {};
+            trade.exportPool[e.itemId] = (trade.exportPool[e.itemId] || 0) + exportQty;
+          }
+          const keepQty = trade ? govQty - exportQty : govQty;
+          if (keepQty > 0) addInventory(gov, e.itemId, keepQty); // national inventory
         }
       }
     } else if (pr.prodMode === 'cash') {
-      o.dom += pr.cashPerTurn || 0;
+      o.dom += (pr.cashPerTurn || 0) * f;
     }
 
     // expenses: upkeep + signed wage delta from the baseline index
@@ -774,6 +804,9 @@ function runEconomy(db, actor) {
   // built-in daily share reprice (folds in the retired Market Session event)
   repriceAllShares(db, 0.6, 0.8, 0.15, 0.015, actor);
 
+  // per-turn government income samples for the finance graphs (recordHistory)
+  g.lastTaxIncome = Math.round(taxTotal * 100) / 100;
+
   if (settledOwners) {
     store.log('economy', `Daily economy settled`,
       `${settledOwners} operators · net ${db.settings.currency}${fmtNum(netTotal)}${taxTotal ? ' · tax ' + db.settings.currency + fmtNum(taxTotal) : ''}`, actor || 'ENGINE', []);
@@ -809,10 +842,13 @@ function runForeignTrade(db, actor) {
   if (!gov || !treasury) return;
 
   const flows = [];
-  let exportValue = 0;
-  // for each exportable item, split the government stock across the partners
-  // that buy it, at each partner's dynamic price
-  const stockOf = (id) => { const r = (gov.inventory || []).find(x => x.itemId === id); return r ? r.qty : 0; };
+  let exportValue = 0, importValue = 0;
+  // for each exportable item, split the export pool (goods the President has
+  // allotted for export — see runEconomy) across the partners that buy it, at
+  // each partner's dynamic price
+  trade.exportPool = trade.exportPool || {};
+  const stockOf = (id) => Math.max(0, Math.floor(trade.exportPool[id] || 0));
+  const takeStock = (id, qty) => { trade.exportPool[id] = Math.max(0, (trade.exportPool[id] || 0) - qty); if (!trade.exportPool[id]) delete trade.exportPool[id]; };
   const exportItems = new Set();
   for (const p of trade.partners) for (const id of (p.exports || [])) exportItems.add(id);
 
@@ -830,15 +866,43 @@ function runForeignTrade(db, actor) {
       const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0);
       const price = Math.round(base * drift * 100) / 100;
       const value = Math.round(qty * price * 100) / 100;
-      removeInventory(gov, itemId, qty);
+      takeStock(itemId, qty);
       ledgerTxn(null, treasury.id, value, `Export to ${(db.entities.find(e => e.id === p.entityId) || {}).name || p.entityId}`, 'TREASURY', 'deposit');
       flows.push({ itemId, partnerId: p.entityId, qty, value });
       exportValue += value;
     }
   }
+
+  // imports ordered by the President (settings.trade.imports): goods bought
+  // abroad each turn at the partner's price, delivered to the national
+  // inventory, paid from the treasury. Skipped when the treasury can't pay.
+  for (const row of (trade.imports || [])) {
+    const qty = Math.round(Number(row.qtyPerTurn) || 0);
+    if (!(qty > 0)) continue;
+    const item = db.items.find(i => i.id === row.itemId);
+    if (!item) continue;
+    const partner = trade.partners.find(p => p.entityId === row.partnerId && (p.imports || []).includes(row.itemId))
+      || trade.partners.find(p => (p.imports || []).includes(row.itemId));
+    const base = partner && partner.prices && partner.prices[row.itemId] > 0
+      ? partner.prices[row.itemId] : (item.marketValue || 0);
+    if (!(base > 0)) continue;
+    const drift = 1 + (Math.random() * 2 - 1) * ((partner && partner.priceDrift) || 0);
+    const price = Math.round(base * drift * 100) / 100;
+    const cost = Math.round(qty * price * 100) / 100;
+    if (!(treasury.balance >= cost)) continue; // imports never overdraw the treasury
+    const partnerName = partner ? ((db.entities.find(e => e.id === partner.entityId) || {}).name || partner.entityId) : 'abroad';
+    ledgerTxn(treasury.id, null, cost, `Import of ${item.name} from ${partnerName}`, 'TREASURY', 'withdraw');
+    addInventory(gov, row.itemId, qty);
+    flows.push({ itemId: row.itemId, partnerId: partner ? partner.entityId : null, qty, value: -cost });
+    importValue += cost;
+  }
+
   trade.lastFlows = flows;
-  if (exportValue > 0) {
-    store.log('economy', `Foreign exports settled`, `${db.settings.currency}${fmtNum(exportValue)} to ${new Set(flows.map(f => f.partnerId)).size} partner(s)`, actor || 'ENGINE', []);
+  db.globalVars.lastExportIncome = Math.round(exportValue * 100) / 100;
+  db.globalVars.lastImportSpend = Math.round(importValue * 100) / 100;
+  if (exportValue > 0 || importValue > 0) {
+    store.log('economy', `Foreign trade settled`,
+      `exports ${db.settings.currency}${fmtNum(exportValue)}${importValue ? ' · imports ' + db.settings.currency + fmtNum(importValue) : ''}`, actor || 'ENGINE', []);
   }
 }
 
@@ -849,8 +913,13 @@ function recordTradeHistory(db) {
   trade.history = trade.history || [];
   const flows = trade.lastFlows || [];
   const byItem = {};
-  for (const f of flows) byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value;
-  trade.history.push({ turn: db.settings.time.turn, date: db.settings.time.date, exportValue: flows.reduce((s, f) => s + f.value, 0), byItem });
+  for (const f of flows) if (f.value > 0) byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value;
+  trade.history.push({
+    turn: db.settings.time.turn, date: db.settings.time.date,
+    exportValue: flows.reduce((s, f) => s + Math.max(0, f.value), 0),
+    importValue: flows.reduce((s, f) => s + Math.max(0, -f.value), 0),
+    byItem
+  });
   if (trade.history.length > 180) trade.history.splice(0, trade.history.length - 180);
 }
 
@@ -928,14 +997,20 @@ function recordHistory(weekly) {
       approval: p.vars.approval || 0, employment: p.vars.employment || 0
     };
   }
-  const shares = {};
-  for (const e of db.entities) if (e.type === 'company' && e.sharePrice !== undefined) shares[e.id] = e.sharePrice;
+  const shares = {}, profits = {}, revenues = {};
+  for (const e of db.entities) {
+    if (e.type !== 'company') continue;
+    if (e.sharePrice !== undefined) shares[e.id] = e.sharePrice;
+    if (e.vars && e.vars.profit !== undefined) profits[e.id] = e.vars.profit;
+    if (e.vars && e.vars.revenue !== undefined) revenues[e.id] = e.vars.revenue;
+  }
   const entry = {
     turn: db.settings.time.turn, date: db.settings.time.date,
     gdp: g.gdp || 0, population: g.population || 0,
     avgHappiness: g.avgHappiness || 0, avgApproval: g.avgApproval || 0,
     moneySupply: g.moneySupply || 0, treasury: g.treasury || 0,
-    provinces, shares
+    tax: g.lastTaxIncome || 0, exports: g.lastExportIncome || 0, imports: g.lastImportSpend || 0,
+    provinces, shares, profits, revenues
   };
   if (weekly) {
     try {

@@ -587,9 +587,59 @@ async function handle(req, res, pathname, method) {
       // sell% + gov% may not exceed 100 — trim gov% to fit, remainder is stockpiled
       if ((co.sellPct || 0) + (co.govPct || 0) > 100) co.govPct = Math.max(0, 100 - (co.sellPct || 0));
       if (b.wage !== undefined) co.wage = clampWage(b.wage);
+      // per-item government routing overrides (CEO ops panel): { itemId: pct }.
+      // null/undefined entry removes the override; the global govPct applies.
+      if (b.govPctByItem !== undefined && typeof b.govPctByItem === 'object') {
+        const map = co.govPctByItem = co.govPctByItem || {};
+        for (const itemId in b.govPctByItem) {
+          if (!db.items.some(i => i.id === itemId)) continue;
+          const v = b.govPctByItem[itemId];
+          if (v === null || v === undefined || v === '') delete map[itemId];
+          else map[itemId] = clampPct(v);
+        }
+        if (!Object.keys(map).length) delete co.govPctByItem;
+      }
       store.log('economy', `${co.name} adjusts operations`, `sell ${co.sellPct}% · gov ${co.govPct}% · wage ${co.wage}`, u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, sellPct: co.sellPct, govPct: co.govPct, wage: co.wage } });
+      return json(res, 200, { ok: true, company: { id: co.id, sellPct: co.sellPct, govPct: co.govPct, wage: co.wage, govPctByItem: co.govPctByItem || {} } });
+    }
+
+    // ---- national trade desk controls (President) ----
+    // exportAlloc: % of each state-bought good allotted for export (the rest
+    // lands in the national inventory); imports: standing per-turn purchase
+    // orders from foreign partners. Editable by whoever controls the
+    // government entity (the President) or the GM.
+    if (pathname === '/api/trade/controls' && method === 'PATCH') {
+      const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
+      if (!gov) return bad('No government entity on file.');
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, gov.id)) return deny('Only the head of government may direct national trade.');
+      const b = await readBody(req);
+      const t = db.settings.trade = db.settings.trade || { govBuyPrices: {}, partners: [], lastFlows: [], history: [] };
+      const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
+      if (b.exportAlloc !== undefined && typeof b.exportAlloc === 'object') {
+        const map = t.exportAlloc = t.exportAlloc || {};
+        for (const itemId in b.exportAlloc) {
+          if (!db.items.some(i => i.id === itemId)) continue;
+          const v = b.exportAlloc[itemId];
+          if (v === null || v === undefined || v === '') delete map[itemId];
+          else map[itemId] = clampPct(v);
+        }
+      }
+      if (Array.isArray(b.imports)) {
+        t.imports = b.imports
+          .map(r => ({
+            itemId: String(r.itemId || ''),
+            partnerId: r.partnerId ? String(r.partnerId) : null,
+            qtyPerTurn: Math.max(0, Math.round(Number(r.qtyPerTurn) || 0))
+          }))
+          .filter(r => r.itemId && db.items.some(i => i.id === r.itemId) && r.qtyPerTurn > 0)
+          .slice(0, 24);
+      }
+      store.log('economy', 'National trade directives updated',
+        `${Object.keys(t.exportAlloc || {}).length} export allocation(s) · ${(t.imports || []).length} import order(s)`, u.user.displayName, [gov.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, trade: { exportAlloc: t.exportAlloc || {}, imports: t.imports || [] } });
     }
 
     // ---- stock market (Phase 4.4) ----

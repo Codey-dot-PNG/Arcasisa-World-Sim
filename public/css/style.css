@@ -1043,3 +1043,29 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   .music-widget .music-title, .music-widget .music-volume{display:none;}
   .music-pl-menu{min-width:180px;}
 }
+
+/* ---------- range sliders (Phase 14 — CEO ops / presidential trade desk) --- */
+.slider-row{display:flex; align-items:center; gap:10px; min-height:28px;}
+.slider-val{
+  font-family:var(--font-mono); font-size:11px; color:var(--ink);
+  min-width:64px; text-align:right; flex-shrink:0;
+}
+.slider-input{
+  flex:1; -webkit-appearance:none; appearance:none; height:22px;
+  background:transparent; cursor:pointer; min-width:90px;
+}
+.slider-input::-webkit-slider-runnable-track{
+  height:4px; background:var(--rule-strong); border-radius:0;
+}
+.slider-input::-webkit-slider-thumb{
+  -webkit-appearance:none; appearance:none; margin-top:-5px;
+  width:14px; height:14px; border-radius:0;
+  background:var(--accent); border:1px solid var(--ink);
+}
+.slider-input::-moz-range-track{height:4px; background:var(--rule-strong);}
+.slider-input::-moz-range-thumb{
+  width:12px; height:12px; border-radius:0;
+  background:var(--accent); border:1px solid var(--ink);
+}
+.slider-input:focus{outline:none;}
+.slider-input:focus::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--accent-wash);}

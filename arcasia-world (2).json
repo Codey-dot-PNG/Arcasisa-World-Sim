@@ -677,6 +677,96 @@
       "tradable": true,
       "description": "Title deed to New Property. Whoever holds this deed owns the property.",
       "marketValue": 15000000
+    },
+    {
+      "id": "item_weapons",
+      "name": "Weapons (crate)",
+      "description": "Small arms and munitions, crated for export. The currency of a nervous decade.",
+      "icon": "W",
+      "category": "Military",
+      "marketValue": 520,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_electronics",
+      "name": "Electronics (crate)",
+      "description": "Assorted electronic goods and components, crated for trade.",
+      "icon": "E",
+      "category": "Goods",
+      "marketValue": 95,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_autos",
+      "name": "Automobile (unit)",
+      "description": "A passenger motor car, export specification.",
+      "icon": "A",
+      "category": "Goods",
+      "marketValue": 830,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_textiles",
+      "name": "Clothing & Textiles (bale)",
+      "description": "Garments and woven cloth, baled for shipment.",
+      "icon": "T",
+      "category": "Goods",
+      "marketValue": 26,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_wine",
+      "name": "Wine (case)",
+      "description": "Twelve bottles of Arcasian table wine.",
+      "icon": "V",
+      "category": "Goods",
+      "marketValue": 14,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_livestock",
+      "name": "Livestock (head)",
+      "description": "Cattle and sheep on the hoof.",
+      "icon": "L",
+      "category": "Commodities",
+      "marketValue": 38,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_sugar",
+      "name": "Sugar (tonne)",
+      "description": "Refined cane sugar.",
+      "icon": "S",
+      "category": "Commodities",
+      "marketValue": 74,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_steel",
+      "name": "Steel (tonne)",
+      "description": "Rolled structural steel.",
+      "icon": "S",
+      "category": "Commodities",
+      "marketValue": 58,
+      "tradable": true,
+      "meta": {}
+    },
+    {
+      "id": "item_tobacco",
+      "name": "Tobacco (tonne)",
+      "description": "Cured leaf tobacco.",
+      "icon": "B",
+      "category": "Commodities",
+      "marketValue": 190,
+      "tradable": true,
+      "meta": {}
     }
   ],
   "roles": [
@@ -4870,7 +4960,9 @@
     "economy": {
       "baseDailyWage": 4,
       "wageHappinessK": 0.03,
-      "wageEmploymentK": 0.03
+      "wageEmploymentK": 0.03,
+      "dailyVariance": 0.06,
+      "happinessOutputK": 0.15
     },
     "trade": {
       "govBuyPrices": {
@@ -4880,66 +4972,82 @@
         "item_copper": 432.0,
         "item_grain": 46.8,
         "item_timber": 8.1,
-        "item_cement": 12.6
+        "item_cement": 12.6,
+        "item_weapons": 468.0,
+        "item_electronics": 85.5,
+        "item_autos": 747.0,
+        "item_textiles": 23.4,
+        "item_wine": 12.6,
+        "item_livestock": 34.2,
+        "item_sugar": 66.6,
+        "item_steel": 52.2,
+        "item_tobacco": 171.0
       },
       "partners": [
         {
+          "entityId": "for_sarom",
+          "tariff": "Low",
+          "exports": [
+            "item_crude",
+            "item_fuel"
+          ],
+          "imports": [
+            "item_weapons",
+            "item_electronics",
+            "item_autos"
+          ],
+          "prices": {
+            "item_weapons": 676.0,
+            "item_electronics": 95.0,
+            "item_autos": 830.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67
+          },
+          "priceDrift": 0.05
+        },
+        {
+          "entityId": "for_qinal",
+          "tariff": "High",
+          "exports": [
+            "item_crude",
+            "item_fuel"
+          ],
+          "imports": [
+            "item_weapons",
+            "item_textiles",
+            "item_wine",
+            "item_timber"
+          ],
+          "prices": {
+            "item_weapons": 598.0,
+            "item_textiles": 26.0,
+            "item_wine": 14.0,
+            "item_timber": 9.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67
+          },
+          "priceDrift": 0.05
+        },
+        {
           "entityId": "for_valksland",
-          "tariff": "Low",
+          "tariff": "High",
           "exports": [
             "item_crude",
-            "item_fuel",
-            "item_ore"
+            "item_fuel"
           ],
-          "imports": [],
-          "prices": {
-            "item_crude": 2.99,
-            "item_fuel": 5.56,
-            "item_ore": 11.33,
-            "item_copper": 494.4,
-            "item_grain": 53.56,
-            "item_timber": 9.27,
-            "item_cement": 14.42
-          },
-          "priceDrift": 0.05
-        },
-        {
-          "entityId": "for_delcasia",
-          "tariff": "Low",
-          "exports": [
-            "item_crude",
-            "item_fuel",
-            "item_ore"
+          "imports": [
+            "item_weapons",
+            "item_textiles",
+            "item_wine",
+            "item_timber"
           ],
-          "imports": [],
           "prices": {
-            "item_crude": 3.13,
-            "item_fuel": 5.83,
-            "item_ore": 11.88,
-            "item_copper": 518.4,
-            "item_grain": 56.16,
-            "item_timber": 9.72,
-            "item_cement": 15.12
-          },
-          "priceDrift": 0.05
-        },
-        {
-          "entityId": "for_solme",
-          "tariff": "Low",
-          "exports": [
-            "item_crude",
-            "item_fuel",
-            "item_ore"
-          ],
-          "imports": [],
-          "prices": {
-            "item_crude": 3.28,
-            "item_fuel": 6.1,
-            "item_ore": 12.43,
-            "item_copper": 542.4,
-            "item_grain": 58.76,
-            "item_timber": 10.17,
-            "item_cement": 15.82
+            "item_weapons": 598.0,
+            "item_textiles": 26.0,
+            "item_wine": 14.0,
+            "item_timber": 9.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67
           },
           "priceDrift": 0.05
         },
@@ -4947,105 +5055,102 @@
           "entityId": "for_madrosia",
           "tariff": "Low",
           "exports": [
+            "item_weapons",
             "item_crude",
             "item_fuel",
-            "item_ore"
+            "item_steel"
           ],
-          "imports": [],
+          "imports": [
+            "item_grain",
+            "item_livestock"
+          ],
           "prices": {
-            "item_crude": 2.99,
-            "item_fuel": 5.56,
-            "item_ore": 11.33,
-            "item_copper": 494.4,
-            "item_grain": 53.56,
-            "item_timber": 9.27,
-            "item_cement": 14.42
+            "item_grain": 52.0,
+            "item_livestock": 38.0,
+            "item_weapons": 468.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67,
+            "item_steel": 60.9
           },
           "priceDrift": 0.05
         },
         {
           "entityId": "for_mazon",
-          "tariff": "Low",
+          "tariff": "Med",
           "exports": [
+            "item_weapons",
             "item_crude",
             "item_fuel",
-            "item_ore"
+            "item_steel"
           ],
-          "imports": [],
+          "imports": [
+            "item_ore",
+            "item_sugar"
+          ],
           "prices": {
-            "item_crude": 3.13,
-            "item_fuel": 5.83,
-            "item_ore": 11.88,
-            "item_copper": 518.4,
-            "item_grain": 56.16,
-            "item_timber": 9.72,
-            "item_cement": 15.12
+            "item_ore": 11.0,
+            "item_sugar": 74.0,
+            "item_weapons": 468.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67,
+            "item_steel": 60.9
           },
           "priceDrift": 0.05
         },
         {
-          "entityId": "for_aldonesia",
+          "entityId": "org_grace",
           "tariff": "Low",
           "exports": [
             "item_crude",
             "item_fuel",
-            "item_ore"
+            "item_steel"
           ],
-          "imports": [],
+          "imports": [
+            "item_weapons",
+            "item_electronics",
+            "item_grain",
+            "item_livestock"
+          ],
           "prices": {
-            "item_crude": 3.28,
-            "item_fuel": 6.1,
-            "item_ore": 12.43,
-            "item_copper": 542.4,
-            "item_grain": 58.76,
-            "item_timber": 10.17,
-            "item_cement": 15.82
+            "item_weapons": 598.0,
+            "item_electronics": 95.0,
+            "item_grain": 52.0,
+            "item_livestock": 38.0,
+            "item_crude": 3.04,
+            "item_fuel": 5.67,
+            "item_steel": 60.9
           },
           "priceDrift": 0.05
         },
         {
-          "entityId": "for_sarom",
-          "tariff": "Low",
+          "entityId": "for_delcasia",
+          "tariff": "Med",
           "exports": [
-            "item_crude",
-            "item_fuel",
-            "item_ore"
+            "item_weapons",
+            "item_electronics",
+            "item_radio",
+            "item_tv"
           ],
-          "imports": [],
-          "prices": {
-            "item_crude": 2.99,
-            "item_fuel": 5.56,
-            "item_ore": 11.33,
-            "item_copper": 494.4,
-            "item_grain": 53.56,
-            "item_timber": 9.27,
-            "item_cement": 14.42
-          },
-          "priceDrift": 0.05
-        },
-        {
-          "entityId": "for_qinal",
-          "tariff": "Low",
-          "exports": [
-            "item_crude",
-            "item_fuel",
-            "item_ore"
+          "imports": [
+            "item_tobacco",
+            "item_crude"
           ],
-          "imports": [],
           "prices": {
-            "item_crude": 3.13,
-            "item_fuel": 5.83,
-            "item_ore": 11.88,
-            "item_copper": 518.4,
-            "item_grain": 56.16,
-            "item_timber": 9.72,
-            "item_cement": 15.12
+            "item_tobacco": 148.2,
+            "item_crude": 2.26,
+            "item_weapons": 598.0,
+            "item_electronics": 109.25,
+            "item_radio": 39.1,
+            "item_tv": 170.2
           },
           "priceDrift": 0.05
         }
       ],
       "lastFlows": [],
-      "history": []
+      "history": [],
+      "exportPool": {},
+      "exportAlloc": {},
+      "imports": []
     }
   },
   "timeline": [

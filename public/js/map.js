@@ -832,10 +832,26 @@ const GameMap = {
         el('span', fmtCompact(Math.min(...vals))), el('span', fmtCompact(Math.max(...vals)))));
     } else if (W.layer === 'ownership') {
       lg.appendChild(el('div.lg-title', 'PROPERTY OWNERS'));
-      const owners = new Map();
-      for (const pr of S().properties) { const o = entById(pr.ownerId); if (o && !owners.has(o.id)) owners.set(o.id, o); }
-      [...owners.values()].slice(0, 10).forEach(o =>
-        lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + (o.color || '#888') }), el('span', o.name))));
+      // owners sorted by holdings, with counts; click a row to open the dossier
+      const counts = new Map();
+      for (const pr of S().properties) {
+        if (!pr.ownerId || !entById(pr.ownerId)) continue;
+        counts.set(pr.ownerId, (counts.get(pr.ownerId) || 0) + 1);
+      }
+      const owners = [...counts.entries()]
+        .map(([id, n]) => ({ ent: entById(id), n }))
+        .sort((a, b) => b.n - a.n || a.ent.name.localeCompare(b.ent.name));
+      const MAXROWS = 14;
+      owners.slice(0, MAXROWS).forEach(({ ent: o, n }) =>
+        lg.appendChild(el('div.lg-row', { style: 'cursor:pointer;', title: 'Open dossier', onclick: () => select('entity', o.id) },
+          el('span.lg-swatch', { style: 'background:' + (o.color || '#888') }),
+          el('span', { style: 'flex:1;' }, o.name),
+          el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:9px; margin-left:6px;' }, String(n)))));
+      if (owners.length > MAXROWS) {
+        lg.appendChild(el('div', { style: 'color:var(--ink-faint); margin-top:2px;' }, '+' + (owners.length - MAXROWS) + ' more owners'));
+      }
+      const total = S().properties.length;
+      lg.appendChild(el('div', { style: 'margin-top:6px; color:var(--ink-faint);' }, total + ' properties · click a name for its file'));
     } else {
       lg.appendChild(el('div.lg-title', S().settings.worldName.toUpperCase()));
       for (const p of S().provinces) {

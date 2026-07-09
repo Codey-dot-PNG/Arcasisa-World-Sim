@@ -38,7 +38,13 @@ ENTITIES = [
      "description": "State holding company.", "ownerId": "ent_gov", "sharePrice": 900, "vars": {}},
     {"id": "ent_satrom", "type": "company", "name": "SATROM", "industry": "Defence & Electronics (Saromite)",
      "color": "#5c3a4e", "ownerId": "for_sarom", "ceoId": "per_hale", "sharePrice": 1017,
+     "trust": 58, "sellPct": 60, "govPct": 25, "wage": 100, "govPctByItem": {"item_crude": 40},
+     "vars": {"revenue": 74000000, "profit": 9100000, "valuation": 610000000},
      "description": "Saromite defence-electronics conglomerate, headquartered in the Federation of Sarom."},
+    {"id": "for_qinal", "type": "foreign", "name": "People's Republic of Qinal", "color": "#726a58",
+     "stance": "Hostile", "description": "Revolutionary power.", "vars": {}},
+    {"id": "for_aldonesia", "type": "foreign", "name": "Aldonesia", "color": "#726a58",
+     "stance": "Friendly", "description": "South-western archipelago power.", "vars": {}},
     {"id": "for_sarom", "type": "foreign", "name": "Federation of Sarom", "color": "#726a58",
      "stance": "Allied", "description": "Continental federation and treaty ally.", "vars": {}},
     {"id": "for_valksland", "type": "foreign", "name": "Valksland", "color": "#726a58",
@@ -55,8 +61,14 @@ ENTITIES = [
 PROPERTIES = [
     {"id": "prop_satrom_casino", "name": "Satrom Grand Casino", "type": "commercial", "kind": "office",
      "provinceId": "prov_lachevan", "pos": [2278, 499], "ownerId": "ent_satrom", "value": 24000000,
-     "employees": 650, "income": 300000, "expenses": 140000,
+     "employees": 650, "income": 300000, "expenses": 4667, "prodMode": "cash", "cashPerTurn": 10000,
+     "produces": [],
      "description": "House of chance on the Lachevan strip.", "inventory": [], "vars": {}},
+    {"id": "prop_satrom_works", "name": "SATROM Radar Works", "type": "industrial", "kind": "factory",
+     "provinceId": "prov_lachevan", "pos": [2290, 510], "ownerId": "ent_satrom", "value": 34000000,
+     "employees": 3100, "income": 380000, "expenses": 8333, "prodMode": "goods",
+     "produces": [{"itemId": "item_crude", "perTurn": 4400}],
+     "description": "Restricted site.", "inventory": [], "vars": {}},
     {"id": "prop_rill_house", "name": "Rill Residence", "type": "residential", "kind": "house",
      "provinceId": "prov_lachevan", "pos": [2361, 524], "ownerId": "per_rill", "value": 18000,
      "employees": 0, "income": 0, "expenses": 40, "description": "A modest house.",
@@ -68,9 +80,65 @@ ITEMS = [
      "marketValue": 34, "tradable": True, "meta": {}, "description": "The people's receiver."},
     {"id": "item_gold", "name": "Gold Bar (400 oz)", "icon": "A", "category": "Reserves",
      "marketValue": 15800, "tradable": True, "meta": {}, "description": "Reserve bullion."},
+    {"id": "item_crude", "name": "Crude Oil (barrel)", "icon": "O", "category": "Commodities",
+     "marketValue": 2.9, "tradable": True, "meta": {}, "description": "Unrefined crude."},
+    {"id": "item_weapons", "name": "Weapons (crate)", "icon": "W", "category": "Military",
+     "marketValue": 520, "tradable": True, "meta": {}, "description": "Small arms, crated."},
 ]
 
-ACCOUNTS = [{"id": "acct_rill", "ownerId": "per_rill", "name": "Personal Account", "balance": 5000}]
+ACCOUNTS = [
+    {"id": "acct_rill", "ownerId": "per_rill", "name": "Personal Account", "balance": 5000},
+    {"id": "acct_treasury", "ownerId": "ent_gov", "name": "Federal Treasury", "balance": 1200000000},
+    {"id": "acct_satrom", "ownerId": "ent_satrom", "name": "SATROM Operating", "balance": 45000000},
+]
+
+TRADE = {
+    "govBuyPrices": {"item_crude": 2.61},
+    "partners": [
+        {"entityId": "for_sarom", "tariff": "Low", "exports": ["item_crude"],
+         "imports": ["item_weapons"], "prices": {"item_crude": 3.04, "item_weapons": 676.0}, "priceDrift": 0.05},
+        {"entityId": "for_valksland", "tariff": "High", "exports": ["item_crude"],
+         "imports": ["item_weapons"], "prices": {"item_crude": 3.04, "item_weapons": 598.0}, "priceDrift": 0.05},
+        {"entityId": "for_qinal", "tariff": "High", "exports": ["item_crude"],
+         "imports": [], "prices": {"item_crude": 3.04}, "priceDrift": 0.05},
+        {"entityId": "for_aldonesia", "tariff": "Low", "exports": ["item_crude"],
+         "imports": [], "prices": {"item_crude": 3.13}, "priceDrift": 0.05},
+    ],
+    "lastFlows": [
+        {"itemId": "item_crude", "partnerId": "for_sarom", "qty": 300, "value": 912.0},
+        {"itemId": "item_crude", "partnerId": "for_valksland", "qty": 300, "value": 905.0},
+        {"itemId": "item_weapons", "partnerId": "for_sarom", "qty": 5, "value": -3380.0},
+    ],
+    "history": [{"turn": t, "date": "1960-01-0%d" % (t + 1), "exportValue": 1500 + t * 120,
+                 "importValue": 300 + t * 40, "byItem": {"item_crude": 1500 + t * 120}} for t in range(4)],
+    "exportPool": {"item_crude": 740},
+    "exportAlloc": {"item_crude": 70},
+    "imports": [{"itemId": "item_weapons", "partnerId": "for_sarom", "qtyPerTurn": 5}],
+}
+
+HISTORY = [
+    {"turn": t, "date": "1960-01-0%d" % (t + 1), "gdp": 12400 + t * 22, "population": 39000000 + t * 900,
+     "avgHappiness": 51 + t * 0.2, "avgApproval": 47 + t * 0.1,
+     "moneySupply": 1927584400 + t * 240000, "treasury": 1199000000 + t * 350000,
+     "tax": 9000 + t * 300, "exports": 1500 + t * 120, "imports": 300 + t * 40,
+     "provinces": {}, "shares": {"ent_satrom": 1017 + t * 4, "ent_arc": 900 + t * 2},
+     "profits": {"ent_satrom": 9100000 + t * 30000, "ent_arc": 22000000 + t * 15000},
+     "revenues": {"ent_satrom": 74000000 + t * 90000, "ent_arc": 310000000 + t * 60000}}
+    for t in range(5)
+]
+
+TRANSACTIONS = [
+    {"id": "txn1", "ts": 0, "turn": 3, "simDate": "1960-01-04", "from": "acct_satrom", "to": "acct_treasury",
+     "amount": 9300, "memo": "Tax", "actor": "TREASURY", "kind": "transfer"},
+    {"id": "txn2", "ts": 0, "turn": 3, "simDate": "1960-01-04", "from": None, "to": "acct_treasury",
+     "amount": 1817, "memo": "Export to Federation of Sarom", "actor": "TREASURY", "kind": "deposit"},
+    {"id": "txn3", "ts": 0, "turn": 3, "simDate": "1960-01-04", "from": "acct_treasury", "to": None,
+     "amount": 3380, "memo": "Import of Weapons (crate) from Federation of Sarom", "actor": "TREASURY", "kind": "withdraw"},
+    {"id": "txn4", "ts": 0, "turn": 3, "simDate": "1960-01-04", "from": "acct_treasury", "to": "acct_satrom",
+     "amount": 3350, "memo": "Government goods purchase", "actor": "TREASURY", "kind": "transfer"},
+    {"id": "txn5", "ts": 0, "turn": 2, "simDate": "1960-01-03", "from": "acct_rill", "to": "acct_treasury",
+     "amount": 120, "memo": "Gambling tax (15%)", "actor": "TREASURY", "kind": "transfer"},
+]
 
 PAGES = ["parliament", "companies", "economy", "population", "news", "entertainment"]
 
@@ -90,18 +158,24 @@ def make_state():
             "time": {"turn": 4, "unit": "day", "perTurn": 1, "date": "1960-01-05", "auto": {"enabled": False}},
             "parliamentSeats": 150,
             "registration": {"open": True},
-            "taxation": {"enabled": False, "gamblingRate": 15},
+            "taxation": {"enabled": False, "gamblingRate": 15, "corporateRate": 10, "propertyRate": 0, "vatRate": 0},
+            "newsThresholds": {"transaction": 5000000},
             "demographics": {"groups": [], "metrics": []},
             "newspapers": [],
             "entertainment": {"venues": VENUES},
             "music": {"enabled": False, "library": [], "playlists": [], "activePlaylist": None,
                       "forcedTrack": None, "volume": 0.7, "shuffle": False},
+            "trade": TRADE,
+            "economy": {"baseDailyWage": 4, "wageHappinessK": 0.03, "wageEmploymentK": 0.03,
+                        "dailyVariance": 0.06, "happinessOutputK": 0.15},
         },
-        "globalVars": {"population": 39000000},
+        "globalVars": {"population": 39000000, "gdp": 12500, "moneySupply": 1927584400,
+                       "treasury": 1200000000, "avgHappiness": 51.6, "avgApproval": 47.3,
+                       "lastTaxIncome": 10200, "lastExportIncome": 1817, "lastImportSpend": 3380},
         "variables": [],
         "entities": ENTITIES, "provinces": [], "cities": [], "properties": PROPERTIES,
-        "accounts": ACCOUNTS, "transactions": [], "news": [], "items": ITEMS, "markers": [],
-        "history": [], "timeline": [], "trades": [], "elections": [],
+        "accounts": ACCOUNTS, "transactions": TRANSACTIONS, "news": [], "items": ITEMS, "markers": [],
+        "history": HISTORY, "timeline": [], "trades": [], "elections": [],
         "roles": [{"id": "citizen", "name": "Citizen"}],
     }
 

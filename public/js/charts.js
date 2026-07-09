@@ -303,8 +303,18 @@ const Charts = {
         const val = this._svg('text', { x: x + barW / 2, y: y - 4, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
         val.textContent = fmtV(r.value);
         svg.appendChild(val);
-        const lbl = this._svg('text', { x: x + barW / 2, y: padTop + plotH + 14, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-soft)' });
-        lbl.textContent = String(r.label);
+        // truncate x labels to the column width so long names (foreign powers,
+        // company names) never overlap; the full name stays in the hover tip
+        const maxChars = Math.max(3, Math.floor(colW / 5.6));
+        const full = String(r.label);
+        const shown = full.length > maxChars ? full.slice(0, Math.max(1, maxChars - 1)) + '…' : full;
+        const lbl = this._svg('text', { x: padLeft + i * colW + colW / 2, y: padTop + plotH + 14, 'text-anchor': 'middle', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-soft)' });
+        lbl.textContent = shown;
+        if (shown !== full) {
+          const tip = this._svg('title');
+          tip.textContent = full;
+          lbl.appendChild(tip);
+        }
         svg.appendChild(lbl);
       });
     }

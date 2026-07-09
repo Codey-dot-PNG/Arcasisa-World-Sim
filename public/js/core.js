@@ -254,11 +254,20 @@ async function connectStream() {
   sse.onopen = () => scheduleRefresh();
   sse.onerror = () => { /* EventSource retries automatically */ };
 }
-// True while a refresh would clobber in-progress GM editing or destroy
-// keystrokes mid-type — scheduleRefresh defers instead of fetching. (Wake-up
-// refresh on tab focus/visibility is registered once in connectStream.)
+// True while the map editor holds unsaved local edits INSIDE W.state (pointer
+// drags, half-drawn lines, a pending debounced save) — swapping in fresh
+// server state would orphan those edits, so the fetch itself must wait.
+function mapEditBusy() {
+  return !!(window.MapEdit && MapEdit.active && (MapEdit.drawing || MapEdit.dragging || MapEdit.saveTimer));
+}
+// True while a re-RENDER would clobber in-progress editing or destroy
+// keystrokes mid-type. Fetching fresh state is safe during all of these
+// (drafts live in their own objects, not in W.state) — only the rebuild of
+// the DOM has to wait. This is what makes saves stick: after a write the
+// client always holds the server-confirmed world, so any later interaction
+// re-renders from CURRENT data instead of silently reverting to stale state.
 function editingBusy() {
-  if (window.MapEdit && MapEdit.active && (MapEdit.drawing || MapEdit.dragging || MapEdit.saveTimer)) return true;
+  if (mapEditBusy()) return true;
   if (window.Entertainment && Entertainment.spinning) return true; // don't rebuild the roulette table mid-spin
   if (W.inspEdit) return true;   // inspector inline-edit draft open
   const ae = document.activeElement;
@@ -266,22 +275,29 @@ function editingBusy() {
   if (ae && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)) return true;  // typing anywhere (forms, modals, GM studio)
   return false;
 }
+// One pending "render when the user frees up" loop. Armed by refreshState
+// when a render had to be deferred; collapses any number of refreshes.
+let renderPending = false;
+function tryDeferredRender() {
+  if (!renderPending) return;
+  if (editingBusy()) { setTimeout(tryDeferredRender, 800); return; }
+  renderPending = false;
+  App.renderAll();
+}
 function scheduleRefresh() {
   // Never swap in fresh state mid-interaction in the map editor: pointer
   // drags and half-drawn lines mutate objects inside the CURRENT state, and
   // replacing it would orphan those edits (the old "edits reset / don't
   // apply" bug). Retry shortly — the interaction ends within a second or two.
-  if (window.MapEdit && (MapEdit.dragging || MapEdit.drawing)) {
+  if (mapEditBusy()) {
     if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
     return;
   }
   if (W.refreshTimer) return;
-  const attempt = async () => {
-    if (editingBusy()) { W.refreshTimer = setTimeout(attempt, 1000); return; } // re-arm and retry until the user frees up
+  W.refreshTimer = setTimeout(async () => {
     W.refreshTimer = null;
     try { await refreshState(); } catch (e) { /* transient */ }
-  };
-  W.refreshTimer = setTimeout(attempt, 250);
+  }, 250);
 }
 let lastV = undefined, refreshSeq = 0;
 async function refreshState(force) {
@@ -293,9 +309,9 @@ async function refreshState(force) {
   // Applying a late stale response is what made turns "reverse" and fresh
   // road edits vanish.
   if (seq !== refreshSeq) return;
-  // an interaction may have started while this GET was in flight — re-check
-  // right before the swap and defer it the same way scheduleRefresh does.
-  if (window.MapEdit && (MapEdit.dragging || MapEdit.drawing)) {
+  // a map-editor interaction may have started while this GET was in flight —
+  // re-check right before the swap and defer the same way scheduleRefresh does.
+  if (mapEditBusy()) {
     if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
     return;
   }
@@ -309,6 +325,10 @@ async function refreshState(force) {
   // per-province party support (public political knowledge) — cached so the
   // province/city dossiers can draw voter-base pies synchronously
   try { W.polling = await GET('/api/polling'); } catch (e) { W.polling = null; }
+  // Rendering waits until the user stops typing/editing, but the fresh state
+  // above is already live — no interaction can revert to pre-save data.
+  if (editingBusy()) { renderPending = true; tryDeferredRender(); return; }
+  renderPending = false;
   App.renderAll();
 }
 
@@ -334,6 +354,24 @@ const Forms = {
   },
   color(obj, key) {
     return el('input', { type: 'color', value: obj[key] || '#5c5340', style: 'width:52px; height:28px; border:1px solid var(--rule-strong); background:transparent; cursor:pointer;', oninput: (e) => obj[key] = e.target.value });
+  },
+  // range slider bound into a draft, with a live mono readout. opts: { suffix,
+  // step, format(v), onInput } — writes Number into obj[key] on input.
+  slider(obj, key, min, max, opts) {
+    opts = opts || {};
+    const fmt = opts.format || ((v) => v + (opts.suffix || ''));
+    const val = Number(obj[key]);
+    const readout = el('span.slider-val', fmt(isFinite(val) ? val : min));
+    const input = el('input.slider-input', {
+      type: 'range', min: String(min), max: String(max), step: String(opts.step || 1),
+      value: String(isFinite(val) ? val : min),
+      oninput: (e) => {
+        obj[key] = Number(e.target.value);
+        readout.textContent = fmt(obj[key]);
+        if (opts.onInput) opts.onInput(obj[key]);
+      }
+    });
+    return el('div.slider-row', input, readout);
   },
   entOptions(types, allowNull) {
     const opts = S().entities.filter(e => !types || types.includes(e.type)).map(e => [e.id, e.name + ' (' + (TYPE_LABEL[e.type] || e.type) + ')']);

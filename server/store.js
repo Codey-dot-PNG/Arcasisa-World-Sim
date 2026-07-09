@@ -483,6 +483,108 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 13 — production economy overhaul (schema < 3) ---------------
+  // Converts the old flat monthly income/expenses into a per-turn production
+  // model: each property either mints goods (its owner sells them) or generates
+  // cash. Calibrates globalVars.gdpScale so GDP recomputed from production
+  // equals the authored figure at turn 0. Seeds company CEO controls, the
+  // government trade desk (settings.trade), economy tunables, and retires the
+  // old event-driven profit generators. Runs exactly once (idempotent).
+  if ((world.schema || 1) < 3 && world.properties && world.settings) {
+    const items = world.items || [];
+    const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
+    const isGood = (id) => { const it = items.find(i => i.id === id); return it && ['Commodities', 'Goods', 'Military'].includes(it.category); };
+    const KIND_ITEM = { mine: 'item_ore', farm: 'item_grain' };
+    const PER_MONTH = 30; // turns the old monthly figures assumed
+
+    // GDP contribution of a property per turn — shared with sim.js runEconomy.
+    // Private firms are valued at output (goods value / cash); pure-cost public
+    // properties (parliament, military, university…) are valued at cost, which
+    // is how government output enters national accounts — this is what "ties
+    // expenses into GDP".
+    const propGross = (pr) => {
+      if (pr.prodMode === 'goods') return (pr.produces || []).reduce((s, e) => s + e.perTurn * priceOf(e.itemId), 0);
+      if (pr.prodMode === 'cash') return pr.cashPerTurn || 0;
+      return pr.expenses || 0; // per-turn upkeep of public/idle assets
+    };
+
+    for (const pr of world.properties) {
+      pr.expenses = Math.round((pr.expenses || 0) / PER_MONTH); // monthly → per-turn
+      const perTurnRevenue = (pr.income || 0) / PER_MONTH;
+      let goodId = (pr.inventory || []).map(r => r.itemId).find(isGood) || KIND_ITEM[pr.kind];
+      if (goodId && !items.find(i => i.id === goodId)) goodId = null;
+      if (perTurnRevenue <= 0) {
+        pr.prodMode = 'none'; pr.produces = []; pr.cashPerTurn = 0;
+      } else if (goodId && priceOf(goodId) > 0) {
+        pr.prodMode = 'goods';
+        pr.produces = [{ itemId: goodId, perTurn: Math.max(1, Math.round(perTurnRevenue / priceOf(goodId))) }];
+        pr.targetRevenue = Math.round(perTurnRevenue);
+        pr.cashPerTurn = 0;
+      } else {
+        pr.prodMode = 'cash'; pr.produces = []; pr.cashPerTurn = Math.round(perTurnRevenue);
+      }
+    }
+
+    const nationalGross = world.properties.reduce((s, pr) => s + propGross(pr), 0);
+    const authoredGdp = (world.globalVars && world.globalVars.gdp) ||
+      world.provinces.reduce((s, p) => s + ((p.vars && p.vars.gdp) || 0), 0);
+    world.globalVars = world.globalVars || {};
+    world.globalVars.gdpScale = nationalGross > 0 ? Math.round((authoredGdp / nationalGross) * 1e6) / 1e6 : 1;
+
+    // CEO controls
+    for (const e of world.entities) {
+      if (e.type !== 'company') continue;
+      if (e.sellPct === undefined) e.sellPct = 100;   // % of production sold domestically
+      if (e.govPct === undefined) e.govPct = 0;       // % sold to the government
+      if (e.wage === undefined) e.wage = 100;         // wage index (100 = baseline)
+    }
+
+    // economy tunables (GM-adjustable later)
+    world.settings.economy = world.settings.economy || {
+      baseDailyWage: 4,      // ₳/employee/turn that a full wage-index swing represents
+      wageHappinessK: 0.03,  // happiness nudge per (wage-100)/100 in operating provinces
+      wageEmploymentK: 0.03  // employment nudge per (wage-100)/100
+    };
+
+    // government trade desk
+    if (!world.settings.trade) {
+      const COMMS = ['item_crude', 'item_fuel', 'item_ore', 'item_copper', 'item_grain', 'item_timber', 'item_cement'].filter(id => items.find(i => i.id === id));
+      const priceMap = (f) => { const o = {}; for (const id of COMMS) o[id] = Math.round(priceOf(id) * f * 100) / 100; return o; };
+      const partners = world.entities.filter(e => e.type === 'foreign').slice(0, 8);
+      world.settings.trade = {
+        govBuyPrices: priceMap(0.9), // government pays companies ~10% under market
+        partners: partners.map((p, i) => ({
+          entityId: p.id,
+          tariff: 'Low',
+          exports: ['item_crude', 'item_fuel', 'item_ore'].filter(id => items.find(x => x.id === id)),
+          imports: [],
+          prices: priceMap(1.03 + (i % 3) * 0.05), // slight per-partner spread, above market
+          priceDrift: 0.05
+        })),
+        lastFlows: [], // [{ itemId, partnerId, qty, value }] filled by the engine
+        history: []    // rolling per-turn totals for the trade graphs
+      };
+    }
+
+    // retire the old event-driven profit generators (their applyEffect handlers
+    // stay in sim.js as manual GM tools; these auto-scheduled events are gone).
+    if (Array.isArray(world.events)) {
+      const RETIRE = new Set(['ev_oil_amco', 'ev_oil_alko', 'ev_market', 'ev_property_pl', 'ev_corporate']);
+      world.events = world.events.filter(ev => !RETIRE.has(ev.id));
+      // GDP is now recomputed from production — drop the old employment→GDP
+      // driver but keep its happiness effect.
+      const drift = world.events.find(ev => ev.id === 'ev_econ_drift');
+      if (drift && Array.isArray(drift.effects)) {
+        drift.effects = drift.effects.filter(fx => !(fx.type === 'adjust_var' && fx.key === 'gdp'));
+        drift.name = 'Employment → Happiness';
+      }
+      changed = true;
+    }
+
+    world.schema = 3;
+    changed = true;
+  }
+
   return changed;
 }
 

@@ -612,6 +612,248 @@ function collectTaxes(db, actor) {
   }
 }
 
+// ---------- production economy (Phase 13) ----------------------------------
+// Runs EVERY turn (replaces the old event-driven profit generators). Each
+// property either mints goods — sold by its owner, split between the domestic
+// market (abstract money-in) and the government (paid from the treasury) — or
+// generates cash directly (casinos, offices, banks). Wages/upkeep are debited;
+// corporate/property tax (if enabled) is skimmed on net; province GDP is
+// recomputed from production using globalVars.gdpScale (fixed at migration).
+
+const clampPct = (v, def) => { const n = Number(v); return isNaN(n) ? def : Math.max(0, Math.min(100, n)); };
+const clamp01 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+function addInventory(holder, itemId, qty) {
+  if (!holder || !(qty > 0)) return;
+  holder.inventory = holder.inventory || [];
+  const row = holder.inventory.find(r => r.itemId === itemId);
+  if (row) row.qty = (row.qty || 0) + qty; else holder.inventory.push({ itemId, qty });
+}
+function removeInventory(holder, itemId, qty) {
+  if (!holder || !holder.inventory || !(qty > 0)) return 0;
+  const row = holder.inventory.find(r => r.itemId === itemId);
+  if (!row) return 0;
+  const take = Math.min(row.qty || 0, qty);
+  row.qty -= take;
+  if (row.qty <= 0) holder.inventory = holder.inventory.filter(r => r !== row);
+  return take;
+}
+// Audit-ledger money move without the per-call timeline entry (routine daily
+// ops would otherwise flood the wire). Balances still move and the transaction
+// is recorded; runEconomy emits one summary log per turn instead.
+function ledgerTxn(fromAcctId, toAcctId, amount, memo, actor, kind) {
+  const db = store.get();
+  amount = Math.round(amount * 100) / 100;
+  if (!(amount > 0)) return;
+  const from = fromAcctId ? db.accounts.find(a => a.id === fromAcctId) : null;
+  const to = toAcctId ? db.accounts.find(a => a.id === toAcctId) : null;
+  if (from) from.balance = Math.round((from.balance - amount) * 100) / 100;
+  if (to) to.balance = Math.round((to.balance + amount) * 100) / 100;
+  store.recordTxn({
+    id: store.uid('txn'), ts: Date.now(), turn: db.settings.time.turn, simDate: db.settings.time.date,
+    from: from ? from.id : null, to: to ? to.id : null, amount, memo: memo || '', actor: actor || 'ENGINE', kind: kind || 'transfer'
+  });
+}
+
+function runEconomy(db, actor) {
+  const g = db.globalVars;
+  const items = db.items;
+  const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
+  const econ = db.settings.economy || { baseDailyWage: 4, wageHappinessK: 0.03, wageEmploymentK: 0.03 };
+  const scale = g.gdpScale || 1;
+  const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
+  const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
+  const govBuy = (db.settings.trade && db.settings.trade.govBuyPrices) || {};
+  const tax = db.settings.taxation && db.settings.taxation.enabled ? db.settings.taxation : null;
+
+  const perOwner = {};      // ownerId -> { dom, upkeep, wage, gross }
+  const govPay = {};        // ownerId -> treasury money owed for gov-bought goods
+  const provGross = {};     // provinceId -> production value this turn
+  const provWage = {};      // provinceId -> { wSum, emp } employee-weighted wage index
+  const own = (id) => (perOwner[id] = perOwner[id] || { dom: 0, upkeep: 0, wage: 0, gross: 0 });
+
+  for (const pr of db.properties) {
+    if (!pr.ownerId) continue;
+    const owner = db.entities.find(e => e.id === pr.ownerId);
+    const co = owner && owner.type === 'company' ? owner : null;
+    const sellPct = co ? clampPct(co.sellPct, 100) : 100;
+    const govPct = co ? clampPct(co.govPct, 0) : 0;
+    const wageIdx = co ? (co.wage === undefined ? 100 : Number(co.wage)) : 100;
+
+    // gross production value (drives GDP): private at output, public at cost
+    let gross;
+    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0);
+    else if (pr.prodMode === 'cash') gross = pr.cashPerTurn || 0;
+    else gross = pr.expenses || 0;
+    if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
+
+    const o = own(pr.ownerId);
+    o.gross += gross;
+
+    // revenue
+    if (pr.prodMode === 'goods') {
+      for (const e of (pr.produces || [])) {
+        const price = priceOf(e.itemId);
+        const produced = e.perTurn || 0;
+        const domQty = Math.floor(produced * sellPct / 100);
+        const govQty = Math.floor(produced * govPct / 100);
+        const keep = produced - domQty - govQty;
+        o.dom += domQty * price;
+        if (keep > 0) addInventory(pr, e.itemId, keep); // unsold accrues as stock
+        if (govQty > 0 && gov) {
+          govPay[pr.ownerId] = (govPay[pr.ownerId] || 0) + govQty * (govBuy[e.itemId] || price);
+          addInventory(gov, e.itemId, govQty); // government stockpile for export
+        }
+      }
+    } else if (pr.prodMode === 'cash') {
+      o.dom += pr.cashPerTurn || 0;
+    }
+
+    // expenses: upkeep + signed wage delta from the baseline index
+    o.upkeep += pr.expenses || 0;
+    o.wage += (pr.employees || 0) * econ.baseDailyWage * ((wageIdx - 100) / 100);
+
+    // wage pressure on the province (employee-weighted)
+    if (pr.provinceId && pr.employees) {
+      const w = provWage[pr.provinceId] = provWage[pr.provinceId] || { wSum: 0, emp: 0 };
+      w.wSum += wageIdx * pr.employees; w.emp += pr.employees;
+    }
+  }
+
+  // settle each owner: net abstract money-in, government purchases, tax
+  let settledOwners = 0, netTotal = 0, taxTotal = 0;
+  for (const ownerId in perOwner) {
+    const o = perOwner[ownerId];
+    const owner = db.entities.find(e => e.id === ownerId);
+    const acct = primaryAccount(ownerId, true);
+    const govRev = govPay[ownerId] || 0;
+    let netAbstract = o.dom - o.upkeep - o.wage; // created/destroyed at the market edge
+
+    // per-turn tax on positive operating net (rates are the same %; net is 1/30
+    // of the old monthly figure, so the monthly burden matches the old system)
+    if (tax && owner && owner.id !== 'ent_gov' && owner.id !== 'ent_bank' && owner.type !== 'government') {
+      const opNet = netAbstract + govRev;
+      const rate = owner.type === 'company' ? (tax.corporateRate || 0) : (tax.propertyRate || 0);
+      if (opNet > 0 && rate > 0 && treasury) {
+        const t = Math.round(opNet * rate / 100 * 100) / 100;
+        if (t > 0) { ledgerTxn(acct.id, treasury.id, t, 'Tax', 'TREASURY', 'transfer'); taxTotal += t; netAbstract -= t; }
+      }
+    }
+
+    if (netAbstract > 0) ledgerTxn(null, acct.id, netAbstract, 'Daily operations', actor, 'deposit');
+    else if (netAbstract < 0) {
+      const draw = Math.min(-netAbstract, Math.max(0, acct.balance)); // never overdraw below zero
+      if (draw > 0) ledgerTxn(acct.id, null, draw, 'Daily upkeep', actor, 'withdraw');
+    }
+    if (govRev > 0 && treasury) ledgerTxn(treasury.id, acct.id, govRev, 'Government goods purchase', 'TREASURY', 'transfer');
+
+    // company earnings vars (annualised run-rate keeps parity with authored figures)
+    if (owner && owner.type === 'company') {
+      owner.vars = owner.vars || {};
+      owner.vars.revenue = Math.round((o.dom + govRev) * 365);
+      owner.vars.profit = Math.round((o.dom + govRev - o.upkeep - o.wage) * 365);
+    }
+    settledOwners++;
+    netTotal += netAbstract;
+  }
+
+  // GDP: province output × calibration scale (global gdp summed by updateDerived)
+  for (const p of db.provinces) {
+    p.vars.gdp = Math.round((provGross[p.id] || 0) * scale * 100) / 100;
+  }
+
+  // wage pressure → happiness & employment nudges (small, per turn, clamped)
+  for (const p of db.provinces) {
+    const w = provWage[p.id];
+    if (!w || !w.emp) continue;
+    const delta = (w.wSum / w.emp - 100) / 100; // avg (wage-100)/100 in this province
+    if (delta === 0) continue;
+    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness + econ.wageHappinessK * delta) * 100) / 100, 0, 100);
+    if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment + econ.wageEmploymentK * delta) * 100) / 100, 0, 100);
+  }
+
+  // built-in daily share reprice (folds in the retired Market Session event)
+  repriceAllShares(db, 0.6, 0.8, 0.15, 0.015, actor);
+
+  if (settledOwners) {
+    store.log('economy', `Daily economy settled`,
+      `${settledOwners} operators · net ${db.settings.currency}${fmtNum(netTotal)}${taxTotal ? ' · tax ' + db.settings.currency + fmtNum(taxTotal) : ''}`, actor || 'ENGINE', []);
+  }
+}
+
+// Share reprice extracted so both the daily engine and the manual reprice_shares
+// effect share one implementation.
+function repriceAllShares(db, a, b, c, e, actor) {
+  const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
+  for (const co of db.entities) {
+    if (co.type !== 'company' || co.sharePrice === undefined) continue;
+    const profit = (co.vars && co.vars.profit) || 0;
+    const valuation = (co.vars && co.vars.valuation) || 1;
+    const trust = co.trust === undefined ? 50 : co.trust;
+    const factor = 1 + a * (profit / valuation) + b * gdpGrowth + c * ((trust - 50) / 100) + (Math.random() * 2 - 1) * e;
+    co.sharePrice = Math.max(0.01, Math.round(co.sharePrice * factor * 100) / 100);
+    const shareItem = db.items.find(it => it.meta && it.meta.companyId === co.id);
+    if (shareItem) shareItem.marketValue = co.sharePrice;
+  }
+}
+
+// Government sells its stockpile abroad each turn at the trade-desk prices
+// (basePrice ± drift, dynamic). Money flows into the treasury. Records per-turn
+// flows for the International Trade graphs. Partners only appear when a company
+// has actually routed goods to the government (govPct > 0) — treasury is
+// otherwise untouched.
+function runForeignTrade(db, actor) {
+  const trade = db.settings.trade;
+  if (!trade || !Array.isArray(trade.partners)) return;
+  const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
+  const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
+  if (!gov || !treasury) return;
+
+  const flows = [];
+  let exportValue = 0;
+  // for each exportable item, split the government stock across the partners
+  // that buy it, at each partner's dynamic price
+  const stockOf = (id) => { const r = (gov.inventory || []).find(x => x.itemId === id); return r ? r.qty : 0; };
+  const exportItems = new Set();
+  for (const p of trade.partners) for (const id of (p.exports || [])) exportItems.add(id);
+
+  for (const itemId of exportItems) {
+    const buyers = trade.partners.filter(p => (p.exports || []).includes(itemId));
+    if (!buyers.length) continue;
+    let stock = stockOf(itemId);
+    if (stock <= 0) continue;
+    const share = Math.floor(stock / buyers.length);
+    for (const p of buyers) {
+      const qty = Math.min(share || stock, stockOf(itemId));
+      if (qty <= 0) continue;
+      const base = (p.prices && p.prices[itemId]) || 0;
+      if (!(base > 0)) continue;
+      const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0);
+      const price = Math.round(base * drift * 100) / 100;
+      const value = Math.round(qty * price * 100) / 100;
+      removeInventory(gov, itemId, qty);
+      ledgerTxn(null, treasury.id, value, `Export to ${(db.entities.find(e => e.id === p.entityId) || {}).name || p.entityId}`, 'TREASURY', 'deposit');
+      flows.push({ itemId, partnerId: p.entityId, qty, value });
+      exportValue += value;
+    }
+  }
+  trade.lastFlows = flows;
+  if (exportValue > 0) {
+    store.log('economy', `Foreign exports settled`, `${db.settings.currency}${fmtNum(exportValue)} to ${new Set(flows.map(f => f.partnerId)).size} partner(s)`, actor || 'ENGINE', []);
+  }
+}
+
+// Append a compact trade sample for the graphs (kept bounded).
+function recordTradeHistory(db) {
+  const trade = db.settings.trade;
+  if (!trade) return;
+  trade.history = trade.history || [];
+  const flows = trade.lastFlows || [];
+  const byItem = {};
+  for (const f of flows) byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value;
+  trade.history.push({ turn: db.settings.time.turn, date: db.settings.time.date, exportValue: flows.reduce((s, f) => s + f.value, 0), byItem });
+  if (trade.history.length > 180) trade.history.splice(0, trade.history.length - 180);
+}
+
 function advanceTurn(steps, actor) {
   const db = store.get();
   steps = Math.max(1, Math.min(60, steps || 1));
@@ -636,6 +878,13 @@ function advanceTurn(steps, actor) {
       if (due) runEvent(ev, actor || 'ENGINE');
     }
 
+    // Production economy runs every turn (replaces the retired profit events):
+    // mint & sell goods / generate cash, pay wages & upkeep, per-turn tax,
+    // recompute province GDP, reprice shares; then the government exports its
+    // stockpile abroad.
+    try { runEconomy(db, actor || 'ENGINE'); } catch (e) { console.error('runEconomy failed:', e.message); }
+    try { runForeignTrade(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignTrade failed:', e.message); }
+
     const prevGdp = db.globalVars.gdp;
     updateDerived();
     const monthBoundary = monthIndex(newMs) !== monthIndex(oldMs);
@@ -652,10 +901,12 @@ function advanceTurn(steps, actor) {
         `${delta >= 0 ? 'an increase' : 'a decline'} of ${Math.abs(delta).toFixed(1)}% for the month. ` +
         `Average approval of the government stands at ${db.globalVars.avgApproval}%.`, 'Economy', true, 'State Statistical Bureau');
     }
-    if (monthBoundary && db.settings.taxation && db.settings.taxation.enabled) collectTaxes(db, actor || 'ENGINE');
+    // taxation is now collected per-turn inside runEconomy (on real net), so the
+    // old monthly collectTaxes pass is retired.
     // lottery draws (Phase 12) — lazy require avoids a sim↔casino cycle
     try { require('./casino').drawDueLotteries(db, actor || 'ENGINE'); } catch (e) { /* casino optional */ }
     recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
+    recordTradeHistory(db);
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
   store.save();

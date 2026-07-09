@@ -570,6 +570,28 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, entity: target });
     }
 
+    // ---- CEO / owner company controls (Phase 13) ----
+    // sell% (domestic), gov% (routed to the government trade desk) and wage
+    // index. Editable by the company's controller (CEO or owner chain) or GM.
+    m = pathname.match(/^\/api\/company\/([\w-]+)\/controls$/);
+    if (m && method === 'PATCH') {
+      const co = db.entities.find(e => e.id === m[1] && e.type === 'company');
+      if (!co) return bad('No such company.');
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, co.id)) return deny('You do not control this company.');
+      const b = await readBody(req);
+      const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
+      const clampWage = (n) => Math.max(0, Math.min(300, Math.round(Number(n) || 0)));
+      if (b.sellPct !== undefined) co.sellPct = clampPct(b.sellPct);
+      if (b.govPct !== undefined) co.govPct = clampPct(b.govPct);
+      // sell% + gov% may not exceed 100 — trim gov% to fit, remainder is stockpiled
+      if ((co.sellPct || 0) + (co.govPct || 0) > 100) co.govPct = Math.max(0, 100 - (co.sellPct || 0));
+      if (b.wage !== undefined) co.wage = clampWage(b.wage);
+      store.log('economy', `${co.name} adjusts operations`, `sell ${co.sellPct}% · gov ${co.govPct}% · wage ${co.wage}`, u.user.displayName, [co.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, company: { id: co.id, sellPct: co.sellPct, govPct: co.govPct, wage: co.wage } });
+    }
+
     // ---- stock market (Phase 4.4) ----
     if (pathname === '/api/market/buy' && method === 'POST') {
       const b = await readBody(req);
@@ -831,6 +853,12 @@ async function handle(req, res, pathname, method) {
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
         if (b.music) s.music = b.music; // Phase 10 — GM Studio Presentation tab writes the whole object
+        if (b.trade) { // Phase 13 — GM Trade desk. Merge editable fields so the engine's live lastFlows/history survive a save.
+          s.trade = s.trade || {};
+          if (b.trade.govBuyPrices) s.trade.govBuyPrices = b.trade.govBuyPrices;
+          if (b.trade.partners) s.trade.partners = b.trade.partners;
+        }
+        if (b.economy) s.economy = b.economy; // Phase 13 — economy tunables (baseDailyWage, wage nudges)
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);
         store.save(); broadcast('sync');

@@ -1,6 +1,52 @@
 'use strict';
 /* GM Studio: visual editors for every collection. No SQL, no code. */
 
+// Phase 13 — quick-start templates so a GM can stand up a producing property or
+// a new item in one click. Property patches reference the default commodity
+// items; if an item is missing in a custom world the GM just repicks it.
+const PROP_TEMPLATES = [
+  ['', '— start from a template —'],
+  ['factory', 'Factory — produces a good'],
+  ['mine', 'Mine — produces ore'],
+  ['oil', 'Oil field — produces crude'],
+  ['refinery', 'Refinery — produces fuel'],
+  ['farm', 'Farm — produces grain'],
+  ['casino', 'Casino — generates cash'],
+  ['office', 'Office / HQ — generates cash'],
+  ['bank', 'Bank — generates cash'],
+  ['port', 'Port / infrastructure — cash'],
+  ['residential', 'Residential — upkeep only'],
+  ['govbuilding', 'Government building — upkeep only']
+];
+const PROP_TEMPLATE_PATCH = {
+  factory: { type: 'industrial', kind: 'factory', prodMode: 'goods', produces: [{ itemId: 'item_radio', perTurn: 100 }], expenses: 5000, employees: 800 },
+  mine: { type: 'industrial', kind: 'mine', prodMode: 'goods', produces: [{ itemId: 'item_ore', perTurn: 150 }], expenses: 4000, employees: 600 },
+  oil: { type: 'industrial', kind: 'mine', prodMode: 'goods', produces: [{ itemId: 'item_crude', perTurn: 3000 }], expenses: 6000, employees: 700 },
+  refinery: { type: 'industrial', kind: 'factory', prodMode: 'goods', produces: [{ itemId: 'item_fuel', perTurn: 1500 }], expenses: 7000, employees: 900 },
+  farm: { type: 'agricultural', kind: 'farm', prodMode: 'goods', produces: [{ itemId: 'item_grain', perTurn: 200 }], expenses: 1500, employees: 500 },
+  casino: { type: 'commercial', kind: 'office', prodMode: 'cash', produces: [], cashPerTurn: 10000, expenses: 4500, employees: 650 },
+  office: { type: 'commercial', kind: 'office', prodMode: 'cash', produces: [], cashPerTurn: 6000, expenses: 3000, employees: 400 },
+  bank: { type: 'commercial', kind: 'bank', prodMode: 'cash', produces: [], cashPerTurn: 8000, expenses: 2000, employees: 450 },
+  port: { type: 'infrastructure', kind: 'port', prodMode: 'cash', produces: [], cashPerTurn: 5000, expenses: 3000, employees: 800 },
+  residential: { type: 'residential', kind: 'house', prodMode: 'none', produces: [], cashPerTurn: 0, expenses: 2, employees: 0 },
+  govbuilding: { type: 'government', kind: 'government', prodMode: 'none', produces: [], cashPerTurn: 0, expenses: 4000, employees: 500 }
+};
+const ITEM_TEMPLATES = [
+  ['', '— start from a template —'],
+  ['commodity', 'Commodity (raw material)'],
+  ['consumer', 'Consumer good'],
+  ['industrial', 'Industrial good'],
+  ['military', 'Military hardware'],
+  ['reserve', 'Reserve / bullion']
+];
+const ITEM_TEMPLATE_PATCH = {
+  commodity: { category: 'Commodities', tradable: true, marketValue: 10, icon: 'C' },
+  consumer: { category: 'Goods', tradable: true, marketValue: 50, icon: 'G' },
+  industrial: { category: 'Goods', tradable: true, marketValue: 200, icon: 'I' },
+  military: { category: 'Military', tradable: false, marketValue: 5000, icon: 'M' },
+  reserve: { category: 'Reserves', tradable: true, marketValue: 1000, icon: 'R' }
+};
+
 const GM = {
   draft: null, draftKey: null,
 
@@ -11,6 +57,7 @@ const GM = {
     ['registry', 'Entity Registry'],
     ['economy', 'Money & Accounts'],
     ['items', 'Items & Market'],
+    ['trade', 'Trade Desk'],
     ['variables', 'Variables'],
     ['events', 'Event Engine'],
     ['population', 'Population'],
@@ -42,6 +89,7 @@ const GM = {
     const fn = {
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
       registry: this.tabRegistry, economy: this.tabEconomy, items: this.tabItems,
+      trade: this.tabTrade,
       variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
       presentation: this.tabPresentation,
       roles: this.tabRoles, danger: this.tabDanger
@@ -409,11 +457,15 @@ const GM = {
     if (!selId) return;
     const isNew = selId === '__newprop__';
     const source = isNew
-      ? { name: 'New Property', type: 'commercial', kind: 'office', provinceId: S().provinces[0] && S().provinces[0].id, pos: [1900, 1000], ownerId: null, value: 100000, employees: 0, income: 0, expenses: 0, description: '', inventory: [], vars: {} }
+      ? { name: 'New Property', type: 'commercial', kind: 'office', provinceId: S().provinces[0] && S().provinces[0].id, pos: [1900, 1000], ownerId: null, value: 100000, employees: 0, income: 0, expenses: 0, prodMode: 'none', produces: [], cashPerTurn: 0, description: '', inventory: [], vars: {} }
       : propById(selId);
     if (!source) return;
     const d = this.getDraft('prop:' + selId, source);
     main.appendChild(Views.secLabel(isNew ? 'New Property' : 'Edit — ' + source.name));
+    // one-click template (prefills category/kind/production)
+    main.appendChild(this.field('Template', this.sel({ _t: '' }, '_t', PROP_TEMPLATES, (v) => {
+      if (v && PROP_TEMPLATE_PATCH[v]) { Object.assign(d, JSON.parse(JSON.stringify(PROP_TEMPLATE_PATCH[v]))); App.renderView(); }
+    }), 'Fills in category, kind and production — you can still tweak everything below.'));
     main.appendChild(el('div.form-grid',
       this.field('Name', this.text(d, 'name')),
       this.field('Owner', this.sel(d, 'ownerId', this.entOptions(null, true))),
@@ -422,13 +474,52 @@ const GM = {
       this.field('Province', this.sel(d, 'provinceId', this.provOptions())),
       this.field('Position', this.placeButton(d, d.name)),
       this.field('Assessed value', this.num(d, 'value')),
-      this.field('Employees', this.num(d, 'employees')),
-      this.field('Monthly income', this.num(d, 'income')),
-      this.field('Monthly expenses', this.num(d, 'expenses'))));
+      this.field('Employees', this.num(d, 'employees'))));
     main.appendChild(this.field('Description', this.area(d, 'description')));
+    main.appendChild(this.productionEditor(d));
     main.appendChild(this.varsEditor(d, 'property'));
     main.appendChild(this.inventoryEditor(d));
     main.appendChild(this.saveBar('properties', d, isNew));
+  },
+
+  /* Production section (Phase 13). A property either mints goods (its owner
+     sells them) or generates cash. For goods, the GM enters a target revenue
+     and the units/turn are back-calculated from the item's market value. */
+  productionEditor(d) {
+    const F = this;
+    const box = el('div');
+    box.appendChild(Views.secLabel('Production (per turn)'));
+    box.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Runs every turn. “Produces goods” mints items into this property’s stock for the owner to sell; “Generates cash” pays money directly (casinos, banks, offices). Enter a target revenue and the units/turn are computed from the item price.'));
+    if (d.prodMode === undefined) d.prodMode = (d.produces && d.produces.length) ? 'goods' : (d.cashPerTurn ? 'cash' : 'none');
+    box.appendChild(this.field('Mode', this.sel(d, 'prodMode',
+      [['none', 'Nothing (upkeep only)'], ['goods', 'Produces goods'], ['cash', 'Generates cash']], () => App.renderView())));
+
+    if (d.prodMode === 'goods') {
+      const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category));
+      d.produces = (d.produces && d.produces.length) ? d.produces : [{ itemId: (goods[0] || {}).id, perTurn: 1 }];
+      d.produces.forEach((row, i) => {
+        const priceNow = () => { const it = itemById(row.itemId); return it ? (it.marketValue || 0) : 0; };
+        const unitOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); padding-bottom:9px; white-space:nowrap;' }, '≈ ' + fmtNum(row.perTurn || 0) + '/turn');
+        const revInput = el('input.text-input', {
+          type: 'number', value: Math.round((row.perTurn || 0) * priceNow()),
+          oninput: (e) => { const rev = Number(e.target.value) || 0; row.perTurn = priceNow() > 0 ? Math.max(0, Math.round(rev / priceNow())) : 0; unitOut.textContent = '≈ ' + fmtNum(row.perTurn) + '/turn'; }
+        });
+        box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:6px; flex-wrap:wrap;' },
+          el('div', { style: 'flex:1 1 180px' }, F.field('Item produced', F.sel(row, 'itemId', goods.map(it => [it.id, it.name + ' (' + CUR() + fmtNum(it.marketValue) + ')']), () => App.renderView()))),
+          el('div', { style: 'flex:1 1 150px' }, F.field('Target revenue / turn (' + CUR() + ')', revInput)),
+          unitOut,
+          el('button.icon-btn', { style: 'padding-bottom:8px;', onclick: () => { d.produces.splice(i, 1); App.renderView(); } }, '✕')));
+      });
+      box.appendChild(el('div.btn-row', el('button.dash-btn', {
+        onclick: () => { const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category)); d.produces.push({ itemId: (goods[0] || {}).id, perTurn: 1 }); App.renderView(); }
+      }, '+ Add produced item')));
+    } else if (d.prodMode === 'cash') {
+      box.appendChild(el('div.form-grid', this.field('Cash generated / turn (' + CUR() + ')', this.num(d, 'cashPerTurn'))));
+    }
+    box.appendChild(el('div.form-grid', this.field('Upkeep / turn (' + CUR() + ')', this.num(d, 'expenses'),
+      'Wages + running costs debited from the owner each turn. Public buildings with no output are valued at this cost in GDP.')));
+    return box;
   },
 
   /* ═══════════ ENTITY REGISTRY ═══════════ */
@@ -548,6 +639,9 @@ const GM = {
     if (!source) return;
     const d = this.getDraft('item:' + selId, source);
     main.appendChild(Views.secLabel(isNew ? 'New Item' : 'Edit — ' + source.name));
+    main.appendChild(this.field('Template', this.sel({ _t: '' }, '_t', ITEM_TEMPLATES, (v) => {
+      if (v && ITEM_TEMPLATE_PATCH[v]) { Object.assign(d, JSON.parse(JSON.stringify(ITEM_TEMPLATE_PATCH[v]))); App.renderView(); }
+    }), 'Fills in category, tradability and a starting market value.'));
     main.appendChild(el('div.form-grid',
       this.field('Name', this.text(d, 'name')),
       this.field('Category', this.text(d, 'category')),
@@ -560,6 +654,78 @@ const GM = {
       oninput: (e) => { try { d.meta = JSON.parse(e.target.value || '{}'); e.target.style.borderColor = ''; } catch (x) { e.target.style.borderColor = 'var(--accent)'; } }
     }, JSON.stringify(d.meta || {}))));
     main.appendChild(this.saveBar('items', d, isNew));
+  },
+
+  /* ═══════════ TRADE DESK (Phase 13) ═══════════
+     Edits settings.trade: what the government pays companies for goods routed
+     to it, and the foreign partners it resells to (per-item price + tariff +
+     the net-balance figure shown in the player Trade table). Saved as one whole
+     object; the server merges it so the engine's live flow history survives. */
+  saveTrade(d) {
+    PATCH('/api/gm/settings', { trade: d })
+      .then(() => { this.draftKey = null; toast('Trade desk saved.'); })
+      .catch(e => toast(e.message, true));
+  },
+  tabTrade(main) {
+    const F = this;
+    const s = S().settings;
+    const trade = this.getDraft('trade', s.trade || { govBuyPrices: {}, partners: [], lastFlows: [], history: [] });
+    trade.govBuyPrices = trade.govBuyPrices || {};
+    trade.partners = trade.partners || [];
+
+    main.appendChild(el('div.doc-title', 'Trade Desk'));
+    main.appendChild(el('div.doc-sub', 'government purchase prices · foreign partners · export prices'));
+
+    const comms = S().items.filter(i => i.tradable && ['Commodities', 'Goods', 'Military'].includes(i.category));
+    const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
+
+    main.appendChild(Views.secLabel('Government purchase prices'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'What the government pays companies for the production they route to it (the CEO’s “sell to government %”). The government resells abroad at the partner prices below — its margin is national trade income.'));
+    const gbGrid = el('div.form-grid');
+    comms.forEach(it => {
+      if (trade.govBuyPrices[it.id] === undefined) trade.govBuyPrices[it.id] = it.marketValue;
+      gbGrid.appendChild(F.field(it.name + ' (' + CUR() + ')', F.num(trade.govBuyPrices, it.id)));
+    });
+    main.appendChild(gbGrid);
+
+    main.appendChild(Views.secLabel('Foreign trade partners'));
+    trade.partners.forEach((p, pi) => {
+      const ent = entById(p.entityId);
+      const box = el('div.stage', { style: 'margin-bottom:12px;' });
+      box.appendChild(el('div.stage-header',
+        el('span.stage-chapter', ent ? ent.name : (p.entityId || 'Partner')),
+        el('button.icon-btn', { title: 'Remove partner', onclick: () => { trade.partners.splice(pi, 1); App.renderView(); } }, '✕')));
+      box.appendChild(el('div.form-grid',
+        F.field('Partner', F.sel(p, 'entityId', foreigns.map(e => [e.id, e.name]), () => App.renderView())),
+        F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
+        F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
+        F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
+      p.exports = p.exports || []; p.prices = p.prices || {};
+      box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, 'Exports to this partner & price'));
+      comms.forEach(it => {
+        const on = p.exports.includes(it.id);
+        const priceInput = el('input.text-input', {
+          type: 'number', style: 'max-width:120px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
+          oninput: (e) => { p.prices[it.id] = Number(e.target.value) || 0; }
+        });
+        box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0;' },
+          el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1; font-size:12.5px; cursor:pointer;' },
+            el('input', {
+              type: 'checkbox', checked: on,
+              onchange: (e) => { if (e.target.checked) { p.exports = [...new Set([...p.exports, it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; } else { p.exports = p.exports.filter(x => x !== it.id); } App.renderView(); }
+            }),
+            it.name),
+          on ? priceInput : null));
+      });
+      main.appendChild(box);
+    });
+    main.appendChild(el('div.btn-row', el('button.dash-btn', {
+      onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], prices: {} }); App.renderView(); }
+    }, '+ Add partner')));
+
+    main.appendChild(el('div.btn-row', { style: 'margin-top:18px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },
+      el('button.solid-btn', { onclick: () => F.saveTrade(trade) }, 'Save Trade Desk')));
   },
 
   /* ═══════════ VARIABLES ═══════════ */

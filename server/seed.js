@@ -669,4 +669,25 @@ function seed() {
   return db;
 }
 
-module.exports = { seed, hashPassword };
+// The canonical starting world is now an authored JSON baseline
+// (data/baseline-world.json) — the 1960 scenario. When that file is present it
+// IS the seed: store.reset()/`--reseed` return to it, and migrate() (store.js)
+// upgrades it to the current schema on every load. The coded seed() above stays
+// as a fallback for a fresh checkout that lacks the baseline file.
+function seedWorld() {
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const file = path.join(__dirname, '..', 'data', 'baseline-world.json');
+    if (fs.existsSync(file)) {
+      const world = JSON.parse(fs.readFileSync(file, 'utf8'));
+      mapdata.applyMap(world); // ensure the SVG map document exists on the baseline
+      return world;
+    }
+  } catch (e) {
+    console.error('baseline-world load failed, falling back to coded seed:', e.message);
+  }
+  return seed();
+}
+
+module.exports = { seed: seedWorld, codedSeed: seed, hashPassword };

@@ -90,6 +90,7 @@ body::before{
 
 /* ---------- buttons & inputs ---------- */
 button{font-family:inherit;}
+button, .tab, .swatch, .chip, .exp-item, .gm-nav-item{touch-action:manipulation;}
 .solid-btn{
   font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.12em; text-transform:uppercase;
   background:var(--ink); color:var(--paper);
@@ -335,7 +336,7 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 
 /* ═══════════ MAP ═══════════ */
 #map-wrap{position:absolute; inset:0; overflow:hidden; background:var(--map-sea);}
-#map-svg{width:100%; height:100%; display:block; cursor:grab;}
+#map-svg{width:100%; height:100%; display:block; cursor:grab; touch-action:none;}
 #map-svg.dragging{cursor:grabbing;}
 #map-svg text{user-select:none; pointer-events:none;}
 .map-ocean{fill:var(--map-sea);}
@@ -833,6 +834,43 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   .doc-view{padding:18px 16px 60px;}
   .form-grid{grid-template-columns:1fr;}
   .paper-switcher{grid-template-columns:repeat(2, 1fr);}
+  /* GM Studio: stack the side-nav above the panel and scroll it horizontally */
+  .gm-layout{flex-direction:column;}
+  .gm-nav{
+    width:100%; display:flex; overflow-x:auto; flex-shrink:0;
+    border-right:none; border-bottom:1px solid var(--rule); padding:6px 4px;
+  }
+  .gm-nav::-webkit-scrollbar{display:none;}
+  .gm-nav-item{border-left:none; border-bottom:2px solid transparent; white-space:nowrap; padding:8px 12px;}
+  .gm-nav-item.active{border-left-color:transparent; border-bottom-color:var(--accent);}
+  .gm-main{padding:18px 16px 90px;}
+}
+
+/* ---------- phones ---------- */
+@media (max-width:640px){
+  /* Panels overlay the whole width instead of a fixed sidebar that overflows */
+  #explorer{width:min(300px, 86vw);}
+  #inspector{width:min(340px, 92vw); box-shadow:-16px 0 40px rgba(0,0,0,.28);}
+  #topbar{height:auto; min-height:46px; gap:8px; padding:0 8px; flex-wrap:wrap;}
+  #tabs{order:5; flex-basis:100%; margin-left:0; border-top:1px solid var(--rule);}
+  .tab{padding:11px 9px 10px;}
+  .topbar-spacer{display:none;}
+  #simclock #clock-turn{font-size:10px;}
+  /* keep the palette from eating the row — one compact swatch strip */
+  .mood-row{gap:5px;}
+  .swatch{width:17px; height:17px;}
+  /* bigger tap targets for the icon controls */
+  #topbar .icon-btn, .inspector-head .icon-btn{min-width:34px; min-height:34px; font-size:16px;}
+  .doc-view{padding:14px 12px 70px;}
+  .doc-title{font-size:24px;}
+  .card-grid{grid-template-columns:1fr;}
+  .paper-switcher{grid-template-columns:repeat(2, 1fr);}
+  .news-article.lead .headline{font-size:24px;}
+  /* wide game tables scroll rather than squashing */
+  .bet-table, .lotto-grid{overflow-x:auto;}
+  .modal{padding:18px 16px;}
+  #ticker{gap:8px; padding:0 8px;}
+  .ticker-label{display:none;}
 }
 
 /* ═══════════ ECONOMY CLUSTER — pick-lists, chips, badges (Phase 4/7) ═══════════ */
@@ -935,26 +973,56 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 }
 
 /* ═══════════ MUSIC WIDGET (Phase 10) ═══════════
-   Compact top-bar player: mute, play/pause, next, now-playing title, volume.
-   Paper/mono styled to match the rest of the shell; hidden entirely when
-   settings.music.enabled is false. */
+   Compact top-bar player: playlist picker, play/pause, next, now-playing
+   title, volume. Paper/mono styled to match the rest of the shell; hidden
+   entirely when settings.music.enabled is false. */
 .music-widget{
   display:flex; align-items:center; gap:6px;
   padding:4px 8px; margin-right:6px;
   border:1px solid var(--rule-strong); background:var(--paper-deep);
   font-family:var(--font-mono); flex-shrink:0;
+  position:relative; /* anchor for the playlist dropdown */
 }
 .music-widget.hidden{display:none;}
 .music-widget .icon-btn{font-size:12px; padding:2px 5px;}
 .music-widget .icon-btn.active{color:var(--accent);}
+.music-pl-btn.locked{color:var(--accent);}
 .music-title{
   font-size:10px; letter-spacing:.04em; color:var(--ink-soft);
   max-width:150px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
 }
 .music-volume{width:64px; accent-color:var(--accent); cursor:pointer;}
+
+/* playlist picker dropdown (Phase 10.1) — floats below the widget */
+.music-pl-menu{
+  position:absolute; top:calc(100% + 5px); right:0; z-index:60;
+  min-width:210px; max-width:280px;
+  background:var(--paper); border:1px solid var(--rule-strong);
+  box-shadow:0 10px 26px rgba(0,0,0,.24);
+}
+.music-pl-menu.hidden{display:none;}
+.music-pl-head{
+  font-size:9px; letter-spacing:.2em; text-transform:uppercase; color:var(--ink-faint);
+  padding:8px 12px 4px;
+}
+.music-pl-item{
+  display:flex; align-items:center; gap:8px;
+  padding:8px 12px; cursor:pointer; font-size:12px; color:var(--ink);
+  border-top:1px solid var(--rule);
+}
+.music-pl-item:hover{background:var(--accent-wash); color:var(--accent);}
+.music-pl-item.selected{color:var(--accent); font-weight:600;}
+.music-pl-check{color:var(--accent); font-size:10px; flex-shrink:0;}
+.music-pl-locked, .music-pl-empty{
+  padding:12px; font-size:11px; line-height:1.5; color:var(--ink-soft);
+}
 @media (max-width:1100px){
   .music-title{max-width:80px;}
 }
-@media (max-width:900px){
-  .music-widget{display:none;} /* GM bar + tabs already crowd small screens; widget stays reachable via GM Studio */
+/* On phones the now-playing title + volume slider are dropped, but the
+   playlist picker and transport stay reachable (the feature needs them). */
+@media (max-width:760px){
+  .music-widget{margin-right:0; gap:3px; padding:3px 5px;}
+  .music-widget .music-title, .music-widget .music-volume{display:none;}
+  .music-pl-menu{min-width:180px;}
 }

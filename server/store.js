@@ -76,7 +76,12 @@ function defaultMusic() {
     library,
     playlists: [{ id: 'plist_default', name: 'Default Soundtrack', tracks: library.map(t => t.id) }],
     activePlaylist: 'plist_default',
-    forcedTrack: null
+    forcedTrack: null,
+    // Phase 10.1 — per-player playlist choice. allowedPlaylists lists the
+    // playlist ids a player may switch to from the top-bar widget; lockPlaylist
+    // forces the GM's activePlaylist on everyone (players can't choose).
+    allowedPlaylists: ['plist_default'],
+    lockPlaylist: false
   };
 }
 
@@ -121,6 +126,17 @@ function migrate(world) {
     world.settings.music = defaultMusic();
     if (vol !== undefined) world.settings.music.volume = vol;
     changed = true;
+  }
+  // Phase 10.1 — per-player playlist choice fields. Additive; a GM's config is
+  // left alone. allowedPlaylists defaults to every existing playlist (so the
+  // picker is populated) and lockPlaylist to off.
+  if (world.settings && world.settings.music) {
+    const mus = world.settings.music;
+    if (mus.allowedPlaylists === undefined) {
+      mus.allowedPlaylists = (mus.playlists || []).map(p => p.id);
+      changed = true;
+    }
+    if (mus.lockPlaylist === undefined) { mus.lockPlaylist = false; changed = true; }
   }
   if (world.settings) {
     const validPaperIds = new Set((world.settings.newspapers || []).map(p => p.id));

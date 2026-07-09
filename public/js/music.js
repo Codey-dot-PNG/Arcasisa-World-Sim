@@ -85,6 +85,39 @@ const Music = {
   library() { const c = this.cfg(); return (c && c.library) || []; },
   trackById(id) { return this.library().find(t => t.id === id); },
 
+  /* ---------- per-player playlist choice (Phase 10.1) ----------
+     The GM still owns the library, playlists, forced track and an
+     activePlaylist default. Each player may *locally* pick any playlist the
+     GM allows (settings.music.allowedPlaylists); that choice lives only in
+     this browser's localStorage and never touches the server. When the GM
+     turns on settings.music.lockPlaylist the pick is ignored and everyone is
+     pinned to the GM's activePlaylist. */
+  allowedPlaylistIds(cfg) {
+    const all = (cfg.playlists || []).map(p => p.id);
+    // undefined = every playlist allowed (older worlds / never configured)
+    if (!Array.isArray(cfg.allowedPlaylists)) return all;
+    return all.filter(id => cfg.allowedPlaylists.includes(id));
+  },
+  localPlaylist() {
+    try { return localStorage.getItem('arcasia-music-playlist') || null; } catch (e) { return null; }
+  },
+  setLocalPlaylist(id) {
+    try {
+      if (id) localStorage.setItem('arcasia-music-playlist', id);
+      else localStorage.removeItem('arcasia-music-playlist'); // null = follow the GM's pick
+    } catch (e) {}
+    this.apply(true);
+  },
+  // Which playlist this client should actually play right now.
+  effectivePlaylistId(cfg) {
+    if (!cfg) return null;
+    if (cfg.lockPlaylist) return cfg.activePlaylist || null; // GM forces it
+    const pick = this.localPlaylist();
+    if (pick && this.allowedPlaylistIds(cfg).includes(pick) &&
+        (cfg.playlists || []).some(p => p.id === pick)) return pick;
+    return cfg.activePlaylist || null; // no/invalid local pick → GM default
+  },
+
   /* ---------- YouTube backend ---------- */
   ytIdOf(url) {
     const m = String(url || '').match(/(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|shorts\/|live\/)|youtu\.be\/)([\w-]{6,})/);
@@ -130,7 +163,7 @@ const Music = {
   buildQueue(cfg) {
     const lib = cfg.library || [];
     const playlists = cfg.playlists || [];
-    const pl = playlists.find(p => p.id === cfg.activePlaylist);
+    const pl = playlists.find(p => p.id === this.effectivePlaylistId(cfg));
     let ids;
     if (pl) ids = (pl.tracks || []).filter(id => lib.some(t => t.id === id));
     else ids = lib.map(t => t.id);
@@ -192,11 +225,12 @@ const Music = {
     this.curForced = null;
     this.audio.loop = false;
 
-    const playlistChanged = this.curPlaylist !== (cfg.activePlaylist || null) || this.curShuffle !== !!cfg.shuffle;
+    const effId = this.effectivePlaylistId(cfg);
+    const playlistChanged = this.curPlaylist !== effId || this.curShuffle !== !!cfg.shuffle;
     if (wasForced || playlistChanged || !this.queue.length || forceRestart) {
       this.queue = this.buildQueue(cfg);
       this.queuePos = this.queue.indexOf(this.curTrackId);
-      this.curPlaylist = cfg.activePlaylist || null;
+      this.curPlaylist = effId;
       this.curShuffle = !!cfg.shuffle;
       if (this.queuePos === -1) {
         // current track isn't part of the (new) rotation — start fresh
@@ -312,15 +346,19 @@ const Music = {
     const topbar = document.getElementById('topbar');
     const playBtn = el('button.icon-btn.music-play', { title: 'Play/pause', onclick: () => this.togglePlay() }, '▶');
     const nextBtn = el('button.icon-btn.music-next', { title: 'Next track', onclick: () => this.next() }, '⏭');
-    const muteBtn = el('button.icon-btn.music-mute', { title: 'Mute/unmute', onclick: () => this.toggleMute() }, '♪');
+    // Replaces the old mute button (which only duplicated pause/volume): opens
+    // a menu of the playlists the GM allows players to choose between.
+    const plBtn = el('button.icon-btn.music-pl-btn', { title: 'Choose playlist', onclick: (e) => this.togglePlaylistMenu(e) }, '♫');
     const title = el('span.music-title', 'No music');
     const volume = el('input.music-volume', {
       type: 'range', min: '0', max: '1', step: '0.05', value: '0.7',
       oninput: (e) => this.setVolume(Number(e.target.value))
     });
-    this.els = { playBtn, nextBtn, muteBtn, title, volume };
+    const plMenu = el('div.music-pl-menu.hidden');
+    this.playlistMenu = plMenu;
+    this.els = { playBtn, nextBtn, plBtn, title, volume };
     this.widget = el('div#music-widget.music-widget.hidden',
-      muteBtn, playBtn, nextBtn, title, volume
+      plBtn, playBtn, nextBtn, title, volume, plMenu
     );
     // Insert before the palette swatches if the topbar is laid out as
     // expected; otherwise just append — either way it's a small fixed-style
@@ -331,18 +369,74 @@ const Music = {
     else document.body.appendChild(this.widget);
   },
 
+  /* ---------- playlist picker menu ---------- */
+  togglePlaylistMenu(e) {
+    if (e) e.stopPropagation();
+    this.armed = true;
+    if (!this.playlistMenu) return;
+    if (this.playlistMenu.classList.contains('hidden')) {
+      this.buildPlaylistMenu();
+      this.playlistMenu.classList.remove('hidden');
+      // close on the next outside click/tap
+      this._plOutside = (ev) => { if (!this.widget.contains(ev.target)) this.closePlaylistMenu(); };
+      setTimeout(() => document.addEventListener('pointerdown', this._plOutside, true), 0);
+    } else {
+      this.closePlaylistMenu();
+    }
+  },
+  closePlaylistMenu() {
+    if (this.playlistMenu) this.playlistMenu.classList.add('hidden');
+    if (this._plOutside) { document.removeEventListener('pointerdown', this._plOutside, true); this._plOutside = null; }
+  },
+  buildPlaylistMenu() {
+    const menu = this.playlistMenu;
+    if (!menu) return;
+    clear(menu);
+    const cfg = this.cfg();
+    if (!cfg) return;
+
+    // GM has locked playback — players cannot choose.
+    if (cfg.lockPlaylist) {
+      const pl = (cfg.playlists || []).find(p => p.id === cfg.activePlaylist);
+      menu.appendChild(el('div.music-pl-locked',
+        '🔒 The gamemaster is controlling the music' + (pl ? ' — ' + pl.name : '') + '.'));
+      return;
+    }
+
+    const allowed = this.allowedPlaylistIds(cfg);
+    const pick = this.localPlaylist();
+    const followingGM = !pick || !allowed.includes(pick);
+    const gmPl = (cfg.playlists || []).find(p => p.id === cfg.activePlaylist);
+
+    const mkRow = (id, label, selected) =>
+      el('div.music-pl-item', { class: selected ? 'selected' : '', onclick: () => { this.setLocalPlaylist(id); this.closePlaylistMenu(); } },
+        el('span.music-pl-check', selected ? '●' : '○'), el('span', label));
+
+    menu.appendChild(el('div.music-pl-head', 'Playlist'));
+    menu.appendChild(mkRow(null, 'Gamemaster’s pick' + (gmPl ? ' (' + gmPl.name + ')' : ' (none)'), followingGM));
+    const rows = (cfg.playlists || []).filter(p => allowed.includes(p.id));
+    rows.forEach(p => menu.appendChild(mkRow(p.id, p.name, !followingGM && pick === p.id)));
+    if (!rows.length) menu.appendChild(el('div.music-pl-empty', 'The gamemaster has not shared any playlists.'));
+  },
+
   renderWidget() {
     if (!this.widget) return;
     const cfg = this.cfg();
-    if (!cfg || !cfg.enabled) { this.widget.classList.add('hidden'); return; }
+    if (!cfg || !cfg.enabled) { this.widget.classList.add('hidden'); this.closePlaylistMenu(); return; }
     this.widget.classList.remove('hidden');
     const t = this.trackById(this.curForced || this.curTrackId);
     this.els.title.textContent = t ? (t.title || 'Untitled track') + (this.curForced ? ' (forced)' : '') : 'No track';
     this.els.title.title = this.els.title.textContent;
     this.els.playBtn.textContent = this.isPlaying() ? '⏸' : '▶';
     this.els.nextBtn.disabled = !!this.curForced;
-    this.els.muteBtn.classList.toggle('active', this.muted);
+    // lock glyph + tooltip when the GM is forcing the playlist
+    const locked = !!cfg.lockPlaylist;
+    this.els.plBtn.textContent = locked ? '🔒' : '♫';
+    this.els.plBtn.title = locked ? 'Gamemaster is controlling the music' : 'Choose playlist';
+    this.els.plBtn.classList.toggle('locked', locked);
     if (document.activeElement !== this.els.volume) this.els.volume.value = String(this.vol);
+    // keep an open menu in sync with live GM changes (lock toggles, renames)
+    if (this.playlistMenu && !this.playlistMenu.classList.contains('hidden')) this.buildPlaylistMenu();
   }
 };
 

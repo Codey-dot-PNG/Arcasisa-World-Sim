@@ -68,7 +68,36 @@ const GameMap = {
   },
   bindPanZoom(wrap) {
     const svg = this.svg;
+    // Two-finger pinch bookkeeping (touch). Live pointers are tracked so a
+    // second finger switches panning into pinch-zoom. clientToSvgUnits maps a
+    // screen point into the svg's user-unit system (independent of this.view,
+    // which transforms the inner group), matching the wheel-zoom math.
+    this.pointers = new Map();
+    this.pinch = null;
+    const clientToSvgUnits = (cx, cy) => {
+      const pt = svg.createSVGPoint(); pt.x = cx; pt.y = cy;
+      return pt.matrixTransform(svg.getScreenCTM().inverse());
+    };
+    const pinchDist = () => {
+      const p = [...this.pointers.values()];
+      return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y);
+    };
+    const pinchMid = () => {
+      const p = [...this.pointers.values()];
+      return { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
+    };
     svg.addEventListener('pointerdown', (e) => {
+      this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+      if (this.pointers.size === 2) {
+        // second finger down — abandon any single-finger pan/click and pinch
+        this.drag = null;
+        this.lastDragMoved = true; // suppress the click that would otherwise fire on lift
+        svg.classList.remove('dragging');
+        const mid = pinchMid();
+        this.pinch = { prevDist: pinchDist(), prevSp: clientToSvgUnits(mid.x, mid.y) };
+        return;
+      }
+      if (this.pointers.size > 2) return;
       // capture is deferred to the first real move (see pointermove below):
       // capturing here unconditionally would re-target every click's
       // pointerup at the svg itself (per the Pointer Events spec), so a
@@ -79,6 +108,25 @@ const GameMap = {
       this.lastDragMoved = false;
     });
     svg.addEventListener('pointermove', (e) => {
+      // ---- pinch-zoom (two fingers) ----
+      if (this.pinch && this.pointers.has(e.pointerId)) {
+        this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+        if (this.pointers.size < 2) return;
+        const mid = pinchMid();
+        const sp = clientToSvgUnits(mid.x, mid.y);
+        const dist = pinchDist();
+        const k2 = Math.min(32, Math.max(0.55, this.view.k * (dist / this.pinch.prevDist)));
+        // zoom about the current midpoint, then pan by how far it travelled
+        this.view.x = sp.x - (sp.x - this.view.x) * (k2 / this.view.k);
+        this.view.y = sp.y - (sp.y - this.view.y) * (k2 / this.view.k);
+        this.view.k = k2;
+        this.view.x += sp.x - this.pinch.prevSp.x;
+        this.view.y += sp.y - this.pinch.prevSp.y;
+        this.pinch.prevDist = dist;
+        this.pinch.prevSp = sp;
+        this.applyTransform();
+        return;
+      }
       if (!this.drag || e.pointerId !== this.drag.pid) return;
       // belt & braces: if the button was released outside the window we never
       // saw the pointerup — the buttons bitmask being 0 means nothing is held.
@@ -108,6 +156,9 @@ const GameMap = {
     // bind them exactly once against the GameMap singleton.
     if (!this._winPanBound) {
       const endFromWindow = (e) => {
+        // drop the lifted finger; end an active pinch once fewer than two remain
+        if (this.pointers && e.pointerId !== undefined) this.pointers.delete(e.pointerId);
+        if (this.pinch && (!this.pointers || this.pointers.size < 2)) this.pinch = null;
         if (!this.drag) return;
         if (e.pointerId !== undefined && this.drag.pid !== undefined && e.pointerId !== this.drag.pid) return;
         this.endDrag();

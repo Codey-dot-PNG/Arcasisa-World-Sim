@@ -1097,6 +1097,8 @@ const GM = {
     const d = this.musicDraft();
     d.library = d.library || [];
     d.playlists = d.playlists || [];
+    // undefined allowedPlaylists means "all" — surface that as every box ticked
+    if (d.allowedPlaylists === undefined) d.allowedPlaylists = d.playlists.map(p => p.id);
 
     main.appendChild(el('div.doc-title', 'Presentation'));
     main.appendChild(el('div.doc-sub', 'music library, playlists and live playback control'));
@@ -1117,6 +1119,26 @@ const GM = {
       }))));
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:4px;' },
       'FORCED TRACKS NEVER APPEAR IN NORMAL SHUFFLE — ONLY WHEN SELECTED ABOVE. CLEARING THE FORCE RESUMES THE ACTIVE PLAYLIST.'));
+
+    /* ---------- player playlist choice (Phase 10.1) ---------- */
+    main.appendChild(Views.secLabel('Player Playlist Choice'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Players pick from the playlists you tick below using the ♫ button in the top-bar music widget; their choice is personal (it never changes what anyone else hears). Turn on “Lock playlist” to override that and force the active playlist on everyone.'));
+    main.appendChild(this.check(d, 'lockPlaylist', 'Lock playlist — force the active playlist on every client (players cannot choose their own)'));
+    main.appendChild(el('div.mono-label', { style: 'margin-top:14px;' }, 'Playlists players may choose'));
+    const allowGrid = el('div.perm-grid');
+    d.playlists.forEach(p => {
+      const checked = d.allowedPlaylists.includes(p.id);
+      allowGrid.appendChild(el('label',
+        el('input', {
+          type: 'checkbox', checked,
+          onchange: (e) => { d.allowedPlaylists = e.target.checked ? [...new Set([...d.allowedPlaylists, p.id])] : d.allowedPlaylists.filter(id => id !== p.id); }
+        }),
+        p.name));
+    });
+    if (!d.playlists.length) allowGrid.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Create a playlist below first.'));
+    main.appendChild(allowGrid);
+
     main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' },
       el('button.solid-btn', { onclick: () => F.saveMusic(d) }, 'Save Presentation Settings')));
 
@@ -1161,7 +1183,7 @@ const GM = {
       const box = el('div.stage', { style: 'margin-bottom:12px;' });
       box.appendChild(el('div.stage-header',
         el('span.stage-chapter', el('span', { style: 'display:inline-block; min-width:220px;' }, F.text(p, 'name'))),
-        el('button.icon-btn', { title: 'Delete playlist', onclick: () => { d.playlists.splice(pi, 1); if (d.activePlaylist === p.id) d.activePlaylist = null; App.renderView(); } }, '✕')));
+        el('button.icon-btn', { title: 'Delete playlist', onclick: () => { d.playlists.splice(pi, 1); if (d.activePlaylist === p.id) d.activePlaylist = null; if (d.allowedPlaylists) d.allowedPlaylists = d.allowedPlaylists.filter(id => id !== p.id); App.renderView(); } }, '✕')));
       p.tracks = p.tracks || [];
       const trackGrid = el('div.perm-grid');
       d.library.forEach(t => {

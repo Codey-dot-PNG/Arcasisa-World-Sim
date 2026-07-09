@@ -581,7 +581,11 @@ function seed() {
           }
         ],
         activePlaylist: 'plist_default',
-        forcedTrack: null
+        forcedTrack: null,
+        // Phase 10.1 — players may switch between allowed playlists from the
+        // top-bar widget; lockPlaylist forces the GM's activePlaylist on all.
+        allowedPlaylists: ['plist_default'],
+        lockPlaylist: false
       }
       // settings.map (countries, labels, roads, rails) is attached by
       // mapdata.applyMap(db) below, which also upgrades all coordinates

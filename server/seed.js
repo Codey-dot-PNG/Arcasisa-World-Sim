@@ -319,7 +319,7 @@ function seed() {
   // 'timeline' is deliberately absent: the Timeline tab is GM-only (the GM
   // role appends it below). Non-GM operators see their own transactions in
   // the Economy ledger instead.
-  const PAGES_ALL = ['map', 'parliament', 'companies', 'economy', 'population', 'news'];
+  const PAGES_ALL = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'war'];
   function role(id, name, perms) { return { id, name, builtin: true, perms }; }
   const roles = [
     role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['timeline', 'gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true }),

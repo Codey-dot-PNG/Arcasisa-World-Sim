@@ -253,11 +253,12 @@ function migrate(world) {
   // also filters timeline data itself in api.js filterState.)
   // Conversely, every role gets the full set of INFO tabs — all dossiers are
   // public knowledge; only the data inside them is clearance-filtered.
-  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'entertainment'];
+  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'entertainment', 'war'];
   for (const r of (world.roles || [])) {
     if (!r.perms || !Array.isArray(r.perms.pages)) continue;
-    if (r.perms.gm) { // GM keeps everything; just make sure it has entertainment
+    if (r.perms.gm) { // GM keeps everything; just make sure it has entertainment/war
       if (!r.perms.pages.includes('entertainment')) { r.perms.pages.push('entertainment'); changed = true; }
+      if (!r.perms.pages.includes('war')) { r.perms.pages.push('war'); changed = true; }
       continue;
     }
     if (r.perms.pages.includes('timeline')) {
@@ -367,6 +368,15 @@ function migrate(world) {
         && (world.entities || []).some(e => e.id === 'per_hale')) {
       satromCo.ceoId = 'per_hale'; changed = true;
     }
+  }
+
+  // War (Phase 15). Nothing structural is required — db.war is simply absent
+  // until a GM starts one — but a malformed/legacy war doc (predating this
+  // feature, or a hand-edited export missing `tick`) would crash the tick
+  // loop, so self-heal by dropping it rather than surfacing an error.
+  if (world.war && typeof world.war.tick !== 'number') {
+    delete world.war;
+    changed = true;
   }
 
   // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'

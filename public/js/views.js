@@ -866,6 +866,7 @@ const Views = {
     else if (W.view === 'news') this.viewNews(inner);
     else if (W.view === 'entertainment') Entertainment.render(inner);
     else if (W.view === 'timeline') this.viewTimeline(inner);
+    else if (W.view === 'war') War.renderPanel(inner);
     else if (W.view === 'gm') GM.render(container);
     if (scrollTop) doc.scrollTop = scrollTop;
   },

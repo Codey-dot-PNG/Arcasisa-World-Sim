@@ -389,6 +389,30 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .prop-marker.selected{stroke:var(--accent); stroke-width:6.4; stroke-opacity:1;}
 .prop-glyph{font-family:var(--font-mono); font-weight:700; fill:var(--paper); pointer-events:none;}
 
+/* War Room — 1960s dossier/newspaper battle-map overlay (public/js/war.js).
+   Muted reds for the invader, ink-toned for the defence; the territory
+   fracture fill uses a hatched <pattern> (#war-hatch, built in war.js) rather
+   than a flat wash so captured ground reads as "eaten away" map paper. */
+.war-territory{pointer-events:none;}
+.war-unit{pointer-events:none;}
+.war-unit-box{stroke:var(--paper); stroke-width:1.6; rx:2;}
+.war-side-att .war-unit-box{fill:#8a3030;}
+.war-side-def .war-unit-box{fill:#2f3d52;}
+.war-state-routed .war-unit-box{fill-opacity:.45; stroke-dasharray:2 2;}
+.war-unit-glyph{font-family:var(--font-mono); font-size:11px; font-weight:700; fill:#f4ecdc;}
+.war-hp-bg{fill:rgba(0,0,0,.35);}
+.war-hp-fill{fill:#c9a13a;}
+.war-fight-ring{fill:none; stroke:#e0a458; stroke-width:2; opacity:.85; animation:war-pulse 1.1s ease-out infinite;}
+@keyframes war-pulse{
+  0%{r:12; opacity:.9;}
+  100%{r:26; opacity:0;}
+}
+.war-flash{fill:none; stroke-width:3; pointer-events:none;}
+.war-flash-battle{stroke:#c9503f;}
+.war-flash-capture{stroke:#e0a458;}
+.war-flash-landing{stroke:#6f93a8;}
+.war-flash-milestone{stroke:#f4ecdc;}
+
 /* Isometric property buildings — small extruded blocks shown once the map is
    zoomed in close enough (see GameMap.isoBuilding / updateMarkerScale in
    map.js). Walls stay near-white like the reference clippings; only the

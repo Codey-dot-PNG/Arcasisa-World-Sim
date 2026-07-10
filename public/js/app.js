@@ -36,7 +36,7 @@ const App = {
   PAGES: [
     ['map', 'World Map'], ['parliament', 'Parliament'], ['companies', 'Companies'],
     ['economy', 'Economy'], ['population', 'Population'], ['news', 'News'],
-    ['entertainment', 'Entertainment'], ['timeline', 'Timeline'], ['gm', 'GM Studio']
+    ['entertainment', 'Entertainment'], ['war', 'War Room'], ['timeline', 'Timeline'], ['gm', 'GM Studio']
   ],
 
   async boot() {

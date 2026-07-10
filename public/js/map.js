@@ -701,6 +701,11 @@ const GameMap = {
       this.eventLayer.appendChild(g);
     }
 
+    // war overlay (territory fracture, unit markers, battle flashes) — drawn
+    // above cities/markers so the front line is never hidden underneath them
+    this.warLayer = null;
+    if (window.War) War.renderMapLayer(this, mk, NS);
+
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;
     if (editing) MapEdit.renderOverlay(this);

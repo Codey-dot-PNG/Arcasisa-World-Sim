@@ -104,3 +104,15 @@ setInterval(() => {
     if (market.maybeDayTick(store.get())) { store.save(); api.broadcast('sync'); }
   } catch (e) { /* transient; retry next tick */ }
 }, 5000).unref();
+
+// War engine — same serverless-safe pattern as the Day Market above, just on
+// a faster ~1s cadence so the local process feels like a live RTS. The actual
+// tick rate is gated on db.war.tickMs/speed (maybeWarTick), so this timer is
+// just how often we check whether a tick is due; on Vercel there is no timer
+// at all and GET /api/state rides the same gate (see server/api.js).
+setInterval(() => {
+  try {
+    const war = require('./server/war');
+    if (war.maybeWarTick(store.get())) { store.save(); api.broadcast('sync'); }
+  } catch (e) { /* transient; retry next tick */ }
+}, 1000).unref();

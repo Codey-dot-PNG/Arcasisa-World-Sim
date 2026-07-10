@@ -11,6 +11,8 @@ const geometry = require('./geometry');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
+const war = require('./war');
+const warScenarios = require('./war-scenarios');
 
 const COOKIE_EXTRA = process.env.VERCEL ? '; Secure' : '';
 
@@ -145,6 +147,10 @@ function filterState(u) {
     history: p.statistics ? (db.history || []) : (db.history || []).map(h => ({ turn: h.turn, shares: h.shares })),
     timeline, trades,
     elections: db.elections,
+    // War (fog of war): every logged-in operator sees the front — territory,
+    // units, objectives, casualties — but the AI's internal reasoning
+    // (war.ai.notes/phase) is GM-only intel, stripped here like events/users.
+    war: db.war ? (p.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null,
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
     users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined
@@ -274,6 +280,7 @@ async function handle(req, res, pathname, method) {
       // real tick, persist + signal so every client refetches the new prices —
       // this is what gives Vercel deployments a live ~5s market with no timer.
       try { if (market.maybeDayTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* market optional */ }
+      try { if (war.maybeWarTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* war optional */ }
       return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
     }
 
@@ -889,6 +896,38 @@ async function handle(req, res, pathname, method) {
         sim.updateDerived();
         store.save(); broadcast('sync');
         return json(res, 200, { ran });
+      }
+      // ---- War (Phase 15 — realtime battlefield RTS) ----
+      if (pathname === '/api/gm/war/start' && method === 'POST') {
+        const b = await readBody(req);
+        if (db.war && db.war.active) return json(res, 409, { error: 'A war is already active.' });
+        const scenario = warScenarios.scenarios[b.scenario];
+        if (!scenario) return bad('Unknown scenario: ' + b.scenario);
+        try {
+          war.startWar(db, scenario);
+        } catch (e) { return bad(e.message); }
+        store.log('gm', `War started: ${scenario.name}`, '', actor, [scenario.attackerId, scenario.defenderId]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war });
+      }
+      if (pathname === '/api/gm/war/control' && method === 'POST') {
+        const b = await readBody(req);
+        if (!db.war) return bad('No war is active.');
+        if (b.paused !== undefined) db.war.paused = !!b.paused;
+        if (b.speed !== undefined) {
+          const speed = Number(b.speed);
+          if (![1, 2, 4, 8].includes(speed)) return bad('Speed must be one of 1, 2, 4, 8.');
+          db.war.speed = speed;
+        }
+        store.log('gm', 'War control updated', `paused=${db.war.paused} speed=${db.war.speed}×`, actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war });
+      }
+      if (pathname === '/api/gm/war/end' && method === 'POST') {
+        if (!db.war) return bad('No war is active.');
+        war.endWar(db, actor, 'Ended by the Gamemaster');
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war });
       }
       if (pathname === '/api/gm/election' && method === 'POST') {
         const b = await readBody(req);

@@ -9,7 +9,7 @@ changes on a machine that has Python but no Node runtime.
 Switch the signed-in user by setting the cookie: document.cookie =
 'mockrole=citizen' (or 'gm', the default) and reloading.
 """
-import json, os, random, threading, time
+import json, os, random, re, threading, time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -370,6 +370,15 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PATCH(self):
         p = urlparse(self.path).path
         b = self._body()
+        m = re.match(r"^/api/company/([\w-]+)/controls$", p)
+        if m:
+            for e in ENTITIES:
+                if e["id"] == m.group(1) and e.get("type") == "company":
+                    if "keepPct" in b: e["keepPct"] = max(0, min(100, round(float(b["keepPct"] or 0))))
+                    if "wage" in b: e["wage"] = max(0, min(300, round(float(b["wage"] or 0))))
+                    VERSION[0] += 1
+                    return self._json({"ok": True, "company": {"id": e["id"], "keepPct": e.get("keepPct", 0), "wage": e.get("wage", 100)}})
+            return self._json({"error": "no such company"}, 400)
         if p.startswith("/api/casino/venue/"):
             vid = p.rsplit("/", 1)[1]
             for v in VENUES:

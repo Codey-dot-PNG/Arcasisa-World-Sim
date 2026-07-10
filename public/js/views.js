@@ -1043,7 +1043,7 @@ const Views = {
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true;
-        try { await PATCH('/api/company/' + e.id + '/controls', draft); toast('Operations updated.'); }
+        try { const r = await PATCH('/api/company/' + e.id + '/controls', draft); if (r && r.company) { e.keepPct = r.company.keepPct; e.wage = r.company.wage; } toast('Operations updated.'); }
         catch (err) { toast(err.message, true); b.disabled = false; }
       }
     }, 'Save Operations'),
@@ -1395,7 +1395,10 @@ const Views = {
       onclick: async (ev) => {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
-          await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, wage: dr.wage });
+          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, wage: dr.wage });
+          // apply the server-confirmed values to local state at once, so no
+          // refetch timing can revert them and navigating away keeps the change
+          if (r && r.company) { c.keepPct = r.company.keepPct; c.wage = r.company.wage; }
           W.opsDraft = null;
           toast('Operations saved.');
         } catch (err) { toast(err.message, true); btn.disabled = false; }

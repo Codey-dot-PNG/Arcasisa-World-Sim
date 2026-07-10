@@ -180,8 +180,12 @@ async function api(method, path, body) {
   try { data = await res.json(); } catch (e) { /* stream or empty */ }
   if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
   // on cloud hosting the realtime ping can lag a moment behind our own
-  // mutations, so refetch state directly after any successful write
-  if (method !== 'GET' && !path.startsWith('/api/auth/')) scheduleRefresh();
+  // mutations, so refetch state directly after any successful write. The
+  // refresh is FORCED so it always applies the freshly-committed world — the
+  // response has already resolved, so the write is durable, and the version
+  // guard must not skip pulling our own save back in (that skip is what made
+  // saves look like they "didn't stick" until a hard reload).
+  if (method !== 'GET' && !path.startsWith('/api/auth/')) scheduleRefresh(true);
   return data;
 }
 const GET = (p) => api('GET', p);
@@ -296,7 +300,9 @@ function tryDeferredRender() {
   renderPending = false;
   App.renderAll();
 }
-function scheduleRefresh() {
+let pendingForce = false;
+function scheduleRefresh(force) {
+  if (force) pendingForce = true; // a write's own refetch must apply, version guard or not
   // Never swap in fresh state mid-interaction in the map editor: pointer
   // drags and half-drawn lines mutate objects inside the CURRENT state, and
   // replacing it would orphan those edits (the old "edits reset / don't
@@ -308,7 +314,8 @@ function scheduleRefresh() {
   if (W.refreshTimer) return;
   W.refreshTimer = setTimeout(async () => {
     W.refreshTimer = null;
-    try { await refreshState(); } catch (e) { /* transient */ }
+    const f = pendingForce; pendingForce = false;
+    try { await refreshState(f); } catch (e) { /* transient */ }
   }, 250);
 }
 let lastV = undefined, refreshSeq = 0;

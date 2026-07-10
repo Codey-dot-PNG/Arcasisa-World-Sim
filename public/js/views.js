@@ -1027,21 +1027,24 @@ const Views = {
      by the company's controller or GM; read-only for everyone else. */
   companyControls(e) {
     const controllable = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, e.id));
-    const sell = e.sellPct === undefined ? 100 : e.sellPct;
-    const govp = e.govPct === undefined ? 0 : e.govPct;
+    const keep = e.keepPct === undefined ? 0 : e.keepPct;
+    const mix = e.govMix === undefined ? 0 : e.govMix;
+    const priceMult = e.govPriceMult === undefined ? 1 : e.govPriceMult;
     const wage = e.wage === undefined ? 100 : e.wage;
     const box = el('div');
     box.appendChild(this.secLabel('Operations'));
     if (!controllable) {
-      box.appendChild(this.kv('Sold to market', sell + '%'));
-      box.appendChild(this.kv('Sold to government', govp + '%'));
+      box.appendChild(this.kv('Kept in inventory', keep + '%'));
+      box.appendChild(this.kv('Offered to government', mix + '% of sales'));
+      box.appendChild(this.kv('Gov. price', '× ' + Number(priceMult).toFixed(2) + ' retail'));
       box.appendChild(this.kv('Wage level', wage + (wage === 100 ? ' (baseline)' : '')));
       return box;
     }
-    const draft = { sellPct: sell, govPct: govp, wage: wage };
+    const draft = { keepPct: keep, govMix: mix, govPriceMult: priceMult, wage: wage };
     box.appendChild(el('div.form-grid',
-      Forms.field('Sell to market %', Forms.slider(draft, 'sellPct', 0, 100, { suffix: '%' }), 'Domestic sales → your revenue'),
-      Forms.field('Sell to government %', Forms.slider(draft, 'govPct', 0, 100, { suffix: '%' }), 'Bought by the state at its set price'),
+      Forms.field('Keep in inventory %', Forms.slider(draft, 'keepPct', 0, 100, { suffix: '%' }), 'Held back as company stock'),
+      Forms.field('Offer to government %', Forms.slider(draft, 'govMix', 0, 100, { suffix: '%' }), 'Share of sales offered to the state (rest → domestic market)'),
+      Forms.field('Gov. price (× retail)', Forms.slider(draft, 'govPriceMult', 0.25, 3, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2) }), 'Your asking price to the state'),
       Forms.field('Wage index (100 = base)', Forms.slider(draft, 'wage', 0, 200, {}), 'Higher pay lifts local happiness/employment but costs more')));
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
@@ -1054,37 +1057,286 @@ const Views = {
     return box;
   },
 
-  /* ---- International Trade (Phase 13) ---- */
+  /* ---- International Trade (Phase 14) ---- */
+  // A small horizontal progress bar: `done` of `total`, with an optional label.
+  tradeBar(done, total, color) {
+    const pct = total > 0 ? Math.max(0, Math.min(100, Math.round(done / total * 100))) : 0;
+    return el('div', { style: 'position:relative; height:8px; border:1px solid var(--rule-strong); background:rgba(0,0,0,.06); overflow:hidden; min-width:90px;' },
+      el('div', { style: 'position:absolute; inset:0 auto 0 0; width:' + pct + '%; background:' + (color || 'var(--good)') + ';' }));
+  },
+  // Shared President/GM trade draft (govBuy + export rules + import orders).
+  tradeDraft(trade) {
+    if (W.tradeCtlDraft && W.tradeCtlDraft._v === 2) return W.tradeCtlDraft;
+    return (W.tradeCtlDraft = {
+      _v: 2,
+      govBuy: JSON.parse(JSON.stringify(trade.govBuy || {})),
+      exports: JSON.parse(JSON.stringify(trade.exports || {})),
+      imports: JSON.parse(JSON.stringify(trade.imports || []))
+    });
+  },
+  async saveTradeCtl(btn, dr) {
+    btn.disabled = true;
+    try {
+      await PATCH('/api/trade/controls', { govBuy: dr.govBuy, exports: dr.exports, imports: (dr.imports || []).filter(r => r.itemId && r.qtyPerTurn > 0) });
+      W.tradeCtlDraft = null;
+      toast('Trade directives saved.');
+    } catch (err) { toast(err.message, true); btn.disabled = false; }
+  },
   viewIntlTrade(inner) {
     const trade = S().settings.trade || {};
-    const partners = trade.partners || [];
-    const flows = trade.lastFlows || [];
-    const hist = trade.history || [];
-    const nameOf = (eid) => { const e = entById(eid); return e ? e.name : eid; };
-    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
-
+    const partners = (trade.partners || []).filter(p => entById(p.entityId));
     if (!partners.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' },
         'No trade partners are configured yet. The Gamemaster sets these up in GM Studio → Trade Desk.'));
       return;
     }
+    const g = S().globalVars || {};
+    inner.appendChild(this.statStrip([
+      ['Exports / turn', fmtMoney(g.lastExportIncome || 0)],
+      ['Imports / turn', fmtMoney(g.lastImportSpend || 0)],
+      ['Net / turn', fmtMoney((g.lastExportIncome || 0) - (g.lastImportSpend || 0))],
+      ['Partners', fmtNum(partners.length)]
+    ]));
 
-    // net-balance table (GM-managed, mirrors the world Trade sheet)
-    inner.appendChild(this.secLabel('Trade Balance'));
-    const table = el('table.data');
-    table.appendChild(el('tr', el('th', 'Country'), el('th', 'Exports'), el('th', 'Imports'), el('th', 'Tariff'), el('th.num', 'Net Balance')));
+    const canGov = this.controlsGov();
+    if (!W.itlTab) W.itlTab = 'markets';
+    const tab = (id, label) => el('button.chip', { class: W.itlTab === id ? 'active' : '', onclick: () => { W.itlTab = id; App.renderView(); } }, label);
+    inner.appendChild(el('div.chip-row', { style: 'margin:8px 0 4px;' },
+      tab('markets', 'Selling & Buying'),
+      tab('goods', 'Goods'),
+      canGov ? tab('exports', 'Exports') : null,
+      canGov ? tab('imports', 'Imports') : null,
+      tab('graphs', 'Graphs')));
+
+    if (W.itlTab === 'goods') return this.intlGoods(inner, trade, partners, canGov);
+    if (W.itlTab === 'exports' && canGov) return this.intlExports(inner, trade, partners);
+    if (W.itlTab === 'imports' && canGov) return this.intlImports(inner, trade, partners);
+    if (W.itlTab === 'graphs') return this.intlGraphs(inner, trade, partners);
+    return this.intlMarkets(inner, trade, partners);
+  },
+
+  /* Selling & Buying — foreign demand (our export markets) and foreign supply
+     (our import sources), each with price and a High/Med/Low level. Read-only;
+     the GM authors these on the Trade Desk. */
+  intlMarkets(inner, trade, partners) {
+    const nameOf = (eid) => { const e = entById(eid); return e ? e.name : eid; };
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const lvl = (s) => el('span', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.05em; color:' + (s === 'High' ? 'var(--good)' : s === 'Low' ? 'var(--accent)' : 'var(--ink-soft)') }, (s || 'Med').toUpperCase());
+    const demandRows = [], supplyRows = [];
     partners.forEach(p => {
-      const nb = Number(p.netBalance || 0);
-      table.appendChild(el('tr.row-link', { onclick: () => select('entity', p.entityId) },
-        el('td', nameOf(p.entityId)),
-        el('td', (p.exports || []).map(itemName).join(', ') || '—'),
-        el('td', (p.imports || []).map(itemName).join(', ') || '—'),
-        el('td', p.tariff || 'Low'),
-        el('td.num', { style: 'font-weight:700; color:' + (nb > 0 ? 'var(--good)' : nb < 0 ? 'var(--accent)' : 'var(--ink-soft)') }, (nb > 0 ? '+' : '') + nb)));
+      const buys = new Set([...(p.exports || []), ...Object.keys(p.demand || {})]);
+      const sells = new Set([...(p.imports || []), ...Object.keys(p.supply || {})]);
+      buys.forEach(iid => { if (itemById(iid)) demandRows.push({ p, iid, price: (p.prices || {})[iid] || 0, level: (p.demand || {})[iid] || 'Med' }); });
+      sells.forEach(iid => { if (itemById(iid)) supplyRows.push({ p, iid, price: (p.prices || {})[iid] || 0, level: (p.supply || {})[iid] || 'Med' }); });
     });
-    inner.appendChild(table);
 
-    // latest-turn export flows (positive values only — negative flows are imports)
+    inner.appendChild(this.secLabel('Foreign Demand — who buys from us'));
+    if (demandRows.length) {
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Country'), el('th', 'Item wanted'), el('th.num', 'They pay'), el('th', 'Demand'))),
+        el('tbody', demandRows.sort((a, b) => b.price - a.price).map(r =>
+          el('tr.row-link', { onclick: () => select('entity', r.p.entityId) },
+            el('td', nameOf(r.p.entityId)), el('td', itemName(r.iid)),
+            el('td.num', CUR() + fmtNum(r.price)), el('td', lvl(r.level)))))));
+    } else inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' }, 'No foreign power is currently buying — the GM sets partner demand on the Trade Desk.'));
+
+    inner.appendChild(this.secLabel('Foreign Supply — who sells to us'));
+    if (supplyRows.length) {
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Country'), el('th', 'Item offered'), el('th.num', 'Their price'), el('th', 'Supply'))),
+        el('tbody', supplyRows.sort((a, b) => a.price - b.price).map(r =>
+          el('tr.row-link', { onclick: () => select('entity', r.p.entityId) },
+            el('td', nameOf(r.p.entityId)), el('td', itemName(r.iid)),
+            el('td.num', CUR() + fmtNum(r.price)), el('td', lvl(r.level)))))));
+    } else inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' }, 'No foreign power is currently offering goods for import.'));
+  },
+
+  /* Goods — the national stockpile (what we hold, how much, and where this
+     turn's inflow came from), and the government's standing offer to buy from
+     domestic companies (qty/turn + price ceiling, tunable per company). */
+  intlGoods(inner, trade, partners, canGov) {
+    const gov = this.govEntity();
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const stockIn = trade.stockIn || {};
+
+    // national stockpile of tradable goods
+    const stockRows = ((gov && gov.inventory) || [])
+      .filter(r => { const it = itemById(r.itemId); return it && ['Commodities', 'Goods', 'Military'].includes(it.category); });
+    inner.appendChild(this.secLabel('National Stockpile'));
+    if (stockRows.length) {
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Item'), el('th.num', 'In stock'), el('th.num', 'Retail'), el('th.num', 'Value'), el('th', 'Inflow last turn (source)'))),
+        el('tbody', stockRows.map(r => {
+          const it = itemById(r.itemId); const src = stockIn[r.itemId] || {};
+          const srcTxt = (src.local || src.import)
+            ? [src.local ? '+' + fmtNum(src.local) + ' local' : null, src.import ? '+' + fmtNum(src.import) + ' import' : null].filter(Boolean).join(' · ')
+            : '—';
+          return el('tr', el('td', it.name), el('td.num', fmtNum(r.qty)), el('td.num', fmtMoney(it.marketValue || 0)),
+            el('td.num', fmtMoney(r.qty * (it.marketValue || 0))), el('td', { style: 'font-size:11.5px; color:var(--ink-soft);' }, srcTxt));
+        }))));
+    } else inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' },
+      'The national stockpile is empty. Buy goods from domestic companies below, or import them.'));
+
+    if (!canGov) return;
+
+    // ---- government purchases from domestic companies ----
+    const dr = this.tradeDraft(trade);
+    // items domestic companies actually produce
+    const producers = {}; // itemId -> Set(companyId)
+    S().properties.forEach(pr => {
+      const owner = entById(pr.ownerId);
+      if (!owner || owner.type !== 'company') return;
+      (pr.produces || []).forEach(e => { (producers[e.itemId] = producers[e.itemId] || new Set()).add(owner.id); });
+    });
+    const buyable = Object.keys(producers).filter(iid => itemById(iid));
+
+    inner.appendChild(this.secLabel('Buy from Domestic Companies'));
+    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+      'Set how much of each good the state will buy per turn and the most it will pay (a multiplier of retail). Companies offer their own price; a sale clears when their ask is at or under your ceiling. Bought goods land in the national stockpile. Tune specific companies with “+ per-company”.'));
+    if (!buyable.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No domestic company is producing tradable goods yet.'));
+    const gbBox = el('div.stage');
+    for (const iid of buyable) {
+      const it = itemById(iid);
+      const entry = dr.govBuy[iid] = dr.govBuy[iid] || { qty: 0, maxMult: 1 };
+      const head = el('div', { style: 'display:flex; align-items:center; gap:12px; padding:6px 0; flex-wrap:wrap;' },
+        el('span', { style: 'width:180px; font-size:12.5px; flex-shrink:0;' }, it.name + ' ', el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:9px;' }, 'retail ' + CUR() + fmtNum(it.marketValue || 0))),
+        el('div', { style: 'display:flex; align-items:center; gap:6px;' }, el('span', { style: 'font-size:11px; color:var(--ink-faint);' }, 'buy/turn'), el('div', { style: 'width:110px;' }, Forms.num(entry, 'qty'))),
+        el('div', { style: 'display:flex; align-items:center; gap:6px; flex:1; min-width:150px;' }, el('span', { style: 'font-size:11px; color:var(--ink-faint);' }, '≤ price'), el('div', { style: 'flex:1;' }, Forms.slider(entry, 'maxMult', 0.25, 2, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2) }))));
+      gbBox.appendChild(head);
+      // per-company override toggle
+      const coBox = el('div', { style: 'margin:0 0 6px 180px;' });
+      const cos = [...producers[iid]].map(entById).filter(Boolean);
+      const openKey = 'gbco_' + iid;
+      const renderCos = () => {
+        clear(coBox);
+        if (!W[openKey]) {
+          coBox.appendChild(el('button.dash-btn', { style: 'font-size:11px;', onclick: () => { W[openKey] = true; renderCos(); } }, '+ per-company (' + cos.length + ')'));
+          return;
+        }
+        entry.byCompany = entry.byCompany || {};
+        cos.forEach(co => {
+          const has = entry.byCompany[co.id] !== undefined;
+          // once "set", bind the inputs directly to the real override object so
+          // every keystroke persists; otherwise show the nationwide values greyed.
+          const target = has ? entry.byCompany[co.id] : { qty: entry.qty || 0, maxMult: entry.maxMult || 1 };
+          coBox.appendChild(el('div', { style: 'display:flex; align-items:center; gap:8px; padding:2px 0; font-size:11.5px; ' + (has ? '' : 'opacity:.6;') },
+            el('span', { style: 'width:140px; color:var(--ink-soft);' }, co.abbrev || co.name),
+            el('div', { style: 'width:100px;' }, has ? Forms.num(target, 'qty', '1') : el('input.text-input', { type: 'number', value: target.qty, disabled: true })),
+            el('div', { style: 'flex:1; min-width:120px;' }, has ? Forms.slider(target, 'maxMult', 0.25, 2, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2) }) : el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, '×' + Number(target.maxMult).toFixed(2))),
+            el('button.dash-btn', { style: has ? '' : 'opacity:.7;', title: has ? 'Custom — click to clear' : 'Follows the nationwide setting', onclick: () => { if (has) delete entry.byCompany[co.id]; else entry.byCompany[co.id] = { qty: entry.qty || 0, maxMult: entry.maxMult || 1 }; renderCos(); } }, has ? 'custom ✕' : 'set')));
+        });
+        coBox.appendChild(el('button.dash-btn', { style: 'font-size:11px; margin-top:4px;', onclick: () => { W[openKey] = false; renderCos(); } }, '– collapse'));
+      };
+      renderCos();
+      gbBox.appendChild(coBox);
+    }
+    inner.appendChild(gbBox);
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: (ev) => this.saveTradeCtl(ev.currentTarget, dr) }, 'Save Purchase Orders')));
+  },
+
+  /* Exports — per-item asking multiplier (global, overridable per country) and
+     an on/off switch. Goods are sold to the highest qualifying bidder; the bar
+     shows how much of each item cleared last turn (unsold stays stockpiled). */
+  intlExports(inner, trade, partners) {
+    const gov = this.govEntity();
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const dr = this.tradeDraft(trade);
+    const fill = trade.lastExportFill || {};
+
+    // items any partner will buy that we could plausibly export
+    const wanted = new Set();
+    partners.forEach(p => { (p.exports || []).forEach(i => wanted.add(i)); Object.keys(p.demand || {}).forEach(i => wanted.add(i)); });
+    ((gov && gov.inventory) || []).forEach(r => { const it = itemById(r.itemId); if (it && ['Commodities', 'Goods', 'Military'].includes(it.category)) wanted.add(r.itemId); });
+    const items = [...wanted].filter(iid => itemById(iid));
+
+    inner.appendChild(this.secLabel('Export Rules'));
+    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+      'Your asking price is retail × the multiplier below; a good is sold to the highest-paying partner whose price meets your ask, up to their appetite, richest bidder first. Set a per-country multiplier to squeeze a specific buyer. Anything unsold stays in the stockpile.'));
+    if (!items.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No foreign power is buying anything right now.'));
+    const box = el('div.stage');
+    for (const iid of items) {
+      const it = itemById(iid);
+      const entry = dr.exports[iid] = dr.exports[iid] || { mult: 1, off: false };
+      const f = fill[iid];
+      const row = el('div', { style: 'padding:7px 0; border-bottom:1px dashed var(--rule);' });
+      row.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; flex-wrap:wrap;' },
+        el('label', { style: 'display:flex; align-items:center; gap:6px; width:200px; flex-shrink:0; cursor:pointer;' },
+          el('input', { type: 'checkbox', checked: !entry.off, onchange: (e) => { entry.off = !e.target.checked; } }),
+          el('span', { style: 'font-size:12.5px;' }, it.name)),
+        el('div', { style: 'display:flex; align-items:center; gap:6px; flex:1; min-width:150px;' }, el('span', { style: 'font-size:11px; color:var(--ink-faint);' }, 'ask ×'), el('div', { style: 'flex:1;' }, Forms.slider(entry, 'mult', 0.5, 3, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2) }))),
+        el('div', { style: 'width:150px;' }, f ? el('div', { style: 'display:flex; align-items:center; gap:6px;' }, this.tradeBar(f.sold, f.available), el('span', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, fmtNum(f.sold) + '/' + fmtNum(f.available))) : el('span', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, 'no flow'))));
+      // per-country overrides
+      const buyers = partners.filter(p => (p.exports || []).includes(iid) || (p.demand && p.demand[iid]));
+      if (buyers.length) {
+        const ck = 'exco_' + iid;
+        const coWrap = el('div', { style: 'margin-top:4px;' });
+        const renderCo = () => {
+          clear(coWrap);
+          if (!W[ck]) { coWrap.appendChild(el('button.dash-btn', { style: 'font-size:10.5px;', onclick: () => { W[ck] = true; renderCo(); } }, '+ per-country (' + buyers.length + ')')); return; }
+          entry.byCountry = entry.byCountry || {};
+          buyers.forEach(p => {
+            const has = entry.byCountry[p.entityId] !== undefined;
+            const proxy = { m: has ? entry.byCountry[p.entityId] : entry.mult };
+            coWrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:8px; padding:2px 0; font-size:11px;' },
+              el('span', { style: 'width:150px; color:var(--ink-soft);' }, entName(p.entityId) + ' (pays ' + CUR() + fmtNum((p.prices || {})[iid] || 0) + ')'),
+              el('div', { style: 'flex:1; min-width:120px;' }, Forms.slider(proxy, 'm', 0.5, 3, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2), onInput: (v) => { entry.byCountry[p.entityId] = v; } })),
+              el('button.dash-btn', { style: has ? '' : 'opacity:.4;', onclick: () => { if (has) delete entry.byCountry[p.entityId]; else entry.byCountry[p.entityId] = proxy.m; renderCo(); } }, has ? '✕' : '=')));
+          });
+          coWrap.appendChild(el('button.dash-btn', { style: 'font-size:10.5px; margin-top:2px;', onclick: () => { W[ck] = false; renderCo(); } }, '– collapse'));
+        };
+        renderCo();
+        row.appendChild(coWrap);
+      }
+      box.appendChild(row);
+    }
+    inner.appendChild(box);
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: (ev) => this.saveTradeCtl(ev.currentTarget, dr) }, 'Save Export Rules')));
+  },
+
+  /* Imports — standing per-turn orders, bought from the cheapest partner that
+     supplies the good at/under the order's price ceiling. */
+  intlImports(inner, trade, partners) {
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const dr = this.tradeDraft(trade);
+    const importable = [...new Set(partners.flatMap(p => [...(p.imports || []), ...Object.keys(p.supply || {})]))].filter(iid => itemById(iid));
+    const lastImp = {}; (trade.lastFlows || []).forEach(f => { if (f.value < 0) lastImp[f.itemId] = (lastImp[f.itemId] || 0) + f.qty; });
+
+    inner.appendChild(this.secLabel('Import Orders (per turn, paid by the Treasury)'));
+    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+      'Each order is filled from the cheapest partner that supplies the good at or under your price ceiling (retail × the multiplier). Delivered into the national stockpile; skipped if the treasury can’t pay.'));
+    const impBox = el('div.stage');
+    const render = () => {
+      clear(impBox);
+      if (!importable.length) { impBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No partner offers goods for import — the GM sets partner supply on the Trade Desk.')); return; }
+      dr.imports.forEach((row, ri) => {
+        if (row.maxMult === undefined) row.maxMult = 1.5;
+        const sellers = partners.filter(p => (p.imports || []).includes(row.itemId) || (p.supply && p.supply[row.itemId]));
+        const itemSel = el('select.text-input', { style: 'max-width:200px;' }, importable.map(iid => el('option', { value: iid, selected: iid === row.itemId ? 'selected' : undefined }, itemName(iid))));
+        itemSel.addEventListener('change', () => { row.itemId = itemSel.value; row.partnerId = null; render(); });
+        const partnerSel = el('select.text-input', { style: 'max-width:180px;' },
+          [el('option', { value: '' }, '— cheapest —'), ...sellers.map(p => el('option', { value: p.entityId, selected: p.entityId === row.partnerId ? 'selected' : undefined }, entName(p.entityId)))]);
+        partnerSel.addEventListener('change', () => { row.partnerId = partnerSel.value || null; });
+        const got = lastImp[row.itemId] || 0;
+        impBox.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; padding:6px 0; flex-wrap:wrap; border-bottom:1px dashed var(--rule);' },
+          itemSel, partnerSel,
+          el('div', { style: 'display:flex; align-items:center; gap:5px;' }, el('span', { style: 'font-size:11px; color:var(--ink-faint);' }, 'qty'), el('div', { style: 'width:100px;' }, Forms.num(row, 'qtyPerTurn', '1'))),
+          el('div', { style: 'display:flex; align-items:center; gap:5px; flex:1; min-width:140px;' }, el('span', { style: 'font-size:11px; color:var(--ink-faint);' }, '≤ ×'), el('div', { style: 'flex:1;' }, Forms.slider(row, 'maxMult', 0.5, 3, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2) }))),
+          el('span', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); width:90px; text-align:right;' }, got ? 'got ' + fmtNum(got) + '/t' : ''),
+          el('button.icon-btn', { title: 'Remove order', onclick: () => { dr.imports.splice(ri, 1); render(); } }, '✕')));
+      });
+      impBox.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => { dr.imports.push({ itemId: importable[0], partnerId: null, qtyPerTurn: 10, maxMult: 1.5 }); render(); } }, '+ Add import order')));
+    };
+    render();
+    inner.appendChild(impBox);
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: (ev) => this.saveTradeCtl(ev.currentTarget, dr) }, 'Save Import Orders')));
+  },
+
+  /* Graphs — export/import flows and value over time. */
+  intlGraphs(inner, trade, partners) {
+    const nameOf = (eid) => { const e = entById(eid); return e ? e.name : eid; };
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const flows = trade.lastFlows || [];
+    const hist = trade.history || [];
     const byPartner = {}, byItem = {};
     flows.filter(f => f.value > 0).forEach(f => { byPartner[f.partnerId] = (byPartner[f.partnerId] || 0) + f.value; byItem[f.itemId] = (byItem[f.itemId] || 0) + f.value; });
     if (Object.keys(byPartner).length) {
@@ -1096,24 +1348,19 @@ const Views = {
         { width: 560, height: 180, title: 'EXPORT VALUE', valueFormat: v => CUR() + fmtCompact(v) }));
     } else {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:12px 0; font-size:12.5px;' },
-        'No exports have flowed yet. When companies route production to the government (their “sell to government %”), the state resells it abroad and the flows appear here.'));
+        'No exports have flowed yet. Buy goods from companies (Goods) and keep exports switched on to sell abroad.'));
     }
-
-    // partner price comparison for a chosen commodity
     const priced = {};
-    partners.forEach(p => (p.exports || []).forEach(iid => { (priced[iid] = priced[iid] || []).push({ partnerId: p.entityId, price: (p.prices && p.prices[iid]) || 0 }); }));
-    const pItems = Object.keys(priced);
+    partners.forEach(p => new Set([...(p.exports || []), ...Object.keys(p.demand || {})]).forEach(iid => { (priced[iid] = priced[iid] || []).push({ partnerId: p.entityId, price: (p.prices && p.prices[iid]) || 0 }); }));
+    const pItems = Object.keys(priced).filter(iid => itemById(iid));
     if (pItems.length) {
       if (!W.tradeItem || !priced[W.tradeItem]) W.tradeItem = pItems[0];
       inner.appendChild(this.secLabel('Partner Price Comparison'));
-      inner.appendChild(el('div.chip-row', pItems.map(iid =>
-        el('button.chip', { class: W.tradeItem === iid ? 'active' : '', onclick: () => { W.tradeItem = iid; App.renderView(); } }, itemName(iid)))));
+      inner.appendChild(el('div.chip-row', pItems.map(iid => el('button.chip', { class: W.tradeItem === iid ? 'active' : '', onclick: () => { W.tradeItem = iid; App.renderView(); } }, itemName(iid)))));
       const mkt = itemById(W.tradeItem);
-      inner.appendChild(Charts.chartBars(priced[W.tradeItem].map(r => ({ label: nameOf(r.partnerId), value: r.price, color: (entById(r.partnerId) || {}).color || 'var(--stk-up)' })),
-        { width: 560, height: 180, title: itemName(W.tradeItem).toUpperCase() + ' — PRICE BY PARTNER' + (mkt ? ' (market ' + CUR() + fmtNum(mkt.marketValue) + ')' : ''), valueFormat: v => CUR() + fmtNum(v) }));
+      inner.appendChild(Charts.chartBars((priced[W.tradeItem] || []).map(r => ({ label: nameOf(r.partnerId), value: r.price, color: (entById(r.partnerId) || {}).color || 'var(--stk-up)' })),
+        { width: 560, height: 180, title: itemName(W.tradeItem).toUpperCase() + ' — PRICE BY PARTNER' + (mkt ? ' (retail ' + CUR() + fmtNum(mkt.marketValue) + ')' : ''), valueFormat: v => CUR() + fmtNum(v) }));
     }
-
-    // export/import value over time
     if (hist.length > 1) {
       inner.appendChild(this.secLabel('Trade Value Over Time'));
       const hasImports = hist.some(h => (h.importValue || 0) > 0);
@@ -1123,109 +1370,6 @@ const Views = {
       ] : hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })),
         { width: 560, height: 150, title: 'FOREIGN TRADE / TURN', yFormat: v => CUR() + fmtCompact(v) }));
     }
-
-    // ---- national trade directives (President / GM) ----
-    if (this.controlsGov()) this.intlTradeControls(inner, trade, partners);
-  },
-
-  /* The President's desk inside International Trade: per-item split of
-     state-bought goods between the export pool and the national inventory
-     (sliders), plus standing import orders from foreign partners. */
-  intlTradeControls(inner, trade, partners) {
-    const gov = this.govEntity();
-    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
-    const govStock = (iid) => { const r = ((gov && gov.inventory) || []).find(x => x.itemId === iid); return r ? r.qty : 0; };
-    const poolStock = (iid) => Math.floor((trade.exportPool || {})[iid] || 0);
-
-    // items the desk can direct: anything partners buy, anything already in
-    // the pool or the national inventory
-    const itemSet = new Set();
-    partners.forEach(p => (p.exports || []).forEach(iid => itemSet.add(iid)));
-    Object.keys(trade.exportPool || {}).forEach(iid => itemSet.add(iid));
-    ((gov && gov.inventory) || []).forEach(r => { const it = itemById(r.itemId); if (it && ['Commodities', 'Goods', 'Military'].includes(it.category)) itemSet.add(r.itemId); });
-    const items = [...itemSet].filter(iid => itemById(iid));
-
-    // importable items: anything any partner offers for sale
-    const importable = [...new Set(partners.flatMap(p => (p.imports || [])))].filter(iid => itemById(iid));
-
-    // draft survives re-renders; discarded when the saved state catches up
-    const dr = (W.tradeCtlDraft && W.tradeCtlDraft._v === 1) ? W.tradeCtlDraft : (W.tradeCtlDraft = {
-      _v: 1,
-      exportAlloc: JSON.parse(JSON.stringify(trade.exportAlloc || {})),
-      imports: JSON.parse(JSON.stringify(trade.imports || []))
-    });
-
-    inner.appendChild(this.secLabel('National Trade Directives (Presidential Desk)'));
-    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
-      'Goods that companies sell to the government are split by your allocation: the export share is sold abroad at partner prices, the rest is stored in the national inventory. Standing import orders are bought each turn from the treasury.'));
-
-    if (items.length) {
-      const box = el('div.stage');
-      box.appendChild(el('div.mono-label', 'Export allocation — % of state-bought goods sold abroad (rest → national inventory)'));
-      for (const iid of items) {
-        if (dr.exportAlloc[iid] === undefined) dr.exportAlloc[iid] = 100;
-        box.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; padding:4px 0;' },
-          el('span', { style: 'width:190px; font-size:12.5px; flex-shrink:0;' }, itemName(iid)),
-          el('div', { style: 'flex:1;' }, Forms.slider(dr.exportAlloc, iid, 0, 100, { suffix: '% export' })),
-          el('span', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); width:170px; text-align:right;' },
-            'pool ' + fmtNum(poolStock(iid)) + ' · stored ' + fmtNum(govStock(iid)))));
-      }
-      inner.appendChild(box);
-    }
-
-    // national inventory composition
-    const invRows = ((gov && gov.inventory) || [])
-      .map(r => { const it = itemById(r.itemId); return it ? { label: it.name, value: r.qty * (it.marketValue || 0) } : null; })
-      .filter(r => r && r.value > 0);
-    if (invRows.length) {
-      inner.appendChild(Charts.chartPie(invRows, { width: 420, height: 190, title: 'National Inventory (by value)' }));
-    }
-
-    // ---- standing import orders ----
-    inner.appendChild(this.secLabel('Import Orders (per turn, paid by the Treasury)'));
-    const impBox = el('div.stage');
-    const renderImports = () => {
-      clear(impBox);
-      if (!importable.length) {
-        impBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
-          'No partner currently offers goods for import — the GM sets partner import lists in GM Studio → Trade Desk.'));
-        return;
-      }
-      dr.imports.forEach((row, ri) => {
-        const sellers = partners.filter(p => (p.imports || []).includes(row.itemId));
-        const itemSel = el('select.text-input', { style: 'max-width:220px;' }, importable.map(iid =>
-          el('option', { value: iid, selected: iid === row.itemId ? 'selected' : undefined }, itemName(iid))));
-        itemSel.addEventListener('change', () => { row.itemId = itemSel.value; row.partnerId = null; renderImports(); });
-        const partnerSel = el('select.text-input', { style: 'max-width:200px;' },
-          [el('option', { value: '' }, '— best available —'),
-          ...sellers.map(p => el('option', { value: p.entityId, selected: p.entityId === row.partnerId ? 'selected' : undefined }, entName(p.entityId)))]);
-        partnerSel.addEventListener('change', () => { row.partnerId = partnerSel.value || null; });
-        const priceP = sellers.find(p => p.entityId === row.partnerId) || sellers[0];
-        const unit = priceP && priceP.prices && priceP.prices[row.itemId] > 0 ? priceP.prices[row.itemId] : (itemById(row.itemId) || {}).marketValue || 0;
-        impBox.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; padding:5px 0; flex-wrap:wrap;' },
-          itemSel, partnerSel,
-          el('div', { style: 'flex:1; min-width:180px;' }, Forms.slider(row, 'qtyPerTurn', 0, 500, { suffix: ' / turn' })),
-          el('span', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); width:110px; text-align:right;' }, '≈' + fmtMoney(unit * (row.qtyPerTurn || 0)) + '/t'),
-          el('button.icon-btn', { title: 'Remove order', onclick: () => { dr.imports.splice(ri, 1); renderImports(); } }, '✕')));
-      });
-      impBox.appendChild(el('div.btn-row',
-        el('button.dash-btn', {
-          onclick: () => { dr.imports.push({ itemId: importable[0], partnerId: null, qtyPerTurn: 10 }); renderImports(); }
-        }, '+ Add import order')));
-    };
-    renderImports();
-    inner.appendChild(impBox);
-
-    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
-      onclick: async (ev) => {
-        const btn = ev.currentTarget; btn.disabled = true;
-        try {
-          await PATCH('/api/trade/controls', { exportAlloc: dr.exportAlloc, imports: dr.imports.filter(r => r.itemId && r.qtyPerTurn > 0) });
-          W.tradeCtlDraft = null;
-          toast('Trade directives saved.');
-        } catch (err) { toast(err.message, true); btn.disabled = false; }
-      }
-    }, 'Save Trade Directives')));
   },
 
   /* ---- Company Operations (CEO desk) ---- */
@@ -1269,40 +1413,84 @@ const Views = {
     // ---- controls draft (survives re-renders until saved) ----
     const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
       id: c.id,
-      sellPct: c.sellPct === undefined ? 100 : c.sellPct,
-      govPct: c.govPct === undefined ? 0 : c.govPct,
+      keepPct: c.keepPct === undefined ? 0 : c.keepPct,
+      govMix: c.govMix === undefined ? 0 : c.govMix,
+      govPriceMult: c.govPriceMult === undefined ? 1 : c.govPriceMult,
       wage: c.wage === undefined ? 100 : c.wage,
-      govPctByItem: JSON.parse(JSON.stringify(c.govPctByItem || {}))
+      govMixByItem: JSON.parse(JSON.stringify(c.govMixByItem || {}))
     });
+    const trade = S().settings.trade || {};
+    const govBuyOf = (iid) => {
+      const gb = (trade.govBuy || {})[iid]; if (!gb) return null;
+      const bc = gb.byCompany && gb.byCompany[c.id];
+      return { qty: bc && bc.qty != null ? bc.qty : (gb.qty || 0), maxMult: bc && bc.maxMult != null ? bc.maxMult : (gb.maxMult != null ? gb.maxMult : 1) };
+    };
 
-    inner.appendChild(this.secLabel('Company-wide Controls'));
+    inner.appendChild(this.secLabel('Sales & Output'));
+    // keep-in-inventory slider
     inner.appendChild(el('div.form-grid',
-      Forms.field('Sell to market %', Forms.slider(dr, 'sellPct', 0, 100, { suffix: '%' }), 'Domestic sales → your revenue'),
-      Forms.field('Sell to government %', Forms.slider(dr, 'govPct', 0, 100, { suffix: '%' }), 'Bought by the state at its trade-desk price'),
+      Forms.field('Keep in inventory %', Forms.slider(dr, 'keepPct', 0, 100, { suffix: '%' }), 'Held back as company stock each turn; the rest is put up for sale')));
+
+    // domestic ↔ government mix slider with a live "orders fulfilled" bar on top.
+    // The right-hand chunk of the bar is the share offered to the state; its
+    // solid fill is how much of that the state actually bought last turn.
+    const govFulfil = c.govFulfil === undefined ? 0 : c.govFulfil;
+    const govRegion = el('div', { style: 'position:absolute; top:0; right:0; height:100%; background:rgba(60,90,116,.28); border-left:1px solid var(--rule-strong);' });
+    const govDone = el('div', { style: 'position:absolute; top:0; left:0; height:100%; background:#3c5a74;' });
+    govRegion.appendChild(govDone);
+    const sizeBar = () => {
+      govRegion.style.width = Math.max(0, Math.min(100, dr.govMix)) + '%';
+      govDone.style.width = Math.round(Math.max(0, Math.min(1, govFulfil)) * 100) + '%';
+    };
+    const fulfilTrack = el('div', { style: 'position:relative; height:9px; border:1px solid var(--rule-strong); background:rgba(74,106,72,.20); margin-bottom:5px; overflow:hidden;' }, govRegion);
+    const mixWrap = el('div', { style: 'margin:2px 0 4px;' },
+      fulfilTrack,
+      Forms.slider(dr, 'govMix', 0, 100, { suffix: '% to gov', onInput: sizeBar }),
+      el('div', { style: 'display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:1px;' },
+        el('span', '◀ DOMESTIC MARKET'),
+        el('span', 'GOVERNMENT ▶')));
+    sizeBar();
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Domestic ↔ Government mix', mixWrap,
+        'Of what you sell, how much is offered to the state. Last turn the state bought ' + Math.round(govFulfil * 100) + '% of what you offered it — unfilled orders are sold domestically.')));
+
+    // price to the government (multiplier of retail) with a live readout
+    const priceHint = el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:3px;' });
+    const setPriceHint = () => { priceHint.textContent = 'ASK = RETAIL × ' + (Number(dr.govPriceMult) || 1).toFixed(2) + ' — THE STATE BUYS ONLY UP TO ITS OWN PRICE CEILING'; };
+    setPriceHint();
+    inner.appendChild(el('div.form-grid',
+      el('div', el('label.field-label', 'Sell-to-government price (× retail)'),
+        Forms.slider(dr, 'govPriceMult', 0.25, 3, { step: 0.05, format: (v) => '×' + Number(v).toFixed(2), onInput: setPriceHint }), priceHint),
       Forms.field('Wage index (100 = baseline)', Forms.slider(dr, 'wage', 0, 200, { suffix: '' }), 'Higher pay lifts local happiness & employment, but costs more')));
 
-    // per-item government routing overrides
+    // ---- per-product table: retail value, state demand, your mix, fulfilment ----
     const producedItems = [...new Set(props.flatMap(pr => (pr.produces || []).map(e => e.itemId)))].filter(iid => itemById(iid));
     if (producedItems.length) {
-      inner.appendChild(this.secLabel('Government Routing by Item'));
-      inner.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:6px;' },
-        'Override the government share per product; items without an override follow the company-wide %.'));
-      const box = el('div.stage');
+      inner.appendChild(this.secLabel('Products'));
+      const tbl = el('table.data', el('thead', el('tr',
+        el('th', 'Product'), el('th.num', 'Retail'), el('th.num', 'Made / turn'),
+        el('th.num', 'State buys ≤'), el('th', 'Your mix to gov'), el('th.num', 'Filled last turn'))));
+      const body = el('tbody');
       for (const iid of producedItems) {
         const it = itemById(iid);
-        const hasOverride = dr.govPctByItem[iid] !== undefined;
-        const proxy = { v: hasOverride ? dr.govPctByItem[iid] : dr.govPct };
-        const slider = Forms.slider(proxy, 'v', 0, 100, { suffix: '%', onInput: (v) => { dr.govPctByItem[iid] = v; } });
-        box.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; padding:4px 0;' },
-          el('span', { style: 'width:190px; font-size:12.5px; flex-shrink:0;' }, it.name),
-          el('div', { style: 'flex:1;' }, slider),
-          el('button.dash-btn', {
-            style: hasOverride ? '' : 'opacity:.45;',
-            title: 'Remove the override — follow the company-wide %',
-            onclick: () => { delete dr.govPctByItem[iid]; App.renderView(); }
-          }, hasOverride ? 'custom ✕' : 'global')));
+        const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0), 0), 0);
+        const gb = govBuyOf(iid);
+        const fill = c.fulfil && c.fulfil[iid];
+        const hasOverride = dr.govMixByItem[iid] !== undefined;
+        const proxy = { v: hasOverride ? dr.govMixByItem[iid] : dr.govMix };
+        const mixCell = el('div', { style: 'display:flex; align-items:center; gap:6px; min-width:150px;' },
+          el('div', { style: 'flex:1;' }, Forms.slider(proxy, 'v', 0, 100, { suffix: '%', onInput: (v) => { dr.govMixByItem[iid] = v; } })),
+          el('button.dash-btn', { style: hasOverride ? '' : 'opacity:.4;', title: hasOverride ? 'Custom — click to follow the company mix' : 'Follows the company mix', onclick: () => { delete dr.govMixByItem[iid]; App.renderView(); } }, hasOverride ? '✕' : '='));
+        body.appendChild(el('tr',
+          el('td', it.name),
+          el('td.num', fmtMoney(it.marketValue || 0)),
+          el('td.num', fmtNum(made)),
+          el('td.num', gb && gb.qty > 0 ? fmtNum(gb.qty) + '/t @ ×' + Number(gb.maxMult).toFixed(2) : '—'),
+          el('td', mixCell),
+          el('td.num', fill && fill.wanted ? Math.round(fill.bought / fill.wanted * 100) + '% (' + fmtNum(fill.bought) + '/' + fmtNum(fill.wanted) + ')' : '—')));
       }
-      inner.appendChild(box);
+      tbl.appendChild(body);
+      inner.appendChild(tbl);
     }
 
     inner.appendChild(el('div.btn-row', el('button.solid-btn', {
@@ -1310,10 +1498,10 @@ const Views = {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
           // explicit nulls clear overrides removed from the draft
-          const govPctByItem = {};
-          for (const iid in (c.govPctByItem || {})) govPctByItem[iid] = null;
-          for (const iid in dr.govPctByItem) govPctByItem[iid] = dr.govPctByItem[iid];
-          await PATCH('/api/company/' + c.id + '/controls', { sellPct: dr.sellPct, govPct: dr.govPct, wage: dr.wage, govPctByItem });
+          const govMixByItem = {};
+          for (const iid in (c.govMixByItem || {})) govMixByItem[iid] = null;
+          for (const iid in dr.govMixByItem) govMixByItem[iid] = dr.govMixByItem[iid];
+          await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, govMix: dr.govMix, govPriceMult: dr.govPriceMult, wage: dr.wage, govMixByItem });
           W.opsDraft = null;
           toast('Operations saved.');
         } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -1321,12 +1509,14 @@ const Views = {
     }, 'Save Operations')));
 
     // ---- where the output goes ----
+    const keepShare = Math.max(0, Math.min(100, dr.keepPct));
+    const sellable = 100 - keepShare;
+    const govShare = Math.round(sellable * Math.max(0, Math.min(100, dr.govMix)) / 100);
     const destRows = [
-      { label: 'Domestic market', value: Math.max(0, Math.min(100, dr.sellPct)), color: '#4a6a48' },
-      { label: 'Government', value: Math.max(0, Math.min(100 - Math.min(100, dr.sellPct), dr.govPct)), color: '#3c5a74' }
+      { label: 'Domestic market', value: Math.max(0, sellable - govShare), color: '#4a6a48' },
+      { label: 'Government', value: govShare, color: '#3c5a74' }
     ];
-    const stockpiled = Math.max(0, 100 - destRows[0].value - destRows[1].value);
-    if (stockpiled > 0) destRows.push({ label: 'Stockpiled on site', value: stockpiled, color: '#8a8054' });
+    if (keepShare > 0) destRows.push({ label: 'Kept in inventory', value: keepShare, color: '#8a8054' });
     const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
     pies.appendChild(Charts.chartPie(destRows, { width: 340, height: 170, title: 'Output Destination (company-wide)' }));
 
@@ -1508,6 +1698,11 @@ const Views = {
     if (W.ecoTab === 'government' && !this.canGovFinance()) W.ecoTab = 'overview';
     inner.appendChild(el('div.doc-title', 'The Economy'));
     inner.appendChild(el('div.doc-sub', S().settings.currencyName + ' (' + CUR() + ') · turn ' + S().settings.time.turn));
+    if (S().globalVars && S().globalVars.bankCrisis) {
+      const sev = Math.round((S().globalVars.bankCrisisSeverity || 0) * 100);
+      inner.appendChild(el('div', { style: 'margin:6px 0 4px; padding:10px 14px; border:1px solid var(--accent); background:rgba(150,40,40,.10); font-family:var(--font-mono); font-size:11.5px; letter-spacing:.03em; color:var(--accent);' },
+        '⚠ ECONOMIC CRISIS — THE BANK OF ARCASIA RESERVE IS EXHAUSTED (SEVERITY ' + sev + '%). Confidence, employment and happiness are falling each turn until the reserve is recapitalised.'));
+    }
 
     const tabs = el('div.chip-row',
       el('button.chip', { class: W.ecoTab === 'overview' ? 'active' : '', onclick: () => { W.ecoTab = 'overview'; App.renderView(); } }, 'Overview'),
@@ -1810,26 +2005,47 @@ const Views = {
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
-  // Raise capital (Workstream A2) — sell NEW shares for cash. Company is paid
-  // immediately; price stays ≈ flat because value came in.
+  // Raise capital (Workstream A2) — sell NEW shares for cash at the LIVE MARKET
+  // PRICE (the seller no longer names a price; proceeds track the real
+  // valuation). The controller picks only what % of shares outstanding to float;
+  // a live preview shows the cash raised. Company is paid immediately; price
+  // stays ≈ flat because value came in (no dilution).
   marketOfferModal(c) {
-    const newShares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'New shares to sell' });
-    const price = el('input.text-input', { type: 'number', min: '0.01', step: '0.01', value: fmtNum(this.livePrice(c)) });
-    const floatPct = el('input.text-input', { type: 'number', min: '0', max: '100', step: '1', value: c.publicFloat || 0 });
+    const SO = c.sharesOutstanding || 0;
+    const draft = { pct: 5 };
+    const sharesFor = (pct) => Math.round(SO * pct / 100);
+    // grow the public float so the freshly floated shares can actually be bought
+    const floatFor = (newShares) => {
+      const cur = Math.round((c.publicFloat || 0) / 100 * SO);
+      const newSO = SO + newShares;
+      return newSO > 0 ? Math.min(100, Math.round((cur + newShares) / newSO * 100)) : (c.publicFloat || 0);
+    };
+    const preview = el('div', { style: 'margin-top:14px; padding:12px; border:1px solid var(--rule-strong); background:var(--paper-2); font-family:var(--font-mono); font-size:12px; line-height:1.8;' });
+    const render = () => {
+      const price = this.livePrice(c);
+      const n = sharesFor(draft.pct);
+      const raised = Math.round(price * n * 100) / 100;
+      const newFloat = floatFor(n);
+      clear(preview);
+      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'MARKET PRICE  '), el('span', { class: 'live-price', 'data-co': c.id }, CUR() + fmtNum(price))));
+      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'NEW SHARES    '), fmtNum(n) + ' (' + draft.pct + '% of ' + fmtNum(SO) + ')'));
+      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'NEW FLOAT     '), (c.publicFloat || 0) + '% → ' + newFloat + '%'));
+      preview.appendChild(el('div', { style: 'margin-top:6px; font-size:14px; font-weight:700; color:var(--good);' }, 'YOU RAISE  ' + CUR() + fmtNum(raised)));
+    };
     openModal('RAISE CAPITAL — ' + c.name, el('div',
-      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Sell new shares into the float for cash. ${fmtNum(c.sharesOutstanding)} outstanding. The company is paid immediately and the price stays roughly flat (no dilution).`),
-      el('label.field-label', 'New shares to sell'), newShares,
-      el('label.field-label', 'Offer price (' + CUR() + '/share)'), price,
-      el('label.field-label', 'New public float (%)'), floatPct
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Float new shares for cash at the live market price. ${fmtNum(SO)} outstanding. The Bank of Arcasia fronts the cash and holds the new float until investors buy it up — a heavy raise drains the Bank’s reserve.`),
+      el('label.field-label', 'Raise (% of shares outstanding)'),
+      Forms.slider(draft, 'pct', 1, 50, { suffix: '%', onInput: render }),
+      preview
     ), [{
       label: 'Raise capital', onClick: async () => {
-        const n = Math.round(Number(newShares.value)), p = Number(price.value);
-        if (!(n > 0)) throw new Error('Enter a positive share count.');
-        if (!(p > 0)) throw new Error('Enter a positive offer price.');
-        const r = await POST('/api/market/offer', { companyId: c.id, newShares: n, price: p, floatPct: Number(floatPct.value) });
-        toast(`Raised ${fmtMoney(r.raised)} selling ${n} shares.`);
+        const n = sharesFor(draft.pct);
+        if (!(n > 0)) throw new Error('Choose a percentage to raise.');
+        const r = await POST('/api/market/offer', { companyId: c.id, newShares: n, floatPct: floatFor(n) });
+        toast(`Raised ${fmtMoney(r.raised)} floating ${fmtNum(n)} shares.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+    render();
   },
   // Bonus issue (Workstream A2) — print free shares. No cash; the price DILUTES.
   marketIssueModal(c) {

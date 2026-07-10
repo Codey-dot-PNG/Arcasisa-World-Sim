@@ -641,6 +641,16 @@ function removeInventory(holder, itemId, qty) {
   if (row.qty <= 0) holder.inventory = holder.inventory.filter(r => r !== row);
   return take;
 }
+// How many units of an item a foreign partner will trade per turn. A GM can pin
+// an exact figure in p.capacity[itemId]; otherwise it derives from the authored
+// demand/supply level (High/Med/Low) attached to that item on the partner.
+const DEMAND_CAP = { Low: 250, Med: 750, High: 2500 };
+function partnerCap(p, itemId, kind /* 'demand' | 'supply' */) {
+  const explicit = p.capacity && Number(p.capacity[itemId]);
+  if (explicit > 0) return explicit;
+  const lvlMap = (kind === 'supply' ? p.supply : p.demand) || {};
+  return DEMAND_CAP[lvlMap[itemId]] || DEMAND_CAP.Med;
+}
 // Audit-ledger money move without the per-call timeline entry (routine daily
 // ops would otherwise flood the wire). Balances still move and the transaction
 // is recorded; runEconomy emits one summary log per turn instead.
@@ -666,10 +676,28 @@ function runEconomy(db, actor) {
   const scale = g.gdpScale || 1;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
-  const govBuy = (db.settings.trade && db.settings.trade.govBuyPrices) || {};
   const tax = db.settings.taxation && db.settings.taxation.enabled ? db.settings.taxation : null;
+  const trade = db.settings.trade || {};
 
-  const trade = db.settings.trade;
+  // The government's standing offer to buy goods from domestic companies (set on
+  // the International Trade desk): per item a max quantity/turn and a price
+  // ceiling expressed as a multiplier of retail, with optional per-company
+  // overrides. Companies price their own goods to the state (co.govPriceMult); a
+  // sale clears only when the company's ask ≤ the government ceiling, up to the
+  // remaining quota. Anything the state declines is sold on the domestic market.
+  const govBuy = trade.govBuy || {};
+  const govRemaining = {};   // itemId -> units the state will still buy this turn
+  const govCoUsed = {};      // itemId -> { coId -> units bought from that company }
+  for (const iid in govBuy) govRemaining[iid] = Math.max(0, Math.round(Number(govBuy[iid].qty) || 0));
+  const govOfferFor = (itemId, coId) => {
+    const gb = govBuy[itemId];
+    if (!gb) return null;
+    const bc = gb.byCompany && gb.byCompany[coId];
+    const maxMult = bc && bc.maxMult != null ? Number(bc.maxMult) : (gb.maxMult != null ? Number(gb.maxMult) : 1);
+    const coCap = bc && bc.qty != null ? Math.max(0, Math.round(Number(bc.qty))) : Infinity;
+    return { maxMult, coCap };
+  };
+  trade.stockIn = {};        // itemId -> { local, import } — this turn's stockpile inflow
 
   // Output breathes with the citizenry: province happiness scales production
   // around its authored baseline, and a small daily wobble keeps profits from
@@ -688,14 +716,16 @@ function runEconomy(db, actor) {
   const govPay = {};        // ownerId -> treasury money owed for gov-bought goods
   const provGross = {};     // provinceId -> production value this turn
   const provWage = {};      // provinceId -> { wSum, emp } employee-weighted wage index
+  const coFulfil = {};      // companyId -> { itemId -> { wanted, bought } } state-sale fill
   const own = (id) => (perOwner[id] = perOwner[id] || { dom: 0, upkeep: 0, wage: 0, gross: 0 });
 
   for (const pr of db.properties) {
     if (!pr.ownerId) continue;
     const owner = db.entities.find(e => e.id === pr.ownerId);
     const co = owner && owner.type === 'company' ? owner : null;
-    const sellPct = co ? clampPct(co.sellPct, 100) : 100;
-    const govPctBase = co ? clampPct(co.govPct, 0) : 0;
+    const keepPct = co ? clampPct(co.keepPct, 0) : 0;              // % held back as stock
+    const govMixBase = co ? clampPct(co.govMix, 0) : 0;           // of sellable output, % offered to the state
+    const govPriceMult = co && co.govPriceMult != null ? Number(co.govPriceMult) : 1; // ask = retail × this
     const wageIdx = co ? (co.wage === undefined ? 100 : Number(co.wage)) : 100;
     const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
 
@@ -709,33 +739,49 @@ function runEconomy(db, actor) {
     const o = own(pr.ownerId);
     o.gross += gross;
 
-    // revenue
+    // revenue — one mix per item: keep a slice as inventory, split the rest
+    // between the state (if it will buy) and the domestic market.
     if (pr.prodMode === 'goods') {
       for (const e of (pr.produces || [])) {
-        const price = priceOf(e.itemId);
+        const retail = priceOf(e.itemId);
         const produced = Math.round((e.perTurn || 0) * f);
-        // per-item government routing (CEO override) falls back to the global %
-        const govPct = co && co.govPctByItem && co.govPctByItem[e.itemId] !== undefined
-          ? clampPct(co.govPctByItem[e.itemId], govPctBase) : govPctBase;
-        const domQty = Math.floor(produced * sellPct / 100);
-        const govQty = Math.min(Math.floor(produced * govPct / 100), Math.max(0, produced - domQty));
-        const keep = produced - domQty - govQty;
-        o.dom += domQty * price;
-        if (keep > 0) addInventory(pr, e.itemId, keep); // unsold accrues as stock
-        if (govQty > 0 && gov) {
-          govPay[pr.ownerId] = (govPay[pr.ownerId] || 0) + govQty * (govBuy[e.itemId] || price);
-          // The President's trade desk splits state purchases between the
-          // export pool and the national inventory (settings.trade.exportAlloc,
-          // % for export; default: everything is resold abroad, the old flow).
-          const alloc = trade && trade.exportAlloc && trade.exportAlloc[e.itemId] !== undefined
-            ? clampPct(trade.exportAlloc[e.itemId], 100) : 100;
-          const exportQty = Math.round(govQty * alloc / 100);
-          if (trade && exportQty > 0) {
-            trade.exportPool = trade.exportPool || {};
-            trade.exportPool[e.itemId] = (trade.exportPool[e.itemId] || 0) + exportQty;
+        if (produced <= 0) continue;
+        // 1) inventory set-aside
+        const keep = Math.floor(produced * keepPct / 100);
+        if (keep > 0) addInventory(pr, e.itemId, keep);
+        const sellable = produced - keep;
+        // 2) government share of the sellable output (per-item override → global mix)
+        const mix = co && co.govMixByItem && co.govMixByItem[e.itemId] !== undefined
+          ? clampPct(co.govMixByItem[e.itemId], govMixBase) : govMixBase;
+        const govWanted = Math.floor(sellable * mix / 100);
+        const domBase = sellable - govWanted;
+        // 3) the state buys what it wants, capped by its price ceiling and quota
+        let govBought = 0;
+        if (govWanted > 0 && gov && co) {
+          const offer = govOfferFor(e.itemId, co.id);
+          const ask = Math.round(retail * govPriceMult * 100) / 100;
+          if (offer && ask <= Math.round(retail * offer.maxMult * 100) / 100) {
+            const used = (govCoUsed[e.itemId] = govCoUsed[e.itemId] || {});
+            const coLeft = Math.max(0, offer.coCap - (used[co.id] || 0));
+            govBought = Math.min(govWanted, Math.max(0, govRemaining[e.itemId] || 0), coLeft);
+            if (govBought > 0) {
+              govRemaining[e.itemId] -= govBought;
+              used[co.id] = (used[co.id] || 0) + govBought;
+              govPay[pr.ownerId] = (govPay[pr.ownerId] || 0) + govBought * ask;
+              addInventory(gov, e.itemId, govBought);        // → national stockpile
+              const src = trade.stockIn[e.itemId] = trade.stockIn[e.itemId] || { local: 0, import: 0 };
+              src.local += govBought;
+            }
           }
-          const keepQty = trade ? govQty - exportQty : govQty;
-          if (keepQty > 0) addInventory(gov, e.itemId, keepQty); // national inventory
+        }
+        // 4) everything the state didn't take is sold on the domestic market
+        const domQty = domBase + (govWanted - govBought);
+        o.dom += domQty * retail;
+        // 5) record fill for the CEO's live "sold to government" bar
+        if (govWanted > 0) {
+          const cf = (coFulfil[pr.ownerId] = coFulfil[pr.ownerId] || {});
+          const row = cf[e.itemId] = cf[e.itemId] || { wanted: 0, bought: 0 };
+          row.wanted += govWanted; row.bought += govBought;
         }
       }
     } else if (pr.prodMode === 'cash') {
@@ -751,6 +797,17 @@ function runEconomy(db, actor) {
       const w = provWage[pr.provinceId] = provWage[pr.provinceId] || { wSum: 0, emp: 0 };
       w.wSum += wageIdx * pr.employees; w.emp += pr.employees;
     }
+  }
+
+  // publish each company's government-sale fill ratio (drives the ops slider bar)
+  for (const co of db.entities) {
+    if (co.type !== 'company') continue;
+    const cf = coFulfil[co.id];
+    if (!cf) { co.fulfil = {}; co.govFulfil = 0; continue; }
+    let w = 0, b = 0;
+    for (const iid in cf) { w += cf[iid].wanted; b += cf[iid].bought; }
+    co.fulfil = cf;
+    co.govFulfil = w > 0 ? Math.round(b / w * 100) / 100 : 0;
   }
 
   // settle each owner: net abstract money-in, government purchases, tax.
@@ -812,8 +869,11 @@ function runEconomy(db, actor) {
   }
 
   // economic confidence → civilian mood (other-systems knock-on). A confident
-  // economy lifts happiness/approval slightly; a market crash drags them.
-  const cShift = Math.round(((econC - 50) / 100) * 0.4 * 100) / 100;
+  // economy lifts happiness/approval; a market crash drags them down hard. The
+  // strength is a GM knob (economy.happinessConfK); the default makes confidence
+  // a MAJOR happiness driver — a deep slump (conf 20) costs ~0.48 happiness/turn.
+  const confK = econ.happinessConfK !== undefined ? Number(econ.happinessConfK) : 1.6;
+  const cShift = Math.round(((econC - 50) / 100) * confK * 100) / 100;
   if (cShift !== 0) for (const p of db.provinces) {
     if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness + cShift) * 100) / 100, 0, 100);
     if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval + cShift * 0.6) * 100) / 100, 0, 100);
@@ -854,81 +914,155 @@ function repriceAllShares(db, a, b, c, e, actor) {
   }
 }
 
-// Government sells its stockpile abroad each turn at the trade-desk prices
-// (basePrice ± drift, dynamic). Money flows into the treasury. Records per-turn
-// flows for the International Trade graphs. Partners only appear when a company
-// has actually routed goods to the government (govPct > 0) — treasury is
-// otherwise untouched.
+// Foreign trade, settled each turn from the national stockpile (gov.inventory).
+//   EXPORTS: any stockpiled good a partner demands is offered abroad at the
+//     government's asking price (retail × its export multiplier, tunable per
+//     country). Partners paying at/above the ask buy up to their demand
+//     capacity, richest bidder first; whatever no one buys stays in the pile.
+//   IMPORTS: standing per-turn orders bought from the cheapest partner that
+//     supplies the good at/under the order's price ceiling, into the stockpile.
+// Money flows through the treasury; per-turn flows feed the trade graphs.
 function runForeignTrade(db, actor) {
   const trade = db.settings.trade;
   if (!trade || !Array.isArray(trade.partners)) return;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
   if (!gov || !treasury) return;
+  const itemById = (id) => db.items.find(i => i.id === id);
+  const retailOf = (id) => { const it = itemById(id); return it ? (it.marketValue || 0) : 0; };
+  const nameOf = (id) => { const e = db.entities.find(x => x.id === id); return e ? e.name : id; };
+  const buys = (p, id) => (p.demand && p.demand[id]) || (p.exports || []).includes(id);   // partner buys from us
+  const sells = (p, id) => (p.supply && p.supply[id]) || (p.imports || []).includes(id);  // partner sells to us
 
   const flows = [];
   let exportValue = 0, importValue = 0;
-  // for each exportable item, split the export pool (goods the President has
-  // allotted for export — see runEconomy) across the partners that buy it, at
-  // each partner's dynamic price
-  trade.exportPool = trade.exportPool || {};
-  const stockOf = (id) => Math.max(0, Math.floor(trade.exportPool[id] || 0));
-  const takeStock = (id, qty) => { trade.exportPool[id] = Math.max(0, (trade.exportPool[id] || 0) - qty); if (!trade.exportPool[id]) delete trade.exportPool[id]; };
-  const exportItems = new Set();
-  for (const p of trade.partners) for (const id of (p.exports || [])) exportItems.add(id);
+  const exportsCfg = trade.exports || {};   // itemId -> { mult, off, byCountry:{pid:mult} }
+  const exportFill = {};                    // itemId -> { available, sold }
+  trade.stockIn = trade.stockIn || {};
 
-  for (const itemId of exportItems) {
-    const buyers = trade.partners.filter(p => (p.exports || []).includes(itemId));
-    if (!buyers.length) continue;
-    let stock = stockOf(itemId);
+  // ---- EXPORTS: sell the national stockpile to the highest qualifying bidder ----
+  const stockItems = (gov.inventory || []).map(r => r.itemId)
+    .filter(iid => { const it = itemById(iid); return it && ['Commodities', 'Goods', 'Military'].includes(it.category); });
+  for (const itemId of stockItems) {
+    const cfg = exportsCfg[itemId] || {};
+    if (cfg.off) continue;                                   // GM/President parked this good
+    const row = (gov.inventory || []).find(r => r.itemId === itemId);
+    let stock = row ? row.qty : 0;
     if (stock <= 0) continue;
-    const share = Math.floor(stock / buyers.length);
-    for (const p of buyers) {
-      const qty = Math.min(share || stock, stockOf(itemId));
-      if (qty <= 0) continue;
+    const retail = retailOf(itemId);
+    exportFill[itemId] = { available: stock, sold: 0 };
+    const bidders = [];
+    for (const p of trade.partners) {
+      if (!buys(p, itemId)) continue;
       const base = (p.prices && p.prices[itemId]) || 0;
       if (!(base > 0)) continue;
+      const mult = cfg.byCountry && cfg.byCountry[p.entityId] != null ? Number(cfg.byCountry[p.entityId])
+        : (cfg.mult != null ? Number(cfg.mult) : 1);
+      if (base >= retail * mult) bidders.push({ p, base });  // meets the government's ask
+    }
+    bidders.sort((a, b) => b.base - a.base);                 // highest bidder first
+    for (const { p, base } of bidders) {
+      if (stock <= 0) break;
+      const qty = Math.min(stock, partnerCap(p, itemId, 'demand'));
+      if (qty <= 0) continue;
       const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0);
       const price = Math.round(base * drift * 100) / 100;
       const value = Math.round(qty * price * 100) / 100;
-      takeStock(itemId, qty);
-      ledgerTxn(null, treasury.id, value, `Export to ${(db.entities.find(e => e.id === p.entityId) || {}).name || p.entityId}`, 'TREASURY', 'deposit');
+      removeInventory(gov, itemId, qty);
+      stock -= qty;
+      ledgerTxn(null, treasury.id, value, `Export of ${(itemById(itemId) || {}).name || itemId} to ${nameOf(p.entityId)}`, 'TREASURY', 'deposit');
       flows.push({ itemId, partnerId: p.entityId, qty, value });
       exportValue += value;
+      exportFill[itemId].sold += qty;
     }
   }
 
-  // imports ordered by the President (settings.trade.imports): goods bought
-  // abroad each turn at the partner's price, delivered to the national
-  // inventory, paid from the treasury. Skipped when the treasury can't pay.
-  for (const row of (trade.imports || [])) {
-    const qty = Math.round(Number(row.qtyPerTurn) || 0);
-    if (!(qty > 0)) continue;
-    const item = db.items.find(i => i.id === row.itemId);
+  // ---- IMPORTS: standing orders, cheapest qualifying supplier first ----
+  for (const order of (trade.imports || [])) {
+    let need = Math.round(Number(order.qtyPerTurn) || 0);
+    if (!(need > 0)) continue;
+    const item = itemById(order.itemId);
     if (!item) continue;
-    const partner = trade.partners.find(p => p.entityId === row.partnerId && (p.imports || []).includes(row.itemId))
-      || trade.partners.find(p => (p.imports || []).includes(row.itemId));
-    const base = partner && partner.prices && partner.prices[row.itemId] > 0
-      ? partner.prices[row.itemId] : (item.marketValue || 0);
-    if (!(base > 0)) continue;
-    const drift = 1 + (Math.random() * 2 - 1) * ((partner && partner.priceDrift) || 0);
-    const price = Math.round(base * drift * 100) / 100;
-    const cost = Math.round(qty * price * 100) / 100;
-    if (!(treasury.balance >= cost)) continue; // imports never overdraw the treasury
-    const partnerName = partner ? ((db.entities.find(e => e.id === partner.entityId) || {}).name || partner.entityId) : 'abroad';
-    ledgerTxn(treasury.id, null, cost, `Import of ${item.name} from ${partnerName}`, 'TREASURY', 'withdraw');
-    addInventory(gov, row.itemId, qty);
-    flows.push({ itemId: row.itemId, partnerId: partner ? partner.entityId : null, qty, value: -cost });
-    importValue += cost;
+    const retail = item.marketValue || 0;
+    const maxMult = order.maxMult != null ? Number(order.maxMult) : 1.5;
+    const ceiling = retail > 0 ? retail * maxMult : Infinity;
+    let sellers = trade.partners.filter(p => sells(p, order.itemId) && (p.prices && p.prices[order.itemId] > 0) && p.prices[order.itemId] <= ceiling);
+    if (order.partnerId) { const only = sellers.filter(p => p.entityId === order.partnerId); if (only.length) sellers = only; }
+    sellers.sort((a, b) => a.prices[order.itemId] - b.prices[order.itemId]);   // cheapest first
+    for (const p of sellers) {
+      if (need <= 0) break;
+      const qty = Math.min(need, partnerCap(p, order.itemId, 'supply'));
+      if (qty <= 0) continue;
+      const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0);
+      const price = Math.round(p.prices[order.itemId] * drift * 100) / 100;
+      const cost = Math.round(qty * price * 100) / 100;
+      if (!(treasury.balance >= cost)) continue;             // never overdraw the treasury
+      ledgerTxn(treasury.id, null, cost, `Import of ${item.name} from ${nameOf(p.entityId)}`, 'TREASURY', 'withdraw');
+      addInventory(gov, order.itemId, qty);
+      const src = trade.stockIn[order.itemId] = trade.stockIn[order.itemId] || { local: 0, import: 0 };
+      src.import += qty;
+      flows.push({ itemId: order.itemId, partnerId: p.entityId, qty, value: -cost });
+      importValue += cost;
+      need -= qty;
+    }
   }
 
   trade.lastFlows = flows;
+  trade.lastExportFill = exportFill;
   db.globalVars.lastExportIncome = Math.round(exportValue * 100) / 100;
   db.globalVars.lastImportSpend = Math.round(importValue * 100) / 100;
   if (exportValue > 0 || importValue > 0) {
     store.log('economy', `Foreign trade settled`,
       `exports ${db.settings.currency}${fmtNum(exportValue)}${importValue ? ' · imports ' + db.settings.currency + fmtNum(importValue) : ''}`, actor || 'ENGINE', []);
   }
+}
+
+// Bank-of-Arcasia solvency → economic crash. The Bank is the market-maker for
+// the Day Market: it funds every share sale and every capital raise from a
+// finite reserve. If players drain it below zero it can no longer honour its
+// book, and the whole economy seizes: company confidence collapses (dragging
+// economic confidence and share prices), and civilian happiness, employment and
+// approval slide every turn until the reserve is recapitalised. The hit deepens
+// with the size of the shortfall relative to the money supply. Runs each turn
+// after trade settles, before updateDerived (so the confidence hit propagates).
+function runBankCrisis(db, actor) {
+  const g = db.globalVars;
+  const bank = db.accounts.find(a => a.ownerId === 'ent_bank') || db.accounts.find(a => a.id === 'acct_bank');
+  if (!bank) return;
+  const bal = bank.balance;
+  if (bal > 0) {
+    if (g.bankCrisis) {
+      g.bankCrisis = false; g.bankCrisisSeverity = 0;
+      draftNews('Bank of Arcasia reserve restored',
+        `The Bank of Arcasia has pulled its reserve back above zero, to ${db.settings.currency}${fmtNum(bal)}. Ministers moved to reassure markets that the emergency has passed; employers and households will take longer to be convinced.`,
+        'Economy', true, 'State Statistical Bureau');
+      store.log('economy', 'Bank reserve restored — crisis over', `reserve ${db.settings.currency}${fmtNum(bal)}`, actor || 'ENGINE', ['ent_bank']);
+    }
+    return;
+  }
+  // reserve exhausted — severity scales with the depth of the shortfall
+  const ms = Math.max(1, g.moneySupply || 1);
+  const depth = Math.min(1, -bal / (ms * 0.04)); // 4% of money supply underwater ⇒ full severity
+  const sev = 0.35 + 0.65 * depth;
+  for (const co of db.entities) {
+    if (co.type !== 'company' || co.confidence === undefined) continue;
+    co.confidence = clamp01(Math.round((co.confidence - 12 * sev) * 10) / 10, 0, 100);
+    if (co.dayPrice !== undefined) co.dayPrice = Math.max(0.01, Math.round(co.dayPrice * (1 - 0.05 * sev) * 100) / 100);
+  }
+  const hHit = 2.2 * sev, eHit = 1.6 * sev, aHit = 1.4 * sev;
+  for (const p of db.provinces) {
+    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness - hHit) * 100) / 100, 0, 100);
+    if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment - eHit) * 100) / 100, 0, 100);
+    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval - aHit) * 100) / 100, 0, 100);
+  }
+  g.bankCrisisSeverity = Math.round(sev * 100) / 100;
+  if (!g.bankCrisis) {
+    g.bankCrisis = true;
+    draftNews('ECONOMIC CRISIS: Bank of Arcasia reserve exhausted',
+      `The Bank of Arcasia has run its reserve to ${db.settings.currency}${fmtNum(bal)} — below zero. Unable to honour its market book, the Bank has frozen and share prices are sliding. Employers are shedding labour and public confidence has collapsed. The government is under mounting pressure to recapitalise the Bank before the slump deepens.`,
+      'Economy', true, 'State Statistical Bureau');
+  }
+  store.log('economy', 'Bank reserve exhausted — economic crash', `reserve ${db.settings.currency}${fmtNum(bal)} · severity ${(sev * 100).toFixed(0)}%`, actor || 'ENGINE', ['ent_bank']);
 }
 
 // Append a compact trade sample for the graphs (kept bounded).
@@ -978,6 +1112,8 @@ function advanceTurn(steps, actor) {
     // stockpile abroad.
     try { runEconomy(db, actor || 'ENGINE'); } catch (e) { console.error('runEconomy failed:', e.message); }
     try { runForeignTrade(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignTrade failed:', e.message); }
+    // Bank solvency check → economy-wide crash while its reserve is underwater.
+    try { runBankCrisis(db, actor || 'ENGINE'); } catch (e) { console.error('runBankCrisis failed:', e.message); }
 
     const prevGdp = db.globalVars.gdp;
     updateDerived();

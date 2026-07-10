@@ -57,13 +57,28 @@ function currentDayPrice(co) {
   const a = co.dayAnchor;
   return pricepath.price(a.price, a.t0, a.seed, Date.now(), co.vol === undefined ? DEFAULT_VOL : co.vol, base);
 }
-// Asymmetric confidence response to a fractional price move: sharp DROPS knock
-// confidence ~2.3× harder than equal rises lift it.
+// Confidence response to a fractional price move. Drops still sting a little
+// harder than equal rises, but only MEANINGFUL moves count: a deadband ignores
+// the ordinary per-tick noise wiggle. (The old code combined symmetric ±2%
+// noise with a 35/80 asymmetric response, so every couple of ticks confidence
+// bled downward for no real reason — that plus the confidence→price feedback
+// below is what made every stock crash on sight.)
+const CONF_DEADBAND = 0.006; // ignore sub-0.6% moves — that is just noise
 function nudgeConfidence(co, ret) {
   if (!isFinite(ret)) return;
+  if (Math.abs(ret) < CONF_DEADBAND) return;
   const cur = co.confidence === undefined ? 50 : co.confidence;
-  const gain = ret >= 0 ? ret * 35 : ret * 80;
+  const gain = ret >= 0 ? ret * 22 : ret * 34;
   co.confidence = clamp(Math.round((cur + gain) * 10) / 10, 0, 100);
+}
+// The confidence level a company's valuation implies: at fair value (day price
+// ≈ fundamental share price) confidence gravitates to ~50; a premium lifts it,
+// a discount lowers it. Confidence is pulled toward this each tick so it can
+// neither run away to zero nor float free of the price.
+function confTarget(co) {
+  const fv = co.sharePrice || co.dayPrice || 0.01;
+  const dp = (co.dayPrice === undefined ? fv : co.dayPrice) || 0.01;
+  return clamp(50 + (dp / fv - 1) * 110, 10, 90);
 }
 // Order-flow impact on the DAY price. signedQty: +buy, −sell.
 function applyDayImpact(co, signedQty, execPrice) {
@@ -99,23 +114,33 @@ function recomputeEconConfidence(db) {
 // biased by economic confidence, clamped to the circuit-breaker band. Updates
 // each company's confidence, appends to dayHistory, and recomputes econ
 // confidence. Returns true if any company was ticked.
+const DAY_REVERT = 0.03;  // per-tick pull of the day quote toward fundamental
+const CONF_REVERT = 0.04; // per-tick pull of confidence toward its fair target
 function dayMarketTick(db) {
   db = db || store.get();
   db.globalVars = db.globalVars || {};
   const conf = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
-  const confBias = (conf - 50) / 50 * 0.008; // ±0.8%/tick at the extremes
+  const confBias = (conf - 50) / 50 * 0.006; // ±0.6%/tick at the extremes
   let any = false;
   for (const co of db.entities) {
     if (co.type !== 'company' || co.sharePrice === undefined) continue;
     any = true;
     if (co.dayPrice === undefined) co.dayPrice = co.sharePrice;
     const prev = co.dayPrice;
+    const fv = co.sharePrice || co.dayPrice || 0.01;
     const noise = (Math.random() * 2 - 1) * (co.vol === undefined ? DEFAULT_VOL : co.vol);
-    co.dayPrice = Math.max(0.01, round2(softBand(co, co.dayPrice * (1 + confBias + noise))));
+    // The quote orbits fundamental value: first a gentle mean reversion toward
+    // it, THEN the confidence bias + speculative noise. Reversion (3%/tick)
+    // dominates the confidence bias (≤0.6%/tick), so a spooked market sags but
+    // no longer death-spirals to the circuit-breaker floor. Order flow (trades,
+    // offerings) still shoves the quote around freely via applyDayImpact.
+    let next = co.dayPrice + (fv - co.dayPrice) * DAY_REVERT;
+    next = next * (1 + confBias + noise);
+    co.dayPrice = Math.max(0.01, round2(softBand(co, next)));
     nudgeConfidence(co, (co.dayPrice - prev) / (prev || 1));
-    // slow confidence decay toward neutral so old shocks fade
+    // pull confidence toward the level the valuation implies (self-anchoring)
     const c = co.confidence === undefined ? 50 : co.confidence;
-    co.confidence = Math.round((c + (50 - c) * 0.01) * 10) / 10;
+    co.confidence = Math.round((c + (confTarget(co) - c) * CONF_REVERT) * 10) / 10;
     co.dayHistory = co.dayHistory || [];
     co.dayHistory.push(co.dayPrice);
     if (co.dayHistory.length > 120) co.dayHistory.shift();
@@ -308,13 +333,17 @@ function transfer(companyId, fromEntityId, toEntityId, shares, actor) {
 // cash immediately, from the National Bank, which now holds the new float. Value
 // (cash) came in, so the price stays ≈ flat: market cap rises by the cash raised.
 // NOT dilution — but it DRAINS the bank until the float is bought up.
-function offer(companyId, newShares, price, floatPct, actor) {
+//
+// The price is NOT set by the seller: shares are placed at the live market
+// price (the day quote), so proceeds track the company's real valuation. The
+// caller chooses only how many new shares to float (a % of shares outstanding).
+function offer(companyId, newShares, floatPct, actor) {
   const db = store.get();
   const co = findCompany(companyId);
   newShares = Math.round(Number(newShares));
-  price = Math.round(Number(price) * 100) / 100;
+  const price = currentDayPrice(co); // placed at the live market valuation
   if (!(newShares > 0)) throw new Error('Offering size must be positive');
-  if (!(price > 0)) throw new Error('Offering price must be positive');
+  if (!(price > 0)) throw new Error('The company has no valid market price to raise against');
   const newOutstanding = (co.sharesOutstanding || 0) + newShares;
   if (newOutstanding > Number.MAX_SAFE_INTEGER) throw new Error('Share count would overflow');
   const raised = Math.round(newShares * price * 100) / 100;

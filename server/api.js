@@ -602,9 +602,11 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, entity: target });
     }
 
-    // ---- CEO / owner company controls (Phase 13) ----
-    // sell% (domestic), gov% (routed to the government trade desk) and wage
-    // index. Editable by the company's controller (CEO or owner chain) or GM.
+    // ---- CEO / owner company controls (Phase 14) ----
+    // keepPct (held as inventory), govMix (of the sellable rest, % offered to
+    // the state vs the domestic market), govPriceMult (price to the state, as a
+    // multiplier of retail) and the wage index. Optional per-item govMix
+    // overrides. Editable by the company's controller (CEO or owner chain) or GM.
     m = pathname.match(/^\/api\/company\/([\w-]+)\/controls$/);
     if (m && method === 'PATCH') {
       const co = db.entities.find(e => e.id === m[1] && e.type === 'company');
@@ -614,64 +616,110 @@ async function handle(req, res, pathname, method) {
       const b = await readBody(req);
       const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
       const clampWage = (n) => Math.max(0, Math.min(300, Math.round(Number(n) || 0)));
-      if (b.sellPct !== undefined) co.sellPct = clampPct(b.sellPct);
-      if (b.govPct !== undefined) co.govPct = clampPct(b.govPct);
-      // sell% + gov% may not exceed 100 — trim gov% to fit, remainder is stockpiled
-      if ((co.sellPct || 0) + (co.govPct || 0) > 100) co.govPct = Math.max(0, 100 - (co.sellPct || 0));
+      const clampMult = (n) => Math.max(0.25, Math.min(3, Math.round(Number(n) * 100) / 100));
+      if (b.keepPct !== undefined) co.keepPct = clampPct(b.keepPct);
+      if (b.govMix !== undefined) co.govMix = clampPct(b.govMix);
+      if (b.govPriceMult !== undefined) co.govPriceMult = clampMult(b.govPriceMult);
       if (b.wage !== undefined) co.wage = clampWage(b.wage);
-      // per-item government routing overrides (CEO ops panel): { itemId: pct }.
-      // null/undefined entry removes the override; the global govPct applies.
-      if (b.govPctByItem !== undefined && typeof b.govPctByItem === 'object') {
-        const map = co.govPctByItem = co.govPctByItem || {};
-        for (const itemId in b.govPctByItem) {
+      // per-item government-mix overrides: { itemId: pct }. null clears one.
+      if (b.govMixByItem !== undefined && typeof b.govMixByItem === 'object') {
+        const map = co.govMixByItem = co.govMixByItem || {};
+        for (const itemId in b.govMixByItem) {
           if (!db.items.some(i => i.id === itemId)) continue;
-          const v = b.govPctByItem[itemId];
+          const v = b.govMixByItem[itemId];
           if (v === null || v === undefined || v === '') delete map[itemId];
           else map[itemId] = clampPct(v);
         }
-        if (!Object.keys(map).length) delete co.govPctByItem;
+        if (!Object.keys(map).length) delete co.govMixByItem;
       }
-      store.log('economy', `${co.name} adjusts operations`, `sell ${co.sellPct}% · gov ${co.govPct}% · wage ${co.wage}`, u.user.displayName, [co.id]);
+      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% · gov mix ${co.govMix || 0}% @ ×${co.govPriceMult != null ? co.govPriceMult : 1} · wage ${co.wage}`, u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, sellPct: co.sellPct, govPct: co.govPct, wage: co.wage, govPctByItem: co.govPctByItem || {} } });
+      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, govMix: co.govMix, govPriceMult: co.govPriceMult, wage: co.wage, govMixByItem: co.govMixByItem || {} } });
     }
 
     // ---- national trade desk controls (President) ----
-    // exportAlloc: % of each state-bought good allotted for export (the rest
-    // lands in the national inventory); imports: standing per-turn purchase
-    // orders from foreign partners. Editable by whoever controls the
-    // government entity (the President) or the GM.
+    // govBuy: the state's standing offer to buy from local companies (per item a
+    // qty/turn and a price ceiling as a multiplier of retail, with optional
+    // per-company overrides); exports: per-item export price multipliers (global,
+    // with per-country overrides, and an on/off toggle); imports: standing
+    // per-turn purchase orders with a price ceiling. Editable by whoever controls
+    // the government entity (the President) or the GM.
     if (pathname === '/api/trade/controls' && method === 'PATCH') {
       const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
       if (!gov) return bad('No government entity on file.');
       const gm = u.role.perms.gm;
       if (!gm && !ownership.controls(u.user.entityId, gov.id)) return deny('Only the head of government may direct national trade.');
       const b = await readBody(req);
-      const t = db.settings.trade = db.settings.trade || { govBuyPrices: {}, partners: [], lastFlows: [], history: [] };
-      const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
-      if (b.exportAlloc !== undefined && typeof b.exportAlloc === 'object') {
-        const map = t.exportAlloc = t.exportAlloc || {};
-        for (const itemId in b.exportAlloc) {
-          if (!db.items.some(i => i.id === itemId)) continue;
-          const v = b.exportAlloc[itemId];
-          if (v === null || v === undefined || v === '') delete map[itemId];
-          else map[itemId] = clampPct(v);
+      const t = db.settings.trade = db.settings.trade || { partners: [], lastFlows: [], history: [] };
+      const validItem = (id) => db.items.some(i => i.id === id);
+      const validCo = (id) => db.entities.some(e => e.id === id && e.type === 'company');
+      const num = (n, def) => { const v = Number(n); return isNaN(v) ? def : v; };
+      const clampQty = (n) => Math.max(0, Math.round(num(n, 0)));
+      const clampMult = (n, def) => Math.max(0, Math.min(10, Math.round(num(n, def) * 100) / 100));
+
+      // government purchases from local companies
+      if (b.govBuy !== undefined && typeof b.govBuy === 'object') {
+        const map = t.govBuy = t.govBuy || {};
+        for (const itemId in b.govBuy) {
+          if (!validItem(itemId)) continue;
+          const src = b.govBuy[itemId];
+          if (src === null || src === undefined) { delete map[itemId]; continue; }
+          const entry = { qty: clampQty(src.qty), maxMult: clampMult(src.maxMult, 1) };
+          if (src.byCompany && typeof src.byCompany === 'object') {
+            const bc = {};
+            for (const coId in src.byCompany) {
+              if (!validCo(coId)) continue;
+              const s = src.byCompany[coId];
+              if (s === null || s === undefined) continue;
+              bc[coId] = {};
+              if (s.qty !== undefined && s.qty !== '') bc[coId].qty = clampQty(s.qty);
+              if (s.maxMult !== undefined && s.maxMult !== '') bc[coId].maxMult = clampMult(s.maxMult, 1);
+              if (!Object.keys(bc[coId]).length) delete bc[coId];
+            }
+            if (Object.keys(bc).length) entry.byCompany = bc;
+          }
+          map[itemId] = entry;
         }
       }
+
+      // export price multipliers (global + per-country) and on/off
+      if (b.exports !== undefined && typeof b.exports === 'object') {
+        const map = t.exports = t.exports || {};
+        for (const itemId in b.exports) {
+          if (!validItem(itemId)) continue;
+          const src = b.exports[itemId];
+          if (src === null || src === undefined) { delete map[itemId]; continue; }
+          const entry = { mult: clampMult(src.mult, 1), off: !!src.off };
+          if (src.byCountry && typeof src.byCountry === 'object') {
+            const bcn = {};
+            for (const pid in src.byCountry) {
+              const v = src.byCountry[pid];
+              if (v === null || v === undefined || v === '') continue;
+              bcn[pid] = clampMult(v, 1);
+            }
+            if (Object.keys(bcn).length) entry.byCountry = bcn;
+          }
+          map[itemId] = entry;
+        }
+      }
+
+      // standing import orders
       if (Array.isArray(b.imports)) {
         t.imports = b.imports
           .map(r => ({
             itemId: String(r.itemId || ''),
             partnerId: r.partnerId ? String(r.partnerId) : null,
-            qtyPerTurn: Math.max(0, Math.round(Number(r.qtyPerTurn) || 0))
+            qtyPerTurn: clampQty(r.qtyPerTurn),
+            maxMult: clampMult(r.maxMult, 1.5)
           }))
-          .filter(r => r.itemId && db.items.some(i => i.id === r.itemId) && r.qtyPerTurn > 0)
+          .filter(r => r.itemId && validItem(r.itemId) && r.qtyPerTurn > 0)
           .slice(0, 24);
       }
+
       store.log('economy', 'National trade directives updated',
-        `${Object.keys(t.exportAlloc || {}).length} export allocation(s) · ${(t.imports || []).length} import order(s)`, u.user.displayName, [gov.id]);
+        `${Object.keys(t.govBuy || {}).length} state purchase(s) · ${Object.keys(t.exports || {}).length} export rule(s) · ${(t.imports || []).length} import order(s)`, u.user.displayName, [gov.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, trade: { exportAlloc: t.exportAlloc || {}, imports: t.imports || [] } });
+      return json(res, 200, { ok: true, trade: { govBuy: t.govBuy || {}, exports: t.exports || {}, imports: t.imports || [] } });
     }
 
     // ---- stock market (Phase 4.4) ----
@@ -714,7 +762,7 @@ async function handle(req, res, pathname, method) {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
       if (!gm && !ownership.controls(u.user.entityId, b.companyId)) return deny('Only the company’s controller may raise capital.');
-      try { const r = market.offer(b.companyId, b.newShares, b.price, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
+      try { const r = market.offer(b.companyId, b.newShares, b.floatPct, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
     // Buyback (Workstream A3) — retire shares from the float, price up.

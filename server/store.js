@@ -630,6 +630,59 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 14 — trade & company-sales overhaul (schema < 4) -------------
+  // Retires the twin sell%/gov% company controls in favour of a single
+  // domestic↔government mix plus a keep-in-inventory slider and a per-company
+  // "price to the state" multiplier; adds the government's standing offer to buy
+  // from local companies (trade.govBuy), export price multipliers (trade.exports)
+  // and partner demand/supply levels; folds any leftover export pool back into
+  // the national stockpile (goods now land directly in gov.inventory). Once.
+  if ((world.schema || 1) < 4 && world.settings) {
+    for (const e of (world.entities || [])) {
+      if (e.type !== 'company') continue;
+      if (e.govMix === undefined) {
+        const sell = e.sellPct === undefined ? 100 : e.sellPct;
+        const gov = e.govPct === undefined ? 0 : e.govPct;
+        const sold = sell + gov;
+        e.govMix = sold > 0 ? Math.round(gov / sold * 100) : 0;   // gov share of what was sold
+        if (e.keepPct === undefined) e.keepPct = Math.max(0, 100 - sold); // remainder was stockpiled
+      }
+      if (e.keepPct === undefined) e.keepPct = 0;
+      if (e.govPriceMult === undefined) e.govPriceMult = 1;        // ask = retail × this
+      if (e.govPctByItem && !e.govMixByItem) { e.govMixByItem = { ...e.govPctByItem }; delete e.govPctByItem; }
+    }
+
+    const t = world.settings.trade = world.settings.trade || { partners: [], lastFlows: [], history: [] };
+    t.partners = t.partners || [];
+    // partner demand (goods they buy from us) / supply (goods they sell us) levels
+    for (const p of t.partners) {
+      p.demand = p.demand || {};
+      p.supply = p.supply || {};
+      for (const iid of (p.exports || [])) if (p.demand[iid] === undefined) p.demand[iid] = 'Med';
+      for (const iid of (p.imports || [])) if (p.supply[iid] === undefined) p.supply[iid] = 'Med';
+    }
+    t.govBuy = t.govBuy || {};       // itemId -> { qty, maxMult, byCompany:{ coId:{qty,maxMult} } }
+    t.exports = t.exports || {};     // itemId -> { mult, off, byCountry:{ pid:mult } }
+    if (Array.isArray(t.imports)) t.imports = t.imports.map(r => ({ ...r, maxMult: r.maxMult != null ? r.maxMult : 1.5 }));
+    // fold any residual export pool into the national stockpile, then retire it
+    if (t.exportPool) {
+      const gov = (world.entities || []).find(e => e.id === 'ent_gov') || (world.entities || []).find(e => e.type === 'government');
+      if (gov) {
+        gov.inventory = gov.inventory || [];
+        for (const iid in t.exportPool) {
+          const q = Math.floor(t.exportPool[iid] || 0);
+          if (q <= 0) continue;
+          const row = gov.inventory.find(r => r.itemId === iid);
+          if (row) row.qty += q; else gov.inventory.push({ itemId: iid, qty: q });
+        }
+      }
+      delete t.exportPool;
+    }
+    delete t.exportAlloc;            // export split is retired (stockpile is gov.inventory)
+    world.schema = 4;
+    changed = true;
+  }
+
   return changed;
 }
 

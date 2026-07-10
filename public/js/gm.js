@@ -769,20 +769,13 @@ const GM = {
     trade.partners = trade.partners || [];
 
     main.appendChild(el('div.doc-title', 'Trade Desk'));
-    main.appendChild(el('div.doc-sub', 'government purchase prices · foreign partners · export prices'));
+    main.appendChild(el('div.doc-sub', 'foreign partners · what they buy & sell · prices & demand levels'));
 
     const comms = S().items.filter(i => i.tradable && ['Commodities', 'Goods', 'Military'].includes(i.category));
     const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
 
-    main.appendChild(Views.secLabel('Government purchase prices'));
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'What the government pays companies for the production they route to it (the CEO’s “sell to government %”). The government resells abroad at the partner prices below — its margin is national trade income.'));
-    const gbGrid = el('div.form-grid');
-    comms.forEach(it => {
-      if (trade.govBuyPrices[it.id] === undefined) trade.govBuyPrices[it.id] = it.marketValue;
-      gbGrid.appendChild(F.field(it.name + ' (' + CUR() + ')', F.num(trade.govBuyPrices, it.id)));
-    });
-    main.appendChild(gbGrid);
+      'Set up each foreign partner: which goods they buy from Arcasia (their demand), which they sell to it (their supply), the price, and a High/Med/Low level that caps how much they will trade per turn. The government’s own purchase prices from domestic companies are now set live on Economy → International Trade → Goods.'));
 
     main.appendChild(Views.secLabel('Foreign trade partners'));
     trade.partners.forEach((p, pi) => {
@@ -796,33 +789,39 @@ const GM = {
         F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
         F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
         F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
-      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {};
-      // shared row builder: `list` is p.exports (goods they buy from us) or
-      // p.imports (goods they sell to us). Prices live in the same per-item map.
-      const commRows = (listKey, label) => {
+      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+      // shared row builder: `listKey` is p.exports (goods they buy from us) or
+      // p.imports (goods they sell to us). Prices live in the same per-item map;
+      // `lvlKey` is p.demand (for exports) or p.supply (for imports) — the
+      // High/Med/Low level that caps how much moves per turn.
+      const commRows = (listKey, lvlKey, label) => {
         box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
         comms.forEach(it => {
           const on = p[listKey].includes(it.id);
           const priceInput = el('input.text-input', {
-            type: 'number', style: 'max-width:120px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
+            type: 'number', style: 'max-width:110px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
             oninput: (e) => { p.prices[it.id] = Number(e.target.value) || 0; }
           });
+          const lvlSel = el('select.text-input', { style: 'max-width:90px;' },
+            [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']].map(o => el('option', { value: o[0], selected: (p[lvlKey][it.id] || 'Med') === o[0] ? 'selected' : undefined }, o[1])));
+          lvlSel.addEventListener('change', () => { p[lvlKey][it.id] = lvlSel.value; });
           box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0;' },
             el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1; font-size:12.5px; cursor:pointer;' },
               el('input', {
                 type: 'checkbox', checked: on,
-                onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
+                onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
               }),
               it.name),
-            on ? priceInput : null));
+            on ? priceInput : null,
+            on ? lvlSel : null));
         });
       };
-      commRows('exports', 'Exports to this partner & price (their demand)');
-      commRows('imports', 'Imports from this partner & price (their supply — the President orders these)');
+      commRows('exports', 'demand', 'Exports to this partner — price & their demand level (they buy these from us)');
+      commRows('imports', 'supply', 'Imports from this partner — price & their supply level (they sell these to us)');
       main.appendChild(box);
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', {
-      onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], prices: {} }); App.renderView(); }
+      onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
     }, '+ Add partner')));
 
     main.appendChild(el('div.btn-row', { style: 'margin-top:18px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },

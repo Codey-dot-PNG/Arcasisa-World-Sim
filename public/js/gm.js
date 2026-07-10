@@ -711,6 +711,36 @@ const GM = {
     } else {
       main.appendChild(this.varsEditor(d, 'entity'));
     }
+    // Foreign powers: a read-only trade profile (what they buy & sell, at what
+    // level and price) right here in the registry, with a jump to the Trade Desk
+    // to edit — so a GM can size up any country's demand without hunting for it.
+    if ((d.type === 'foreign' || d.type === 'org') && !isNew) {
+      const partner = ((S().settings.trade || {}).partners || []).find(p => p.entityId === d.id);
+      main.appendChild(Views.secLabel('Trade profile'));
+      if (!partner) {
+        main.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, 'Not yet a trade partner. '));
+        main.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'trade'; this.draftKey = null; App.renderView(); } }, 'Set up on the Trade Desk →'));
+      } else {
+        const priceOf = (iid) => {
+          const it = itemById(iid); if (!it) return 0;
+          const m = (partner.priceMult && partner.priceMult[iid] > 0) ? partner.priceMult[iid]
+            : (partner.prices && partner.prices[iid] > 0 && it.marketValue > 0 ? partner.prices[iid] / it.marketValue : 1);
+          return Math.round((it.marketValue || 0) * m * 100) / 100;
+        };
+        const profile = (title, ids, lvlMap) => {
+          const wrap = el('div', { style: 'margin-bottom:8px;' });
+          wrap.appendChild(el('div.mono-label', title));
+          if (!ids.length) { wrap.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint);' }, '— none —')); return wrap; }
+          const tbl = el('table.data', el('thead', el('tr', el('th', 'Good'), el('th', 'Level'), el('th.num', 'Price'))));
+          const body = el('tbody');
+          ids.forEach(iid => { const it = itemById(iid); if (!it) return; body.appendChild(el('tr', el('td', it.name), el('td', (lvlMap || {})[iid] || 'Med'), el('td.num', CUR() + fmtNum(priceOf(iid))))); });
+          tbl.appendChild(body); wrap.appendChild(tbl); return wrap;
+        };
+        main.appendChild(profile('Buys from Arcasia — our exports', partner.exports || [], partner.demand));
+        main.appendChild(profile('Sells to Arcasia — our imports', partner.imports || [], partner.supply));
+        main.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'trade'; this.draftKey = null; App.renderView(); } }, 'Edit on the Trade Desk →'));
+      }
+    }
     main.appendChild(this.inventoryEditor(d));
     main.appendChild(this.saveBar('entities', d, isNew));
   },

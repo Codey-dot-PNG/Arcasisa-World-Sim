@@ -47,6 +47,121 @@ const ITEM_TEMPLATE_PATCH = {
   reserve: { category: 'Reserves', tradable: true, marketValue: 1000, icon: 'R' }
 };
 
+// Ready-made whole-event templates. Picking one fills in the trigger and a set
+// of sensible effects the GM can then tweak — so a GM never has to write a
+// formula from a blank card. Each patch is a full event body (minus id/runs).
+const EVENT_TEMPLATES = [
+  ['', '— start from a template —'],
+  ['boom', 'Economic boom (monthly)'],
+  ['recession', 'Recession (monthly)'],
+  ['scandal', 'Government scandal'],
+  ['popularity', 'Popularity surge'],
+  ['aid', 'Foreign aid windfall'],
+  ['disaster', 'Natural disaster (random province)'],
+  ['price_shock', 'Commodity price shock'],
+  ['babyboom', 'Baby boom'],
+  ['unrest', 'Civil unrest (conditional)']
+];
+const EVENT_TEMPLATE_PATCH = {
+  boom: {
+    name: 'Economic boom', description: 'A broad upswing lifts output and mood.',
+    trigger: { type: 'monthly' }, conditions: [],
+    effects: [
+      { type: 'adjust_var', scope: 'global', op: 'mul', key: 'gdp', value: '1.02' },
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'happiness', value: 'rand(0.5, 1.5)' },
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'employment', value: 'rand(0.2, 0.8)' },
+      { type: 'news', headline: 'Economy surges as output climbs', category: 'Economy', body: 'Factories and ports report a busy month across the Republic.', publish: true }
+    ]
+  },
+  recession: {
+    name: 'Recession', description: 'A downturn drags on growth and jobs.',
+    trigger: { type: 'monthly' }, conditions: [],
+    effects: [
+      { type: 'adjust_var', scope: 'global', op: 'mul', key: 'gdp', value: '0.98' },
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'employment', value: 'rand(-1.2, -0.4)' },
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'happiness', value: 'rand(-1.5, -0.5)' },
+      { type: 'news', headline: 'Downturn bites as growth stalls', category: 'Economy', body: 'Businesses warn of a harder quarter ahead.', publish: true }
+    ]
+  },
+  scandal: {
+    name: 'Government scandal', description: 'A scandal dents public approval.',
+    trigger: { type: 'manual' }, conditions: [],
+    effects: [
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'approval', value: 'rand(-6, -2)' },
+      { type: 'news', headline: 'Scandal engulfs the government', category: 'Politics', body: 'Revelations dominate the front pages and the order paper.', publish: true }
+    ]
+  },
+  popularity: {
+    name: 'Popularity surge', description: 'A win for the government lifts approval.',
+    trigger: { type: 'manual' }, conditions: [],
+    effects: [
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'approval', value: 'rand(2, 6)' },
+      { type: 'news', headline: 'Government rides a wave of goodwill', category: 'Politics', body: 'Ministers enjoy a rare stretch of favourable coverage.', publish: true }
+    ]
+  },
+  aid: {
+    name: 'Foreign aid windfall', description: 'An ally wires funds to the treasury.',
+    trigger: { type: 'manual' }, conditions: [],
+    effects: [
+      { type: 'money', kind: 'deposit', to: 'ent_gov', amount: 'rand(20000000, 80000000)', memo: 'Foreign aid grant' },
+      { type: 'news', headline: 'Ally pledges major aid package', category: 'Foreign', body: 'The funds are earmarked for the budget.', publish: true }
+    ]
+  },
+  disaster: {
+    name: 'Natural disaster', description: 'A disaster strikes one province at random.',
+    trigger: { type: 'manual' }, conditions: [],
+    effects: [
+      { type: 'adjust_var', scope: 'province', target: 'random', op: 'add', key: 'happiness', value: 'rand(-8, -3)' },
+      { type: 'adjust_var', scope: 'province', target: 'random', op: 'add', key: 'infrastructure', value: 'rand(-6, -2)' },
+      { type: 'news', headline: 'Disaster strikes a province', category: 'Regional', body: 'Emergency crews are on the scene; damage is being assessed.', publish: true }
+    ]
+  },
+  price_shock: {
+    name: 'Commodity price shock', description: 'Prices of a whole category jump.',
+    trigger: { type: 'manual' }, conditions: [],
+    effects: [
+      { type: 'set_item_value', item: 'all', category: 'Commodities', value: '$value * rand(1.1, 1.4)' },
+      { type: 'news', headline: 'Commodity prices spike', category: 'Economy', body: 'Traders scramble as raw material costs climb.', publish: true }
+    ]
+  },
+  babyboom: {
+    name: 'Baby boom', description: 'Population growth across the classes.',
+    trigger: { type: 'monthly' }, conditions: [],
+    effects: [
+      { type: 'adjust_demo', province: 'all', group: 'all', metric: 'population', op: 'mul', value: '1.004' }
+    ]
+  },
+  unrest: {
+    name: 'Civil unrest', description: 'When approval falls too low, unrest spreads.',
+    trigger: { type: 'every_turn' },
+    conditions: [{ a: 'g(avgApproval)', op: '<', b: '35' }],
+    effects: [
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'happiness', value: 'rand(-1.5, -0.3)' },
+      { type: 'adjust_var', scope: 'province', target: 'all', op: 'add', key: 'crime', value: 'rand(0.3, 1.2)' },
+      { type: 'news', headline: 'Unrest spreads amid discontent', category: 'Politics', body: 'Protests are reported in several provinces.', publish: false }
+    ]
+  }
+};
+
+// Ready-made variable definitions — pick one and just rename if wanted.
+const VAR_TEMPLATES = [
+  ['', '— start from a template —'],
+  ['prov_pct', 'Province percentage metric (0–100)'],
+  ['prov_index', 'Province index (arbitrary number)'],
+  ['global_money', 'Global money figure'],
+  ['global_pct', 'Global percentage'],
+  ['company_num', 'Company number'],
+  ['entity_flag', 'Entity flag (0/1)']
+];
+const VAR_TEMPLATE_PATCH = {
+  prov_pct: { scope: 'province', key: 'newMetric', label: 'New Metric', format: 'percent', default: 50 },
+  prov_index: { scope: 'province', key: 'newIndex', label: 'New Index', format: 'number', default: 0 },
+  global_money: { scope: 'global', key: 'newFund', label: 'New Fund', format: 'money', default: 0 },
+  global_pct: { scope: 'global', key: 'newRate', label: 'New Rate', format: 'percent', default: 0 },
+  company_num: { scope: 'company', key: 'newFigure', label: 'New Figure', format: 'number', default: 0 },
+  entity_flag: { scope: 'entity', key: 'newFlag', label: 'New Flag', format: 'number', default: 0 }
+};
+
 const GM = {
   draft: null, draftKey: null,
 
@@ -875,6 +990,9 @@ const GM = {
     if (!source) return;
     const d = this.getDraft('var:' + selId, source);
     main.appendChild(Views.secLabel(isNew ? 'New Variable' : 'Edit — ' + source.label));
+    main.appendChild(this.field('Start from a template', this.sel({ _t: '' }, '_t', VAR_TEMPLATES, (v) => {
+      if (v && VAR_TEMPLATE_PATCH[v]) { Object.assign(d, JSON.parse(JSON.stringify(VAR_TEMPLATE_PATCH[v]))); App.renderView(); }
+    }), 'Fills in scope, key, label, format and a default.'));
     main.appendChild(el('div.form-grid',
       this.field('Scope', this.sel(d, 'scope', [['province', 'Province'], ['company', 'Company'], ['entity', 'Entity'], ['property', 'Property'], ['global', 'Global']])),
       this.field('Key (used in expressions as $key)', this.text(d, 'key')),
@@ -1232,6 +1350,16 @@ const GM = {
     const d = this.getDraft('ev:' + selId, source);
 
     main.appendChild(Views.secLabel(isNew ? 'New Event' : 'Edit — ' + source.name));
+    main.appendChild(this.field('Start from a template', this.sel({ _t: '' }, '_t', EVENT_TEMPLATES, (v) => {
+      if (v && EVENT_TEMPLATE_PATCH[v]) {
+        const patch = JSON.parse(JSON.stringify(EVENT_TEMPLATE_PATCH[v]));
+        d.name = patch.name; d.description = patch.description;
+        d.trigger = patch.trigger || { type: 'every_turn' };
+        d.conditions = patch.conditions || [];
+        d.effects = patch.effects || [];
+        App.renderView();
+      }
+    }), 'Fills in the trigger, conditions and effects — then tweak the details. No formula-writing needed to start.'));
     main.appendChild(el('div.form-grid',
       this.field('Name', this.text(d, 'name')),
       this.field('Trigger', this.sel(d.trigger, 'type', [['every_turn', 'Every turn'], ['interval', 'Every N turns'], ['weekly', 'Every week'], ['monthly', 'Every month'], ['date', 'On a specific date'], ['manual', 'Manual only']], () => App.renderView())),

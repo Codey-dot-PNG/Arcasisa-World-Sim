@@ -152,6 +152,13 @@ function market_treasuryPoolClient(co) {
   const held = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
   return Math.max(0, (co.sharesOutstanding || 0) - held);
 }
+// Shares that count toward valuation / market cap: all outstanding EXCEPT
+// freshly-floated primary stock no real investor has subscribed to yet (mirrors
+// server market.valuedShares — floating unsold stock must not inflate cap).
+function market_valuedSharesClient(co) {
+  const primary = Math.min((co.vars && co.vars.primaryPool) || 0, market_treasuryPoolClient(co));
+  return Math.max(0, (co.sharesOutstanding || 0) - primary);
+}
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
 const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', fort: 'T', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };

@@ -194,6 +194,10 @@ function migrate(world) {
       changed = true;
     }
     if (e.priceAnchor !== undefined) { delete e.priceAnchor; changed = true; }
+    // Unsold primary-offering pool (shares floated but not yet subscribed).
+    // Existing worlds start at 0 — their current float is legitimate owner
+    // stock, not an unsold offering, so it still counts toward valuation.
+    if (e.vars && e.vars.primaryPool === undefined) { e.vars.primaryPool = 0; changed = true; }
   }
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }

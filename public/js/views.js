@@ -1673,7 +1673,7 @@ const Views = {
     }
     const capRows = S().entities
       .filter(e => e.type === 'company' && e.sharePrice !== undefined && e.sharesOutstanding)
-      .map(c => ({ label: c.abbrev || c.name, value: c.sharePrice * c.sharesOutstanding, color: c.color, onClick: () => select('entity', c.id) }));
+      .map(c => ({ label: c.abbrev || c.name, value: c.sharePrice * market_valuedSharesClient(c), color: c.color, onClick: () => select('entity', c.id) }));
     if (capRows.length) pies.appendChild(Charts.chartPie(capRows, { width: 420, height: 210, title: 'Market Capitalisation' }));
     if (pies.children.length) inner.appendChild(pies);
 
@@ -1804,7 +1804,10 @@ const Views = {
           logoEl,
           el('div',
             el('div.tr-parties', { style: 'cursor:pointer;', title: 'Open company file', onclick: openFile }, c.name + ' — ' + (c.abbrev || c.industry || '')),
-            el('div.tr-meta', 'DAY ', this.livePriceEl(c), ` · VALUE ${CUR()}${fmtNum(c.sharePrice)} · WK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · CONF ${c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'}`, ' ', pctEl))),
+            el('div.tr-meta', 'DAY ', this.livePriceEl(c), ` · VALUE ${CUR()}${fmtNum(c.sharePrice)} · WK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · CONF ${c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'}`,
+              (Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c)) > 0
+                ? el('span', { style: 'color:var(--accent);' }, ` · ${fmtNum(Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c)))} ON SHELF`) : null),
+              ' ', pctEl))),
         el('div', { style: 'text-align:right;' },
           el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
       row.appendChild(head);
@@ -1909,35 +1912,32 @@ const Views = {
       const newSO = SO + newShares;
       return newSO > 0 ? Math.min(100, Math.round((cur + newShares) / newSO * 100)) : (c.publicFloat || 0);
     };
+    const pending = Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c));
     const preview = el('div', { style: 'margin-top:14px; padding:12px; border:1px solid var(--rule-strong); background:var(--paper-deep); font-family:var(--font-mono); font-size:12px; line-height:1.8;' });
     const render = () => {
       const price = this.livePrice(c);
       const n = sharesFor(draft.pct);
-      const soAfter = SO + n;
-      const poolAfter = market_treasuryPoolClient(c) + n;
-      const overhang = soAfter > 0 ? poolAfter / soAfter : 0;
-      const offerPrice = Math.max(0.01, Math.round(price * Math.max(0.1, 1 - overhang) * 100) / 100);
-      const raised = Math.round(offerPrice * n * 100) / 100;
-      const fvAfter = soAfter > 0 ? Math.round(((c.sharePrice || price) * SO + raised) / soAfter * 100) / 100 : (c.sharePrice || 0);
+      const potential = Math.round(price * n * 100) / 100;
       clear(preview);
       preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'MARKET PRICE   '), el('span', { class: 'live-price', 'data-co': c.id }, CUR() + fmtNum(price))));
-      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'UNDERWRITTEN @ '), CUR() + fmtNum(offerPrice) + '  (−' + Math.round(Math.min(0.9, overhang) * 100) + '% float-overhang discount)'));
       preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'NEW SHARES     '), fmtNum(n) + ' (' + draft.pct + '% of ' + fmtNum(SO) + ')'));
-      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'VALUE / SHARE  '), CUR() + fmtNum(c.sharePrice || 0) + ' → ' + CUR() + fmtNum(fvAfter) + '  (dilution)'));
+      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'ON THE SHELF   '), fmtNum(pending + n) + ' shares awaiting subscribers'));
+      preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'VALUE / SHARE  '), CUR() + fmtNum(c.sharePrice || 0) + '  (unchanged — no dilution until sold)'));
       preview.appendChild(el('div', el('span', { style: 'color:var(--ink-faint);' }, 'NEW FLOAT      '), (c.publicFloat || 0) + '% → ' + floatFor(n) + '%'));
-      preview.appendChild(el('div', { style: 'margin-top:6px; font-size:14px; font-weight:700; color:var(--good);' }, 'YOU RAISE  ' + CUR() + fmtNum(raised)));
+      preview.appendChild(el('div', { style: 'margin-top:6px; font-size:14px; font-weight:700; color:var(--good);' }, 'RAISE UP TO  ' + CUR() + fmtNum(potential)));
+      preview.appendChild(el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin-top:2px;' }, 'paid to the company only as real investors subscribe'));
     };
     openModal('RAISE CAPITAL — ' + c.name, el('div',
-      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Float new shares for cash. The Bank of Arcasia underwrites at the live price minus the share of the company left unsold in the float — big raises earn less per share and dilute existing holders. ${fmtNum(SO)} outstanding.`),
-      el('label.field-label', 'Raise (% of shares outstanding)'),
+      el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, `Float new shares onto the market. They sit on the shelf until real investors buy them — the company is paid, and its valuation rises, only as they actually subscribe. Floating alone raises no cash and dilutes no one. ${fmtNum(SO)} outstanding${pending ? ', ' + fmtNum(pending) + ' already on the shelf' : ''}.`),
+      el('label.field-label', 'Float (% of shares outstanding)'),
       Forms.slider(draft, 'pct', 1, 50, { suffix: '%', onInput: render }),
       preview
     ), [{
-      label: 'Raise capital', onClick: async () => {
+      label: 'Float shares', onClick: async () => {
         const n = sharesFor(draft.pct);
-        if (!(n > 0)) throw new Error('Choose a percentage to raise.');
+        if (!(n > 0)) throw new Error('Choose a percentage to float.');
         const r = await POST('/api/market/offer', { companyId: c.id, newShares: n, floatPct: floatFor(n) });
-        toast(`Raised ${fmtMoney(r.raised)} floating ${fmtNum(n)} shares @ ${fmtMoney(r.price)}.`);
+        toast(`Floated ${fmtNum(n)} shares — up to ${fmtMoney(r.potentialRaise)} as investors subscribe.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
     render();

@@ -21,7 +21,151 @@ const War = {
   _flashAnim: {},    // synthetic flash id -> { node, t0, life }
   _raf: null,
 
+  // ---- interactive War layer input state (Phase 16) ----
+  _sel: new Set(),   // selected unit ids (commandable side only)
+  _input: null,      // current pointer gesture: {mode:'box'|'formation', start:[x,y], active, node?}
+  _bombArmed: false,
+  _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
+
   active() { return !!(S() && S().war); },
+
+  /* ═══════════ AUTHORITY ═══════════
+     Non-GM operators always command the defender — the server enforces this
+     regardless of what the client sends, but the client mirrors it so the UI
+     never even offers an 'att' toggle to a non-GM. */
+  commandableSide() { return (isGM() && this._gmSide === 'att') ? 'att' : 'def'; },
+
+  /* ═══════════ MAP INPUT (delegated from map.js's pointer handlers) ═══════════
+     map.js only calls these while W.layer === 'war'. Each returns true when it
+     consumed the gesture (map.js must then skip its own pan/click handling). */
+  onMapPointerDown(e) {
+    if (!this.active()) return false;
+    const map = GameMap;
+    const world = map.clientToWorld(e.clientX, e.clientY);
+    if (e.shiftKey) {
+      this._input = { mode: 'box', start: world, active: true, node: this._marqueeNode(map) };
+      return true;
+    }
+    if (e.ctrlKey || e.metaKey) {
+      this._input = { mode: 'formation', start: world, active: true, node: this._formationNode(map) };
+      return true;
+    }
+    if (this._bombArmed) {
+      this._dropBomb(world);
+      this._bombArmed = false;
+      return true;
+    }
+    if (this._sel.size) {
+      this._issueMove(world);
+      return true;
+    }
+    return false;
+  },
+  onMapPointerMove(e) {
+    if (!this._input || !this._input.active) return;
+    const map = GameMap;
+    const world = map.clientToWorld(e.clientX, e.clientY);
+    if (this._input.mode === 'box') this._updateMarquee(this._input.node, this._input.start, world);
+    else if (this._input.mode === 'formation') this._updateFormationLine(this._input.node, this._input.start, world);
+  },
+  onMapPointerUp(e) {
+    if (!this._input || !this._input.active) return;
+    const map = GameMap;
+    const world = map.clientToWorld(e.clientX, e.clientY);
+    const start = this._input.start;
+    const tiny = Math.hypot(world[0] - start[0], world[1] - start[1]) < 6;
+    if (this._input.mode === 'box') {
+      if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
+      if (tiny) {
+        this._sel.clear();
+      } else {
+        const x0 = Math.min(start[0], world[0]), x1 = Math.max(start[0], world[0]);
+        const y0 = Math.min(start[1], world[1]), y1 = Math.max(start[1], world[1]);
+        const side = this.commandableSide();
+        const war = S().war;
+        this._sel.clear();
+        for (const u of (war ? war.units : [])) {
+          if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0)) continue;
+          if (u.pos[0] >= x0 && u.pos[0] <= x1 && u.pos[1] >= y0 && u.pos[1] <= y1) this._sel.add(u.id);
+        }
+      }
+      if (map.render) map.render();
+    } else if (this._input.mode === 'formation') {
+      if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
+      if (!tiny && this._sel.size) this._issueFormation(start, world);
+    }
+    this._input = null;
+  },
+
+  _marqueeNode(map) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const r = document.createElementNS(NS, 'rect');
+    r.setAttribute('class', 'war-marquee');
+    map.world.appendChild(r);
+    return r;
+  },
+  _updateMarquee(node, a, b) {
+    if (!node) return;
+    node.setAttribute('x', Math.min(a[0], b[0]));
+    node.setAttribute('y', Math.min(a[1], b[1]));
+    node.setAttribute('width', Math.abs(b[0] - a[0]));
+    node.setAttribute('height', Math.abs(b[1] - a[1]));
+  },
+  _formationNode(map) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const l = document.createElementNS(NS, 'line');
+    l.setAttribute('class', 'war-formation-line');
+    map.world.appendChild(l);
+    return l;
+  },
+  _updateFormationLine(node, a, b) {
+    if (!node) return;
+    node.setAttribute('x1', a[0]); node.setAttribute('y1', a[1]);
+    node.setAttribute('x2', b[0]); node.setAttribute('y2', b[1]);
+  },
+
+  // Plain click with an existing selection: move all selected units toward
+  // the click point (spread slightly in a small ring so they don't stack).
+  async _issueMove(dest) {
+    const ids = [...this._sel];
+    const n = ids.length;
+    const orders = ids.map((id, i) => {
+      if (n === 1) return { unitId: id, dest };
+      const ang = (i / n) * Math.PI * 2;
+      const r = 24;
+      return { unitId: id, dest: [dest[0] + Math.cos(ang) * r, dest[1] + Math.sin(ang) * r] };
+    });
+    try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
+    catch (e) { toast(e.message, true); }
+  },
+  // Ctrl-drag formation: distribute the current selection along the line A→B,
+  // nearest-in-order (sort both units and slots by their projection onto the
+  // line direction, then pair them up 1:1) so units don't cross paths.
+  async _issueFormation(a, b) {
+    const war = S().war;
+    if (!war) return;
+    const ids = [...this._sel];
+    const n = ids.length;
+    if (n === 0) return;
+    const dir = [b[0] - a[0], b[1] - a[1]];
+    const units = ids.map(id => war.units.find(u => u.id === id)).filter(Boolean);
+    const proj = (p) => (p[0] - a[0]) * dir[0] + (p[1] - a[1]) * dir[1];
+    units.sort((u1, u2) => proj(u1.pos) - proj(u2.pos));
+    const slots = [];
+    for (let i = 0; i < units.length; i++) {
+      const t = units.length > 1 ? i / (units.length - 1) : 0.5;
+      slots.push([a[0] + dir[0] * t, a[1] + dir[1] * t]);
+    }
+    const orders = units.map((u, i) => ({ unitId: u.id, dest: slots[i] }));
+    try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
+    catch (e) { toast(e.message, true); }
+  },
+  async _dropBomb(pos) {
+    try {
+      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos });
+      toast('Bombing run away — impact incoming.');
+    } catch (e) { toast(e.message, true); }
+  },
 
   /* ---------- shared animation loop ----------
      One rAF loop, started lazily, that both tweens unit positions (~900ms
@@ -60,15 +204,29 @@ const War = {
   /* ═══════════ MAP LAYER ═══════════ */
   renderMapLayer(map, mk, NS) {
     const war = S().war;
-    if (!war) { this._anim = {}; this._flashAnim = {}; return; }
+    if (!war) { this._anim = {}; this._flashAnim = {}; this._removeToolbar(); return; }
     map.warLayer = document.createElementNS(NS, 'g');
     map.warLayer.setAttribute('class', 'war-layer');
     map.world.appendChild(map.warLayer);
 
+    this.renderCraters(map, mk, NS, war);
     this.renderTerritory(map, mk, NS, war);
     this.renderUnits(map, mk, NS, war);
     this.renderFlashes(map, mk, NS, war);
     this.ensureLoop();
+    if (W.layer === 'war') this.renderToolbar(); else this._removeToolbar();
+  },
+
+  // Dark scorch circles from recent bomb drops — drawn UNDER units/territory
+  // so a crater reads as ground damage, not a marker. war.craters is capped
+  // at 40 server-side so this stays cheap.
+  renderCraters(map, mk, NS, war) {
+    for (const c of (war.craters || [])) {
+      const circ = document.createElementNS(NS, 'circle');
+      circ.setAttribute('cx', c.pos[0]); circ.setAttribute('cy', c.pos[1]); circ.setAttribute('r', 95);
+      circ.setAttribute('class', 'war-crater');
+      map.warLayer.appendChild(circ);
+    }
   },
 
   // Fracture overlay: captured cells grouped by province, drawn as a union of
@@ -128,35 +286,64 @@ const War = {
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
     for (const u of war.units) {
+      const isDead = u.dead || u.state === 'dead';
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}` +
+        (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : ''));
+      g.setAttribute('data-warunit', u.id);
+
+      if (isDead) {
+        // Corpses don't tween and aren't kept in the anim registry — they
+        // just sit where they fell, at reduced opacity, no HP bar, no ring.
+        g.setAttribute('transform', `translate(${u.pos[0]},${u.pos[1]})`);
+        const box = document.createElementNS(NS, 'rect');
+        box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
+        box.setAttribute('class', 'war-unit-box');
+        g.appendChild(box);
+        const glyph = document.createElementNS(NS, 'text');
+        glyph.setAttribute('class', 'war-unit-glyph');
+        glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
+        glyph.textContent = WAR_KIND_GLYPH[u.kind] || '?';
+        g.appendChild(glyph);
+        const title = document.createElementNS(NS, 'title');
+        title.textContent = `${u.name} — destroyed`;
+        g.appendChild(title);
+        map.warLayer.appendChild(g);
+        delete this._anim[u.id];
+        continue;
+      }
+
       liveIds.add(u.id);
       const prevAnim = this._anim[u.id];
       const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : u.pos;
-      const g = document.createElementNS(NS, 'g');
-      g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}`);
-      g.setAttribute('data-warunit', u.id);
       g.setAttribute('transform', `translate(${from[0]},${from[1]})`);
 
       if (u.state === 'fighting') {
         const ring = document.createElementNS(NS, 'circle');
-        ring.setAttribute('r', 20); ring.setAttribute('class', 'war-fight-ring');
+        ring.setAttribute('r', 30); ring.setAttribute('class', 'war-fight-ring');
         g.appendChild(ring);
       }
+      if (this._sel.has(u.id)) {
+        const selRing = document.createElementNS(NS, 'circle');
+        selRing.setAttribute('r', 30); selRing.setAttribute('class', 'war-sel-ring');
+        g.appendChild(selRing);
+      }
       const box = document.createElementNS(NS, 'rect');
-      box.setAttribute('x', -13); box.setAttribute('y', -9); box.setAttribute('width', 26); box.setAttribute('height', 18);
+      box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
       box.setAttribute('class', 'war-unit-box');
       g.appendChild(box);
       const glyph = document.createElementNS(NS, 'text');
       glyph.setAttribute('class', 'war-unit-glyph');
-      glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 4);
+      glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
       glyph.textContent = WAR_KIND_GLYPH[u.kind] || '?';
       g.appendChild(glyph);
       const pct = Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
       const hpBg = document.createElementNS(NS, 'rect');
-      hpBg.setAttribute('x', -13); hpBg.setAttribute('y', 10); hpBg.setAttribute('width', 26); hpBg.setAttribute('height', 3);
+      hpBg.setAttribute('x', -20); hpBg.setAttribute('y', -22); hpBg.setAttribute('width', 40); hpBg.setAttribute('height', 4);
       hpBg.setAttribute('class', 'war-hp-bg');
       g.appendChild(hpBg);
       const hpFill = document.createElementNS(NS, 'rect');
-      hpFill.setAttribute('x', -13); hpFill.setAttribute('y', 10); hpFill.setAttribute('width', 26 * pct); hpFill.setAttribute('height', 3);
+      hpFill.setAttribute('x', -20); hpFill.setAttribute('y', -22); hpFill.setAttribute('width', 40 * pct); hpFill.setAttribute('height', 4);
       hpFill.setAttribute('class', 'war-hp-fill');
       g.appendChild(hpFill);
       const title = document.createElementNS(NS, 'title');
@@ -189,6 +376,55 @@ const War = {
     }
   },
 
+  /* ═══════════ WAR MAP TOOLBAR ═══════════
+     Small floating control surface, only present while W.layer === 'war'.
+     Rebuilt on every render (cheap — a handful of buttons); removed the
+     instant the layer changes so it never lingers over another layer. */
+  renderToolbar() {
+    const bar0 = document.getElementById('war-toolbar');
+    if (bar0 && bar0.parentNode) bar0.parentNode.removeChild(bar0);
+    const war = S().war;
+    if (!war) return;
+    const side = this.commandableSide();
+    const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
+    const now = Date.now();
+    const onCooldown = now < bomb.cooldownUntil;
+    const bar = el('div#war-toolbar.war-toolbar');
+    bar.appendChild(el('div.war-toolbar-hint', 'Shift-drag: select · Ctrl-drag: formation · Click: move · Bomb: arm then click'));
+    const row = el('div.btn-row');
+    const bombBtn = el('button.dash-btn', {
+      class: (this._bombArmed ? 'active' : '') , disabled: onCooldown,
+      onclick: () => { this._bombArmed = !this._bombArmed; this.renderToolbar(); }
+    }, onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
+    row.appendChild(bombBtn);
+    row.appendChild(el('button.dash-btn', {
+      onclick: () => { this._sel.clear(); this._bombArmed = false; if (GameMap.render) GameMap.render(); }
+    }, 'Clear selection'));
+    if (isGM()) {
+      row.appendChild(el('button.dash-btn', {
+        class: this._gmSide === 'def' ? 'active' : '',
+        onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.renderToolbar(); }
+      }, 'Command: Defender'));
+      row.appendChild(el('button.dash-btn', {
+        class: this._gmSide === 'att' ? 'active' : '',
+        onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.renderToolbar(); }
+      }, 'Command: Attacker'));
+    }
+    bar.appendChild(row);
+    const wrap = document.getElementById('map-wrap');
+    if (wrap) wrap.appendChild(bar);
+    // Re-render the toolbar periodically so the bomb cooldown counts down
+    // without waiting for the next server sync.
+    if (!this._toolbarTimer) {
+      this._toolbarTimer = setInterval(() => { if (W.layer === 'war' && this.active()) this.renderToolbar(); else this._removeToolbar(); }, 1000);
+    }
+  },
+  _removeToolbar() {
+    const bar = document.getElementById('war-toolbar');
+    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
+    if (this._toolbarTimer) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
+  },
+
   /* ═══════════ WAR ROOM PANEL ═══════════ */
   renderPanel(inner) {
     const war = S().war;
@@ -198,6 +434,8 @@ const War = {
       if (isGM()) this.renderStartForm(inner);
       return;
     }
+    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:6px;' },
+      'Command your forces directly on the map — switch to the ⚔ War layer.'));
 
     const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
     const mm = Math.floor(elapsed / 60), ss = elapsed % 60;

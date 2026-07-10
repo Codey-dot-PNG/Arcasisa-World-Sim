@@ -87,6 +87,12 @@ const GameMap = {
       return { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
     };
     svg.addEventListener('pointerdown', (e) => {
+      // War layer: let War decide whether this gesture is a command (box
+      // select, formation drag, move order, bomb drop) before any pan/pinch
+      // bookkeeping starts. War only consumes shift/ctrl-drags and plain
+      // clicks that actually do something (an existing selection, or armed
+      // bomb mode) — everything else falls through to normal pan/select.
+      if (W.layer === 'war' && window.War && War.onMapPointerDown(e)) { return; }
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 2) {
         // second finger down — abandon any single-finger pan/click and pinch
@@ -108,6 +114,7 @@ const GameMap = {
       this.lastDragMoved = false;
     });
     svg.addEventListener('pointermove', (e) => {
+      if (window.War && War._input && War._input.active) { War.onMapPointerMove(e); return; }
       // ---- pinch-zoom (two fingers) ----
       if (this.pinch && this.pointers.has(e.pointerId)) {
         this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -156,6 +163,7 @@ const GameMap = {
     // bind them exactly once against the GameMap singleton.
     if (!this._winPanBound) {
       const endFromWindow = (e) => {
+        if (window.War && War._input && War._input.active) { War.onMapPointerUp(e); return; }
         // drop the lifted finger; end an active pinch once fewer than two remain
         if (this.pointers && e.pointerId !== undefined) this.pointers.delete(e.pointerId);
         if (this.pinch && (!this.pointers || this.pointers.size < 2)) this.pinch = null;
@@ -172,6 +180,7 @@ const GameMap = {
     // window-capture handler has already cleared this.drag and set
     // lastDragMoved, so consult that flag to tell a click from a pan.
     svg.addEventListener('pointerup', (e) => {
+      if (window.War && War._input && War._input.active) { War.onMapPointerUp(e); return; }
       if (this.lastDragMoved) return;
       if (W.placing) {
         const [wx, wy] = this.clientToWorld(e.clientX, e.clientY);
@@ -237,6 +246,7 @@ const GameMap = {
     if (l.includes('political')) out.push({ id: 'political', label: 'Political' });
     if (l.includes('data') && perms().statistics) out.push({ id: 'data', label: 'Data' });
     if (l.includes('ownership')) out.push({ id: 'ownership', label: 'Ownership' });
+    if (S() && S().war) out.push({ id: 'war', label: '⚔ War' }); // public — everyone may watch/command the front
     if (!out.length) out.push({ id: 'plain', label: 'Terrain' });
     return out;
   },

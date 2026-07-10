@@ -413,6 +413,21 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .war-flash-landing{stroke:#6f93a8;}
 .war-flash-milestone{stroke:#f4ecdc;}
 
+/* Phase 16 — interactive War layer: mobile defenders, corpses, bombs. */
+.war-unit-dead{opacity:.35; filter:grayscale(1);}
+.war-unit-dead .war-unit-box{stroke-dasharray:1 2;}
+.war-sel-ring{fill:none; stroke:#e0c34a; stroke-width:2.5; opacity:.95;}
+.war-crater{fill:#1a1410; opacity:.3; pointer-events:none; stroke:#0c0906; stroke-width:1; stroke-dasharray:6 4;}
+.war-marquee{fill:rgba(224,164,88,.12); stroke:#e0a458; stroke-width:1.5; stroke-dasharray:5 3; pointer-events:none;}
+.war-formation-line{stroke:#e0a458; stroke-width:2; stroke-dasharray:8 4; pointer-events:none;}
+.war-toolbar{
+  position:absolute; left:12px; bottom:12px; z-index:20;
+  background:var(--paper); border:1px solid var(--ink-faint); border-radius:4px;
+  padding:8px 10px; max-width:340px; box-shadow:0 2px 10px rgba(0,0,0,.25);
+}
+.war-toolbar-hint{font-size:11px; color:var(--ink-faint); margin-bottom:6px;}
+.war-toolbar .btn-row{flex-wrap:wrap; gap:6px;}
+
 /* Isometric property buildings — small extruded blocks shown once the map is
    zoomed in close enough (see GameMap.isoBuilding / updateMarkerScale in
    map.js). Walls stay near-white like the reference clippings; only the

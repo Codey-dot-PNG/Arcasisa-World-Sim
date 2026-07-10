@@ -22,9 +22,15 @@
 // accepts either a single flat polygon or that list of subpaths and applies
 // the same even-odd rule SVG itself uses for compound paths.
 
+// Curve commands (c/C and the smooth/quadratic family) appear in a few shapes
+// (e.g. prov_mezdov, the Valksland outline). We don't tessellate them — for a
+// point-in-polygon test at map-cell resolution a straight line to the segment's
+// ENDPOINT is accurate enough — but they MUST be consumed as their own command
+// so their control-point numbers don't leak in as stray vertices on the
+// preceding line command.
 function parseShape(d) {
   const subpaths = [];
-  const cmdRe = /([MmLlHhVvZz])([^MmLlHhVvZz]*)/g;
+  const cmdRe = /([MmLlHhVvCcSsQqTtZz])([^MmLlHhVvCcSsQqTtZz]*)/g;
   let cur = null, x = 0, y = 0, startX = 0, startY = 0, m;
   while ((m = cmdRe.exec(String(d || '')))) {
     const cmd = m[1];
@@ -67,6 +73,21 @@ function parseShape(d) {
         if (!cur) { cur = [[x, y]]; subpaths.push(cur); }
         while (i < nums.length) { y += nums[i++]; cur.push([x, y]); }
         break;
+      // Curves: step to each segment's endpoint (last coord pair of the
+      // segment), approximating the curve by a chord. Segment sizes: C/c = 3
+      // pairs, S/s & Q/q = 2 pairs, T/t = 1 pair.
+      case 'C': case 'S': case 'Q': case 'T': {
+        if (!cur) { cur = [[x, y]]; subpaths.push(cur); }
+        const pairs = cmd === 'C' ? 3 : cmd === 'T' ? 1 : 2;
+        while (i + pairs * 2 <= nums.length) { i += (pairs - 1) * 2; x = nums[i++]; y = nums[i++]; cur.push([x, y]); }
+        break;
+      }
+      case 'c': case 's': case 'q': case 't': {
+        if (!cur) { cur = [[x, y]]; subpaths.push(cur); }
+        const pairs = cmd === 'c' ? 3 : cmd === 't' ? 1 : 2;
+        while (i + pairs * 2 <= nums.length) { i += (pairs - 1) * 2; x += nums[i++]; y += nums[i++]; cur.push([x, y]); }
+        break;
+      }
       case 'Z': case 'z':
         x = startX; y = startY;
         break;

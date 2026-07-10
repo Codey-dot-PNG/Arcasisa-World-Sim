@@ -166,6 +166,7 @@ const GM = {
   draft: null, draftKey: null,
 
   TABS: [
+    ['globaledit', 'Experimental Global Editor'],
     ['world', 'World & Time'],
     ['provinces', 'Provinces'],
     ['mapobjects', 'Cities & Properties'],
@@ -203,6 +204,7 @@ const GM = {
     layout.appendChild(nav); layout.appendChild(main);
     container.appendChild(layout);
     const fn = {
+      globaledit: this.tabGlobalEdit,
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
       registry: this.tabRegistry, economy: this.tabEconomy, assets: this.tabAssets, items: this.tabItems,
       trade: this.tabTrade,
@@ -315,6 +317,375 @@ const GM = {
       }, 'Duplicate') : null,
       !isNew ? el('button.danger-btn', { onclick: () => this.deleteColl(coll, draft.id, nameForDelete || draft.name || draft.id) }, 'Delete') : null
     );
+  },
+
+  /* One foreign-partner editor card, shared by the Trade Desk (a whole list of
+     them) and the Experimental Global Editor's per-country Trade tab (a single
+     locked one). opts.lockEntity hides the partner-picker & remove control so
+     the Global Editor always edits the country you drilled into. */
+  tradePartnerBox(trade, p, pi, opts) {
+    opts = opts || {};
+    const F = this;
+    const comms = S().items.filter(i => i.tradable && ['Commodities', 'Goods', 'Military'].includes(i.category));
+    const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
+    const ent = entById(p.entityId);
+    const box = el('div.stage', { style: 'margin-bottom:12px;' });
+    box.appendChild(el('div.stage-header',
+      el('span.stage-chapter', ent ? ent.name : (p.entityId || 'Partner')),
+      opts.lockEntity ? null : el('button.icon-btn', { title: 'Remove partner', onclick: () => { trade.partners.splice(pi, 1); App.renderView(); } }, '✕')));
+    box.appendChild(el('div.form-grid',
+      opts.lockEntity ? null : F.field('Partner', F.sel(p, 'entityId', foreigns.map(e => [e.id, e.name]), () => App.renderView())),
+      F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
+      F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
+      F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
+    p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.priceMult = p.priceMult || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+    // implied multiplier for a legacy absolute price, so old worlds show a
+    // sensible starting multiplier before they're re-authored
+    const multOf = (it) => {
+      if (p.priceMult[it.id] > 0) return p.priceMult[it.id];
+      if (p.prices[it.id] > 0 && it.marketValue > 0) return Math.round(p.prices[it.id] / it.marketValue * 100) / 100;
+      return 1;
+    };
+    // shared row builder: `listKey` is p.exports (goods they buy from us) or
+    // p.imports (goods they sell to us). Price is the item's global retail value
+    // × a per-partner MULTIPLIER slider (with typing). `lvlKey` is the
+    // demand/supply High/Med/Low level that sizes the orders.
+    const commRows = (listKey, lvlKey, label) => {
+      box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
+      comms.forEach(it => {
+        const on = p[listKey].includes(it.id);
+        const cb = el('input', {
+          type: 'checkbox', checked: on,
+          onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it); if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
+        });
+        const row = el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap;' },
+          el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 200px; font-size:12.5px; cursor:pointer;' }, cb,
+            el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(it.marketValue)))));
+        if (on) {
+          if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
+          const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
+          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(it.marketValue * (p.priceMult[it.id] || 1) * 100) / 100); };
+          paint();
+          const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', onInput: () => { delete p.prices[it.id]; paint(); } });
+          const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
+          lvlSel.style.maxWidth = '84px';
+          row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px;' }, el('div', { style: 'flex:1;' }, slider), priceOut, lvlSel));
+        }
+        box.appendChild(row);
+      });
+    };
+    commRows('exports', 'demand', 'Exports to this partner — price multiplier & their demand level (they buy these from us)');
+    commRows('imports', 'supply', 'Imports from this partner — price multiplier & their supply level (they sell these to us)');
+    return box;
+  },
+
+  /* ═══════════ EXPERIMENTAL GLOBAL EDITOR ═══════════
+     A front-facing-style, drill-down console over every entity in the sim:
+       Level 1 — entity CLASS (Companies / Persons / Countries / …)
+       Level 2 — the exact ENTITY
+       Level 3 — a FACET (Details · Money · Inventory · Ownership · Properties ·
+                 Trade, the last only for foreign powers / orgs)
+     Nothing here is new machinery — every save routes through the same
+     /api/gm/* endpoints the dedicated tabs use, so edits stay consistent with
+     certificates, deeds, accounts and the trade engine. It just gathers the
+     whole surface for one entity behind three rows of tabs. */
+  GE_CLASSES: [
+    ['company', 'Companies'],
+    ['person', 'Persons'],
+    ['foreign', 'Countries'],
+    ['party', 'Parties'],
+    ['government', 'Government'],
+    ['org', 'Organisations']
+  ],
+
+  tabGlobalEdit(main) {
+    main.appendChild(el('div.doc-title', 'Experimental Global Editor'));
+    main.appendChild(el('div.doc-sub', 'pick a class, then an entity, then edit its money · inventory · ownership · property income · trade'));
+
+    // ── Level 1 — entity class ──────────────────────────────────────────
+    if (!this.GE_CLASSES.some(([t]) => t === W.geClass)) W.geClass = 'company';
+    main.appendChild(el('div.mono-label', { style: 'margin-top:6px;' }, '1 · Class'));
+    main.appendChild(el('div.chip-row', this.GE_CLASSES.map(([t, label]) =>
+      el('button.chip', { class: W.geClass === t ? 'active' : '', onclick: () => { W.geClass = t; W.geSel = null; this.draftKey = null; App.renderView(); } },
+        label + ' (' + S().entities.filter(e => e.type === t).length + ')'))));
+
+    // ── Level 2 — the exact entity ──────────────────────────────────────
+    const list = S().entities.filter(e => e.type === W.geClass);
+    if (W.geSel && !list.some(e => e.id === W.geSel)) W.geSel = null;
+    if (!W.geSel && list.length) W.geSel = list[0].id;
+    main.appendChild(el('div.mono-label', { style: 'margin-top:12px;' }, '2 · Entity'));
+    const entBar = el('div.chip-row');
+    list.forEach(e => entBar.appendChild(el('button.chip', {
+      class: W.geSel === e.id ? 'active' : '',
+      onclick: () => { W.geSel = e.id; this.draftKey = null; App.renderView(); }
+    }, e.name)));
+    entBar.appendChild(el('button.chip', {
+      style: 'border-style:dashed;',
+      onclick: () => {
+        const nd = { name: 'New ' + (TYPE_LABEL[W.geClass] || 'Entity'), type: W.geClass, color: '#5c5340', description: '', vars: {}, inventory: [] };
+        POST('/api/gm/coll/entities', nd).then(r => { W.geSel = r.id; this.draftKey = null; toast('Created.'); }).catch(e => toast(e.message, true));
+      }
+    }, '+ New'));
+    main.appendChild(entBar);
+
+    const e = entById(W.geSel);
+    if (!e) { main.appendChild(el('div', { style: 'padding:16px; color:var(--ink-faint);' }, 'No entity of this class yet — use “+ New”.')); return; }
+
+    // ── Level 3 — facet ─────────────────────────────────────────────────
+    const SUBS = [['details', 'Details'], ['money', 'Money'], ['inventory', 'Inventory'], ['ownership', 'Ownership'], ['properties', 'Properties']];
+    if (e.type === 'foreign' || e.type === 'org') SUBS.push(['trade', 'Trade Details']);
+    if (!W.geSub || !SUBS.some(([s]) => s === W.geSub)) W.geSub = 'details';
+    main.appendChild(el('div.mono-label', { style: 'margin-top:14px;' }, '3 · ' + e.name + ' — ' + (TYPE_LABEL[e.type] || e.type)));
+    main.appendChild(el('div.chip-row', SUBS.map(([s, label]) =>
+      el('button.chip', { class: W.geSub === s ? 'active' : '', onclick: () => { W.geSub = s; this.draftKey = null; App.renderView(); } }, label))));
+
+    const panel = el('div', { style: 'margin-top:14px;' });
+    main.appendChild(panel);
+    ({
+      details: this.geDetails, money: this.geMoney, inventory: this.geInventory,
+      ownership: this.geOwnership, properties: this.geProperties, trade: this.geTrade
+    }[W.geSub] || this.geDetails).call(this, panel, e);
+  },
+
+  /* ---- Global Editor · Details ---- */
+  geDetails(main, e) {
+    const d = this.getDraft('ge:details:' + e.id, e);
+    const types = ['company', 'party', 'person', 'government', 'foreign', 'org'];
+    main.appendChild(el('div.form-grid',
+      this.field('Name', this.text(d, 'name')),
+      this.field('Type', this.sel(d, 'type', types.map(t => [t, TYPE_LABEL[t] || t]))),
+      this.field('Marker colour', this.color(d, 'color')),
+      this.field('Logo / image path', this.text(d, 'logo', '/assets/…')),
+      d.type === 'company' ? this.field('Industry', this.text(d, 'industry')) : null,
+      d.type === 'company' ? this.field('Shares outstanding', this.num(d, 'sharesOutstanding')) : null,
+      d.type === 'person' ? this.field('Title', this.text(d, 'title')) : null,
+      d.type === 'party' ? this.field('Abbreviation', this.text(d, 'abbrev')) : null,
+      d.type === 'party' ? this.field('Seats (MPs)', this.num(d, 'mpCount')) : null,
+      (d.type === 'foreign' || d.type === 'org') ? this.field('Stance / relations', this.text(d, 'stance')) : null));
+    main.appendChild(this.field('Description', this.area(d, 'description')));
+    main.appendChild(this.varsEditor(d, d.type === 'company' ? 'company' : 'entity'));
+    main.appendChild(this.saveBar('entities', d, false));
+  },
+
+  /* ---- Global Editor · Money ----
+     A net-worth composition bar plus a per-account "set balance to X" control
+     (delta routed through /api/gm/mint, the same central-bank op the Money tab
+     exposes). Opening accounts and transfers reuse the existing modals. */
+  geMoney(main, e) {
+    const accts = (S().accounts || []).filter(a => a.ownerId === e.id);
+    const skipCat = new Set(['Securities', 'Deeds', 'Honours']);
+    const cash = accts.reduce((s, a) => s + a.balance, 0);
+    const goodsVal = (e.inventory || []).reduce((s, r) => { const it = itemById(r.itemId); return it && !skipCat.has(it.category) ? s + r.qty * (it.marketValue || 0) : s; }, 0);
+    const propVal = (S().properties || []).filter(p => p.ownerId === e.id).reduce((s, p) => s + (p.value || 0), 0);
+    const shareVal = S().entities.filter(c => c.type === 'company' && (c.shareholders || []).some(sh => sh.entityId === e.id))
+      .reduce((s, c) => { const sh = c.shareholders.find(x => x.entityId === e.id); return s + sh.shares * (c.sharePrice || 0); }, 0);
+
+    main.appendChild(Views.secLabel('Net worth'));
+    main.appendChild(Charts.chartBars([
+      { label: 'Cash', value: cash, color: 'var(--good)' },
+      { label: 'Inventory', value: goodsVal, color: 'var(--accent)' },
+      { label: 'Property', value: propVal, color: 'var(--ink-soft)' },
+      { label: 'Shares', value: shareVal, color: 'var(--paper-line)' }
+    ], { horizontal: true, width: 520, height: 150, valueFormat: v => fmtMoney(v) }));
+    main.appendChild(this.kv('Total net worth', fmtMoney(cash + goodsVal + propVal + shareVal), 'pos'));
+
+    main.appendChild(Views.secLabel('Bank accounts'));
+    main.appendChild(el('div.btn-row',
+      el('button.solid-btn', {
+        onclick: () => {
+          const nd = { ownerId: e.id, name: 'New Account', balance: 0 };
+          openModal('OPEN ACCOUNT', el('div',
+            el('div', { style: 'font-size:12px; color:var(--ink-soft); margin:4px 0 6px;' }, 'Holder: ' + e.name),
+            el('label.field-label', 'Account name'), this.text(nd, 'name'),
+            el('label.field-label', 'Opening balance'), this.num(nd, 'balance')
+          ), [{ label: 'Open Account', onClick: async () => { await POST('/api/gm/coll/accounts', nd); toast('Account opened.'); } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+        }
+      }, '+ Open Account'),
+      el('button.dash-btn', { onclick: () => Views.transferModal(accts[0] && accts[0].id) }, '⇄ Transfer')));
+
+    if (!accts.length) { main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No account on file. Open one above.')); return; }
+    accts.forEach(a => {
+      const st = { v: a.balance };
+      main.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:8px; flex-wrap:wrap;' },
+        el('div', { style: 'flex:1 1 200px;' }, this.field(a.name + ' — set balance to (' + CUR() + ')', this.num(st, 'v'))),
+        el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-faint); padding-bottom:9px; white-space:nowrap;' }, 'now ' + fmtMoney(a.balance)),
+        el('button.solid-btn', {
+          style: 'margin-bottom:2px;',
+          onclick: async () => {
+            const delta = Math.round((Number(st.v) - a.balance) * 100) / 100;
+            if (!delta) { toast('No change.'); return; }
+            try { await POST('/api/gm/mint', { accountId: a.id, amount: delta, memo: 'GM balance adjustment' }); toast('Balance set to ' + fmtMoney(Number(st.v)) + '.'); }
+            catch (x) { toast(x.message, true); }
+          }
+        }, 'Apply'),
+        el('button.icon-btn', { title: 'Close account', onclick: () => this.deleteColl('accounts', a.id, a.name) }, '✕')));
+    });
+  },
+
+  /* ---- Global Editor · Inventory ----
+     A value chart, a quick "move an item out" (give-item) and the full
+     inventory editor saved back through the entities collection. */
+  geInventory(main, e) {
+    const rows = (e.inventory || []).map(r => { const it = itemById(r.itemId); return it ? { label: it.name, value: r.qty * (it.marketValue || 0), color: 'var(--accent)' } : null; })
+      .filter(Boolean).sort((a, b) => b.value - a.value).slice(0, 10);
+    if (rows.length) {
+      main.appendChild(Views.secLabel('Holdings by value'));
+      main.appendChild(Charts.chartBars(rows, { horizontal: true, width: 520, height: Math.max(90, rows.length * 24 + 30), valueFormat: v => fmtMoney(v) }));
+    }
+
+    main.appendChild(Views.secLabel('Move an item out'));
+    const mv = (this._geMove && this._geMove.fromEntityId === e.id) ? this._geMove
+      : (this._geMove = { fromEntityId: e.id, toEntityId: (S().entities.find(x => x.id !== e.id) || {}).id, itemId: (S().items[0] || {}).id, qty: 1 });
+    mv.fromEntityId = e.id;
+    main.appendChild(el('div.form-grid',
+      this.field('To holder', this.sel(mv, 'toEntityId', this.entOptions())),
+      this.field('Item', this.sel(mv, 'itemId', this.itemOptions())),
+      this.field('Quantity', this.num(mv, 'qty'))));
+    main.appendChild(el('div.btn-row', el('button.dash-btn', {
+      onclick: async () => { try { await POST('/api/gm/give-item', mv); this.draftKey = null; toast('Item moved.'); } catch (x) { toast(x.message, true); } }
+    }, 'Move Item')));
+
+    const d = this.getDraft('ge:inv:' + e.id, e);
+    main.appendChild(this.inventoryEditor(d));
+    main.appendChild(this.saveBar('entities', d, false));
+  },
+
+  /* ---- Global Editor · Ownership ----
+     Companies get owner/CEO/shares + a share register with float↔holder
+     assignment (set-holding). Everything else gets the mirror image: which
+     companies it controls, and its shareholdings, both editable. */
+  geOwnership(main, e) {
+    const companies = S().entities.filter(c => c.type === 'company');
+    if (e.type === 'company') {
+      const od = (this._geOwn && this._geOwn.id === e.id) ? this._geOwn
+        : (this._geOwn = { id: e.id, ownerId: e.ownerId || '', ceoId: e.ceoId || '', sharesOutstanding: e.sharesOutstanding || 0 });
+      main.appendChild(Views.secLabel('Control'));
+      main.appendChild(el('div.form-grid',
+        this.field('Owner (controlled by)', this.sel(od, 'ownerId', this.entOptions(null, true))),
+        this.field('Chief Executive', this.sel(od, 'ceoId', this.entOptions(['person'], true))),
+        this.field('Shares outstanding', this.num(od, 'sharesOutstanding'))));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: async () => {
+          try {
+            await PATCH('/api/gm/coll/entities/' + e.id, {
+              ownerId: od.ownerId === '__null__' ? null : (od.ownerId || null),
+              ceoId: od.ceoId === '__null__' ? null : (od.ceoId || null),
+              sharesOutstanding: Number(od.sharesOutstanding) || 0
+            });
+            this._geOwn = null; toast('Control updated.');
+          } catch (x) { toast(x.message, true); }
+        }
+      }, 'Save Control')));
+
+      main.appendChild(Views.secLabel('Share register'));
+      const pool = market_treasuryPoolClient(e);
+      const total = e.sharesOutstanding || 1;
+      main.appendChild(Views.barRow('Float (Exchange)', pool / total * 100, 'var(--paper-line)', fmtNum(pool)));
+      (e.shareholders || []).forEach(sh => main.appendChild(Views.barRow(entName(sh.entityId), sh.shares / total * 100, (entById(sh.entityId) || {}).color, fmtNum(sh.shares))));
+      const sh = (this._geShare && this._geShare.companyId === e.id) ? this._geShare
+        : (this._geShare = { companyId: e.id, fromEntityId: 'float', toEntityId: (S().entities[0] || {}).id, shares: 1 });
+      sh.companyId = e.id;
+      const holderOpts = [['float', '— Float (Exchange) —'], ...this.entOptions()];
+      main.appendChild(el('div.form-grid',
+        this.field('From', this.sel(sh, 'fromEntityId', holderOpts)),
+        this.field('To', this.sel(sh, 'toEntityId', holderOpts)),
+        this.field('Shares', this.num(sh, 'shares'))));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: async () => { try { await POST('/api/gm/set-holding', sh); this.draftKey = null; toast('Shares reassigned.'); } catch (x) { toast(x.message, true); } }
+      }, 'Assign Shares')));
+      return;
+    }
+
+    // non-company holders
+    main.appendChild(Views.secLabel('Companies controlled'));
+    const controls = companies.filter(c => c.ownerId === e.id || c.ceoId === e.id);
+    if (!controls.length) main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Controls no company.'));
+    controls.forEach(c => main.appendChild(this.kv(c.name, [c.ownerId === e.id ? 'Owner' : null, c.ceoId === e.id ? 'CEO' : null].filter(Boolean).join(' · '))));
+
+    main.appendChild(Views.secLabel('Grant control'));
+    const asg = (this._geAssign && this._geAssign.ent === e.id) ? this._geAssign
+      : (this._geAssign = { ent: e.id, companyId: (companies[0] || {}).id, role: 'ownerId' });
+    asg.ent = e.id;
+    main.appendChild(el('div.form-grid',
+      this.field('Company', this.sel(asg, 'companyId', companies.map(c => [c.id, c.name]))),
+      this.field('Role', this.sel(asg, 'role', [['ownerId', 'Owner'], ['ceoId', 'Chief Executive']]))));
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        try { await PATCH('/api/gm/coll/entities/' + asg.companyId, { [asg.role]: e.id }); toast(e.name + ' now ' + (asg.role === 'ownerId' ? 'owns' : 'runs') + ' ' + (entById(asg.companyId) || {}).name + '.'); }
+        catch (x) { toast(x.message, true); }
+      }
+    }, 'Grant Control')));
+
+    main.appendChild(Views.secLabel('Shareholdings'));
+    const held = companies.filter(c => (c.shareholders || []).some(s => s.entityId === e.id));
+    if (!held.length) main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Holds no shares.'));
+    held.forEach(c => { const s = c.shareholders.find(x => x.entityId === e.id); const total = c.sharesOutstanding || 1; main.appendChild(Views.barRow(c.name, s.shares / total * 100, c.color, fmtNum(s.shares))); });
+    const gs = (this._geGrantSh && this._geGrantSh.ent === e.id) ? this._geGrantSh
+      : (this._geGrantSh = { ent: e.id, companyId: (companies[0] || {}).id, shares: 1, dir: 'in' });
+    gs.ent = e.id;
+    main.appendChild(el('div.form-grid',
+      this.field('Company', this.sel(gs, 'companyId', companies.map(c => [c.id, c.name]))),
+      this.field('Direction', this.sel(gs, 'dir', [['in', 'Float → ' + e.name], ['out', e.name + ' → Float']])),
+      this.field('Shares', this.num(gs, 'shares'))));
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        const body = gs.dir === 'in'
+          ? { companyId: gs.companyId, fromEntityId: 'float', toEntityId: e.id, shares: gs.shares }
+          : { companyId: gs.companyId, fromEntityId: e.id, toEntityId: 'float', shares: gs.shares };
+        try { await POST('/api/gm/set-holding', body); toast('Shares updated.'); } catch (x) { toast(x.message, true); }
+      }
+    }, 'Apply')));
+  },
+
+  /* ---- Global Editor · Properties ----
+     Every property this entity owns, with a net-cash-per-turn chart and a
+     per-property editor (value, employees and the full production/income
+     block) saved through the properties collection. */
+  geProperties(main, e) {
+    const props = (S().properties || []).filter(p => p.ownerId === e.id);
+    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - (p.expenses || 0), color: 'var(--accent)' }));
+    if (rows.length) {
+      main.appendChild(Views.secLabel('Net cash / turn by property'));
+      main.appendChild(Charts.chartBars(rows, { horizontal: true, width: 520, height: Math.max(90, rows.length * 24 + 30), valueFormat: v => fmtMoney(v) }));
+    }
+    if (!props.length) {
+      main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, e.name + ' owns no property. Reassign one via another entity’s Ownership tab, or the Cities & Properties tab.'));
+      return;
+    }
+    if (!W.geProp || !props.some(p => p.id === W.geProp)) W.geProp = props[0].id;
+    main.appendChild(el('div.chip-row', props.map(p => el('button.chip', {
+      class: W.geProp === p.id ? 'active' : '', onclick: () => { W.geProp = p.id; this.draftKey = null; App.renderView(); }
+    }, p.name))));
+    const prop = propById(W.geProp);
+    const d = this.getDraft('ge:prop:' + prop.id, prop);
+    main.appendChild(el('div.form-grid',
+      this.field('Name', this.text(d, 'name')),
+      this.field('Assessed value', this.num(d, 'value')),
+      this.field('Employees', this.num(d, 'employees'))));
+    main.appendChild(this.productionEditor(d));
+    main.appendChild(this.saveBar('properties', d, false));
+  },
+
+  /* ---- Global Editor · Trade (foreign powers / orgs) ----
+     Reuses the Trade Desk's partner card, locked to this country, creating a
+     partner entry on demand. Saved as the whole settings.trade object. */
+  geTrade(main, e) {
+    const s = S().settings;
+    const trade = this.getDraft('ge:trade:' + e.id, s.trade || { partners: [], lastFlows: [], history: [] });
+    trade.partners = trade.partners || [];
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Author what ' + e.name + ' buys from Arcasia (their demand) and sells to it (their supply), the price multiplier on each good, and the demand/supply level that sizes the orders the open market posts each turn.'));
+    const pi = trade.partners.findIndex(p => p.entityId === e.id);
+    if (pi < 0) {
+      main.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, e.name + ' is not yet a trade partner.'));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: () => { trade.partners.push({ entityId: e.id, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
+      }, '+ Make ' + e.name + ' a trade partner')));
+      return;
+    }
+    main.appendChild(this.tradePartnerBox(trade, trade.partners[pi], pi, { lockEntity: true }));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:14px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },
+      el('button.solid-btn', { onclick: () => this.saveTrade(trade) }, 'Save Trade Desk')));
   },
 
   /* ═══════════ WORLD & TIME ═══════════ */
@@ -915,7 +1286,6 @@ const GM = {
     main.appendChild(el('div.doc-title', 'Trade Desk'));
     main.appendChild(el('div.doc-sub', 'foreign partners · what they buy & sell · prices & demand levels'));
 
-    const comms = S().items.filter(i => i.tradable && ['Commodities', 'Goods', 'Military'].includes(i.category));
     const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
 
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
@@ -923,55 +1293,7 @@ const GM = {
 
     main.appendChild(Views.secLabel('Foreign trade partners'));
     trade.partners.forEach((p, pi) => {
-      const ent = entById(p.entityId);
-      const box = el('div.stage', { style: 'margin-bottom:12px;' });
-      box.appendChild(el('div.stage-header',
-        el('span.stage-chapter', ent ? ent.name : (p.entityId || 'Partner')),
-        el('button.icon-btn', { title: 'Remove partner', onclick: () => { trade.partners.splice(pi, 1); App.renderView(); } }, '✕')));
-      box.appendChild(el('div.form-grid',
-        F.field('Partner', F.sel(p, 'entityId', foreigns.map(e => [e.id, e.name]), () => App.renderView())),
-        F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
-        F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
-        F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
-      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.priceMult = p.priceMult || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
-      // implied multiplier for a legacy absolute price, so old worlds show a
-      // sensible starting multiplier before they're re-authored
-      const multOf = (it) => {
-        if (p.priceMult[it.id] > 0) return p.priceMult[it.id];
-        if (p.prices[it.id] > 0 && it.marketValue > 0) return Math.round(p.prices[it.id] / it.marketValue * 100) / 100;
-        return 1;
-      };
-      // shared row builder: `listKey` is p.exports (goods they buy from us) or
-      // p.imports (goods they sell to us). Price is now the item's global retail
-      // value × a per-partner MULTIPLIER slider (with typing). `lvlKey` is the
-      // demand/supply High/Med/Low level that sizes the orders.
-      const commRows = (listKey, lvlKey, label) => {
-        box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
-        comms.forEach(it => {
-          const on = p[listKey].includes(it.id);
-          const cb = el('input', {
-            type: 'checkbox', checked: on,
-            onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it); if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
-          });
-          const row = el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap;' },
-            el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 200px; font-size:12.5px; cursor:pointer;' }, cb,
-              el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(it.marketValue)))));
-          if (on) {
-            if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
-            const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
-            const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(it.marketValue * (p.priceMult[it.id] || 1) * 100) / 100); };
-            paint();
-            const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', onInput: () => { delete p.prices[it.id]; paint(); } });
-            const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
-            lvlSel.style.maxWidth = '84px';
-            row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px;' }, el('div', { style: 'flex:1;' }, slider), priceOut, lvlSel));
-          }
-          box.appendChild(row);
-        });
-      };
-      commRows('exports', 'demand', 'Exports to this partner — price multiplier & their demand level (they buy these from us)');
-      commRows('imports', 'supply', 'Imports from this partner — price multiplier & their supply level (they sell these to us)');
-      main.appendChild(box);
+      main.appendChild(this.tradePartnerBox(trade, p, pi));
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', {
       onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }

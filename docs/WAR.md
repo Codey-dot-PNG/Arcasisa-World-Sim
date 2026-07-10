@@ -28,9 +28,16 @@ war: {
   ai: { phase, lastPlanTick, notes:[{t,text}], attackerStartStrength, consolidateFrac, collapseFrac }, // GM-only — stripped by filterState
   events: [ { t, kind:'battle'|'capture'|'landing'|'milestone', pos, text } ], // cap 60, for client animation
   stats: { attLosses, defLosses, provinceControl: { provId: 0..100 }, citiesHeld: [cityIds] },
+  bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } },
+  craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
   result: null | { winner:'att'|'def'|null, endedAt, reason }
 }
 ```
+
+Unit fields gained by the interactive layer (Phase 16): `dead`/`deadAt` (a
+corpse — see below), `orderedBy:'player'`/`playerHoldUntil` (a direct player
+move order and, for attacker units only, how long `runAI` must leave it
+alone).
 
 Unit `kind` is free-form scenario data (`marine`, `infantry`, `armored`,
 `reserve` for the attacker; every defender is spawned as `garrison`). Unit
@@ -144,6 +151,90 @@ province, west of the Valksland landmass), lands near Cape Valgos
 playtesting at 8× speed) to reach the capital in single-digit minutes of
 real 1× time and finish the whole campaign in roughly 15–30 minutes.
 
+## Interactive War layer (Phase 16)
+
+A dedicated map layer (`⚔ War`, public — appears for any operator once
+`db.war` exists) lets a player command troops in realtime instead of only
+watching the AI-vs-garrison front. **Authority is server-authoritative**: the
+client only sends orders; `server/war.js` validates and applies them.
+
+- **Who commands what**: the GM may command either side via a `side` param
+  (default `'def'`); every other operator is forced onto `'def'` regardless
+  of what the client sends (`server/api.js`'s two war routes compute
+  `side = u.role.perms.gm && b.side === 'att' ? 'att' : 'def'`). The attacker
+  AI (`runAI`) keeps driving the invasion — a GM commanding `'att'` directly
+  only pins the units it explicitly orders (see player-hold below); it
+  doesn't disable the AI.
+- **Input gestures** (map.js delegates to `War.onMapPointerDown/Move/Up`
+  while `W.layer === 'war'`, consuming the gesture so the base map doesn't
+  also pan or fire its select/place click):
+  - **Shift-drag**: box-select all live units of the commandable side inside
+    the marquee.
+  - **Ctrl-drag**: formation — distributes the current selection along the
+    drawn line, nearest-in-order.
+  - **Plain click with a selection**: move order. A single selected unit goes
+    straight to the click; multiple units spread in a small ring around it.
+  - **Bomb armed + click**: drops a bomb at the click point (see below), then
+    disarms.
+- **Command routes**:
+  - `POST /api/war/command { side?, orders:[{unitId,dest:[x,y]}] }` — any
+    logged-in operator; validates `orders` (array, cap 64, each dest a
+    finite `[x,y]` inside the 3840×2160 grid), then `war.commandUnits`.
+  - `POST /api/war/bomb { side?, pos:[x,y] }` — same auth/side rule;
+    `war.dropBomb`; returns the new cooldown timestamp.
+  Both are outside the `/api/gm/...` block — deliberately player-accessible,
+  unlike every other war route.
+
+### Mobile defenders & collision
+
+Garrisons are still static by default (spawn `speed: 0`), but the first time
+a player orders one to move, `commandUnits` grants it `DEF_MOVE_SPEED`
+(3.2 px/tick) and it marches like any other unit. The garrison's 1.35× defend
+bonus (`stepCombat`) now only applies while it's stationary (`garrison &&
+!dest`) — a garrison that leaves its position fights as a regular unit.
+
+Units never pass through a live enemy: before advancing toward its `dest`,
+`stepMovement` checks the nearest live enemy and refuses to close within
+`COLLIDE_ENEMY` (46px) of it — the unit stops and its state becomes
+`'fighting'` instead, letting `stepCombat` grind the engagement out until one
+side routs (the existing rout/retreat logic is exactly how a unit "steps out
+of the way"). A light `FRIENDLY_SEP` (30px) separation nudges overlapping
+same-side units apart each tick so live stacks don't visually merge (garrisons
+that are holding are exempt, so dug-in stacks stay put).
+
+### Corpses
+
+A unit that hits `strength <= 0` is no longer spliced out of `war.units` —
+`killUnit` marks it `dead: true, deadAt: <tick>, state: 'dead', dest: null`
+and it stays in the array. The `isLive(u)` helper (`strength > 0 && !u.dead`)
+gates every place a unit must be alive: movement, combat targeting,
+collision, territory projection, objective checks, AI strength sums. Corpses
+render at reduced opacity with no HP bar and aren't selectable. They're kept
+for the rest of the war (the roster is small, ~24 units) but pruned once
+older than `CORPSE_MAX_AGE_TICKS` (400) so a very long war doesn't grow
+`war.units` unbounded.
+
+### Bombs
+
+`dropBomb(db, side, pos, actor)` — validated (war active, not paused, that
+side's cooldown expired) then, on success:
+1. Sets a `BOMB_COOLDOWN_MS` (12s) cooldown for that side.
+2. Damages every live unit (both sides) within `BOMB_RADIUS` (95px) by up to
+   `BOMB_UNIT_DMG` (90), falling off linearly to 0 at the radius edge; a unit
+   that drops to 0 becomes a corpse via the same `killUnit` path as combat.
+3. Destroys every property within the blast radius (removed from
+   `db.properties`), then calls `deeds.syncAllDeeds(db)` **once** after the
+   loop — properties are never hand-deleted from the deed register; this is
+   the sanctioned choke point that retires the orphaned deed items and
+   inventory rows in one idempotent pass.
+4. Cuts roads: any `settings.map.roads` polyline with a point inside the
+   blast has those points stripped; if that splits the line into two or more
+   surviving runs of ≥2 points, each run becomes its own new road object
+   (`{ id: store.uid('road'), pts: run }`) — the AI's road-speed bonus reads
+   `settings.map.roads` live, so a cut road immediately costs mobility there.
+5. Records a crater (`war.craters`, capped at 40) and a `'battle'` war event
+   so the client flashes it.
+
 ## API — `server/api.js`
 
 - `POST /api/gm/war/start { scenario }` — GM-only; 409 if a war is already
@@ -159,6 +250,10 @@ real 1× time and finish the whole campaign in roughly 15–30 minutes.
   — the next `war/start` fails with 409 while one is still `active`, and
   since `startWar` overwrites `db.war` wholesale, starting a new scenario
   after a `result` has been set naturally replaces the old record.
+- `POST /api/war/command { side?, orders:[{unitId,dest}] }` and
+  `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
+  logged-in operator, not GM-gated); see "Interactive War layer" above for
+  the authority model and validation.
 - Heartbeat: `GET /api/state` calls `war.maybeWarTick(db)` right after the
   existing `market.maybeDayTick(db)` call, saving + broadcasting on a real
   tick — identical wall-clock-gate pattern, so this works serverless with no
@@ -184,7 +279,9 @@ is local-mode convenience only — on Vercel there is no timer at all;
 numeric `tick` (a legacy/malformed doc) is deleted rather than left to crash
 the tick loop. No schema bump — `db.war` is additive/absent-by-default, and
 `'war'` was added to every role's `pages` list the same way `'entertainment'`
-was previously (see the `STD_PAGES` loop in `migrate()`).
+was previously (see the `STD_PAGES` loop in `migrate()`). Phase 16 added two
+more additive guards next to it: a `db.war` missing `bombs` or `craters`
+(started before this change) gets them defaulted in place.
 
 ## Client — `public/js/war.js`
 
@@ -201,6 +298,11 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
     navy (defender), with a kind glyph, a strength pip bar, and a pulsing
     ring on `fighting` units.
   - **Battle flashes** — a fading ring at each recent `war.events` position.
+  - **Craters** — dark scorch circles at each `war.craters` entry, drawn under
+    the territory/unit layers.
+  - **War toolbar** — a small floating control surface, present only while
+    `W.layer === 'war'`: the gesture hint line, an arm/cooldown Bomb button,
+    Clear selection, and (GM-only) a Defender/Attacker command-side toggle.
   - Positions are **tweened client-side**: a module-level `_anim` registry
     (keyed by unit id, not DOM node) remembers each unit's last interpolated
     position across renders, so even though `GameMap.render()` tears down
@@ -230,7 +332,16 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
   pathfinding or line-of-sight — coarse by design (see `docs/CONVENTIONS.md`
   on keeping things simple), but a unit can path in a straight line into
   water at a re-entrant coastline if a scenario ever places waypoints badly.
-- Defenders are purely static garrisons; there's no defender-side AI (no
-  counter-attacks, no falling back to consolidate a line). Fine for the
-  "invasion" scenario shape this was built for, but a symmetric
-  war-vs-war scenario would need one.
+- Defenders are purely static garrisons unless a player moves them; there's
+  still no defender-side AI (no counter-attacks, no falling back to
+  consolidate a line) — a defender left alone by every player behaves exactly
+  as before.
+- The formation gesture assigns slots along a straight line only — no
+  wedge/column presets, and a very uneven selection (wildly different
+  positions) can produce awkward nearest-in-order pairings.
+- Bomb blast radius and combat range are both simple circle checks, matching
+  the rest of the engine's coarse-by-design approach (see
+  docs/CONVENTIONS.md) — no line-of-sight, no terrain occlusion.
+- Corpses are pruned by age (`CORPSE_MAX_AGE_TICKS`), not by count; an
+  unusually long, static war could still accumulate a few hundred stale
+  corpse entries before the age cutoff catches up.

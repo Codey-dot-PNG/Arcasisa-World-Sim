@@ -378,6 +378,10 @@ function migrate(world) {
     delete world.war;
     changed = true;
   }
+  // Phase 16 — interactive War layer (bombs/craters). Additive: a war started
+  // before this change simply lacks these fields until the next tick/order.
+  if (world.war && !world.war.bombs) { world.war.bombs = { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } }; changed = true; }
+  if (world.war && !world.war.craters) { world.war.craters = []; changed = true; }
 
   // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'
   // role, so live worlds pick up role changes made outside the normal API

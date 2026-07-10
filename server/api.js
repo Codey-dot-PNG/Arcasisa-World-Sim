@@ -413,6 +413,36 @@ async function handle(req, res, pathname, method) {
       }
     }
 
+    // ---- War: interactive command routes (Phase 16). Any logged-in operator
+    // may command the defender; only the GM may pick 'att' (and only the GM
+    // sees war.ai at all — see filterState). The client only sends orders;
+    // the server is authoritative for everything that actually moves a unit
+    // or detonates a bomb.
+    if (pathname === '/api/war/command' && method === 'POST') {
+      const b = await readBody(req);
+      if (!db.war || !db.war.active) return bad('No war is active.');
+      const side = (u.role.perms.gm && b.side === 'att') ? 'att' : 'def';
+      if (!Array.isArray(b.orders) || b.orders.length > 64) return bad('Invalid orders.');
+      const orders = b.orders.filter(o => o && typeof o.unitId === 'string' && Array.isArray(o.dest) && o.dest.length === 2 &&
+        Number.isFinite(o.dest[0]) && Number.isFinite(o.dest[1]) &&
+        o.dest[0] >= 0 && o.dest[0] <= 3840 && o.dest[1] >= 0 && o.dest[1] <= 2160);
+      war.commandUnits(db, side, orders, u.user.displayName);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true });
+    }
+    if (pathname === '/api/war/bomb' && method === 'POST') {
+      const b = await readBody(req);
+      if (!db.war || !db.war.active) return bad('No war is active.');
+      const side = (u.role.perms.gm && b.side === 'att') ? 'att' : 'def';
+      const pos = b.pos;
+      if (!Array.isArray(pos) || pos.length !== 2 || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1]) ||
+        pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');
+      const result = war.dropBomb(db, side, pos, u.user.displayName);
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil });
+    }
+
     if (pathname === '/api/trade' && method === 'POST') {
       const b = await readBody(req);
       // A controller may send from any entity in their ownership chain (their

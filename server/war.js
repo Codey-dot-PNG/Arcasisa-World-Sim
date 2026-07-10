@@ -13,12 +13,21 @@
 //   grid: { cell, cols, rows, provinceLandCells: {provId:count}, totalLandCells }
 //   cells: { "cx,cy": { o:'att', p:1, pid: provId } }  — SPARSE; absent = defender-held
 //   units: [{ id, side, name, kind, pos:[x,y], dest:[x,y]|null, strength,
-//             maxStrength, org, speed, atk, state, objectiveId, garrison? }]
+//             maxStrength, org, speed, atk, state, objectiveId, garrison?,
+//             dead?, deadAt?, orderedBy?:'player', playerHoldUntil? }]
 //   objectives: [{ id, kind, ref, pos:[x,y], priority, status, holdTicks }]
 //   ai: { phase, lastPlanTick, notes:[…] }   — GM-only (stripped in filterState)
 //   events: [{ t, kind, pos, text }]         — capped 60, for client animation
 //   stats: { attLosses, defLosses, provinceControl:{provId:0..100}, citiesHeld:[] }
+//   bombs: { att:{cooldownUntil}, def:{cooldownUntil} }
+//   craters: [{ pos:[x,y], t: epochMs, side }]  — capped 40, for client scorch marks
 //   result: null | { winner:'att'|'def', endedAt, reason }
+//
+// Unit `dead` units are KEPT in war.units as corpses (never spliced) so the
+// front line's history is visible; they are excluded from everything via the
+// isLive() helper. `orderedBy`/`playerHoldUntil` mark a unit that took a
+// direct player order (only meaningful for attacker units, whose default
+// controller is the AI) — see commandUnits() and runAI()'s player-hold guard.
 // ---------------------------------------------------------------------------
 const store = require('./store');
 const sim = require('./sim');
@@ -40,6 +49,19 @@ const ROAD_BONUS = 1.5;               // speed multiplier near a road
 const ROAD_RANGE = 60;                // px — "near" a road for the speed bonus
 const CITY_CONTROL_PCT = 65;          // province-control % that satisfies control_province
 const MAX_TICKS_PER_CALL = 20;        // catch-up cap, same spirit as autoTick's 30
+// ---- interactive War layer tunables (Phase 16 — player-commanded defenders,
+// mobile garrisons, collision/firefights, corpses, bombs) ----
+const UNIT_RADIUS = 26;               // px — a unit's collider radius
+const COLLIDE_ENEMY = 46;             // px — a unit will not advance within this of a live enemy; it stops and fights instead
+const FRIENDLY_SEP = 30;              // px — soft separation distance between live friendlies
+const DEF_MOVE_SPEED = 3.2;           // px/tick granted to a garrison the first time the player orders it to move
+const BOMB_RADIUS = 95;               // px — blast radius
+const BOMB_UNIT_DMG = 90;             // max strength damage to a unit at the blast centre (falls off to 0 at BOMB_RADIUS)
+const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between bomb drops
+const PLAYER_HOLD_TICKS = 12;         // ticks a GM-ordered ATTACKER unit is exempt from AI reassignment
+const CORPSE_MAX_AGE_TICKS = 400;     // corpses older than this are pruned to bound war.units growth
+
+function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
@@ -214,6 +236,8 @@ function startWar(db, scenario) {
       collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12 },
     events: [],
     stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [] },
+    bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } },
+    craters: [],
     result: null
   };
   pushEvent(db.war, 'landing', units[0].pos, `${attacker.name} war fleet sighted in the Strait — invasion begins.`);
@@ -248,7 +272,7 @@ function note(war, text) {
   if (war.ai.notes.length > 20) war.ai.notes.shift();
 }
 function runAI(db, war) {
-  const attTotal = war.units.filter(u => u.side === 'att' && u.strength > 0).reduce((s, u) => s + u.strength, 0);
+  const attTotal = war.units.filter(u => u.side === 'att' && isLive(u)).reduce((s, u) => s + u.strength, 0);
   const collapseAt = war.ai.attackerStartStrength * war.ai.collapseFrac;
   const consolidateAt = war.ai.attackerStartStrength * war.ai.consolidateFrac;
 
@@ -273,7 +297,8 @@ function runAI(db, war) {
   const target = primaryObjective(war);
   if (war.ai.phase === 'consolidate') {
     for (const u of war.units) {
-      if (u.side !== 'att' || u.strength <= 0 || u.state === 'embarked') continue;
+      if (u.side !== 'att' || !isLive(u) || u.state === 'embarked') continue;
+      if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
       u.dest = null;
       if (u.state !== 'routed') u.state = 'holding';
     }
@@ -291,7 +316,8 @@ function runAI(db, war) {
   let assigned = 0, garrisoned = 0;
   for (let i = 0; i < war.units.length; i++) {
     const u = war.units[i];
-    if (u.side !== 'att' || u.strength <= 0 || u.state === 'routed') continue;
+    if (u.side !== 'att' || !isLive(u) || u.state === 'routed') continue;
+    if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue; // GM ordered this unit directly — leave it alone until the hold expires
     if (u.state === 'embarked') { u.objectiveId = landingObj ? landingObj.id : null; continue; }
     // hold every 4th committed unit back on the last city taken, as a garrison
     const lastHeld = war.stats.citiesHeld.length ? war.stats.citiesHeld[war.stats.citiesHeld.length - 1] : null;
@@ -311,11 +337,36 @@ function runAI(db, war) {
 }
 
 // ---------- movement ----------
+// nearest LIVE enemy to a unit (used both for collision and elsewhere).
+function nearestLiveEnemy(war, u) {
+  let nearest = null, nd = Infinity;
+  for (const e of war.units) {
+    if (e.side === u.side || !isLive(e)) continue;
+    const d = dist(u.pos, e.pos);
+    if (d < nd) { nd = d; nearest = e; }
+  }
+  return { unit: nearest, dist: nd };
+}
 function stepMovement(db, war) {
   const roads = ((db.settings || {}).map || {}).roads || [];
   for (const u of war.units) {
-    if (u.strength <= 0) continue;
-    if (u.side === 'def') continue; // static garrisons never move
+    if (!isLive(u)) continue;
+    if (u.side === 'def') {
+      // Mobile defenders: a garrison only moves once the player has given it
+      // a dest (commandUnits grants it DEF_MOVE_SPEED). No dest = stays put
+      // (the classic static garrison, unchanged for scenarios with no player
+      // input at all).
+      if (!u.dest) continue;
+      // Collision: a live unit never advances into COLLIDE_ENEMY of a live
+      // enemy — it stops and fights instead (stepCombat handles damage).
+      const near = nearestLiveEnemy(war, u);
+      if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
+      const spd = u.speed || DEF_MOVE_SPEED;
+      advanceToward(u, u.dest, spd);
+      u.state = 'moving';
+      if (dist(u.pos, u.dest) < 12) { u.dest = null; u.orderedBy = null; u.state = 'holding'; }
+      continue;
+    }
     if (u.state === 'embarked') {
       const landingObj = war.objectives.find(o => o.kind === 'landing');
       if (!u.dest && landingObj) u.dest = landingObj.pos.slice();
@@ -338,7 +389,7 @@ function stepMovement(db, war) {
     }
     if (u.state === 'routed') {
       // fall back away from the nearest live enemy, recovering org
-      const enemies = war.units.filter(e => e.side !== u.side && e.strength > 0);
+      const enemies = war.units.filter(e => e.side !== u.side && isLive(e));
       let away = u.pos;
       if (enemies.length) {
         let nearest = enemies[0], nd = dist(u.pos, nearest.pos);
@@ -353,9 +404,16 @@ function stepMovement(db, war) {
       continue;
     }
     if (u.dest) {
+      // Collision: a live unit never advances into COLLIDE_ENEMY of a live
+      // enemy — it stops and fights instead (stepCombat handles damage).
+      const near = nearestLiveEnemy(war, u);
+      if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
       let speed = u.speed;
       if (distToRoads(u.pos, roads) <= ROAD_RANGE) speed *= ROAD_BONUS;
       advanceToward(u, u.dest, speed);
+      // A player-ordered attacker unit that reaches its dest reverts to
+      // normal AI-eligible behaviour on the next replan.
+      if (u.orderedBy === 'player' && dist(u.pos, u.dest) < 12) { u.orderedBy = null; u.dest = null; u.state = 'holding'; continue; }
       // Reached a sweep waypoint (control_province patrol) with the objective
       // still short of its threshold — pick a fresh waypoint immediately
       // rather than idling until the next AI replan (up to AI_INTERVAL ticks).
@@ -364,6 +422,26 @@ function stepMovement(db, war) {
         if (obj && obj.kind === 'control_province' && obj.status !== 'done') {
           u.dest = randomProvincePoint(war, obj.ref) || obj.pos.slice();
         }
+      }
+    }
+  }
+  // Friendly separation — cheap O(n^2) over a small roster (~24 units).
+  // Garrisons that are holding (not moving) stay put so dug-in stacks don't jitter.
+  const live = war.units.filter(isLive);
+  for (let i = 0; i < live.length; i++) {
+    const a = live[i];
+    if (a.garrison && !a.dest) continue;
+    for (let j = i + 1; j < live.length; j++) {
+      const b = live[j];
+      if (a.side !== b.side) continue;
+      if (b.garrison && !b.dest) continue;
+      const dx = b.pos[0] - a.pos[0], dy = b.pos[1] - a.pos[1];
+      const d = Math.hypot(dx, dy);
+      if (d > 0 && d < FRIENDLY_SEP) {
+        const push = (FRIENDLY_SEP - d) / 2;
+        const nx = dx / d, ny = dy / d;
+        a.pos = [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5];
+        b.pos = [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5];
       }
     }
   }
@@ -377,9 +455,24 @@ function advanceToward(u, dest, speed) {
 }
 
 // ---------- combat ----------
+// Mark a unit dead WITHOUT splicing it out of war.units — it stays as a
+// corpse for the rest of the war (see the STATE SHAPE note above). Roster is
+// small (~24 units) so no cap is needed; pruneCorpses() below bounds growth
+// over very long wars by age instead.
+function killUnit(war, u) {
+  u.strength = 0;
+  u.dead = true;
+  u.deadAt = war.tick;
+  u.state = 'dead';
+  u.dest = null;
+  pushEvent(war, 'battle', u.pos.slice(), `${u.name} destroyed.`);
+}
+function pruneCorpses(war) {
+  war.units = war.units.filter(u => !u.dead || (war.tick - (u.deadAt || 0)) < CORPSE_MAX_AGE_TICKS);
+}
 function stepCombat(db, war) {
-  const atts = war.units.filter(u => u.side === 'att' && u.strength > 0 && u.state !== 'embarked');
-  const defs = war.units.filter(u => u.side === 'def' && u.strength > 0);
+  const atts = war.units.filter(u => u.side === 'att' && isLive(u) && u.state !== 'embarked');
+  const defs = war.units.filter(u => u.side === 'def' && isLive(u));
   let anyFight = false;
   for (const a of atts) {
     let nearest = null, nd = Infinity;
@@ -388,7 +481,8 @@ function stepCombat(db, war) {
     const d = nearest;
     anyFight = true;
     a.state = 'fighting'; if (d.state !== 'routed') d.state = 'fighting';
-    const defBonus = d.garrison ? 1.35 : 1; // garrisons fight harder from a fixed position
+    const defStationary = d.garrison && !d.dest; // the dug-in bonus only applies while the defender is holding its ground — a garrison that marches out loses it
+    const defBonus = defStationary ? 1.35 : 1;
     const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * Math.random()) * (a.atk || 1);
     const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * Math.random()) * defBonus;
     d.strength = Math.max(0, round1(d.strength - dmgToDef));
@@ -398,12 +492,12 @@ function stepCombat(db, war) {
     d.org = clamp(d.org - ORG_DRAIN * 0.7, 0, 100); // dug-in defenders lose organisation more slowly
     if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
     if (d.org < ROUT_ORG && !d.garrison && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
-    if (a.strength <= 0) pushEvent(war, 'battle', a.pos.slice(), `${a.name} destroyed.`);
-    if (d.strength <= 0) pushEvent(war, 'battle', d.pos.slice(), `${d.name} destroyed.`);
+    if (a.strength <= 0) killUnit(war, a);
+    if (d.strength <= 0) killUnit(war, d);
   }
-  war.units = war.units.filter(u => u.strength > 0);
+  pruneCorpses(war);
   if (!anyFight) {
-    for (const u of war.units) if (u.state !== 'routed' && u.side === 'att') u.org = clamp(u.org + ORG_REGEN, 0, 100);
+    for (const u of war.units) if (isLive(u) && u.state !== 'routed' && u.side === 'att') u.org = clamp(u.org + ORG_REGEN, 0, 100);
   }
 }
 function round1(n) { return Math.round(n * 10) / 10; }
@@ -412,7 +506,7 @@ function round1(n) { return Math.round(n * 10) / 10; }
 function stepTerritory(db, war) {
   const cs = war.grid.cell;
   for (const u of war.units) {
-    if (u.strength <= 0 || u.state === 'embarked') continue;
+    if (!isLive(u) || u.state === 'embarked') continue;
     const cx0 = Math.floor(u.pos[0] / cs), cy0 = Math.floor(u.pos[1] / cs);
     for (let dx = -2; dx <= 2; dx++) {
       for (let dy = -2; dy <= 2; dy++) {
@@ -451,8 +545,8 @@ function stepObjectives(db, war) {
     const cityId = o.ref;
     const city = db.cities.find(c => c.id === cityId);
     if (!city) continue;
-    const attNear = war.units.some(u => u.side === 'att' && u.strength > 0 && u.state !== 'embarked' && dist(u.pos, o.pos) <= CAPTURE_RANGE);
-    const defNear = war.units.some(u => u.side === 'def' && u.strength > 0 && dist(u.pos, o.pos) <= CAPTURE_RANGE);
+    const attNear = war.units.some(u => u.side === 'att' && isLive(u) && u.state !== 'embarked' && dist(u.pos, o.pos) <= CAPTURE_RANGE);
+    const defNear = war.units.some(u => u.side === 'def' && isLive(u) && dist(u.pos, o.pos) <= CAPTURE_RANGE);
     if (attNear && !defNear) {
       o.holdTicks = (o.holdTicks || 0) + 1;
       if (o.status === 'pending') o.status = 'active';
@@ -498,6 +592,99 @@ function checkVictory(db, war) {
   }
 }
 
+// ---------- player command entry points ----------
+// A player order sets dest (+ orderedBy/playerHoldUntil for attacker units —
+// meaningless for defenders, which have no AI to hold off, but harmless to
+// set uniformly). Defenders additionally get DEF_MOVE_SPEED the first time
+// they're ordered to move (spawn speed stays 0 otherwise, preserving the
+// classic static-garrison behaviour for scenarios/tests that never call this).
+function commandUnits(db, side, orders, actor) {
+  const war = db.war;
+  if (!war || !Array.isArray(orders)) return;
+  for (const o of orders) {
+    if (!o || !o.unitId || !Array.isArray(o.dest) || o.dest.length !== 2) continue;
+    const u = war.units.find(x => x.id === o.unitId && x.side === side);
+    if (!u || !isLive(u)) continue; // unknown/dead/wrong-side — ignore silently
+    u.dest = [Number(o.dest[0]), Number(o.dest[1])];
+    u.orderedBy = 'player';
+    u.playerHoldUntil = war.tick + PLAYER_HOLD_TICKS;
+    if (u.side === 'def' && !u.speed) u.speed = DEF_MOVE_SPEED;
+  }
+}
+
+// Falloff 1 at blast centre → 0 at BOMB_RADIUS.
+function bombFalloff(d) { return clamp(1 - d / BOMB_RADIUS, 0, 1); }
+
+function dropBomb(db, side, pos, actor) {
+  const war = db.war;
+  if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
+  war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };
+  const bomb = war.bombs[side] = war.bombs[side] || { cooldownUntil: 0 };
+  const now = Date.now();
+  if (now < bomb.cooldownUntil) return { ok: false, error: 'Bomb is on cooldown.' };
+  if (!Array.isArray(pos) || pos.length !== 2) return { ok: false, error: 'Invalid target position.' };
+  bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
+
+  // 1. Damage units of both sides within the blast.
+  for (const u of war.units) {
+    if (!isLive(u)) continue;
+    const d = dist(u.pos, pos);
+    if (d > BOMB_RADIUS) continue;
+    const dmg = BOMB_UNIT_DMG * bombFalloff(d);
+    u.strength = Math.max(0, round1(u.strength - dmg));
+    if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
+    if (u.strength <= 0) killUnit(war, u);
+  }
+  pruneCorpses(war);
+
+  // 2. Destroy properties within the blast; sync the deed mirror ONCE after.
+  const destroyed = [];
+  db.properties = (db.properties || []).filter(p => {
+    if (!p.pos || dist(p.pos, pos) > BOMB_RADIUS) return true;
+    destroyed.push(p);
+    return false;
+  });
+  if (destroyed.length) {
+    require('./deeds').syncAllDeeds(db);
+    for (const p of destroyed) {
+      store.log('event', `${p.name} destroyed`, 'Levelled by aerial bombardment', actor || 'WAR ENGINE', []);
+    }
+  }
+
+  // 3. Cut roads: strip points within the blast, split surviving runs.
+  const roads = ((db.settings || {}).map || {}).roads || [];
+  const nextRoads = [];
+  let roadsCut = 0;
+  for (const r of roads) {
+    const pts = r.pts || [];
+    const inBlast = pts.some(p => dist(p, pos) <= BOMB_RADIUS);
+    if (!inBlast) { nextRoads.push(r); continue; }
+    roadsCut++;
+    let run = [];
+    const runs = [];
+    for (const p of pts) {
+      if (dist(p, pos) <= BOMB_RADIUS) { if (run.length) runs.push(run); run = []; }
+      else run.push(p);
+    }
+    if (run.length) runs.push(run);
+    for (const run2 of runs) if (run2.length >= 2) nextRoads.push({ id: store.uid('road'), pts: run2 });
+  }
+  if (roadsCut) {
+    db.settings = db.settings || {}; db.settings.map = db.settings.map || {};
+    db.settings.map.roads = nextRoads;
+  }
+
+  // 4. Crater.
+  war.craters = war.craters || [];
+  war.craters.push({ pos: pos.slice(), t: now, side });
+  if (war.craters.length > 40) war.craters.shift();
+
+  // 5. Battle event.
+  pushEvent(war, 'battle', pos.slice(), `Bombing run — ${destroyed.length} structure${destroyed.length === 1 ? '' : 's'} levelled.`);
+
+  return { ok: true };
+}
+
 // ---------- one tick ----------
 function warTick(db) {
   const war = db.war;
@@ -536,4 +723,4 @@ function maybeWarTick(db) {
   return any;
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, buildGrid };
+module.exports = { startWar, endWar, warTick, maybeWarTick, buildGrid, dropBomb, commandUnits, isLive };

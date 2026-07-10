@@ -761,6 +761,30 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 16 — trade price multipliers + tariffs (schema < 6) ----------
+  // Foreign-partner prices move to a MULTIPLIER off each item's global retail
+  // value (item.marketValue), so a GM sets prices in one place and just tunes a
+  // per-partner premium/discount. Existing absolute prices convert to the
+  // equivalent multiplier. Also backfills the tariff schedule.
+  if ((world.schema || 1) < 6 && world.settings) {
+    const t = world.settings.trade;
+    if (t) {
+      t.tariffs = t.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {} };
+      const priceOf = (iid) => { const it = (world.items || []).find(x => x.id === iid); return it ? (it.marketValue || 0) : 0; };
+      for (const p of (t.partners || [])) {
+        p.priceMult = p.priceMult || {};
+        for (const iid in (p.prices || {})) {
+          if (p.priceMult[iid] !== undefined) continue;
+          const retail = priceOf(iid);
+          p.priceMult[iid] = retail > 0 && p.prices[iid] > 0
+            ? Math.round(p.prices[iid] / retail * 100) / 100 : 1;
+        }
+      }
+    }
+    world.schema = 6;
+    changed = true;
+  }
+
   return changed;
 }
 

@@ -1358,9 +1358,17 @@ const Views = {
       }))));
 
     // what the world pays (partner price comparison per item)
+    // partner base price = item retail × partner multiplier (legacy absolute
+    // prices honoured as an implied multiplier), mirroring the trade engine
+    const partnerBase = (p, it) => {
+      const mult = (p.priceMult && p.priceMult[it.id] > 0) ? p.priceMult[it.id]
+        : (p.prices && p.prices[it.id] > 0 && it.marketValue > 0 ? p.prices[it.id] / it.marketValue : 1);
+      return Math.round((it.marketValue || 0) * mult * 100) / 100;
+    };
     const priced = {};
     partners.forEach(p => new Set([...(p.exports || []), ...Object.keys(p.demand || {})]).forEach(iid => {
-      if (itemById(iid)) (priced[iid] = priced[iid] || []).push({ partnerId: p.entityId, price: (p.prices && p.prices[iid]) || 0 });
+      const it = itemById(iid);
+      if (it) (priced[iid] = priced[iid] || []).push({ partnerId: p.entityId, price: partnerBase(p, it) });
     }));
     const pItems = Object.keys(priced);
     if (pItems.length) {

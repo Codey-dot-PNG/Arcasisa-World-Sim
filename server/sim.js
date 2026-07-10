@@ -872,7 +872,14 @@ function generateTradeOrders(db) {
     const mk = (iid, kind) => {
       const item = db.items.find(i => i.id === iid);
       if (!item) return null;
-      const base = (p.prices && p.prices[iid] > 0) ? p.prices[iid] : (item.marketValue || 0);
+      // Price = the item's GLOBAL retail value × this partner's per-item
+      // MULTIPLIER (1 = at retail; >1 pays a premium, <1 a discount). Legacy
+      // absolute prices are honoured as an implied multiplier so old worlds
+      // keep their numbers until re-authored.
+      const retail = item.marketValue || 0;
+      const mult = (p.priceMult && p.priceMult[iid] > 0) ? p.priceMult[iid]
+        : (p.prices && p.prices[iid] > 0 && retail > 0 ? p.prices[iid] / retail : 1);
+      const base = retail * mult;
       if (!(base > 0)) return null;
       const lvl = ((kind === 'demand' ? p.demand : p.supply) || {})[iid] || 'Med';
       // demand level scales the ask/bid: eager buyers bid over the odds,

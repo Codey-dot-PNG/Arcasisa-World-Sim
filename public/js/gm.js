@@ -788,35 +788,44 @@ const GM = {
         F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
         F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
         F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
-      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+      p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.priceMult = p.priceMult || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+      // implied multiplier for a legacy absolute price, so old worlds show a
+      // sensible starting multiplier before they're re-authored
+      const multOf = (it) => {
+        if (p.priceMult[it.id] > 0) return p.priceMult[it.id];
+        if (p.prices[it.id] > 0 && it.marketValue > 0) return Math.round(p.prices[it.id] / it.marketValue * 100) / 100;
+        return 1;
+      };
       // shared row builder: `listKey` is p.exports (goods they buy from us) or
-      // p.imports (goods they sell to us). Prices live in the same per-item map;
-      // `lvlKey` is p.demand (for exports) or p.supply (for imports) — the
-      // High/Med/Low level that caps how much moves per turn.
+      // p.imports (goods they sell to us). Price is now the item's global retail
+      // value × a per-partner MULTIPLIER slider (with typing). `lvlKey` is the
+      // demand/supply High/Med/Low level that sizes the orders.
       const commRows = (listKey, lvlKey, label) => {
         box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
         comms.forEach(it => {
           const on = p[listKey].includes(it.id);
-          const priceInput = el('input.text-input', {
-            type: 'number', style: 'max-width:110px;', value: p.prices[it.id] === undefined ? it.marketValue : p.prices[it.id],
-            oninput: (e) => { p.prices[it.id] = Number(e.target.value) || 0; }
+          const cb = el('input', {
+            type: 'checkbox', checked: on,
+            onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it); if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
           });
-          const lvlSel = el('select.text-input', { style: 'max-width:90px;' },
-            [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']].map(o => el('option', { value: o[0], selected: (p[lvlKey][it.id] || 'Med') === o[0] ? 'selected' : undefined }, o[1])));
-          lvlSel.addEventListener('change', () => { p[lvlKey][it.id] = lvlSel.value; });
-          box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0;' },
-            el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1; font-size:12.5px; cursor:pointer;' },
-              el('input', {
-                type: 'checkbox', checked: on,
-                onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.prices[it.id] === undefined) p.prices[it.id] = it.marketValue; if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
-              }),
-              it.name),
-            on ? priceInput : null,
-            on ? lvlSel : null));
+          const row = el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap;' },
+            el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 200px; font-size:12.5px; cursor:pointer;' }, cb,
+              el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(it.marketValue)))));
+          if (on) {
+            if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
+            const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
+            const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(it.marketValue * (p.priceMult[it.id] || 1) * 100) / 100); };
+            paint();
+            const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', onInput: () => { delete p.prices[it.id]; paint(); } });
+            const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
+            lvlSel.style.maxWidth = '84px';
+            row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px;' }, el('div', { style: 'flex:1;' }, slider), priceOut, lvlSel));
+          }
+          box.appendChild(row);
         });
       };
-      commRows('exports', 'demand', 'Exports to this partner — price & their demand level (they buy these from us)');
-      commRows('imports', 'supply', 'Imports from this partner — price & their supply level (they sell these to us)');
+      commRows('exports', 'demand', 'Exports to this partner — price multiplier & their demand level (they buy these from us)');
+      commRows('imports', 'supply', 'Imports from this partner — price multiplier & their supply level (they sell these to us)');
       main.appendChild(box);
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', {

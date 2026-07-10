@@ -2390,8 +2390,79 @@ const Views = {
     ].filter(Boolean), true);
   },
 
+  /* ---- Timeline → International Trade ledger (GM / government) ----
+     What's flowing in and out: a per-turn export/import chart, this turn's
+     live flows by partner & item, and cumulative export leaders. */
+  timelineTrade(inner) {
+    const trade = S().settings.trade || {};
+    const g = S().globalVars || {};
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const partnerName = (pid) => { const e = entById(pid); return e ? e.name : pid; };
+    inner.appendChild(el('div.doc-title', 'International Trade Ledger'));
+    inner.appendChild(el('div.doc-sub', 'What the Republic is buying and selling abroad · newest first'));
+
+    inner.appendChild(this.statStrip([
+      ['Exported this turn', fmtMoney(g.lastExportIncome || 0)],
+      ['Imported this turn', fmtMoney(g.lastImportSpend || 0)],
+      ['Net balance', fmtMoney((g.lastExportIncome || 0) - (g.lastImportSpend || 0))],
+      ['Tariffs collected', fmtMoney(g.lastTariffIncome || 0)]
+    ]));
+
+    // per-turn exports vs imports history
+    const hist = (trade.history || []).slice(-60);
+    if (hist.length) {
+      inner.appendChild(this.secLabel('Exports vs imports / turn'));
+      inner.appendChild(Charts.chartLine([
+        { name: 'Exports', color: 'var(--good)', points: hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })) },
+        { name: 'Imports', color: 'var(--accent)', points: hist.map(h => ({ x: h.turn, y: h.importValue || 0 })) }
+      ], { width: 620, height: 170, title: 'FOREIGN TRADE / TURN', yFormat: v => CUR() + fmtCompact(v) }));
+    }
+
+    // this turn's live flows, grouped by partner + item + direction
+    const flows = trade.lastFlows || [];
+    inner.appendChild(this.secLabel('This turn’s flows'));
+    if (!flows.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:10px 0;' }, 'No trades have cleared this turn yet.'));
+    } else {
+      const tbl = el('table.data', el('thead', el('tr',
+        el('th', 'Direction'), el('th', 'Partner'), el('th', 'Good'),
+        el('th.num', 'Qty'), el('th.num', 'Value'), el('th.num', 'Duty'))));
+      const body = el('tbody');
+      for (const f of [...flows].reverse()) {
+        const isExport = f.value > 0;
+        body.appendChild(el('tr',
+          el('td', el('span', { style: 'color:' + (isExport ? 'var(--good)' : 'var(--accent)') }, isExport ? 'EXPORT' : 'IMPORT')),
+          el('td', { style: 'cursor:pointer;', onclick: () => select('entity', f.partnerId) }, partnerName(f.partnerId)),
+          el('td', itemName(f.itemId)),
+          el('td.num', fmtNum(f.qty)),
+          el('td.num', fmtMoney(Math.abs(f.value))),
+          el('td.num', f.tariff ? fmtMoney(f.tariff) : '—')));
+      }
+      tbl.appendChild(body);
+      inner.appendChild(tbl);
+    }
+
+    // cumulative export value by good, across the recorded history
+    const byItem = {};
+    for (const h of hist) for (const iid in (h.byItem || {})) byItem[iid] = (byItem[iid] || 0) + h.byItem[iid];
+    const leaders = Object.entries(byItem).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 12);
+    if (leaders.length) {
+      inner.appendChild(this.secLabel('Top exports (cumulative)'));
+      inner.appendChild(Charts.chartPie(leaders.map(([iid, v]) => ({ label: itemName(iid), value: v })),
+        { width: 420, height: 220, title: 'EXPORT VALUE BY GOOD', valueFormat: v => CUR() + fmtCompact(v) }));
+    }
+  },
+
   /* ---- Timeline ---- */
   viewTimeline(inner) {
+    const canTrade = isGM() || !!perms().government || this.controlsGov();
+    if (canTrade) {
+      if (!W.tlView || !['record', 'trade'].includes(W.tlView)) W.tlView = 'record';
+      inner.appendChild(el('div.chip-row', { style: 'margin-bottom:8px;' },
+        el('button.chip', { class: W.tlView === 'record' ? 'active' : '', onclick: () => { W.tlView = 'record'; App.renderView(); } }, 'The Record'),
+        el('button.chip', { class: W.tlView === 'trade' ? 'active' : '', onclick: () => { W.tlView = 'trade'; App.renderView(); } }, 'International Trade')));
+      if (W.tlView === 'trade') return this.timelineTrade(inner);
+    }
     inner.appendChild(el('div.doc-title', 'The Record'));
     inner.appendChild(el('div.doc-sub', 'Every event, transfer and decision · newest first'));
     if (!isGM()) inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin:6px 0 2px;' },

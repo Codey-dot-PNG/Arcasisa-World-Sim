@@ -28,6 +28,17 @@ const War = {
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
 
   active() { return !!(S() && S().war); },
+  // A war OBJECT lingers after the fighting ends (active:false) so players can
+  // review the final front — but its units are no longer commandable. Orders
+  // against an inactive war are rejected server-side ("No war is active."), so
+  // gate the command/bomb affordances on this, not on active() (= war exists).
+  commandable() { const w = S() && S().war; return !!(w && w.active); },
+
+  // Clamp a world point to the 3840×2160 map so orders/bombs never land
+  // out of bounds — the ocean rect extends far past the map frame, so a
+  // click in open water would otherwise send coordinates the server rejects
+  // (bomb → "Invalid target position.") or silently drops (move order).
+  _clamp(pt) { return [Math.max(0, Math.min(3840, pt[0])), Math.max(0, Math.min(2160, pt[1]))]; },
 
   /* ═══════════ AUTHORITY ═══════════
      Non-GM operators always command the defender — the server enforces this
@@ -51,11 +62,14 @@ const War = {
       return true;
     }
     if (this._bombArmed) {
-      this._dropBomb(world);
       this._bombArmed = false;
+      if (!this.commandable()) { toast('The war has concluded — no bombs can be dropped.', true); this.renderToolbar(); return true; }
+      this._dropBomb(world);
+      this.renderToolbar();
       return true;
     }
     if (this._sel.size) {
+      if (!this.commandable()) { toast('The war has concluded — no orders can be issued.', true); return true; }
       this._issueMove(world);
       return true;
     }
@@ -130,10 +144,10 @@ const War = {
     const ids = [...this._sel];
     const n = ids.length;
     const orders = ids.map((id, i) => {
-      if (n === 1) return { unitId: id, dest };
+      if (n === 1) return { unitId: id, dest: this._clamp(dest) };
       const ang = (i / n) * Math.PI * 2;
       const r = 24;
-      return { unitId: id, dest: [dest[0] + Math.cos(ang) * r, dest[1] + Math.sin(ang) * r] };
+      return { unitId: id, dest: this._clamp([dest[0] + Math.cos(ang) * r, dest[1] + Math.sin(ang) * r]) };
     });
     try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
     catch (e) { toast(e.message, true); }
@@ -156,13 +170,13 @@ const War = {
       const t = units.length > 1 ? i / (units.length - 1) : 0.5;
       slots.push([a[0] + dir[0] * t, a[1] + dir[1] * t]);
     }
-    const orders = units.map((u, i) => ({ unitId: u.id, dest: slots[i] }));
+    const orders = units.map((u, i) => ({ unitId: u.id, dest: this._clamp(slots[i]) }));
     try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
     catch (e) { toast(e.message, true); }
   },
   async _dropBomb(pos) {
     try {
-      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos });
+      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos) });
       toast('Bombing run away — impact incoming.');
     } catch (e) { toast(e.message, true); }
   },
@@ -385,17 +399,20 @@ const War = {
     if (bar0 && bar0.parentNode) bar0.parentNode.removeChild(bar0);
     const war = S().war;
     if (!war) return;
+    const live = this.commandable(); // false once the war has concluded
     const side = this.commandableSide();
     const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
     const now = Date.now();
     const onCooldown = now < bomb.cooldownUntil;
     const bar = el('div#war-toolbar.war-toolbar');
-    bar.appendChild(el('div.war-toolbar-hint', 'Shift-drag: select · Ctrl-drag: formation · Click: move · Bomb: arm then click'));
+    bar.appendChild(el('div.war-toolbar-hint', live
+      ? 'Shift-drag: select · Ctrl-drag: formation · Click: move · Bomb: arm then click'
+      : 'This war has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
     const bombBtn = el('button.dash-btn', {
-      class: (this._bombArmed ? 'active' : '') , disabled: onCooldown,
-      onclick: () => { this._bombArmed = !this._bombArmed; this.renderToolbar(); }
-    }, onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
+      class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
+      onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; this.renderToolbar(); }
+    }, !live ? '💣 Bomb' : onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
     row.appendChild(bombBtn);
     row.appendChild(el('button.dash-btn', {
       onclick: () => { this._sel.clear(); this._bombArmed = false; if (GameMap.render) GameMap.render(); }

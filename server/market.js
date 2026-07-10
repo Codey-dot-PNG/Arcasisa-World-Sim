@@ -330,41 +330,52 @@ function transfer(companyId, fromEntityId, toEntityId, shares, actor) {
 }
 
 // Offering — primary capital raise. The company SELLS new shares and is paid
-// cash immediately, from the National Bank, which now holds the new float. Value
-// (cash) came in, so the price stays ≈ flat: market cap rises by the cash raised.
-// NOT dilution — but it DRAINS the bank until the float is bought up.
+// cash immediately, from the National Bank, which now holds the new float.
 //
-// The price is NOT set by the seller: shares are placed at the live market
-// price (the day quote), so proceeds track the company's real valuation. The
-// caller chooses only how many new shares to float (a % of shares outstanding).
+// Two rules close the old money pump (float → cap rises → float again → ∞):
+//   1. OVERHANG DISCOUNT — the Bank underwrites at the live day price minus the
+//      share of the company that would be sitting UNSOLD in the float after the
+//      raise. Shares nobody has bought are dead weight; dumping more of them
+//      earns ever less per share. offerPrice = dayPrice × (1 − poolFracAfter).
+//   2. VALUE CONSERVATION — the fundamental price re-marks so market cap rises
+//      by exactly the cash that came in and no more:
+//      sharePrice' = (sharePrice·S + raised) / (S + n). A raise at a discount
+//      therefore DILUTES existing holders instead of minting free value.
 function offer(companyId, newShares, floatPct, actor) {
   const db = store.get();
   const co = findCompany(companyId);
   newShares = Math.round(Number(newShares));
-  const price = currentDayPrice(co); // placed at the live market valuation
+  const price = currentDayPrice(co); // anchor: the live market valuation
   if (!(newShares > 0)) throw new Error('Offering size must be positive');
   if (!(price > 0)) throw new Error('The company has no valid market price to raise against');
-  const newOutstanding = (co.sharesOutstanding || 0) + newShares;
+  const so = co.sharesOutstanding || 0;
+  if (newShares > so) throw new Error('A single offering may at most double the share count');
+  const newOutstanding = so + newShares;
   if (newOutstanding > Number.MAX_SAFE_INTEGER) throw new Error('Share count would overflow');
-  const raised = Math.round(newShares * price * 100) / 100;
+
+  const poolAfter = treasuryPool(co) + newShares;
+  const overhang = poolAfter / newOutstanding;         // unsold fraction after the raise
+  const offerPrice = Math.max(0.01, round2(price * Math.max(0.1, 1 - overhang)));
+  const raised = Math.round(newShares * offerPrice * 100) / 100;
+  // value-conserving fundamental re-mark (dilution by exactly the discount)
+  const oldCap = (co.sharePrice || price) * so;
+  co.sharePrice = Math.max(0.01, round2((oldCap + raised) / newOutstanding));
 
   co.sharesOutstanding = newOutstanding;
   const coAcct = sim.primaryAccount(co.id, true);
   // the Bank fronts the capital and holds the float; it recoups as players buy.
-  sim.txn(bankAccount().id, coAcct.id, raised, `Share offering: ${newShares} new ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  sim.txn(bankAccount().id, coAcct.id, raised, `Share offering: ${newShares} new ${co.abbrev || co.name} shares @ ${db.settings.currency}${offerPrice}`, actor, 'transfer');
   co.vars = co.vars || {};
   co.vars.valuation = (co.vars.valuation || 0) + raised;
   if (floatPct !== undefined && floatPct !== null && !isNaN(Number(floatPct))) {
     co.publicFloat = Math.min(100, Math.max(0, Number(floatPct)));
   }
-  // Fundamental VALUE stays flat (cash came in), but the DAY MARKET reacts to
-  // the supply flood: dumping a lot of new float onto speculators marks the day
-  // price down (and dents confidence). Flooding offerings now has a visible
-  // consequence — a crash — on top of draining the Bank.
+  // the DAY MARKET reacts to the supply flood: dumping new float onto
+  // speculators marks the day quote down and dents confidence.
   applyDayImpact(co, -newShares, currentDayPrice(co));
   store.log('market', `${co.name} raised ${db.settings.currency}${raised.toLocaleString()}`,
-    `Sold ${newShares} new shares @ ${db.settings.currency}${price} (funded by the Bank of Arcasia); outstanding now ${newOutstanding}`, actor, [co.id]);
-  return { sharesOutstanding: co.sharesOutstanding, raised, price, sharePrice: co.sharePrice, dayPrice: co.dayPrice, publicFloat: co.publicFloat };
+    `Sold ${newShares} new shares @ ${db.settings.currency}${offerPrice} (${Math.round((1 - overhang) * 100)}% of market — float overhang discount); value/share now ${db.settings.currency}${co.sharePrice}; outstanding ${newOutstanding}`, actor, [co.id]);
+  return { sharesOutstanding: co.sharesOutstanding, raised, price: offerPrice, marketPrice: price, overhang: round2(overhang), sharePrice: co.sharePrice, dayPrice: co.dayPrice, publicFloat: co.publicFloat };
 }
 
 // Bonus mint — free new shares, NO cash. Market cap preserved, so both prices

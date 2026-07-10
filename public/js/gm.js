@@ -764,8 +764,7 @@ const GM = {
   tabTrade(main) {
     const F = this;
     const s = S().settings;
-    const trade = this.getDraft('trade', s.trade || { govBuyPrices: {}, partners: [], lastFlows: [], history: [] });
-    trade.govBuyPrices = trade.govBuyPrices || {};
+    const trade = this.getDraft('trade', s.trade || { partners: [], lastFlows: [], history: [] });
     trade.partners = trade.partners || [];
 
     main.appendChild(el('div.doc-title', 'Trade Desk'));
@@ -775,7 +774,7 @@ const GM = {
     const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
 
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Set up each foreign partner: which goods they buy from Arcasia (their demand), which they sell to it (their supply), the price, and a High/Med/Low level that caps how much they will trade per turn. The government’s own purchase prices from domestic companies are now set live on Economy → International Trade → Goods.'));
+      'Author each foreign partner: which goods they buy from Arcasia (their demand), which they sell to it (their supply), the base price, and a High/Med/Low level that sizes the orders they post. Every turn the open market generates buy/sell orders from these settings; players fill them on Economy → International Trade.'));
 
     main.appendChild(Views.secLabel('Foreign trade partners'));
     trade.partners.forEach((p, pi) => {

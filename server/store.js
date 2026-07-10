@@ -683,6 +683,76 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 15 — open-market trade (schema < 5) --------------------------
+  // Government purchasing, standing import orders and export rules are all
+  // retired: foreign partners now post procedural buy/sell ORDERS every turn
+  // (settings.trade.orders) that players fill by hand, with volume-sensitive
+  // pricing. Company controls shrink to keepPct (inventory ↔ domestic split)
+  // + wage; class demographics gain per-province structure (shares re-derived
+  // from province character so provinces stop looking identical).
+  if ((world.schema || 1) < 5 && world.settings) {
+    for (const e of (world.entities || [])) {
+      if (e.type !== 'company') continue;
+      if (e.keepPct === undefined) e.keepPct = 0;
+      delete e.sellPct; delete e.govPct; delete e.govPctByItem;
+      delete e.govMix; delete e.govPriceMult; delete e.govMixByItem;
+      delete e.fulfil; delete e.govFulfil;
+    }
+    const t = world.settings.trade;
+    if (t) {
+      delete t.govBuy; delete t.exports; delete t.imports;
+      delete t.stockIn; delete t.lastExportFill; delete t.govBuyPrices;
+      t.orders = t.orders || { turn: (world.settings.time || {}).turn || 0, buys: [], sells: [] };
+    }
+    // Re-derive demographic group SHARES per province from its character
+    // (urbanisation stays as authored; class mix now follows industry,
+    // agriculture, education and wealth), preserving each province's total
+    // population and per-group metrics. This is what makes provinces stop
+    // sharing one identical 30/22/5/8/12 class split.
+    for (const p of (world.provinces || [])) {
+      const d = p.demographics;
+      if (!d || !d['Working Class']) continue;
+      const total = Object.values(d).reduce((s, g) => s + (g.population || 0), 0);
+      if (!(total > 0)) continue;
+      const v = p.vars || {};
+      const ind = (v.industry || 50) / 100, agr = (v.agriculture || 50) / 100, edu = (v.education || 50) / 100;
+      const urbanNow = (d['Urban'] && d['Urban'].population || 0);
+      const ruralNow = (d['Rural'] && d['Rural'].population || 0);
+      const urbanFrac = (urbanNow + ruralNow) > 0 ? urbanNow / (urbanNow + ruralNow) : 0.5;
+      const income = d['Middle Class'] ? d['Middle Class'].income : 1000;
+      const wealth = Math.max(0, Math.min(1, (income - 700) / 900)); // per-province wealth proxy
+      let shares = {
+        'Working Class': 0.24 + ind * 0.16,            // industrial provinces skew working-class
+        'Middle Class': 0.14 + wealth * 0.14 + edu * 0.06,
+        'Upper Class': 0.02 + wealth * 0.05,
+        'Students': 0.04 + edu * 0.07,
+        'Retired': 0.10 + (1 - ind) * 0.05,
+        'Rural': (0.20 + agr * 0.10) * (1 - urbanFrac) * 2,
+        'Urban': (0.20 + agr * 0.10) * urbanFrac * 2
+      };
+      const sum = Object.values(shares).reduce((s, x) => s + x, 0);
+      for (const gname in shares) {
+        if (!d[gname]) continue;
+        d[gname].population = Math.round(total * shares[gname] / sum);
+      }
+      p.vars.population = Object.values(d).reduce((s, g) => s + (g.population || 0), 0);
+    }
+    // Calibrate the jobs→employment coupling per province so the AUTHORED
+    // employment level is the equilibrium at the authored job count. (The old
+    // global k=200 predates the ×2.79 population rescale, which is why every
+    // province's employment was sliding to the 40% clamp floor.)
+    for (const p of (world.provinces || [])) {
+      const v = p.vars || {};
+      if (!(v.population > 0) || !(v.employment > 0)) continue;
+      const demand = (world.properties || []).filter(pr => pr.provinceId === p.id).reduce((s, pr) => s + (pr.employees || 0), 0);
+      if (!(demand > 0)) continue;
+      const force = v.population * 0.6;
+      v.employmentK = Math.round(v.employment * force / (100 * demand));
+    }
+    world.schema = 5;
+    changed = true;
+  }
+
   return changed;
 }
 

@@ -127,12 +127,16 @@ const Charts = {
     // outer frame
     svg.appendChild(this._svg('rect', { x: plotX0, y: plotY0, width: plotW, height: plotH, fill: 'none', stroke: 'var(--rule-strong)', 'stroke-width': 1 }));
 
-    // gridlines + y labels (rounded to one decimal — floating-point noise
-    // like "0.9999996%" must never reach the axis)
+    // gridlines + y labels. Precision adapts to the row step so tight ranges
+    // (e.g. a share price wobbling by pennies) don't collapse into a stack of
+    // identical labels, while floating-point noise never reaches the axis.
     const gridRows = 4;
+    const rowStep = (yMax - yMin) / gridRows;
+    const yDec = rowStep >= 1 ? 1 : Math.min(4, Math.max(1, 1 - Math.floor(Math.log10(Math.max(rowStep, 1e-6)))));
+    const yPow = Math.pow(10, yDec);
     for (let i = 0; i <= gridRows; i++) {
       const gy = plotY0 + (i / gridRows) * plotH;
-      const val = Math.round((yMax - (i / gridRows) * (yMax - yMin)) * 10) / 10;
+      const val = Math.round((yMax - (i / gridRows) * (yMax - yMin)) * yPow) / yPow;
       svg.appendChild(this._svg('line', { x1: plotX0, y1: gy, x2: plotX1, y2: gy, stroke: 'var(--rule)', 'stroke-width': 1 }));
       const lbl = this._svg('text', { x: plotX0 - 6, y: gy + 3, 'text-anchor': 'end', 'font-family': 'var(--font-mono)', 'font-size': 9, fill: 'var(--ink-faint)' });
       lbl.textContent = this._fmtY(val, opts.yFormat);

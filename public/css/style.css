@@ -46,8 +46,8 @@ body[data-mood="red"]{
   --sea:#1b0d0c; --map-sea:#1d1418; --good:#9aa88a;
   --hover-wash:rgba(236,220,196,0.06); --accent-wash:rgba(224,164,88,0.14);
 }
-body[data-mood="warm"]{ --paper:#f2e3c4; --paper-deep:#ead6ad; --paper-line:#d0b787; --sea:#ddc9a0; --map-sea:#96a9b3; }
-body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --paper-line:#cdb478; --accent:#8a5a14; --accent-soft:#a37427; --sea:#dcc788; --map-sea:#93a49b; }
+body[data-mood="warm"]{ --paper:#f2e3c4; --paper-deep:#ead6ad; --paper-line:#d0b787; --sea:#ddc9a0; --map-sea:#96a9b3; --hover-wash:rgba(84,62,26,0.06); --accent-wash:rgba(122,60,24,0.08); }
+body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --paper-line:#cdb478; --accent:#8a5a14; --accent-soft:#a37427; --sea:#dcc788; --map-sea:#93a49b; --hover-wash:rgba(90,64,16,0.07); --accent-wash:rgba(138,90,20,0.10); }
 
 *{box-sizing:border-box;}
 html,body{margin:0; padding:0; height:100%;}
@@ -708,6 +708,9 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   font-family:Georgia, 'Fraunces', serif; font-weight:900; text-transform:uppercase;
   letter-spacing:0.03em; font-size:24px; color:#1c3a6b;
 }
+/* the navy slab is unreadable on the dark/red papers — lift it there */
+body[data-mood="dark"] .paper-mast-radical .pm-name,
+body[data-mood="red"] .paper-mast-radical .pm-name{color:#7a9fd4;}
 .paper-mast-radical .pm-tagline{color:var(--ink-soft);}
 
 /* strip under the switcher: city / tagline / lead category, echoing the
@@ -1069,3 +1072,23 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 }
 .slider-input:focus{outline:none;}
 .slider-input:focus::-webkit-slider-thumb{box-shadow:0 0 0 2px var(--accent-wash);}
+
+/* Combined bar+slider (Phase 15 — company keep↔domestic mix). The track is a
+   two-colour bar split at the thumb via the --mix custom property. */
+.slider-input.mix{height:26px;}
+.slider-input.mix::-webkit-slider-runnable-track{
+  height:12px; border:1px solid var(--rule-strong);
+  background:linear-gradient(to right, var(--good) var(--mix,50%), var(--hover-wash) var(--mix,50%));
+}
+.slider-input.mix::-webkit-slider-thumb{
+  margin-top:-3px; width:8px; height:18px;
+  background:var(--ink); border:1px solid var(--paper);
+}
+.slider-input.mix::-moz-range-track{
+  height:12px; border:1px solid var(--rule-strong);
+  background:linear-gradient(to right, var(--good) var(--mix,50%), var(--hover-wash) var(--mix,50%));
+}
+.slider-input.mix::-moz-range-thumb{
+  width:8px; height:18px; border-radius:0;
+  background:var(--ink); border:1px solid var(--paper);
+}

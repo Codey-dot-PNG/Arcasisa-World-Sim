@@ -707,6 +707,10 @@ function migrate(world) {
       delete t.govBuy; delete t.exports; delete t.imports;
       delete t.stockIn; delete t.lastExportFill; delete t.govBuyPrices;
       t.orders = t.orders || { turn: (world.settings.time || {}).turn || 0, buys: [], sells: [] };
+      // Government trade tariffs: a global baseline plus additive per-country
+      // and per-company surcharges, separate import/export rates. Empty = free
+      // trade. Collected into the treasury by sim.executeTrade.
+      t.tariffs = t.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {} };
     }
     // Re-derive demographic group SHARES per province from its character
     // (urbanisation stays as authored; class mix now follows industry,

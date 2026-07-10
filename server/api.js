@@ -30,6 +30,25 @@ function json(res, code, obj) {
   res.end(body);
   return true; // handled — the static server must not touch this response
 }
+
+// Normalise & clamp a tariff schedule from the client. Shape:
+//   { global:{import,export}, byCountry:{ entId:{import,export} }, byCompany:{...} }
+// Rates are whole-percent, clamped [0,90]; zero rows are dropped so the object
+// stays small. Returns a fresh, safe object regardless of what came in.
+function sanitizeTariffs(raw) {
+  const clamp = (n) => Math.max(0, Math.min(90, Math.round(Number(n) || 0)));
+  const pair = (o) => ({ import: clamp(o && o.import), export: clamp(o && o.export) });
+  const map = (o) => {
+    const out = {};
+    for (const id in (o || {})) {
+      const p = pair(o[id]);
+      if (p.import || p.export) out[id] = p; // drop all-zero overrides
+    }
+    return out;
+  };
+  raw = raw || {};
+  return { global: pair(raw.global), byCountry: map(raw.byCountry), byCompany: map(raw.byCompany) };
+}
 function readBody(req, maxBytes) {
   const cap = maxBytes || 4e6;
   // Vercel's Node runtime pre-parses JSON bodies onto req.body.
@@ -623,6 +642,22 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, wage: co.wage } });
     }
 
+    // ---- government trade tariffs (Phase 16) ----
+    // The President (controls the government) or GM sets import/export tariffs:
+    // a global baseline plus additive per-country and per-company surcharges.
+    // Collected into the treasury by sim.executeTrade. Body: { tariffs }.
+    if (pathname === '/api/trade/tariffs' && method === 'PATCH') {
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, 'ent_gov')) return deny('Only the government may set tariffs.');
+      const b = await readBody(req);
+      db.settings.trade = db.settings.trade || {};
+      db.settings.trade.tariffs = sanitizeTariffs(b.tariffs || {});
+      store.log('economy', 'Government tariff schedule updated',
+        `global import ${db.settings.trade.tariffs.global.import}% · export ${db.settings.trade.tariffs.global.export}%`, u.user.displayName, ['ent_gov']);
+      store.save(); broadcast('sync');
+      return json(res, 200, { tariffs: db.settings.trade.tariffs });
+    }
+
     // ---- open-market trade execution (Phase 15) ----
     // Fill part of a foreign partner's procedurally generated order. side
     // 'sell' exports the holder's stock into a foreign BUY order; side 'buy'
@@ -986,6 +1021,7 @@ async function handle(req, res, pathname, method) {
         if (b.trade) { // GM Trade desk. Merge ONLY the authored fields so the engine's live order book / lastFlows / history survive a save.
           s.trade = s.trade || {};
           if (b.trade.partners) s.trade.partners = b.trade.partners;
+          if (b.trade.tariffs) s.trade.tariffs = sanitizeTariffs(b.trade.tariffs);
           // partner edits reshape the market — reopen the order book at once
           try { sim.generateTradeOrders(db); } catch (e) { /* orders regenerate next turn */ }
         }

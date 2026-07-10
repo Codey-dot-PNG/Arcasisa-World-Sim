@@ -1118,16 +1118,21 @@ const Views = {
       ['Exported this turn', fmtMoney(g.lastExportIncome || 0)],
       ['Imported this turn', fmtMoney(g.lastImportSpend || 0)],
       ['Net', fmtMoney((g.lastExportIncome || 0) - (g.lastImportSpend || 0))],
+      ['Tariffs collected', fmtMoney(g.lastTariffIncome || 0)],
       ['Partners', fmtNum(partners.length)]
     ]));
 
-    if (!W.itlTab || !['market', 'goods'].includes(W.itlTab)) W.itlTab = 'market';
+    const canTariff = isGM() || this.controlsGov();
+    const validTabs = canTariff ? ['market', 'goods', 'tariffs'] : ['market', 'goods'];
+    if (!W.itlTab || !validTabs.includes(W.itlTab)) W.itlTab = 'market';
     const tab = (id, label) => el('button.chip', { class: W.itlTab === id ? 'active' : '', onclick: () => { W.itlTab = id; App.renderView(); } }, label);
     inner.appendChild(el('div.chip-row', { style: 'margin:8px 0 4px;' },
       tab('market', 'Selling & Buying'),
-      tab('goods', 'Goods & Prices')));
+      tab('goods', 'Goods & Prices'),
+      canTariff ? tab('tariffs', 'Tariffs') : null));
 
     if (W.itlTab === 'goods') return this.intlGoods(inner, trade, partners);
+    if (W.itlTab === 'tariffs' && canTariff) return this.intlTariffs(inner, trade, partners);
     return this.intlMarket(inner, trade, partners);
   },
 
@@ -1197,10 +1202,14 @@ const Views = {
         const unit = this.tradeUnit(order, q, side);
         const value = Math.round(unit * q * 100) / 100;
         const fillPct = Math.round(((order.filled || 0) + q) / order.qty * 100);
+        const tRate = tradeTariffRateClient(side, me, order.partnerId);
+        const tariff = Math.round(value * tRate / 100 * 100) / 100;
+        const net = side === 'sell' ? value - tariff : value + tariff; // proceeds after duty / cost incl. tariff
         preview.textContent = fmtNum(q) + ' @ ~' + CUR() + fmtNum(unit) + ' = ' + CUR() + fmtNum(value) +
+          (tRate > 0 ? (side === 'sell' ? ' − ' + tRate + '% duty → ' + CUR() + fmtNum(net) : ' + ' + tRate + '% tariff → ' + CUR() + fmtNum(net)) : '') +
           (side === 'sell' ? ' · FILLS ' + fillPct + '% OF DEMAND' : ' · TAKES ' + fillPct + '% OF SUPPLY');
         btn.disabled = false;
-        if (side === 'buy') { const a = acctOf(me); if (a && a.balance < value) { preview.textContent += ' — INSUFFICIENT FUNDS'; btn.disabled = true; } }
+        if (side === 'buy') { const a = acctOf(me); if (a && a.balance < net) { preview.textContent += ' — INSUFFICIENT FUNDS'; btn.disabled = true; } }
       };
       btn.addEventListener('click', async () => {
         const q = qtyFor();
@@ -1248,6 +1257,59 @@ const Views = {
       ] : hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })),
         { width: 560, height: 150, title: 'FOREIGN TRADE / TURN', yFormat: v => CUR() + fmtCompact(v) }));
     }
+  },
+
+  /* Tariffs — the government's import/export duty schedule. A global baseline
+     plus additive per-country and per-company surcharges (President or GM).
+     Duties are collected into the treasury as trades execute. */
+  intlTariffs(inner, trade, partners) {
+    const tf = trade.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {} };
+    const companies = S().entities.filter(e => e.type === 'company');
+    const g0 = (m, id, k) => ((tf[m] && tf[m][id]) || {})[k] || 0;
+    // persistent draft so slider drags survive the day-market re-render
+    if (!W.tariffDraft) {
+      W.tariffDraft = { global: { import: tf.global && tf.global.import || 0, export: tf.global && tf.global.export || 0 }, byCountry: {}, byCompany: {} };
+      for (const p of partners) W.tariffDraft.byCountry[p.entityId] = { import: g0('byCountry', p.entityId, 'import'), export: g0('byCountry', p.entityId, 'export') };
+      for (const c of companies) W.tariffDraft.byCompany[c.id] = { import: g0('byCompany', c.id, 'import'), export: g0('byCompany', c.id, 'export') };
+    }
+    const dr = W.tariffDraft;
+
+    inner.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin:4px 0 10px;' },
+      'Set import and export duties. The effective rate on any trade is the ', el('strong', 'global'),
+      ' baseline plus the country surcharge plus the company surcharge — so you can tax everyone a little, a single rival power heavily, or one company specifically. Duties flow to the Treasury as trades clear; the national stockpile is exempt.'));
+
+    const dutyRow = (label, obj, sub) => el('div', { style: 'display:grid; grid-template-columns:170px 1fr 1fr; gap:12px; align-items:center; padding:6px 0; border-bottom:1px dashed var(--rule);' },
+      el('div', el('div', { style: 'font-size:12.5px;' }, label), sub ? el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, sub) : null),
+      el('div', el('div', { style: 'font-family:var(--font-mono); font-size:8.5px; color:var(--ink-faint); letter-spacing:.08em;' }, 'IMPORT'), Forms.sliderNum(obj, 'import', 0, 90, { suffix: '%' })),
+      el('div', el('div', { style: 'font-family:var(--font-mono); font-size:8.5px; color:var(--ink-faint); letter-spacing:.08em;' }, 'EXPORT'), Forms.sliderNum(obj, 'export', 0, 90, { suffix: '%' })));
+
+    inner.appendChild(this.secLabel('Global baseline'));
+    inner.appendChild(dutyRow('All trade', dr.global, 'applies to every trader & partner'));
+
+    inner.appendChild(this.secLabel('By country (foreign partner)'));
+    for (const p of partners) {
+      const e = entById(p.entityId);
+      inner.appendChild(dutyRow((e && e.name) || p.entityId, dr.byCountry[p.entityId], 'surcharge on trade with this power'));
+    }
+
+    if (companies.length) {
+      inner.appendChild(this.secLabel('By company (domestic trader)'));
+      for (const c of companies) inner.appendChild(dutyRow(c.name, dr.byCompany[c.id], 'surcharge on this company’s trades'));
+    }
+
+    inner.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
+      onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          const r = await PATCH('/api/trade/tariffs', { tariffs: dr });
+          if (r && r.tariffs) trade.tariffs = r.tariffs;
+          W.tariffDraft = null;
+          toast('Tariff schedule saved.');
+          App.renderView();
+        } catch (err) { toast(err.message, true); btn.disabled = false; }
+      }
+    }, 'Save tariff schedule'),
+      el('button.dash-btn', { onclick: () => { W.tariffDraft = null; App.renderView(); } }, 'Reset')));
   },
 
   /* Goods & Prices — the national stockpile plus an overview of domestic

@@ -864,6 +864,7 @@ function generateTradeOrders(db) {
   trade.lastFlows = [];
   db.globalVars.lastExportIncome = 0;
   db.globalVars.lastImportSpend = 0;
+  db.globalVars.lastTariffIncome = 0;
   const buys = [], sells = [];
   const LVL_PRICE = { High: 1.08, Med: 1, Low: 0.92 }; // hungrier buyers pay more
   for (const p of trade.partners) {
@@ -926,6 +927,23 @@ function drawHolderStock(db, holder, itemId, qty) {
   return qty - need; // actually drawn
 }
 
+// Effective government tariff (%) on a trade. Additive levels, so the state can
+// set one baseline and refine it: global (everyone) + a per-COUNTRY surcharge
+// (the foreign partner) + a per-COMPANY surcharge (the domestic trader). Import
+// and export are tracked separately. The government never tariffs its own
+// stockpile trades (it IS the taxing authority). Clamped to [0, 90]%.
+function tradeTariffRate(db, side, holder, partnerId) {
+  const tf = db.settings.trade && db.settings.trade.tariffs;
+  if (!tf || !holder) return 0;
+  if (holder.type === 'government' || holder.id === 'ent_gov') return 0;
+  const key = side === 'sell' ? 'export' : 'import';
+  const num = (o) => (o && Number(o[key])) || 0;
+  const rate = num(tf.global)
+    + num(tf.byCountry && tf.byCountry[partnerId])
+    + num(tf.byCompany && tf.byCompany[holder.id]);
+  return Math.max(0, Math.min(90, rate));
+}
+
 // Execute a player trade against an open order. side 'sell' = fill a foreign
 // BUY order from the holder's stock (money in); side 'buy' = take from a
 // foreign SELL order (money out, goods into the holder's own inventory).
@@ -954,26 +972,37 @@ function executeTrade(side, orderId, holderId, qty, actor) {
   const unit = tradeUnitPrice(order, qty, side);
   const value = Math.round(unit * qty * 100) / 100;
   const partnerName = (db.entities.find(e => e.id === order.partnerId) || {}).name || order.partnerId;
+  const tariffRate = tradeTariffRate(db, side, holder, order.partnerId);
+  const tariff = Math.round(value * tariffRate / 100 * 100) / 100;
+  const treasury = tariff > 0 ? (db.accounts.find(a => a.id === 'acct_treasury')) : null;
+  const cur = db.settings.currency;
 
   if (side === 'sell') {
     if (holderStock(db, holder, order.itemId) < qty) throw new Error('Not enough stock to sell');
     drawHolderStock(db, holder, order.itemId, qty);
-    ledgerTxn(null, acct.id, value, `Export of ${item.name} to ${partnerName}`, actor, 'deposit');
+    // export duty is skimmed from the proceeds into the treasury
+    const net = Math.round((value - tariff) * 100) / 100;
+    ledgerTxn(null, acct.id, net, `Export of ${item.name} to ${partnerName}${tariff ? ` (net of ${tariffRate}% duty)` : ''}`, actor, 'deposit');
+    if (treasury && tariff > 0) ledgerTxn(null, treasury.id, tariff, `Export duty (${tariffRate}%) — ${holder.name} → ${partnerName}`, 'TREASURY', 'deposit');
     db.globalVars.lastExportIncome = Math.round(((db.globalVars.lastExportIncome || 0) + value) * 100) / 100;
     trade.lastFlows = trade.lastFlows || [];
-    trade.lastFlows.push({ itemId: order.itemId, partnerId: order.partnerId, qty, value });
+    trade.lastFlows.push({ itemId: order.itemId, partnerId: order.partnerId, qty, value, tariff });
   } else {
-    if (acct.balance < value) throw new Error('Insufficient funds for that purchase');
+    // import tariff is added on top of the purchase price, paid to the treasury
+    const total = Math.round((value + tariff) * 100) / 100;
+    if (acct.balance < total) throw new Error(`Insufficient funds for that purchase${tariff ? ' (incl. ' + tariffRate + '% tariff)' : ''}`);
     ledgerTxn(acct.id, null, value, `Import of ${item.name} from ${partnerName}`, actor, 'withdraw');
+    if (treasury && tariff > 0) ledgerTxn(acct.id, treasury.id, tariff, `Import tariff (${tariffRate}%) — ${holder.name} ← ${partnerName}`, 'TREASURY', 'transfer');
     addInventory(holder, order.itemId, qty);
     db.globalVars.lastImportSpend = Math.round(((db.globalVars.lastImportSpend || 0) + value) * 100) / 100;
     trade.lastFlows = trade.lastFlows || [];
-    trade.lastFlows.push({ itemId: order.itemId, partnerId: order.partnerId, qty, value: -value });
+    trade.lastFlows.push({ itemId: order.itemId, partnerId: order.partnerId, qty, value: -value, tariff });
   }
+  if (tariff > 0) db.globalVars.lastTariffIncome = Math.round(((db.globalVars.lastTariffIncome || 0) + tariff) * 100) / 100;
   order.filled = (order.filled || 0) + qty;
   store.log('economy', `${holder.name} ${side === 'sell' ? 'exported' : 'imported'} ${qty} × ${item.name}`,
-    `${side === 'sell' ? 'to' : 'from'} ${partnerName} @ ${db.settings.currency}${unit}/unit — ${db.settings.currency}${fmtNum(value)}`, actor, [holder.id, order.partnerId]);
-  return { qty, unit, value, filled: order.filled, orderQty: order.qty };
+    `${side === 'sell' ? 'to' : 'from'} ${partnerName} @ ${cur}${unit}/unit — ${cur}${fmtNum(value)}${tariff ? ` · ${side === 'sell' ? 'duty' : 'tariff'} ${cur}${fmtNum(tariff)} (${tariffRate}%)` : ''}`, actor, [holder.id, order.partnerId]);
+  return { qty, unit, value, tariff, tariffRate, filled: order.filled, orderQty: order.qty };
 }
 
 // Bank-of-Arcasia solvency → economic crash. The Bank is the market-maker for
@@ -1420,6 +1449,6 @@ module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
   runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, autoTick, syncPresidency,
-  generateTradeOrders, executeTrade, holderStock,
+  generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
   findProv, findEnt, findItem
 };

@@ -180,29 +180,79 @@ const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M'
 const ICON_MANIFEST = ['airport', 'factory', 'port', 'military', 'mine', 'farm', 'bank', 'government', 'university', 'rail-station', 'radio-mast', 'star'];
 const iconHref = (name) => '/assets/icons/' + name + '.svg';
 
+/* ---------- optimistic outbox ----------
+   The war layer's optimistic-order outbox (docs/WAR.md "Client-side
+   prediction"), generalised: an action paints its EXPECTED result into
+   W.state immediately, so the UI answers the click at 0ms instead of after a
+   server round-trip. Entries re-apply across incoming authoritative state
+   swaps until their own POST settles (the response's sync payload carries the
+   real result, so the guess is discarded, never trusted). Purely cosmetic —
+   the server re-checks everything; a wrong guess is corrected one round-trip
+   later by server truth. */
+const Optimistic = {
+  _pending: [], _seq: 0,
+  apply(fn) {
+    const id = ++this._seq;
+    this._pending.push({ id, fn, at: Date.now() });
+    try { fn(W.state); W._localRev = (W._localRev || 0) + 1; } catch (e) { /* guess only */ }
+    renderOrDefer();
+    return id;
+  },
+  settle(id) { this._pending = this._pending.filter(p => p.id !== id); },
+  // after every authoritative state swap: re-paint guesses whose POST is
+  // still in flight (8s expiry — a hung request must not pin stale numbers)
+  reapply() {
+    const now = Date.now();
+    this._pending = this._pending.filter(p => now - p.at < 8000);
+    for (const p of this._pending) { try { p.fn(W.state); } catch (e) { /* guess only */ } }
+    if (this._pending.length) W._localRev = (W._localRev || 0) + 1;
+  }
+};
+
 /* ---------- API ---------- */
-async function api(method, path, body) {
-  const res = await fetch(path, {
-    method,
-    headers: body ? { 'Content-Type': 'application/json' } : undefined,
-    body: body ? JSON.stringify(body) : undefined
-  });
+// opts.optimistic: fn(state) applied locally before the request round-trips —
+// see Optimistic above. Used by hot gameplay actions (transfers, market
+// orders) so a slow backend never sits between a click and its feedback.
+async function api(method, path, body, opts) {
+  opts = opts || {};
+  const opt = opts.optimistic ? Optimistic.apply(opts.optimistic) : null;
+  let res;
+  try {
+    res = await fetch(path, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : undefined,
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (e) {
+    if (opt) { Optimistic.settle(opt); scheduleRefresh(true); } // roll the guess back to server truth
+    throw e;
+  }
   let data = null;
   try { data = await res.json(); } catch (e) { /* stream or empty */ }
-  if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
-  // on cloud hosting the realtime ping can lag a moment behind our own
-  // mutations, so refetch state directly after any successful write. The
-  // refresh is FORCED so it always applies the freshly-committed world — the
-  // response has already resolved, so the write is durable, and the version
-  // guard must not skip pulling our own save back in (that skip is what made
-  // saves look like they "didn't stick" until a hard reload).
-  if (method !== 'GET' && !path.startsWith('/api/auth/')) scheduleRefresh(true);
+  // settle BEFORE applying the response sync: the payload already contains
+  // this write's real effect, so re-applying the guess would double-count it.
+  if (opt) Optimistic.settle(opt);
+  if (!res.ok) {
+    if (opt) scheduleRefresh(true); // the guess painted a result that didn't happen — refetch truth
+    throw new Error((data && data.error) || ('HTTP ' + res.status));
+  }
+  if (method !== 'GET' && !path.startsWith('/api/auth/')) {
+    // Response-sync: mutating responses carry the freshly-committed,
+    // permission-filtered world (server/api.js attachSync) — apply it here
+    // and the write is on screen in ONE round-trip, no refetch. Fallback to
+    // the old forced refetch when the payload is absent (older server, or an
+    // endpoint that opted out). War orders do neither: the war heartbeat +
+    // client prediction own that path, and the old per-order full refetch
+    // was pure overhead on top of them.
+    if (data && data.sync) applySync(data.sync);
+    else if (!path.startsWith('/api/war/')) scheduleRefresh(true);
+  }
   return data;
 }
 const GET = (p) => api('GET', p);
-const POST = (p, b) => api('POST', p, b || {});
-const PATCH = (p, b) => api('PATCH', p, b || {});
-const DEL = (p) => api('DELETE', p);
+const POST = (p, b, opts) => api('POST', p, b || {}, opts);
+const PATCH = (p, b, opts) => api('PATCH', p, b || {}, opts);
+const DEL = (p, opts) => api('DELETE', p, undefined, opts);
 
 /* ---------- live stream + refresh ---------- */
 // Local hosting pushes over SSE. Cloud hosting (Vercel + Supabase) has no
@@ -329,10 +379,37 @@ function scheduleRefresh(force) {
     try { await refreshState(f); } catch (e) { /* transient */ }
   }, 250);
 }
+// Render now unless the user is mid-edit/mid-type — then arm the deferred
+// loop. Every authoritative or optimistic state change funnels through this.
+function renderOrDefer() {
+  if (editingBusy()) { renderPending = true; tryDeferredRender(); return; }
+  renderPending = false;
+  App.renderAll();
+}
+// Apply a response-sync payload (mutation responses carry {v, user, state,
+// polling} — see server/api.js attachSync). Same guards as refreshState:
+// never during a map-editor interaction, never a world older than rendered.
+function applySync(sync) {
+  if (!sync || !sync.state) return;
+  if (mapEditBusy()) { scheduleRefresh(true); return; } // let the deferring refetch path handle it
+  if (sync.v !== undefined && lastV !== undefined && sync.v < lastV) return; // stale — a newer world is already on screen
+  if (sync.user) W.me = sync.user;
+  W.state = sync.state;
+  if (sync.v !== undefined) lastV = lastV === undefined ? sync.v : Math.max(lastV, sync.v);
+  if (sync.polling !== undefined) W.polling = sync.polling;
+  Optimistic.reapply();
+  renderOrDefer();
+}
 let lastV = undefined, refreshSeq = 0;
 async function refreshState(force) {
   const seq = ++refreshSeq;
-  const data = await GET('/api/state');
+  // ?ifv=: tell the server which version we already hold — when unchanged it
+  // answers with a tiny envelope instead of the full filtered world, which
+  // makes the 20s fallback poll and post-write broadcast echoes nearly free.
+  // Forced refreshes always fetch in full (they exist to re-pull our own
+  // write even when versions look equal).
+  const useIfv = !force && lastV !== undefined && W.state;
+  const data = await GET('/api/state' + (useIfv ? '?ifv=' + encodeURIComponent(lastV) : ''));
   // overlapping refreshes (realtime ping + poll + post-write refetch) can
   // resolve out of order — only the newest issued request may apply, and never
   // a world OLDER than one already rendered (v is monotonic server-side).
@@ -345,21 +422,27 @@ async function refreshState(force) {
     if (!W._refreshRetry) W._refreshRetry = setTimeout(() => { W._refreshRetry = null; scheduleRefresh(); }, 900);
     return;
   }
-  if (!force && data.v !== undefined && lastV !== undefined && data.v <= lastV && W.state) {
-    W.me = data.user; // keep identity/role fresh even when the world itself hasn't changed
+  if (data.unchanged) {
+    W.me = data.user || W.me; // identity/role stay fresh even on the cheap path
     return;
+  }
+  if (data.v !== undefined && lastV !== undefined && W.state) {
+    // force may re-apply the SAME version (its whole point: own writes must
+    // stick) but even a forced apply must never regress to an older world.
+    if (force ? data.v < lastV : data.v <= lastV) { W.me = data.user; return; }
   }
   W.me = data.user;
   W.state = data.state;
   if (data.v !== undefined) lastV = data.v;
   // per-province party support (public political knowledge) — cached so the
-  // province/city dossiers can draw voter-base pies synchronously
-  try { W.polling = await GET('/api/polling'); } catch (e) { W.polling = null; }
+  // province/city dossiers can draw voter-base pies synchronously. Bundled
+  // into /api/state now; the separate endpoint remains as a fallback.
+  if (data.polling !== undefined) W.polling = data.polling;
+  else { try { W.polling = await GET('/api/polling'); } catch (e) { W.polling = null; } }
+  Optimistic.reapply();
   // Rendering waits until the user stops typing/editing, but the fresh state
   // above is already live — no interaction can revert to pre-save data.
-  if (editingBusy()) { renderPending = true; tryDeferredRender(); return; }
-  renderPending = false;
-  App.renderAll();
+  renderOrDefer();
 }
 
 /* ---------- shared form helpers (bind into a draft object) ---------- */

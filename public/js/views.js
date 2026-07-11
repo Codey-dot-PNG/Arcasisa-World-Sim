@@ -804,7 +804,18 @@ const Views = {
         if (to.kind === 'account' && to.id === fromId) throw new Error('Source and destination are the same account.');
         const body = { fromAccountId: fromId, amount: Number(amount.value), memo: memo.value };
         if (to.kind === 'account') body.toAccountId = to.id; else body.toEntityId = to.id;
-        await POST('/api/transfer', body);
+        // optimistic: balances move on click; the response's sync payload
+        // (or an error refetch) replaces the guess with server truth
+        await POST('/api/transfer', body, {
+          optimistic: (s) => {
+            if (!(body.amount > 0)) return;
+            const from = s.accounts.find(a => a.id === body.fromAccountId);
+            const dest = body.toAccountId ? s.accounts.find(a => a.id === body.toAccountId)
+              : s.accounts.find(a => a.ownerId === body.toEntityId);
+            if (from) from.balance -= body.amount;
+            if (dest) dest.balance += body.amount; // recipient may be permission-hidden — then only our side paints
+          }
+        });
         toast('Wire sent.');
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
@@ -842,7 +853,23 @@ const Views = {
     ), [{
       label: 'Transfer', onClick: async () => {
         if (fromSel.value === toSel.value) throw new Error('Sender and recipient are the same entity.');
-        await POST('/api/trade', { fromEntityId: fromSel.value, itemId: itemSel.value, toEntityId: toSel.value, qty: Number(qty.value) });
+        const b = { fromEntityId: fromSel.value, itemId: itemSel.value, toEntityId: toSel.value, qty: Number(qty.value) };
+        await POST('/api/trade', b, {
+          optimistic: (s) => {
+            if (!(b.qty > 0)) return;
+            const from = s.entities.find(e => e.id === b.fromEntityId);
+            const dest = s.entities.find(e => e.id === b.toEntityId);
+            const row = from && (from.inventory || []).find(r => r.itemId === b.itemId);
+            if (row) {
+              row.qty -= b.qty;
+              if (row.qty <= 0) from.inventory = from.inventory.filter(r => r.qty > 0);
+            }
+            if (dest && Array.isArray(dest.inventory)) { // may be permission-stripped
+              const dr = dest.inventory.find(r => r.itemId === b.itemId);
+              if (dr) dr.qty += b.qty; else dest.inventory.push({ itemId: b.itemId, qty: b.qty });
+            }
+          }
+        });
         toast('Goods transferred.');
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
@@ -2000,7 +2027,20 @@ const Views = {
       label: 'Buy', onClick: async () => {
         const n = Math.round(Number(shares.value));
         if (!(n > 0)) throw new Error('Enter a positive share count.');
-        const r = await POST('/api/market/buy', { companyId: c.id, shares: n });
+        const px = this.livePrice(c); // pre-VAT estimate — server truth corrects it one round-trip later
+        const r = await POST('/api/market/buy', { companyId: c.id, shares: n }, {
+          optimistic: (s) => {
+            const co = s.entities.find(e => e.id === c.id);
+            const meId = W.me.entityId;
+            if (!co || !meId) return;
+            if (Array.isArray(co.shareholders)) {
+              const row = co.shareholders.find(x => x.entityId === meId);
+              if (row) row.shares += n; else co.shareholders.push({ entityId: meId, shares: n });
+            }
+            const acct = s.accounts.find(a => a.ownerId === meId);
+            if (acct && px > 0) acct.balance -= n * px;
+          }
+        });
         toast(`Bought ${r.shares} shares for ${fmtMoney(r.cost)}.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
@@ -2014,7 +2054,20 @@ const Views = {
       label: 'Sell', onClick: async () => {
         const n = Math.round(Number(shares.value));
         if (!(n > 0)) throw new Error('Enter a positive share count.');
-        const r = await POST('/api/market/sell', { companyId: c.id, shares: n });
+        const px = this.livePrice(c); // estimate — server truth corrects it one round-trip later
+        const r = await POST('/api/market/sell', { companyId: c.id, shares: n }, {
+          optimistic: (s) => {
+            const co = s.entities.find(e => e.id === c.id);
+            const meId = W.me.entityId;
+            if (!co || !meId) return;
+            if (Array.isArray(co.shareholders)) {
+              const row = co.shareholders.find(x => x.entityId === meId);
+              if (row) { row.shares -= n; if (row.shares <= 0) co.shareholders = co.shareholders.filter(x => x.shares > 0); }
+            }
+            const acct = s.accounts.find(a => a.ownerId === meId);
+            if (acct && px > 0) acct.balance += n * px;
+          }
+        });
         toast(`Sold ${r.shares} shares for ${fmtMoney(r.proceeds)}.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);

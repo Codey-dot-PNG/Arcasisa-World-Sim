@@ -901,7 +901,17 @@ async function commit() {
     }
     if (pendingTimeline.length) await sb.insert('timeline', pendingTimeline.map(tlRow));
     if (pendingTxns.length) await sb.insert('transactions', pendingTxns.map(txRow));
-    if (dirty || broadcastPending) {
+    // Ping clients only when a handler explicitly asked (broadcast('sync') →
+    // requestBroadcast). Pinging on ANY dirty commit made cloud hosting
+    // broadcast-storm every client during a war: each war-tick save (ridden
+    // by /api/state and the ~1Hz heartbeats) pinged everyone into a full
+    // refetch + re-render, drowning the app at exactly the moment players
+    // were most active. The world_version upsert rides the same gate — its
+    // UPDATE is itself a realtime signal (postgres_changes), so bumping it on
+    // silent saves would ping clients through the back door. Handlers that
+    // matter to other players all broadcast explicitly; tick churn (war
+    // movement, day-market gates) is pulled by the clients that watch it.
+    if (broadcastPending) {
       await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // table may not exist on older deployments
       await sb.broadcast('world', 'sync');
     }
@@ -917,6 +927,14 @@ function get() { return db; }
 // re-renders. File mode has no CAS version, but fileRev still changes on
 // every save so it serves the same purpose.
 function getVersion() { return MODE === 'file' ? fileRev : version; }
+
+// True when this request has mutated the world beyond what getVersion()
+// reports. File mode is never "uncommitted": save() bumps fileRev
+// synchronously, so the version already reflects every change. Cloud mode is
+// dirty between a handler's save() and commit()'s CAS — a version-match
+// short-circuit (/api/state?ifv=) must not fire then, and api/index.js uses
+// the post-commit version to patch buffered responses instead.
+function hasUncommitted() { return MODE === 'file' ? false : dirty; }
 
 // Drop the warm cache so the next begin() reloads from Postgres. Used when a
 // handler throws mid-mutation, so a half-applied in-memory db is never
@@ -1077,5 +1095,5 @@ function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 module.exports = {
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
   snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR,
-  getVersion, invalidate
+  getVersion, hasUncommitted, invalidate
 };

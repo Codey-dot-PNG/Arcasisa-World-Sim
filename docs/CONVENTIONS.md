@@ -20,8 +20,16 @@ Every state change follows:
 // 1. validate (return bad()/deny() early)   2. mutate db in place
 store.log(type, title, detail, actor, refs); // audit — refs drive player timeline visibility
 store.save();                                 // debounced file write / cloud dirty flag
-broadcast('sync');                            // clients refetch state
+broadcast('sync');                            // ping OTHER clients to refetch
 ```
+- `broadcast('sync')` is for changes other players must see promptly. High-frequency churn
+  whose consumers already pull it (war ticks/orders → the ~1s war heartbeat) saves WITHOUT
+  broadcasting — a ping per tick/order forces every client into a full refetch and lags the
+  whole app (docs/SYNC-ARCHITECTURE.md, invariant 9).
+- The mutating client itself doesn't need the broadcast: `json()` auto-attaches a `sync`
+  payload (fresh filtered world + polling) to successful mutating responses, and core.js
+  applies it in the same round-trip (response-sync — docs/SYNC-ARCHITECTURE.md). This is
+  free for new routes; don't hand-roll post-write refetches client-side.
 - Money moves **only** through `sim.txn()` (logged, news on big transfers) or `ledgerTxn()`
   (per-turn economy — records the transaction but skips the per-call timeline entry; emit one
   summary log per turn instead). Never touch `account.balance` directly.

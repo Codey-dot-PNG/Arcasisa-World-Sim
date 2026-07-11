@@ -2,7 +2,14 @@
 
 All routes live in one handler, `api.handle()`. JSON in/out. Errors: `{error}` with 400
 (`bad`), 401, 403 (`deny`), 404, 500. Auth via `arcsid` HttpOnly cookie → `db.sessions`.
-After any mutation the pattern is `store.save(); broadcast('sync');` — clients refetch state.
+After any mutation the pattern is `store.save(); broadcast('sync');` — the broadcast pings
+OTHER clients to refetch; the mutating client itself is served by **response-sync**:
+`json()` automatically attaches `sync: {v, user, state: filterState(u), polling}` to every
+successful world-mutating response (POST/PATCH/PUT/DELETE, 200, authed), so the caller
+applies its own write in the same round-trip. Excluded: `/api/auth/*`, `/api/war/*`
+(war orders ride client prediction + the war heartbeat), `/api/stream|config|cron`.
+On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrites
+`v`/`sync.v` to the post-commit version before flushing (marker header `X-World-V`).
 
 ## Auth & session
 
@@ -13,9 +20,9 @@ After any mutation the pattern is `store.save(); broadcast('sync');` — clients
 | `POST /api/auth/logout` | |
 | `POST /api/auth/register` | if `settings.registration.open`; creates person entity + account + stipend |
 | `GET /api/me` · `PATCH /api/me/password` | |
-| `GET /api/state` | `{user, state: filterState(u), v}`. Also rides `market.maybeDayTick` (serverless day market) |
+| `GET /api/state` | `{user, state: filterState(u), v, polling}`. Also rides `market.maybeDayTick` (serverless day market). `?ifv=<v>`: when the version still matches (and this request didn't mutate), returns tiny `{v, unchanged: true, user}` instead of the full body |
 | `GET /api/stream` | SSE (file mode only; cloud uses Supabase Realtime) |
-| `GET /api/polling` | public party-support percentages, national + per province |
+| `GET /api/polling` | public party-support percentages, national + per province (legacy — new clients read the copy bundled into `/api/state` and sync payloads) |
 | `GET\|POST /api/cron` | advance overdue auto-turns; auth: `CRON_SECRET` bearer/`?key=` or GM session |
 
 ## Player actions

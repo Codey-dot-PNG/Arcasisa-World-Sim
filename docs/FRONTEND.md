@@ -32,12 +32,22 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 ## Data flow
 
 1. Boot: `GET /api/config` → storage/realtime mode → `GET /api/state` → `W.state`.
-2. Realtime `sync` (SSE event or Supabase broadcast) → refetch `/api/state` → `renderAll()`.
-   The returned `v` (world version) lets the client skip no-op re-renders.
-3. All mutations are POST/PATCH calls; the client never mutates `W.state` optimistically —
-   it waits for the sync-triggered refetch.
+2. Realtime `sync` (SSE event or Supabase broadcast) → refetch `/api/state?ifv=<lastV>` →
+   `renderAll()`. When the version still matches, the server answers a tiny
+   `{v, unchanged, user}` envelope; `polling` rides the full response (no separate fetch).
+3. Mutations are POST/PATCH calls. Successful responses carry a `sync` payload (the fresh
+   filtered world) which `applySync()` applies immediately — one round-trip, no refetch.
+   Hot actions (wire transfer, market buy/sell, goods trade) additionally pass
+   `opts.optimistic` to `POST()`: a guess painted into `W.state` at click time via the
+   `Optimistic` outbox (the war-order pattern generalised), always replaced by server
+   truth when the response lands. `/api/war/*` orders skip all of this — war prediction +
+   the ~1s heartbeat own that path (docs/WAR.md).
 4. `W.state` is already permission-filtered by the server. Absent fields (inventories,
    demographics, events…) mean "not cleared to see" — render defensively.
+5. `renderAll()` skips the full-SVG map rebuild when a content fingerprint over the map's
+   actual inputs (provinces/cities/properties/markers/`settings.map`/entity colours/layer)
+   is unchanged (`mapFingerprint` in app.js) — most syncs don't touch the map. Direct
+   `GameMap.render()` calls (map editor, layer buttons) always render.
 
 ## Conventions
 

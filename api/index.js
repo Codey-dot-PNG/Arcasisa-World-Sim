@@ -115,6 +115,21 @@ async function handleRequest(req, res) {
         throw e;
       }
       // Flush only after a durable commit.
+      // Responses that embed a world version (v / sync.v) composed it BEFORE
+      // commit(), when the version was still the one begin() loaded. Rewrite
+      // to the post-commit version so clients can trust it for ?ifv= checks
+      // and monotonic guards (server/api.js json() sets the marker header).
+      if (bres.headers['X-World-V'] === 'pending') {
+        delete bres.headers['X-World-V'];
+        try {
+          const body = JSON.parse(bres.chunks.join('') || 'null');
+          if (body && typeof body === 'object') {
+            if ('v' in body) body.v = store.getVersion();
+            if (body.sync && typeof body.sync === 'object') body.sync.v = store.getVersion();
+            bres.chunks = [JSON.stringify(body)];
+          }
+        } catch (e) { /* malformed body — flush as-is */ }
+      }
       for (const [k, v] of Object.entries(bres.headers)) res.setHeader(k, v);
       res.statusCode = bres.statusCode;
       res.end(bres.chunks.join(''));

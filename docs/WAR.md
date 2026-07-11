@@ -584,6 +584,12 @@ client only sends orders; `server/war.js` validates and applies them.
     `war.dropBomb`; ORDERS an airstrike (see "Airstrikes" below) and returns
     `{ ok, cooldownUntil, strike }` — `strike` is the created
     `war.airstrikes` entry, used by the client for optimistic prediction.
+  Both routes `store.save()` WITHOUT `broadcast('sync')` (Phase 20): an
+  order/strike only touches `db.war`, which every watcher pulls through the
+  ~1s heartbeat — a per-order broadcast forced every client (war-watching or
+  not) into a full /api/state refetch, the same global thrash per-tick
+  broadcasts caused. The client's generic `api()` wrapper likewise skips its
+  post-write refetch for `/api/war/*` paths.
   Both are outside the `/api/gm/...` block — deliberately player-accessible,
   unlike every other war route.
 
@@ -843,8 +849,10 @@ rebase-on-authority pattern is deliberately generic: it's the template for
 making other poll-bound systems feel realtime without touching the CAS
 commit model. The Day Market applies the READ-ONLY half of it (no orders to
 predict, since money never gets predicted client-side — see
-docs/SIMULATION.md's "Day Market client prediction"); turn previews could
-still do the full version.
+docs/SIMULATION.md's "Day Market client prediction"). Phase 20 generalised
+the WRITE half game-wide: mutation responses carry the freshly-committed
+filtered world (response-sync) and hot actions paint optimistic guesses via
+core.js's `Optimistic` outbox — see docs/SYNC-ARCHITECTURE.md.
 
 **Testing determinism/prediction** — `tools/war-divergence-check.js` (plain
 `node`, no running server) ticks `server/war-engine.js` as an authoritative

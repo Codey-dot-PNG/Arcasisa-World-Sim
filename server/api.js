@@ -26,11 +26,56 @@ function broadcast(type, data) {
 setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 
 // ---------- helpers -------------------------------------------------------
+// Mutating endpoints that must stay lean: war orders/heartbeat ride their own
+// prediction + heartbeat channel (docs/WAR.md), auth precedes a full page
+// boot, stream/config/cron are not world mutations at all.
+const SYNC_SKIP = /^\/api\/(auth\/|war\/|stream$|config$|cron$)/;
+
+// Response-sync (Phase 20): every successful world-mutating response carries
+// the freshly-mutated, permission-filtered world, so the client applies its
+// own write in ONE round-trip instead of POST → debounce → GET /api/state →
+// GET /api/polling. handle() tags the response object with the authed user;
+// tagging res (per-request object) rather than module state keeps concurrent
+// file-mode requests from reading each other's identity mid-await.
+function attachSync(res, code, obj) {
+  if (code !== 200 || !obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
+  if (obj.error || obj.sync) return obj;
+  const u = res._syncUser;
+  if (!u) return obj;
+  if (!['POST', 'PATCH', 'PUT', 'DELETE'].includes(res._syncMethod)) return obj;
+  if (SYNC_SKIP.test(res._syncPath || '')) return obj;
+  try {
+    obj.sync = { v: store.getVersion(), user: userPayload(u), state: filterState(u), polling: pollingPayload() };
+  } catch (e) { /* a sync payload is a bonus — never break the real response */ }
+  return obj;
+}
 function json(res, code, obj) {
+  obj = attachSync(res, code, obj);
+  const headers = { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' };
+  // Cloud mode commits AFTER the handler runs, so any world version embedded
+  // here is pre-commit. Mark the buffered response; api/index.js rewrites
+  // v/sync.v to the post-commit version before flushing. File mode needs no
+  // patch — save() bumps the version synchronously inside the handler.
+  if (store.MODE === 'supabase' && obj && typeof obj === 'object' && !Array.isArray(obj) && ('v' in obj || obj.sync)) {
+    headers['X-World-V'] = 'pending';
+  }
   const body = JSON.stringify(obj);
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, headers);
   res.end(body);
   return true; // handled — the static server must not touch this response
+}
+
+// Party-support percentages (national + per province) — public political
+// knowledge. Shared by GET /api/polling, /api/state bundling, and attachSync.
+function pollingPayload() {
+  const { national, totalVotes, byProvince } = sim.computePolling(false);
+  const pct = {}; for (const pid in national) pct[pid] = Math.round(national[pid] / (totalVotes || 1) * 1000) / 10;
+  const provPct = {};
+  for (const provId in byProvince) {
+    const votes = byProvince[provId]; const tot = Object.values(votes).reduce((a, b) => a + b, 0) || 1;
+    provPct[provId] = {}; for (const pid in votes) provPct[provId][pid] = Math.round(votes[pid] / tot * 1000) / 10;
+  }
+  return { national: pct, byProvince: provPct };
 }
 
 // Normalise & clamp a tariff schedule from the client. Shape:
@@ -220,6 +265,8 @@ async function handle(req, res, pathname, method) {
   if (!pathname.startsWith('/api/')) return false;
   const db = store.get();
   const u = getUser(req);
+  // response-sync context (see attachSync) — per-response, never module state
+  res._syncUser = u; res._syncMethod = method; res._syncPath = pathname;
   const deny = (msg) => json(res, 403, { error: msg || 'Not permitted' });
   const bad = (msg) => json(res, 400, { error: msg || 'Bad request' });
 
@@ -313,7 +360,15 @@ async function handle(req, res, pathname, method) {
       // on milestones — per-tick broadcasts made every client refetch the full
       // world at tick rate during a war. See war.maybeWarTickSignal.
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
-      return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
+      // ?ifv= fast-path: the client already holds this version — skip the
+      // ~100KB filterState body and answer with a tiny "unchanged" envelope.
+      // Never when this very request mutated the world (gated ticks above):
+      // cloud-mode getVersion() is pre-commit then, so a match would lie.
+      const ifv = new URL(req.url, 'http://localhost').searchParams.get('ifv');
+      if (ifv !== null && ifv === String(store.getVersion()) && !store.hasUncommitted()) {
+        return json(res, 200, { v: store.getVersion(), unchanged: true, user: userPayload(u) });
+      }
+      return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion(), polling: pollingPayload() });
     }
 
     if (pathname === '/api/stream' && method === 'GET') {
@@ -329,15 +384,10 @@ async function handle(req, res, pathname, method) {
 
     if (pathname === '/api/polling' && method === 'GET') {
       // public political knowledge — newspapers publish polls; every operator
-      // may see the party-support landscape (national and per province)
-      const { national, totalVotes, byProvince } = sim.computePolling(false);
-      const pct = {}; for (const pid in national) pct[pid] = Math.round(national[pid] / (totalVotes || 1) * 1000) / 10;
-      const provPct = {};
-      for (const provId in byProvince) {
-        const votes = byProvince[provId]; const tot = Object.values(votes).reduce((a, b) => a + b, 0) || 1;
-        provPct[provId] = {}; for (const pid in votes) provPct[provId][pid] = Math.round(votes[pid] / tot * 1000) / 10;
-      }
-      return json(res, 200, { national: pct, byProvince: provPct });
+      // may see the party-support landscape (national and per province).
+      // Kept for older clients; new clients read the copy bundled into
+      // /api/state and mutation sync payloads.
+      return json(res, 200, pollingPayload());
     }
 
     // ---- player actions ----
@@ -485,7 +535,13 @@ async function handle(req, res, pathname, method) {
         return inBounds(o.dest);
       });
       war.commandUnits(db, side, orders, u.user.displayName);
-      store.save(); broadcast('sync');
+      // save WITHOUT broadcast: a move order only touches db.war.units, and
+      // every war-watching client pulls that through its ~1s /api/war/state
+      // heartbeat. A per-order broadcast forced EVERY client (war-watching or
+      // not) into a full /api/state refetch + re-render — at order rates
+      // during a battle that global thrash was the lag, same lesson as
+      // per-tick broadcasts (docs/WAR.md "Milestone-only broadcasts").
+      store.save();
       return json(res, 200, { ok: true });
     }
     if (pathname === '/api/war/bomb' && method === 'POST') {
@@ -501,7 +557,12 @@ async function handle(req, res, pathname, method) {
         pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');
       const result = war.dropBomb(db, side, pos, u.user.displayName);
       if (!result.ok) return bad(result.error);
-      store.save(); broadcast('sync');
+      // save without broadcast — same reasoning as /api/war/command above:
+      // the orderer splices the returned strike into its prediction, everyone
+      // else learns of it from the next heartbeat; the blast's ground effects
+      // fire at strikeTick inside warTick, whose milestone signal DOES
+      // broadcast when something world-visible happens.
+      store.save();
       // strike is returned so the client can insert it into the predicted
       // war immediately (plane/countdown start before the next heartbeat).
       return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil, strike: result.strike });

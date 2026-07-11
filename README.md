@@ -105,6 +105,13 @@ public/assets/       your flags, seals, party & company logos
 data/                world.json + snapshots (created at runtime)
 ```
 
+## Developer documentation
+
+Working on the code (human or AI)? Start with [CLAUDE.md](CLAUDE.md) — it indexes the full
+reference set in `docs/`: [architecture](docs/ARCHITECTURE.md), [world data model](docs/WORLD-DATA.md),
+[simulation engine](docs/SIMULATION.md), [HTTP API](docs/API.md), [frontend](docs/FRONTEND.md)
+and [conventions & gotchas](docs/CONVENTIONS.md).
+
 ## Troubleshooting sync & realtime
 
 For detailed sync layer architecture and debugging steps, see [docs/SYNC-ARCHITECTURE.md](docs/SYNC-ARCHITECTURE.md). Run `node tools/diagnose-sync.js https://your-app.vercel.app` to verify persistence, concurrency, and read-your-writes guarantees. Note: `supabase-setup.sql` must be re-run in the Supabase SQL editor whenever it changes (it creates/maintains the tables, RLS policies, and publication membership required for live updates).

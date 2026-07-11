@@ -6,6 +6,27 @@
 // the top as expected.
 let lastRenderedView = null;
 
+// Content fingerprint over everything GameMap.render() draws from. A sync
+// that leaves these byte-identical cannot change the map, so renderView may
+// keep the existing SVG. W._localRev covers optimistic local mutations
+// (which change state without a new server version); the war layer redraws
+// itself through War.refreshLayer, so only war start/end matters here.
+let lastMapFp = null;
+function mapFingerprint() {
+  const s = S();
+  if (!s) return '';
+  try {
+    return [
+      W.layer, W.dataVar, W._localRev || 0,
+      (window.MapEdit && MapEdit.active) ? 1 : 0,
+      s.war ? (s.war.active ? 'w1' : 'w0') : 'w-',
+      JSON.stringify([s.provinces, s.cities, s.properties, s.markers,
+        s.settings.map, s.settings.worldName, s.variables,
+        s.entities.map(e => [e.id, e.name, e.color])])
+    ].join('|');
+  } catch (e) { return 'nofp:' + Math.random(); } // can't fingerprint — always render
+}
+
 // The scrolling elements aren't #view itself (it's overflow:hidden — a pan/
 // zoom surface for the map) but a child rebuilt from scratch on every render:
 // .doc-view for the document-style views, .gm-main for GM Studio. Both are
@@ -150,8 +171,15 @@ const App = {
   renderView(fresh) {
     const container = document.getElementById('view');
     if (W.view === 'map') {
-      if (fresh || !document.getElementById('map-wrap')) GameMap.mount(container);
-      else GameMap.render();
+      if (fresh || !document.getElementById('map-wrap')) { GameMap.mount(container); lastMapFp = mapFingerprint(); return; }
+      // The full-SVG map rebuild is the most expensive render in the app
+      // (the war layer learned this first — docs/WAR.md "war-layer-only
+      // redraws"). Most syncs don't touch anything the map draws (market
+      // trades, news, casino…), so skip the rebuild unless the map's actual
+      // inputs changed. Direct GameMap.render() callers (map editor, layer
+      // buttons) bypass this and always render.
+      const fp = mapFingerprint();
+      if (fp !== lastMapFp) { lastMapFp = fp; GameMap.render(); }
       return;
     }
     if (W.view === 'gm') { GM.render(container); return; }

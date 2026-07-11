@@ -57,13 +57,17 @@ All mutations follow the same 5-step pattern, implemented in `api/index.js` and 
 
 **Retry loop:** On WORLD_CONFLICT, `api/index.js` catches the error and retries the entire request (fresh begin → handler → commit) up to 3 attempts. Only after a durable commit succeeds is the buffered response sent to the client. If a handler throws mid-mutation, `store.invalidate()` drops the warm cache so a half-mutated doc is never reused or committed.
 
+**Response-sync (Phase 20):** `server/api.js json()` attaches `sync: {v, user, state: filterState(u), polling}` to every successful world-mutating response (see docs/API.md for exclusions). The mutating client applies this payload directly (`applySync` in core.js) instead of refetching — its own write lands in ONE round-trip where it used to take three (POST → 250ms debounce → GET /api/state → GET /api/polling). Because the payload is composed inside the handler (pre-commit in cloud mode), `json()` marks the buffered response with header `X-World-V: pending` and `api/index.js` rewrites `v`/`sync.v` to the post-commit version right before flushing. File mode needs no patch: `save()` bumps `fileRev` synchronously inside the handler.
+
+**Version fast-path:** `GET /api/state?ifv=<v>` answers `{v, unchanged: true, user}` (no `filterState`, ~100× smaller) when the client's version still matches and the request itself didn't mutate (`store.hasUncommitted()`), making broadcast echoes of a client's own writes and the fallback poll nearly free.
+
 ---
 
 ## Realtime Signal Path
 
 **Server → Client:**
 1. Handler commits successfully → `store.commit()` writes the world doc via CAS on version.
-2. Immediately after CAS succeeds, `world_version` row is upserted (id=1, version=newVersion).
+2. Only if the handler explicitly called `broadcast('sync')` (→ `store.requestBroadcast()`): the `world_version` row is upserted (id=1, version=newVersion) and the Realtime broadcast fires. **Silent saves do not ping.** War ticks, war orders, and other high-frequency churn call `store.save()` without `broadcast('sync')` — their consumers pull via the ~1s `/api/war/state` heartbeat, and pinging every client into a full refetch per tick/order was the single biggest cause of app-wide lag during a war (the world doc still commits and `v` still advances; the 20s fallback poll and the next real broadcast converge everyone else).
 3. Supabase observes the `world_version` UPDATE and broadcasts event `{topic: 'world', event: 'sync'}` to all subscribed clients.
 4. Client receives two signals:
    - **Supabase postgres_changes:** subscription on `world_version`, listens for UPDATE events (lowest latency, ~100ms).
@@ -72,7 +76,9 @@ All mutations follow the same 5-step pattern, implemented in `api/index.js` and 
 5. Client has fallback poll: every 20s, GET /api/state to fetch the latest world version.
 6. Tab focus/visibility change triggers an immediate refresh.
 
-**Client fetches:** GET /api/state returns `{user, state, v}` where `v` is the current world version. The client **skips re-rendering** if `v` is unchanged from the last render.
+**Client fetches:** GET /api/state returns `{user, state, v, polling}` where `v` is the current world version (polling is bundled — no separate serial GET /api/polling round-trip). The client sends `?ifv=<lastV>` on non-forced refreshes and **skips re-rendering** if `v` is unchanged from the last render.
+
+**Optimistic outbox (core.js `Optimistic`):** the war layer's optimistic-order outbox generalised. A hot action (wire transfer, market buy/sell, goods trade) passes `opts.optimistic = fn(state)` to `POST(...)`; the fn paints the expected result into `W.state` synchronously (0ms feedback), re-applies across any authoritative state swaps that land while the request is in flight, and is settled (removed) the moment its own response arrives — BEFORE that response's sync payload applies, so the guess is never double-counted on top of server truth. A failed request forces a refetch to roll the guess back. Purely cosmetic: the server re-validates everything.
 
 ---
 
@@ -111,6 +117,12 @@ Future changes to the sync layer must not break these:
 7. **Client: never apply an /api/state response that is older than what is already rendered** — `refreshState()` in core.js carries a request sequence counter (only the newest issued request may apply) AND rejects any response whose `v` is ≤ the last rendered `v`. Overlapping refreshes (realtime ping + poll + post-write refetch) resolve out of order; without this guard the UI visibly travels back in time (turns "reversing", fresh edits vanishing).
 
 8. **Server: requests are serialized per instance** — api/index.js wraps every invocation in a promise-chain mutex because Vercel's fluid compute can run multiple requests concurrently in one instance, and the store's world cache/version/pending buffers are shared module state. Cross-instance safety is the CAS commit's job; in-instance safety is the mutex's. Never remove one because the other exists.
+
+9. **`broadcast('sync')` means "other clients must refetch NOW"; `store.save()` alone means "persist silently"** — the Realtime ping (and the `world_version` upsert that IS a ping via postgres_changes) fires only on `broadcastPending`, never on mere `dirty`. High-frequency churn (war ticks, war orders/bombs) saves silently and is pulled by its consumers' heartbeat; pinging every client per tick is what made wars lag the whole app. Any mutation OTHER players must see promptly still requires the explicit `broadcast('sync')`.
+
+10. **Response-sync v must be post-commit accurate** — a payload embedding `v` composed before `commit()` must be rewritten by api/index.js (X-World-V marker) after the CAS lands. A client that trusts a pre-commit `v` will poison its `?ifv=`/monotonic guards.
+
+11. **Client: an optimistic guess is settled before its response's sync payload applies** — the payload already contains the write's real effect; re-applying the guess on top would double-count it. And a guess must never survive its request: error or network failure → settle + forced refetch.
 
 ---
 

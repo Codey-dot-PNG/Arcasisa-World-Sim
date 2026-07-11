@@ -86,13 +86,21 @@ const GameMap = {
       const p = [...this.pointers.values()];
       return { x: (p[0].x + p[1].x) / 2, y: (p[0].y + p[1].y) / 2 };
     };
+    // On the war layer the right button is a command gesture (move order /
+    // formation drag) — suppress the browser context menu there so it never
+    // pops over the battlefield. Other layers keep their native menu.
+    svg.addEventListener('contextmenu', (e) => { if (W.layer === 'war') e.preventDefault(); });
     svg.addEventListener('pointerdown', (e) => {
       // War layer: let War decide whether this gesture is a command (box
-      // select, formation drag, move order, bomb drop) before any pan/pinch
-      // bookkeeping starts. War only consumes shift/ctrl-drags and plain
-      // clicks that actually do something (an existing selection, or armed
-      // bomb mode) — everything else falls through to normal pan/select.
+      // select, right-click move/formation drag, armed-bomb drop) before any
+      // pan/pinch bookkeeping starts. War only consumes right-button
+      // gestures, shift/ctrl-drags and armed-bomb clicks — a plain left
+      // press always falls through so the base pan keeps working.
       if (W.layer === 'war' && window.War && War.onMapPointerDown(e)) { return; }
+      // The right button never pans — and must not leave stale drag
+      // bookkeeping behind when War didn't consume it (no war doc, other
+      // layer, …); the context-menu suppression above only covers 'war'.
+      if (e.button === 2) return;
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (this.pointers.size === 2) {
         // second finger down — abandon any single-finger pan/click and pinch
@@ -189,6 +197,12 @@ const GameMap = {
         cb([Math.round(wx), Math.round(wy)]);
       } else if (this.editing()) {
         MapEdit.mapClick(this.clientToWorld(e.clientX, e.clientY), e);
+      } else if (W.layer === 'war' && window.War) {
+        // Plain left-click on empty ground deselects. This is only reachable
+        // because the dossier handlers (provinces, cities, properties, …)
+        // stand down on the war layer instead of stopPropagation-ing — see
+        // the `W.layer === 'war'` guards on their pointerup listeners.
+        War.onMapClick(e);
       }
     });
     svg.addEventListener('wheel', (e) => {
@@ -440,6 +454,7 @@ const GameMap = {
       if (!c.shape) continue;
       const node = mk('path', { d: c.shape, 'fill-rule': 'evenodd', class: 'country-shape', fill: c.fill || '#a8a196', 'vector-effect': 'non-scaling-stroke' });
       node.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return; // war layer: clicks are battlefield input, not dossier lookups — bubble to the svg (deselect)
         if (this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         if (c.entityId && entById(c.entityId)) select('entity', c.entityId, { noPan: true });
@@ -462,6 +477,7 @@ const GameMap = {
       else if (p.path && p.path.length > 2) poly = mk('polygon', { points: ptsStr(p.path), class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
       if (!poly) continue;
       poly.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return; // war layer: no dossier — let the click bubble so War can deselect
         if (this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         select('province', p.id, { noPan: true });
@@ -555,6 +571,7 @@ const GameMap = {
         MapEdit.propertyPointerDown(e, pr, g);
       });
       rect.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return; // war layer: no dossier — let the click bubble so War can deselect
         if (draggableHere || this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         select('property', pr.id, { noPan: true });
@@ -641,6 +658,7 @@ const GameMap = {
       dot.setAttribute('class', 'city-dot');
       if (W.selection && W.selection.kind === 'city' && W.selection.id === c.id) dot.classList.add('selected');
       dot.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return; // war layer: no dossier — let the click bubble so War can deselect
         if (this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         select('city', c.id, { noPan: true });
@@ -681,6 +699,7 @@ const GameMap = {
         MapEdit.markerPointerDown(e, mrk, g);
       });
       circ.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return; // war layer: no dossier — let the click bubble so War can deselect
         if (editingHere || this.dragMoved() || W.placing || this.editing()) return;
         e.stopPropagation();
         select('marker', mrk.id, { noPan: true });

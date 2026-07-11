@@ -428,6 +428,16 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .war-toolbar-hint{font-size:11px; color:var(--ink-faint); margin-bottom:6px;}
 .war-toolbar .btn-row{flex-wrap:wrap; gap:6px;}
 
+/* Phase 17 — RTS input redesign: clickable own-side markers + movement arrows.
+   .war-unit is pointer-events:none (enemy/dead symbols never intercept the
+   map); .war-unit-cmd re-enables hits ONLY on commandable-side live markers,
+   which carry the select/shift-toggle listeners (see War.renderUnits). */
+.war-unit-cmd{pointer-events:auto; cursor:pointer;}
+.war-move-arrow{fill:none; stroke:#e0a458; stroke-width:2; stroke-dasharray:7 5; opacity:.4; pointer-events:none;}
+.war-move-arrow-sel{fill:none; stroke:#e0c34a; stroke-width:3; stroke-dasharray:9 5; opacity:.95; pointer-events:none;}
+.war-move-arrowhead{fill:#e0a458; opacity:.55;}
+.war-move-arrowhead-sel{fill:#e0c34a;}
+
 /* Isometric property buildings — small extruded blocks shown once the map is
    zoomed in close enough (see GameMap.isoBuilding / updateMarkerScale in
    map.js). Walls stay near-white like the reference clippings; only the

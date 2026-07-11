@@ -15,6 +15,14 @@
 
 const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰' };
 const WAR_SCENARIOS = [['valksland_invasion', 'The Valgos Crisis — Valksland invades across the Strait']];
+// Above this map zoom, unit markers render at a CONSTANT WORLD scale (scale 1
+// — a fixed 40×28 world-unit symbol whose on-screen size grows as you zoom,
+// exactly matching the server's 40px collision/combat range, so "what touches
+// fights" reads literally). Below it, the marker keeps a constant SCREEN size
+// (counter-scaled) so units stay readable over the whole island.
+// FIXED_MODE_K/k is continuous at the threshold — no visual pop mid-zoom.
+const WAR_FIXED_MODE_K = 3;
+function warMarkerScale(k) { return Math.max(1, WAR_FIXED_MODE_K / Math.max(0.01, k)); }
 
 const War = {
   _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, curPos:[x,y], node }
@@ -48,16 +56,38 @@ const War = {
 
   /* ═══════════ MAP INPUT (delegated from map.js's pointer handlers) ═══════════
      map.js only calls these while W.layer === 'war'. Each returns true when it
-     consumed the gesture (map.js must then skip its own pan/click handling). */
+     consumed the gesture (map.js must then skip its own pan/click handling).
+
+     The scheme (Phase 17 redesign — the old one consumed plain left-clicks,
+     which blocked panning and forced a trip to the toolbar to deselect):
+       · RIGHT-click            = move order for the current selection
+       · RIGHT-drag             = formation line (ctrl-left-drag kept as alias)
+       · LEFT-click on a soldier= select it (shift+click adds/toggles) —
+                                  handled by per-marker listeners in renderUnits
+       · SHIFT+left-drag        = box select
+       · plain LEFT-click       = deselect (empty ground — see onMapClick,
+                                  reached via map.js's svg pointerup once the
+                                  dossier handlers stand down on the war layer)
+       · plain LEFT-drag        = pan, exactly as the base map (never consumed)
+       · Esc                    = clear selection + disarm bomb
+       · Bomb                   = arm on the toolbar, then LEFT-click drops it */
   onMapPointerDown(e) {
     if (!this.active()) return false;
     const map = GameMap;
     const world = map.clientToWorld(e.clientX, e.clientY);
+    if (e.button === 2) {
+      // Right-button gesture: click = move order, drag = formation line.
+      // Which one it is only becomes known on pointerup (>6 world px moved),
+      // so start an 'order' gesture and grow the formation line lazily.
+      this._input = { mode: 'order', start: world, active: true, node: null };
+      return true;
+    }
+    if (e.button !== 0) return false;
     if (e.shiftKey) {
       this._input = { mode: 'box', start: world, active: true, node: this._marqueeNode(map) };
       return true;
     }
-    if (e.ctrlKey || e.metaKey) {
+    if (e.ctrlKey || e.metaKey) { // bonus alias — right-drag is the primary formation gesture
       this._input = { mode: 'formation', start: world, active: true, node: this._formationNode(map) };
       return true;
     }
@@ -68,11 +98,8 @@ const War = {
       this.renderToolbar();
       return true;
     }
-    if (this._sel.size) {
-      if (!this.commandable()) { toast('The war has concluded — no orders can be issued.', true); return true; }
-      this._issueMove(world);
-      return true;
-    }
+    // Plain left button: NOT consumed — map.js pans on drag; a motionless
+    // click on empty ground deselects via onMapClick (svg pointerup).
     return false;
   },
   onMapPointerMove(e) {
@@ -81,6 +108,12 @@ const War = {
     const world = map.clientToWorld(e.clientX, e.clientY);
     if (this._input.mode === 'box') this._updateMarquee(this._input.node, this._input.start, world);
     else if (this._input.mode === 'formation') this._updateFormationLine(this._input.node, this._input.start, world);
+    else if (this._input.mode === 'order') {
+      // Only materialise the formation line once the drag is unambiguous.
+      const moved = Math.hypot(world[0] - this._input.start[0], world[1] - this._input.start[1]) >= 6;
+      if (moved && !this._input.node) this._input.node = this._formationNode(map);
+      if (this._input.node) this._updateFormationLine(this._input.node, this._input.start, world);
+    }
   },
   onMapPointerUp(e) {
     if (!this._input || !this._input.active) return;
@@ -107,8 +140,44 @@ const War = {
     } else if (this._input.mode === 'formation') {
       if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
       if (!tiny && this._sel.size) this._issueFormation(start, world);
+    } else if (this._input.mode === 'order') {
+      if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
+      if (this._sel.size) {
+        if (!this.commandable()) { toast('The war has concluded — no orders can be issued.', true); }
+        else if (tiny) this._issueMove(world);
+        else this._issueFormation(start, world);
+      }
     }
     this._input = null;
+  },
+
+  // Plain left-click on empty ground (map.js's svg-level pointerup, after the
+  // dossier select() handlers stand down on the war layer): clear selection.
+  onMapClick(e) {
+    if (e.button !== 0) return;
+    if (this._sel.size) { this._sel.clear(); if (GameMap.render) GameMap.render(); }
+  },
+
+  // Left-click a commandable soldier: replace the selection; shift+click
+  // toggles it in/out. Wired per-marker in renderUnits (only own live units).
+  onUnitClick(unitId, e) {
+    if (!this.commandable()) return;
+    if (e.shiftKey) { if (!this._sel.delete(unitId)) this._sel.add(unitId); }
+    else { this._sel.clear(); this._sel.add(unitId); }
+    if (GameMap.render) GameMap.render();
+  },
+
+  // Esc clears selection + disarms the bomb while on the war layer. Bound
+  // once against window (survives GameMap's DOM rebuilds).
+  bindKeys() {
+    if (this._keysBound) return;
+    this._keysBound = true;
+    window.addEventListener('keydown', (e) => {
+      if (e.key !== 'Escape' || W.layer !== 'war') return;
+      const had = this._sel.size || this._bombArmed;
+      this._sel.clear(); this._bombArmed = false; this._input = null;
+      if (had) { if (GameMap.render) GameMap.render(); this.renderToolbar(); }
+    });
   },
 
   _marqueeNode(map) {
@@ -199,7 +268,11 @@ const War = {
         const u = Math.min(1, (now - e.t0) / 900);
         const k = ease(u);
         e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
-        const scale = 1 / Math.max(1, (GameMap.view ? GameMap.view.k : 1) * 0.85);
+        // Fixed-world-size above WAR_FIXED_MODE_K, constant-screen-size below
+        // — computed every frame from the live zoom so the mode switches
+        // during a wheel-zoom without waiting for a re-render. HP bar,
+        // selection ring and fight ring all inherit this group transform.
+        const scale = warMarkerScale(GameMap.view ? GameMap.view.k : 1);
         e.node.setAttribute('transform', `translate(${e.curPos[0]},${e.curPos[1]}) scale(${scale})`);
       }
       for (const id in this._flashAnim) {
@@ -225,9 +298,11 @@ const War = {
 
     this.renderCraters(map, mk, NS, war);
     this.renderTerritory(map, mk, NS, war);
+    this.renderMoveArrows(map, mk, NS, war);
     this.renderUnits(map, mk, NS, war);
     this.renderFlashes(map, mk, NS, war);
     this.ensureLoop();
+    this.bindKeys();
     if (W.layer === 'war') this.renderToolbar(); else this._removeToolbar();
   },
 
@@ -293,23 +368,94 @@ const War = {
     }
   },
 
+  // Movement arrows: a dashed polyline from each COMMANDABLE-SIDE live unit
+  // with a dest, along its remaining transport-graph waypoints (u.path from
+  // u.pathIdx on — straight to dest when there's no route), ending in an
+  // arrowhead at the destination. Enemy movement intent is deliberately NOT
+  // drawn — fog of war on where the other side is headed. Static per render
+  // (the tweened marker chases the arrow's tail slightly — acceptable).
+  renderMoveArrows(map, mk, NS, war) {
+    const side = this.commandableSide();
+    // Arrowhead <marker> defs — recreated per render, same reasoning as the
+    // territory hatch <pattern> (the whole SVG is torn down every render).
+    const defs = document.createElementNS(NS, 'defs');
+    map.warLayer.appendChild(defs);
+    for (const [id, cls] of [['war-arrowhead', 'war-move-arrowhead'], ['war-arrowhead-sel', 'war-move-arrowhead-sel']]) {
+      const m = document.createElementNS(NS, 'marker');
+      m.setAttribute('id', id);
+      m.setAttribute('viewBox', '0 0 10 10');
+      m.setAttribute('refX', '8'); m.setAttribute('refY', '5');
+      m.setAttribute('markerWidth', '5'); m.setAttribute('markerHeight', '5');
+      m.setAttribute('orient', 'auto-start-reverse');
+      const tip = document.createElementNS(NS, 'path');
+      tip.setAttribute('d', 'M0,0 L10,5 L0,10 z');
+      tip.setAttribute('class', cls);
+      m.appendChild(tip);
+      defs.appendChild(m);
+    }
+    for (const u of war.units) {
+      if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0) || !u.dest) continue;
+      const anim = this._anim[u.id];
+      const from = anim && anim.curPos ? anim.curPos : u.pos;
+      const pts = [from];
+      if (Array.isArray(u.path) && u.path.length) {
+        for (let i = (u.pathIdx || 0); i < u.path.length; i++) pts.push(u.path[i]);
+      }
+      pts.push(u.dest);
+      const sel = this._sel.has(u.id);
+      const line = document.createElementNS(NS, 'polyline');
+      line.setAttribute('points', pts.map(p => p[0] + ',' + p[1]).join(' '));
+      line.setAttribute('class', sel ? 'war-move-arrow-sel' : 'war-move-arrow');
+      line.setAttribute('marker-end', `url(#${sel ? 'war-arrowhead-sel' : 'war-arrowhead'})`);
+      map.warLayer.appendChild(line);
+    }
+  },
+
   // NATO-ish rectangle markers, one per live unit. Position is animated by
   // the shared rAF loop (ensureLoop) — here we only decide the tween's `from`
   // (the last known interpolated position, so a mid-tween re-render never
   // snaps backward) and `to` (this sync's authoritative server position).
+  // Commandable-side live markers are also the CLICK TARGETS for select /
+  // shift-toggle (the group is the hitbox, so in fixed-world mode the hitbox
+  // equals the visual symbol exactly); enemy and dead units get no handlers.
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
+    const cmdSide = this.commandableSide();
+    const canCommand = this.commandable();
+    const scaleNow = warMarkerScale(map.view ? map.view.k : 1);
     for (const u of war.units) {
       const isDead = u.dead || u.state === 'dead';
+      const clickable = canCommand && !isDead && u.side === cmdSide;
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}` +
-        (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : ''));
+        (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : '') +
+        (clickable ? ' war-unit-cmd' : ''));
       g.setAttribute('data-warunit', u.id);
+      if (clickable) {
+        // Left-click selects / shift-toggles. Propagation is stopped on BOTH
+        // pointerdown (so the map never starts pan bookkeeping under the
+        // click) and pointerup (so the svg-level empty-ground deselect never
+        // fires); the actual selection happens on pointerup, after which the
+        // re-render can safely tear the node down. Right-clicks fall through
+        // to the svg (a move order may target a friendly's position), and an
+        // ARMED BOMB click also falls through so it drops on the map point.
+        g.addEventListener('pointerdown', (e) => {
+          if (e.button !== 0 || this._bombArmed) return;
+          e.stopPropagation();
+        });
+        g.addEventListener('pointerup', (e) => {
+          if (e.button !== 0 || this._bombArmed) return;
+          e.stopPropagation();
+          this.onUnitClick(u.id, e);
+        });
+      }
 
       if (isDead) {
         // Corpses don't tween and aren't kept in the anim registry — they
         // just sit where they fell, at reduced opacity, no HP bar, no ring.
-        g.setAttribute('transform', `translate(${u.pos[0]},${u.pos[1]})`);
+        // They still take the current marker scale so they don't vanish at
+        // low zoom (static — corpses don't need per-frame rescaling).
+        g.setAttribute('transform', `translate(${u.pos[0]},${u.pos[1]}) scale(${scaleNow})`);
         const box = document.createElementNS(NS, 'rect');
         box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
         box.setAttribute('class', 'war-unit-box');
@@ -330,7 +476,7 @@ const War = {
       liveIds.add(u.id);
       const prevAnim = this._anim[u.id];
       const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : u.pos;
-      g.setAttribute('transform', `translate(${from[0]},${from[1]})`);
+      g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
 
       if (u.state === 'fighting') {
         const ring = document.createElementNS(NS, 'circle');
@@ -406,14 +552,20 @@ const War = {
     const onCooldown = now < bomb.cooldownUntil;
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
-      ? 'Shift-drag: select · Ctrl-drag: formation · Click: move · Bomb: arm then click'
+      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
       : 'This war has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
-    const bombBtn = el('button.dash-btn', {
-      class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
-      onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; this.renderToolbar(); }
-    }, !live ? '💣 Bomb' : onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
+    // Bombs are DEFENDER-ONLY (server-enforced in dropBomb / the /api/war/bomb
+    // route) — a GM commanding the attacker gets a disabled button + hint
+    // instead of a bomb that would only bounce off the server.
+    const bombBtn = (side === 'att')
+      ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '💣 No air arm')
+      : el('button.dash-btn', {
+          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
+          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; this.renderToolbar(); }
+        }, !live ? '💣 Bomb' : onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
     row.appendChild(bombBtn);
+    if (side === 'att') this._bombArmed = false; // never leave a bomb armed while commanding the side that has none
     row.appendChild(el('button.dash-btn', {
       onclick: () => { this._sel.clear(); this._bombArmed = false; if (GameMap.render) GameMap.render(); }
     }, 'Clear selection'));

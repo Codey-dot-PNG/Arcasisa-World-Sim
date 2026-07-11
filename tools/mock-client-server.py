@@ -9,7 +9,7 @@ changes on a machine that has Python but no Node runtime.
 Switch the signed-in user by setting the cookie: document.cookie =
 'mockrole=citizen' (or 'gm', the default) and reloading.
 """
-import json, os, random, threading, time
+import json, os, random, re, threading, time
 from http.server import ThreadingHTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -130,6 +130,8 @@ TRADE = {
     "exportPool": {"item_crude": 740},
     "exportAlloc": {"item_crude": 70},
     "imports": [{"itemId": "item_weapons", "partnerId": "for_sarom", "qtyPerTurn": 5}],
+    "tariffs": {"global": {"import": 0, "export": 0}, "byCountry": {}, "byCompany": {}},
+    "orders": {"turn": 4, "buys": [], "sells": []},
 }
 
 HISTORY = [
@@ -370,6 +372,28 @@ class Handler(SimpleHTTPRequestHandler):
     def do_PATCH(self):
         p = urlparse(self.path).path
         b = self._body()
+        if p == "/api/trade/tariffs":
+            tf = b.get("tariffs") or {}
+            def _pair(o): return {"import": max(0, min(90, round(float((o or {}).get("import") or 0)))),
+                                  "export": max(0, min(90, round(float((o or {}).get("export") or 0))))}
+            def _map(o):
+                out = {}
+                for k, v in (o or {}).items():
+                    pr = _pair(v)
+                    if pr["import"] or pr["export"]: out[k] = pr
+                return out
+            TRADE["tariffs"] = {"global": _pair(tf.get("global")), "byCountry": _map(tf.get("byCountry")), "byCompany": _map(tf.get("byCompany"))}
+            VERSION[0] += 1
+            return self._json({"tariffs": TRADE["tariffs"]})
+        m = re.match(r"^/api/company/([\w-]+)/controls$", p)
+        if m:
+            for e in ENTITIES:
+                if e["id"] == m.group(1) and e.get("type") == "company":
+                    if "keepPct" in b: e["keepPct"] = max(0, min(100, round(float(b["keepPct"] or 0))))
+                    if "wage" in b: e["wage"] = max(0, min(300, round(float(b["wage"] or 0))))
+                    VERSION[0] += 1
+                    return self._json({"ok": True, "company": {"id": e["id"], "keepPct": e.get("keepPct", 0), "wage": e.get("wage", 100)}})
+            return self._json({"error": "no such company"}, 400)
         if p.startswith("/api/casino/venue/"):
             vid = p.rsplit("/", 1)[1]
             for v in VENUES:

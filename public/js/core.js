@@ -152,6 +152,24 @@ function market_treasuryPoolClient(co) {
   const held = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
   return Math.max(0, (co.sharesOutstanding || 0) - held);
 }
+// Shares that count toward valuation / market cap: all outstanding EXCEPT
+// freshly-floated primary stock no real investor has subscribed to yet (mirrors
+// server market.valuedShares — floating unsold stock must not inflate cap).
+function market_valuedSharesClient(co) {
+  const primary = Math.min((co.vars && co.vars.primaryPool) || 0, market_treasuryPoolClient(co));
+  return Math.max(0, (co.sharesOutstanding || 0) - primary);
+}
+// Effective government tariff (%) on an open-market trade — mirrors
+// sim.tradeTariffRate: global + per-country + per-company, import/export apart.
+function tradeTariffRateClient(side, holder, partnerId) {
+  const tf = S().settings.trade && S().settings.trade.tariffs;
+  if (!tf || !holder) return 0;
+  if (holder.type === 'government' || holder.id === 'ent_gov') return 0;
+  const key = side === 'sell' ? 'export' : 'import';
+  const num = (o) => (o && Number(o[key])) || 0;
+  const rate = num(tf.global) + num(tf.byCountry && tf.byCountry[partnerId]) + num(tf.byCompany && tf.byCompany[holder.id]);
+  return Math.max(0, Math.min(90, rate));
+}
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
 const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', fort: 'T', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };
@@ -173,8 +191,12 @@ async function api(method, path, body) {
   try { data = await res.json(); } catch (e) { /* stream or empty */ }
   if (!res.ok) throw new Error((data && data.error) || ('HTTP ' + res.status));
   // on cloud hosting the realtime ping can lag a moment behind our own
-  // mutations, so refetch state directly after any successful write
-  if (method !== 'GET' && !path.startsWith('/api/auth/')) scheduleRefresh();
+  // mutations, so refetch state directly after any successful write. The
+  // refresh is FORCED so it always applies the freshly-committed world — the
+  // response has already resolved, so the write is durable, and the version
+  // guard must not skip pulling our own save back in (that skip is what made
+  // saves look like they "didn't stick" until a hard reload).
+  if (method !== 'GET' && !path.startsWith('/api/auth/')) scheduleRefresh(true);
   return data;
 }
 const GET = (p) => api('GET', p);
@@ -289,7 +311,9 @@ function tryDeferredRender() {
   renderPending = false;
   App.renderAll();
 }
-function scheduleRefresh() {
+let pendingForce = false;
+function scheduleRefresh(force) {
+  if (force) pendingForce = true; // a write's own refetch must apply, version guard or not
   // Never swap in fresh state mid-interaction in the map editor: pointer
   // drags and half-drawn lines mutate objects inside the CURRENT state, and
   // replacing it would orphan those edits (the old "edits reset / don't
@@ -301,7 +325,8 @@ function scheduleRefresh() {
   if (W.refreshTimer) return;
   W.refreshTimer = setTimeout(async () => {
     W.refreshTimer = null;
-    try { await refreshState(); } catch (e) { /* transient */ }
+    const f = pendingForce; pendingForce = false;
+    try { await refreshState(f); } catch (e) { /* transient */ }
   }, 250);
 }
 let lastV = undefined, refreshSeq = 0;
@@ -377,6 +402,28 @@ const Forms = {
       }
     });
     return el('div.slider-row', input, readout);
+  },
+  // Draggable slider WITH a typing box — both bound to obj[key], kept in sync.
+  // opts: { step, suffix, onInput }. Used anywhere a value wants both a quick
+  // drag and an exact keyed entry (tariffs, GM editors, …).
+  sliderNum(obj, key, min, max, opts) {
+    opts = opts || {};
+    const step = opts.step || 1;
+    const clamp = (v) => Math.max(min, Math.min(max, isFinite(v) ? v : min));
+    const val = clamp(Number(obj[key]));
+    obj[key] = val;
+    const range = el('input.slider-input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(val), style: 'flex:1;' });
+    const box = el('input.text-input', { type: 'number', min: String(min), max: String(max), step: String(step), value: String(val), style: 'width:72px; flex:0 0 auto; text-align:right;' });
+    const suffix = opts.suffix ? el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-faint);' }, opts.suffix) : null;
+    const sync = (v, from) => {
+      v = clamp(Number(v)); obj[key] = v;
+      if (from !== 'range') range.value = String(v);
+      if (from !== 'box') box.value = String(v);
+      if (opts.onInput) opts.onInput(v);
+    };
+    range.addEventListener('input', () => sync(range.value, 'range'));
+    box.addEventListener('input', () => sync(box.value, 'box'));
+    return el('div', { style: 'display:flex; align-items:center; gap:10px;' }, range, box, suffix);
   },
   entOptions(types, allowNull) {
     const opts = S().entities.filter(e => !types || types.includes(e.type)).map(e => [e.id, e.name + ' (' + (TYPE_LABEL[e.type] || e.type) + ')']);

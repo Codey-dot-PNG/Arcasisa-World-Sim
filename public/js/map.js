@@ -769,6 +769,8 @@ const GameMap = {
     const showProps = k >= 6.7 || W.layer === 'ownership' || (this.editing() && MapEdit.mode === 'properties');
     if (this.markerLayer) {
       for (const g of this.markerLayer.children) {
+        // the owner-tint <defs> lives in this layer too — it has no position
+        if (!g.hasAttribute('data-x')) continue;
         const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
         // Textured buildings are locked to the map: one fixed world-unit scale
         // at every zoom level (no counter-scaling), and the texture is always

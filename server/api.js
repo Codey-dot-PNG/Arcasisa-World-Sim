@@ -32,6 +32,25 @@ function json(res, code, obj) {
   res.end(body);
   return true; // handled — the static server must not touch this response
 }
+
+// Normalise & clamp a tariff schedule from the client. Shape:
+//   { global:{import,export}, byCountry:{ entId:{import,export} }, byCompany:{...} }
+// Rates are whole-percent, clamped [0,90]; zero rows are dropped so the object
+// stays small. Returns a fresh, safe object regardless of what came in.
+function sanitizeTariffs(raw) {
+  const clamp = (n) => Math.max(0, Math.min(90, Math.round(Number(n) || 0)));
+  const pair = (o) => ({ import: clamp(o && o.import), export: clamp(o && o.export) });
+  const map = (o) => {
+    const out = {};
+    for (const id in (o || {})) {
+      const p = pair(o[id]);
+      if (p.import || p.export) out[id] = p; // drop all-zero overrides
+    }
+    return out;
+  };
+  raw = raw || {};
+  return { global: pair(raw.global), byCountry: map(raw.byCountry), byCompany: map(raw.byCompany) };
+}
 function readBody(req, maxBytes) {
   const cap = maxBytes || 4e6;
   // Vercel's Node runtime pre-parses JSON bodies onto req.body.
@@ -639,11 +658,11 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, entity: target });
     }
 
-    // ---- CEO / owner company controls (Phase 14) ----
-    // keepPct (held as inventory), govMix (of the sellable rest, % offered to
-    // the state vs the domestic market), govPriceMult (price to the state, as a
-    // multiplier of retail) and the wage index. Optional per-item govMix
-    // overrides. Editable by the company's controller (CEO or owner chain) or GM.
+    // ---- CEO / owner company controls (Phase 15) ----
+    // keepPct — % of production held back as company stock (the rest sells on
+    // the domestic market) — and the wage index. Goods held as stock are traded
+    // on the open market or via trade offers. Editable by the company's
+    // controller (CEO or owner chain) or GM.
     m = pathname.match(/^\/api\/company\/([\w-]+)\/controls$/);
     if (m && method === 'PATCH') {
       const co = db.entities.find(e => e.id === m[1] && e.type === 'company');
@@ -653,110 +672,48 @@ async function handle(req, res, pathname, method) {
       const b = await readBody(req);
       const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
       const clampWage = (n) => Math.max(0, Math.min(300, Math.round(Number(n) || 0)));
-      const clampMult = (n) => Math.max(0.25, Math.min(3, Math.round(Number(n) * 100) / 100));
       if (b.keepPct !== undefined) co.keepPct = clampPct(b.keepPct);
-      if (b.govMix !== undefined) co.govMix = clampPct(b.govMix);
-      if (b.govPriceMult !== undefined) co.govPriceMult = clampMult(b.govPriceMult);
       if (b.wage !== undefined) co.wage = clampWage(b.wage);
-      // per-item government-mix overrides: { itemId: pct }. null clears one.
-      if (b.govMixByItem !== undefined && typeof b.govMixByItem === 'object') {
-        const map = co.govMixByItem = co.govMixByItem || {};
-        for (const itemId in b.govMixByItem) {
-          if (!db.items.some(i => i.id === itemId)) continue;
-          const v = b.govMixByItem[itemId];
-          if (v === null || v === undefined || v === '') delete map[itemId];
-          else map[itemId] = clampPct(v);
-        }
-        if (!Object.keys(map).length) delete co.govMixByItem;
-      }
-      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% · gov mix ${co.govMix || 0}% @ ×${co.govPriceMult != null ? co.govPriceMult : 1} · wage ${co.wage}`, u.user.displayName, [co.id]);
+      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% in stock · wage ${co.wage}`, u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, govMix: co.govMix, govPriceMult: co.govPriceMult, wage: co.wage, govMixByItem: co.govMixByItem || {} } });
+      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, wage: co.wage } });
     }
 
-    // ---- national trade desk controls (President) ----
-    // govBuy: the state's standing offer to buy from local companies (per item a
-    // qty/turn and a price ceiling as a multiplier of retail, with optional
-    // per-company overrides); exports: per-item export price multipliers (global,
-    // with per-country overrides, and an on/off toggle); imports: standing
-    // per-turn purchase orders with a price ceiling. Editable by whoever controls
-    // the government entity (the President) or the GM.
-    if (pathname === '/api/trade/controls' && method === 'PATCH') {
-      const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
-      if (!gov) return bad('No government entity on file.');
+    // ---- government trade tariffs (Phase 16) ----
+    // The President (controls the government) or GM sets import/export tariffs:
+    // a global baseline plus additive per-country and per-company surcharges.
+    // Collected into the treasury by sim.executeTrade. Body: { tariffs }.
+    if (pathname === '/api/trade/tariffs' && method === 'PATCH') {
       const gm = u.role.perms.gm;
-      if (!gm && !ownership.controls(u.user.entityId, gov.id)) return deny('Only the head of government may direct national trade.');
+      if (!gm && !ownership.controls(u.user.entityId, 'ent_gov')) return deny('Only the government may set tariffs.');
       const b = await readBody(req);
-      const t = db.settings.trade = db.settings.trade || { partners: [], lastFlows: [], history: [] };
-      const validItem = (id) => db.items.some(i => i.id === id);
-      const validCo = (id) => db.entities.some(e => e.id === id && e.type === 'company');
-      const num = (n, def) => { const v = Number(n); return isNaN(v) ? def : v; };
-      const clampQty = (n) => Math.max(0, Math.round(num(n, 0)));
-      const clampMult = (n, def) => Math.max(0, Math.min(10, Math.round(num(n, def) * 100) / 100));
-
-      // government purchases from local companies
-      if (b.govBuy !== undefined && typeof b.govBuy === 'object') {
-        const map = t.govBuy = t.govBuy || {};
-        for (const itemId in b.govBuy) {
-          if (!validItem(itemId)) continue;
-          const src = b.govBuy[itemId];
-          if (src === null || src === undefined) { delete map[itemId]; continue; }
-          const entry = { qty: clampQty(src.qty), maxMult: clampMult(src.maxMult, 1) };
-          if (src.byCompany && typeof src.byCompany === 'object') {
-            const bc = {};
-            for (const coId in src.byCompany) {
-              if (!validCo(coId)) continue;
-              const s = src.byCompany[coId];
-              if (s === null || s === undefined) continue;
-              bc[coId] = {};
-              if (s.qty !== undefined && s.qty !== '') bc[coId].qty = clampQty(s.qty);
-              if (s.maxMult !== undefined && s.maxMult !== '') bc[coId].maxMult = clampMult(s.maxMult, 1);
-              if (!Object.keys(bc[coId]).length) delete bc[coId];
-            }
-            if (Object.keys(bc).length) entry.byCompany = bc;
-          }
-          map[itemId] = entry;
-        }
-      }
-
-      // export price multipliers (global + per-country) and on/off
-      if (b.exports !== undefined && typeof b.exports === 'object') {
-        const map = t.exports = t.exports || {};
-        for (const itemId in b.exports) {
-          if (!validItem(itemId)) continue;
-          const src = b.exports[itemId];
-          if (src === null || src === undefined) { delete map[itemId]; continue; }
-          const entry = { mult: clampMult(src.mult, 1), off: !!src.off };
-          if (src.byCountry && typeof src.byCountry === 'object') {
-            const bcn = {};
-            for (const pid in src.byCountry) {
-              const v = src.byCountry[pid];
-              if (v === null || v === undefined || v === '') continue;
-              bcn[pid] = clampMult(v, 1);
-            }
-            if (Object.keys(bcn).length) entry.byCountry = bcn;
-          }
-          map[itemId] = entry;
-        }
-      }
-
-      // standing import orders
-      if (Array.isArray(b.imports)) {
-        t.imports = b.imports
-          .map(r => ({
-            itemId: String(r.itemId || ''),
-            partnerId: r.partnerId ? String(r.partnerId) : null,
-            qtyPerTurn: clampQty(r.qtyPerTurn),
-            maxMult: clampMult(r.maxMult, 1.5)
-          }))
-          .filter(r => r.itemId && validItem(r.itemId) && r.qtyPerTurn > 0)
-          .slice(0, 24);
-      }
-
-      store.log('economy', 'National trade directives updated',
-        `${Object.keys(t.govBuy || {}).length} state purchase(s) · ${Object.keys(t.exports || {}).length} export rule(s) · ${(t.imports || []).length} import order(s)`, u.user.displayName, [gov.id]);
+      db.settings.trade = db.settings.trade || {};
+      db.settings.trade.tariffs = sanitizeTariffs(b.tariffs || {});
+      store.log('economy', 'Government tariff schedule updated',
+        `global import ${db.settings.trade.tariffs.global.import}% · export ${db.settings.trade.tariffs.global.export}%`, u.user.displayName, ['ent_gov']);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, trade: { govBuy: t.govBuy || {}, exports: t.exports || {}, imports: t.imports || [] } });
+      return json(res, 200, { tariffs: db.settings.trade.tariffs });
+    }
+
+    // ---- open-market trade execution (Phase 15) ----
+    // Fill part of a foreign partner's procedurally generated order. side
+    // 'sell' exports the holder's stock into a foreign BUY order; side 'buy'
+    // imports from a foreign SELL order. The government trades from the
+    // national stockpile through the treasury (President/GM); a company trades
+    // its own stock through its account (controller/GM). Volume moves the
+    // price against the trader (see sim.executeTrade).
+    if (pathname === '/api/trade/execute' && method === 'POST') {
+      const b = await readBody(req);
+      const side = b.side === 'buy' ? 'buy' : 'sell';
+      const holder = db.entities.find(e => e.id === b.holderId);
+      if (!holder) return bad('Unknown holder.');
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, holder.id)) return deny('You do not control that holder.');
+      try {
+        const r = sim.executeTrade(side, String(b.orderId || ''), holder.id, b.qty, u.user.displayName);
+        store.save(); broadcast('sync');
+        return json(res, 200, r);
+      } catch (e) { return bad(e.message); }
     }
 
     // ---- stock market (Phase 4.4) ----
@@ -1130,10 +1087,12 @@ async function handle(req, res, pathname, method) {
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
         if (b.music) s.music = b.music; // Phase 10 — GM Studio Presentation tab writes the whole object
-        if (b.trade) { // Phase 13 — GM Trade desk. Merge editable fields so the engine's live lastFlows/history survive a save.
+        if (b.trade) { // GM Trade desk. Merge ONLY the authored fields so the engine's live order book / lastFlows / history survive a save.
           s.trade = s.trade || {};
-          if (b.trade.govBuyPrices) s.trade.govBuyPrices = b.trade.govBuyPrices;
           if (b.trade.partners) s.trade.partners = b.trade.partners;
+          if (b.trade.tariffs) s.trade.tariffs = sanitizeTariffs(b.trade.tariffs);
+          // partner edits reshape the market — reopen the order book at once
+          try { sim.generateTradeOrders(db); } catch (e) { /* orders regenerate next turn */ }
         }
         if (b.economy) s.economy = b.economy; // Phase 13 — economy tunables (baseDailyWage, wage nudges)
         sim.scheduleAuto();

@@ -102,7 +102,7 @@ function recomputeEconConfidence(db) {
   let wsum = 0, w = 0;
   for (const co of db.entities) {
     if (co.type !== 'company' || !co.sharesOutstanding) continue;
-    const cap = ((co.dayPrice === undefined ? co.sharePrice : co.dayPrice) || 0) * co.sharesOutstanding;
+    const cap = ((co.dayPrice === undefined ? co.sharePrice : co.dayPrice) || 0) * valuedShares(co);
     wsum += (co.confidence === undefined ? 50 : co.confidence) * cap; w += cap;
   }
   const target = w ? wsum / w : 50;
@@ -182,6 +182,14 @@ function heldTotal(co) {
 function treasuryPool(co) {
   return Math.max(0, (co.sharesOutstanding || 0) - heldTotal(co));
 }
+// Shares that legitimately count toward valuation / market cap: everything
+// EXCEPT freshly-floated primary stock that no real investor has subscribed to
+// yet. Unsold primary shares are not wealth — this is what stops floating from
+// inflating a company's valuation out of nothing.
+function valuedShares(co) {
+  const primary = Math.min((co.vars && co.vars.primaryPool) || 0, treasuryPool(co));
+  return Math.max(0, (co.sharesOutstanding || 0) - primary);
+}
 function holdingOf(co, entityId) {
   const r = (co.shareholders || []).find(s => s.entityId === entityId);
   return r ? r.shares : 0;
@@ -259,7 +267,12 @@ function findCompany(companyId) {
   return co;
 }
 
-// Player buys `shares` from the float at the live day price; cash → the Bank.
+// Player buys `shares` from the float at the live day price. Buying UNSOLD
+// PRIMARY stock (from a company's offering) is a real capital subscription —
+// that cash goes to the COMPANY and lifts its valuation. Buying ordinary
+// (secondary) float pays the National Bank market-maker, as before. This is the
+// hinge that stops floating from minting money: a company banks nothing until a
+// real investor actually subscribes.
 function buy(companyId, buyerEntityId, shares, actor, opts) {
   const db = store.get();
   const co = findCompany(companyId);
@@ -281,16 +294,32 @@ function buy(companyId, buyerEntityId, shares, actor, opts) {
   const tax = db.settings.taxation || {};
   const vat = tax.enabled && tax.vatRate > 0 ? Math.round(cost * tax.vatRate / 100) : 0;
   if (!gm && buyAcct.balance < cost + vat) throw new Error('Insufficient funds (incl. VAT)');
-  // cash flows to the National Bank (market maker), never to the company
-  sim.txn(buyAcct.id, bankAcct.id, cost, `Bought ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  // split the buy into primary subscription (pays the company) and secondary
+  // (pays the Bank). Primary is drawn down first — those are the shares the
+  // company is still owed capital for.
+  co.vars = co.vars || {};
+  const primaryPool = Math.min(co.vars.primaryPool || 0, treasuryPool(co));
+  const primaryShares = Math.min(shares, primaryPool);
+  const secondaryShares = shares - primaryShares;
+  if (primaryShares > 0) {
+    const primaryCash = round2(price * primaryShares);
+    const coAcct = sim.primaryAccount(co.id, true);
+    sim.txn(buyAcct.id, coAcct.id, primaryCash, `Primary subscription: ${primaryShares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+    co.vars.primaryPool = Math.max(0, primaryPool - primaryShares);
+    co.vars.valuation = round2((co.vars.valuation || 0) + primaryCash); // real capital raised
+  }
+  if (secondaryShares > 0) {
+    const secondaryCash = round2(price * secondaryShares);
+    sim.txn(buyAcct.id, bankAcct.id, secondaryCash, `Bought ${secondaryShares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
+  }
   if (vat > 0) {
     const treasury = db.accounts.find(a => a.id === 'acct_treasury');
     if (treasury) sim.txn(buyAcct.id, treasury.id, vat, `VAT (${tax.vatRate}%) on share purchase`, 'TREASURY', 'transfer');
   }
   setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
   applyDayImpact(co, +shares, price); // buying pressure nudges the day quote up
-  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${vat ? ' + VAT ' + db.settings.currency + vat : ''}`, actor, [co.id, buyerEntityId]);
-  return { shares, cost, price, vat, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
+  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${primaryShares ? ' · ' + primaryShares + ' primary → ' + co.name : ''}${vat ? ' + VAT ' + db.settings.currency + vat : ''}`, actor, [co.id, buyerEntityId]);
+  return { shares, cost, price, vat, primaryShares, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
 }
 
 // Player sells `shares` back into the float; the National Bank pays out.
@@ -329,42 +358,38 @@ function transfer(companyId, fromEntityId, toEntityId, shares, actor) {
   return { shares };
 }
 
-// Offering — primary capital raise. The company SELLS new shares and is paid
-// cash immediately, from the National Bank, which now holds the new float. Value
-// (cash) came in, so the price stays ≈ flat: market cap rises by the cash raised.
-// NOT dilution — but it DRAINS the bank until the float is bought up.
-//
-// The price is NOT set by the seller: shares are placed at the live market
-// price (the day quote), so proceeds track the company's real valuation. The
-// caller chooses only how many new shares to float (a % of shares outstanding).
+// Offering — primary capital raise. Floating new shares now puts them ON THE
+// SHELF (a "primary pool") instead of paying the company up front. Nothing is
+// created: sharesOutstanding rises but valuation, cash and the per-share price
+// are UNCHANGED, because shares nobody has bought are not wealth. The company is
+// paid — and its valuation rises — only as real investors subscribe (see buy(),
+// which drains this primary pool and routes that cash to the company). This
+// kills the old money pump where the Bank fronted cash for stock that then just
+// sat unsold in the float and still counted toward the company's valuation.
 function offer(companyId, newShares, floatPct, actor) {
   const db = store.get();
   const co = findCompany(companyId);
   newShares = Math.round(Number(newShares));
-  const price = currentDayPrice(co); // placed at the live market valuation
+  const price = currentDayPrice(co); // reference price the shelf is offered at
   if (!(newShares > 0)) throw new Error('Offering size must be positive');
   if (!(price > 0)) throw new Error('The company has no valid market price to raise against');
-  const newOutstanding = (co.sharesOutstanding || 0) + newShares;
+  const so = co.sharesOutstanding || 0;
+  if (newShares > so) throw new Error('A single offering may at most double the share count');
+  const newOutstanding = so + newShares;
   if (newOutstanding > Number.MAX_SAFE_INTEGER) throw new Error('Share count would overflow');
-  const raised = Math.round(newShares * price * 100) / 100;
 
   co.sharesOutstanding = newOutstanding;
-  const coAcct = sim.primaryAccount(co.id, true);
-  // the Bank fronts the capital and holds the float; it recoups as players buy.
-  sim.txn(bankAccount().id, coAcct.id, raised, `Share offering: ${newShares} new ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
   co.vars = co.vars || {};
-  co.vars.valuation = (co.vars.valuation || 0) + raised;
+  // shares awaiting a real subscriber — excluded from valuation until bought
+  co.vars.primaryPool = (co.vars.primaryPool || 0) + newShares;
   if (floatPct !== undefined && floatPct !== null && !isNaN(Number(floatPct))) {
     co.publicFloat = Math.min(100, Math.max(0, Number(floatPct)));
   }
-  // Fundamental VALUE stays flat (cash came in), but the DAY MARKET reacts to
-  // the supply flood: dumping a lot of new float onto speculators marks the day
-  // price down (and dents confidence). Flooding offerings now has a visible
-  // consequence — a crash — on top of draining the Bank.
+  // more stock on the shelf softens the live day quote a touch (dilution risk).
   applyDayImpact(co, -newShares, currentDayPrice(co));
-  store.log('market', `${co.name} raised ${db.settings.currency}${raised.toLocaleString()}`,
-    `Sold ${newShares} new shares @ ${db.settings.currency}${price} (funded by the Bank of Arcasia); outstanding now ${newOutstanding}`, actor, [co.id]);
-  return { sharesOutstanding: co.sharesOutstanding, raised, price, sharePrice: co.sharePrice, dayPrice: co.dayPrice, publicFloat: co.publicFloat };
+  store.log('market', `${co.name} floated ${newShares} new shares`,
+    `Offered to the market at ${db.settings.currency}${round2(price)}; the company is paid only as investors subscribe. Outstanding ${newOutstanding}; unsold primary pool ${co.vars.primaryPool}`, actor, [co.id]);
+  return { sharesOutstanding: co.sharesOutstanding, primaryPool: co.vars.primaryPool, price, potentialRaise: round2(price * newShares), sharePrice: co.sharePrice, dayPrice: co.dayPrice, publicFloat: co.publicFloat };
 }
 
 // Bonus mint — free new shares, NO cash. Market cap preserved, so both prices
@@ -419,6 +444,8 @@ function buyback(companyId, shares, actor, opts) {
   co.sharesOutstanding = Math.max(0, (co.sharesOutstanding || 0) - shares);
   co.vars = co.vars || {};
   co.vars.valuation = Math.max(0, (co.vars.valuation || 0) - cost);
+  // a buyback that retires unsold primary stock unwinds that pending offering
+  co.vars.primaryPool = Math.min(co.vars.primaryPool || 0, treasuryPool(co));
   applyDayImpact(co, +shares, price); // retiring float pushes the day quote up
   store.log('market', `${co.name} bought back ${shares} shares`,
     `Spent ${db.settings.currency}${cost.toLocaleString()}; outstanding now ${co.sharesOutstanding}; ${db.settings.currency}${price} → ${db.settings.currency}${co.dayPrice}`, actor, [co.id]);
@@ -447,7 +474,7 @@ function remarkFromTrade(companyId, money, shares, actor) {
 }
 
 module.exports = {
-  shareItemFor, holdingOf, treasuryPool, personPublicHeld, maxPublic,
+  shareItemFor, holdingOf, treasuryPool, valuedShares, personPublicHeld, maxPublic,
   setHolding, syncAllCertificates, buy, sell, transfer, issue,
   offer, bonusMint, buyback, remarkFromTrade,
   currentDayPrice, applyDayImpact, dayReanchor, dayMarketTick, maybeDayTick, recomputeEconConfidence, nudgeConfidence,

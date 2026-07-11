@@ -33,7 +33,12 @@
    in this module, not in the DOM. */
 
 const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰' };
-const WAR_SCENARIOS = [['valksland_invasion', 'The Valgos Crisis — Valksland invades across the Strait']];
+// Fallback shown for the one render before the real list arrives (or if the
+// fetch fails) — see War._ensureScenarioList / GET /api/gm/war/scenarios,
+// which is the source of truth so this file doesn't have to hardcode every
+// scenario id in server/war-scenarios.js.
+const WAR_SCENARIOS_FALLBACK = [{ id: 'valksland_invasion', name: 'The Valgos Crisis', attackerName: 'Valksland', defenderName: 'the Republic' }];
+const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['marine', 'Marine'], ['garrison', 'Garrison']];
 // Above this map zoom, unit markers render at a CONSTANT WORLD scale (scale 1
 // — a fixed 40×28 world-unit symbol whose on-screen size grows as you zoom,
 // exactly matching the server's 40px collision/combat range, so "what touches
@@ -54,6 +59,15 @@ const War = {
   _input: null,      // current pointer gesture: {mode:'box'|'formation', start:[x,y], active, node?}
   _bombArmed: false,
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
+
+  // ---- GM unit spawner (Feature: mid-war reinforcements) ----
+  _spawnArmed: false,        // "arm placement" mode: next war-layer left-click places the spawn
+  _spawnDraft: { side: 'att', kind: 'infantry', count: 3, strength: 2000, atk: 1, speed: 3.5 },
+  // ---- Foreign intervention (Feature: nation joins an ongoing war) ----
+  _joinDraft: null,          // { entityId, side } — lazily seeded once a candidate nation list exists
+  // ---- GM scenario picker (Feature: dynamic scenario list) ----
+  _scenarioList: null,       // null = not yet fetched; [] = fetched empty/failed
+  _scenarioFetchInFlight: false,
 
   // ---- client-side prediction state (Phase 18) ----
   _pred: null,       // { war: <deep copy>, authRef: <the S().war object it was rebased from>, baseTick, outbox: [{side,unitId,dest,exp}] }
@@ -266,11 +280,32 @@ const War = {
     const now = Date.now();
     if (now - (this._panelAt || 0) < 2500) return;
     this._panelAt = now;
+    this._reRenderPanel();
+  },
+  // Re-render the War Room panel in place, preserving scroll position — used
+  // by the heartbeat refresh above and by UI-only state toggles (spawn/join
+  // side buttons) that need to repaint their active state without a full
+  // world refetch.
+  _reRenderPanel() {
+    if (typeof App === 'undefined') return;
     const dv = document.querySelector('#view .doc-view');
     const st = dv ? dv.scrollTop : 0;
     App.renderView();
     const dv2 = document.querySelector('#view .doc-view');
     if (dv2) dv2.scrollTop = st;
+  },
+
+  // GM scenario picker data (Feature: dynamic scenario list) — fetched once
+  // and cached; a failed/incomplete fetch just leaves the fallback showing.
+  async _ensureScenarioList() {
+    if (this._scenarioList || this._scenarioFetchInFlight) return;
+    this._scenarioFetchInFlight = true;
+    try {
+      const data = await GET('/api/gm/war/scenarios');
+      this._scenarioList = (data && data.scenarios) || [];
+    } catch (e) { this._scenarioList = []; }
+    this._scenarioFetchInFlight = false;
+    if (typeof W !== 'undefined' && W.view === 'war') this._reRenderPanel();
   },
 
   /* ═══════════ MAP INPUT (delegated from map.js's pointer handlers) ═══════════
@@ -312,6 +347,13 @@ const War = {
     }
     if (e.ctrlKey || e.metaKey) { // formation's surviving gesture, now that right-drag draws a path instead
       this._input = { mode: 'formation', start: world, active: true, node: this._formationNode(map) };
+      return true;
+    }
+    if (this._spawnArmed && isGM()) {
+      this._spawnArmed = false;
+      if (!this.commandable()) { toast('The war has concluded — no units can be spawned.', true); this.renderToolbar(); return true; }
+      this._doSpawn(world);
+      this.renderToolbar();
       return true;
     }
     if (this._bombArmed) {
@@ -411,8 +453,8 @@ const War = {
     this._keysBound = true;
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || W.layer !== 'war') return;
-      const had = this._sel.size || this._bombArmed;
-      this._sel.clear(); this._bombArmed = false; this._input = null;
+      const had = this._sel.size || this._bombArmed || this._spawnArmed;
+      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null;
       if (had) { if (GameMap.render) GameMap.render(); this.renderToolbar(); }
     });
   },
@@ -516,6 +558,20 @@ const War = {
     try {
       const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos) });
       toast('Bombing run away — impact incoming.');
+    } catch (e) { toast(e.message, true); }
+  },
+  // GM unit spawner (Feature: mid-war reinforcements) — placement click after
+  // "Arm placement" in the War Room GM panel (see renderSpawner). Authority
+  // (validation, clamping, war.mods.hp scaling) all lives server-side in
+  // war.spawnUnits; this is just the click-to-position UI.
+  async _doSpawn(pos) {
+    const d = this._spawnDraft;
+    try {
+      await POST('/api/gm/war/spawn', {
+        side: d.side, pos: this._clamp(pos), kind: d.kind,
+        count: d.count, strength: d.strength, atk: d.atk, speed: d.speed
+      });
+      toast(`${d.count} ${d.kind} unit${d.count === 1 ? '' : 's'} deployed.`);
     } catch (e) { toast(e.message, true); }
   },
 
@@ -720,7 +776,7 @@ const War = {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}` +
         (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : '') +
-        (clickable ? ' war-unit-cmd' : ''));
+        (clickable ? ' war-unit-cmd' : '') + (u.nationId ? ' war-unit-ally' : ''));
       g.setAttribute('data-warunit', u.id);
       if (clickable) {
         // Left-click selects / shift-toggles. Propagation is stopped on BOTH
@@ -729,13 +785,14 @@ const War = {
         // fires); the actual selection happens on pointerup, after which the
         // re-render can safely tear the node down. Right-clicks fall through
         // to the svg (a move order may target a friendly's position), and an
-        // ARMED BOMB click also falls through so it drops on the map point.
+        // ARMED BOMB or ARMED SPAWN click also falls through so it lands on
+        // the map point rather than selecting the unit underneath it.
         g.addEventListener('pointerdown', (e) => {
-          if (e.button !== 0 || this._bombArmed) return;
+          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
           e.stopPropagation();
         });
         g.addEventListener('pointerup', (e) => {
-          if (e.button !== 0 || this._bombArmed) return;
+          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
           e.stopPropagation();
           this.onUnitClick(u.id, e);
         });
@@ -805,7 +862,8 @@ const War = {
       hpFill.setAttribute('class', 'war-hp-fill');
       g.appendChild(hpFill);
       const title = document.createElementNS(NS, 'title');
-      title.textContent = `${u.name} — ${Math.round(u.strength)}/${u.maxStrength} · ${u.state}`;
+      title.textContent = `${u.name} — ${Math.round(u.strength)}/${u.maxStrength} · ${u.state}` +
+        (u.nationId ? ` · ${entName(u.nationId)} contingent` : '');
       g.appendChild(title);
       map.warLayer.appendChild(g);
 
@@ -861,13 +919,22 @@ const War = {
       ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '💣 No air arm')
       : el('button.dash-btn', {
           class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
-          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; this.renderToolbar(); }
+          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
         }, !live ? '💣 Bomb' : onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
     row.appendChild(bombBtn);
     if (side === 'att') this._bombArmed = false; // never leave a bomb armed while commanding the side that has none
     row.appendChild(el('button.dash-btn', {
-      onclick: () => { this._sel.clear(); this._bombArmed = false; if (GameMap.render) GameMap.render(); }
+      onclick: () => { this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; if (GameMap.render) GameMap.render(); }
     }, 'Clear selection'));
+    // GM unit spawner (Feature: mid-war reinforcements) — the "Arm placement"
+    // button lives in the War Room GM panel (renderSpawner), but the armed
+    // state and its cancel action surface here too since arming happens on
+    // one view and the placement click happens on the map layer.
+    if (isGM() && this._spawnArmed) {
+      row.appendChild(el('button.dash-btn.active', {
+        onclick: () => { this._spawnArmed = false; this.renderToolbar(); }
+      }, `🪖 Spawn armed (${this._spawnDraft.side === 'att' ? 'Att' : 'Def'}) — click target`));
+    }
     if (isGM()) {
       row.appendChild(el('button.dash-btn', {
         class: this._gmSide === 'def' ? 'active' : '',
@@ -965,13 +1032,77 @@ const War = {
 
   renderStartForm(inner) {
     inner.appendChild(Views.secLabel('Start a Scenario'));
-    const sel = el('select.text-input', WAR_SCENARIOS.map(s => el('option', { value: s[0] }, s[1])));
+    if (!this._scenarioList) this._ensureScenarioList(); // kicks off the fetch; this render uses the fallback until it resolves
+    const list = (this._scenarioList && this._scenarioList.length) ? this._scenarioList : WAR_SCENARIOS_FALLBACK;
+    const sel = el('select.text-input', list.map(s => el('option', { value: s.id },
+      `${s.name} — ${s.attackerName} invades ${s.defenderName}`)));
     inner.appendChild(el('div.btn-row', sel, el('button.solid-btn', {
       onclick: async () => {
         try { await POST('/api/gm/war/start', { scenario: sel.value }); toast('The invasion begins.'); }
         catch (e) { toast(e.message, true); }
       }
     }, '⚔ Start War')));
+  },
+
+  // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/
+  // damage/speed controls, then "Arm placement" hands off to a map click
+  // (see onMapPointerDown's _spawnArmed branch and _doSpawn). Mirrors the
+  // bomb-arming flow: armed state shows on the floating war toolbar too, and
+  // Esc disarms it (see bindKeys).
+  renderSpawner(inner, war) {
+    inner.appendChild(Views.secLabel('Spawn Units'));
+    const d = this._spawnDraft;
+    const box = el('div');
+    box.appendChild(Forms.field('Side', el('div.btn-row',
+      el('button.dash-btn', { class: d.side === 'att' ? 'active' : '', onclick: () => { d.side = 'att'; this._reRenderPanel(); } }, 'Attacker'),
+      el('button.dash-btn', { class: d.side === 'def' ? 'active' : '', onclick: () => { d.side = 'def'; this._reRenderPanel(); } }, 'Defender')
+    )));
+    box.appendChild(Forms.field('Kind', Forms.sel(d, 'kind', WAR_SPAWN_KINDS)));
+    box.appendChild(Forms.field('Count', Forms.sliderNum(d, 'count', 1, 12, { step: 1 })));
+    box.appendChild(Forms.field('HP (strength)', Forms.sliderNum(d, 'strength', 50, 20000, { step: 50 })));
+    box.appendChild(Forms.field('Damage (atk ×)', Forms.sliderNum(d, 'atk', 0.2, 10, { step: 0.1 })));
+    box.appendChild(Forms.field('Speed', Forms.sliderNum(d, 'speed', 0, 12, { step: 0.1 })));
+    box.appendChild(el('div.btn-row', el('button.solid-btn', {
+      class: this._spawnArmed ? 'active' : '',
+      onclick: () => {
+        this._spawnArmed = !this._spawnArmed;
+        if (this._spawnArmed) this._bombArmed = false;
+        this._reRenderPanel();
+        this.renderToolbar();
+      }
+    }, this._spawnArmed ? 'Armed — click the map to place (Esc cancels)' : '➕ Arm placement')));
+    inner.appendChild(box);
+  },
+
+  // Foreign intervention (Feature: nation joins an ongoing war) — a plain
+  // nation/side picker; the actual spawn/allies bookkeeping is all
+  // server-side in war.joinWar.
+  renderIntervention(inner, war) {
+    inner.appendChild(Views.secLabel('Foreign Intervention'));
+    const allies = war.allies || { att: [], def: [] };
+    const excluded = new Set([war.attackerId, war.defenderId, ...(allies.att || []), ...(allies.def || [])]);
+    const options = (S().entities || []).filter(e => e.type === 'foreign' && !excluded.has(e.id)).map(e => [e.id, e.name]);
+    if (!options.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No further foreign powers are available to intervene.'));
+      return;
+    }
+    if (!this._joinDraft || !options.some(o => o[0] === this._joinDraft.entityId)) {
+      this._joinDraft = { entityId: options[0][0], side: (this._joinDraft && this._joinDraft.side) || 'att' };
+    }
+    const d = this._joinDraft;
+    const box = el('div');
+    box.appendChild(Forms.field('Nation', Forms.sel(d, 'entityId', options)));
+    box.appendChild(Forms.field('Side', el('div.btn-row',
+      el('button.dash-btn', { class: d.side === 'att' ? 'active' : '', onclick: () => { d.side = 'att'; this._reRenderPanel(); } }, 'Join Attacker'),
+      el('button.dash-btn', { class: d.side === 'def' ? 'active' : '', onclick: () => { d.side = 'def'; this._reRenderPanel(); } }, 'Join Defender')
+    )));
+    box.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        try { await POST('/api/gm/war/join', { entityId: d.entityId, side: d.side }); toast('Intervention ordered.'); }
+        catch (e) { toast(e.message, true); }
+      }
+    }, '🤝 Join War')));
+    inner.appendChild(box);
   },
 
   renderControls(inner, war) {
@@ -996,7 +1127,11 @@ const War = {
       row.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'This war has concluded. Start a new scenario below to run another.'));
     }
     inner.appendChild(row);
-    if (!war.result) this.renderTuning(inner, war);
+    if (!war.result) {
+      this.renderTuning(inner, war);
+      this.renderSpawner(inner, war);
+      this.renderIntervention(inner, war);
+    }
     if (war.result) this.renderStartForm(inner);
   },
 

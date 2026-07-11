@@ -23,6 +23,14 @@ const BOMB_UNIT_DMG = 90;             // max strength damage at the blast centre
 const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between bomb drops
 const TUNING_MIN = 0.1, TUNING_MAX = 10; // clamp range for GM global tuning sliders (war.mods)
 
+// GM spawn/join tunables (Feature: mid-war reinforcements) — clamp ranges
+// for the /api/gm/war/spawn and /api/gm/war/join routes.
+const SPAWN_MIN_COUNT = 1, SPAWN_MAX_COUNT = 12;
+const SPAWN_MIN_STR = 50, SPAWN_MAX_STR = 20000;
+const SPAWN_MIN_ATK = 0.2, SPAWN_MAX_ATK = 10;
+const SPAWN_MIN_SPD = 0, SPAWN_MAX_SPD = 12;
+const JOIN_MIN_COUNT = 1, JOIN_MAX_COUNT = 10, JOIN_DEFAULT_COUNT = 4;
+
 const isLive = engine.isLive;
 const dist = engine.dist;
 const round1 = engine.round1;
@@ -82,6 +90,13 @@ function startWar(db, scenario) {
 
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
   const stage = scenario.staging;
+  // Land invasions (`scenario.land: true`) spawn troops already on their own
+  // soil, marching cross-border on tick one — no sea transit, no `landing`
+  // objective (the scenario simply omits one). The engine only special-cases
+  // state 'embarked'; any other non-routed state is picked up by the next AI
+  // replan exactly like a unit that just finished landing (see runAI/
+  // stepMovement in war-engine.js — 'moving' units with no dest just wait a
+  // few ticks for the AI cycle instead of needing a dedicated code path).
   const units = scenario.units.map(u => {
     const def = unitDefaults[u.kind] || { strength: 2000, speed: 4, atk: 1 }; // ×10 fallback, consistent with the scenario-data tuning (see war-scenarios.js)
     const strength = u.strength || def.strength;
@@ -96,7 +111,7 @@ function startWar(db, scenario) {
       org: 100,
       speed: u.speed || def.speed,
       atk: u.atk || def.atk || 1,
-      state: 'embarked',
+      state: scenario.land ? 'moving' : 'embarked',
       objectiveId: null
     };
   });
@@ -147,12 +162,22 @@ function startWar(db, scenario) {
     // fallback (`(war.mods && war.mods.dmg) || 1`), so a legacy war missing
     // this field behaves identically without needing a migration.
     mods: { dmg: 1, bombDmg: 1, hp: 1 },
+    // Foreign nations that joined an ongoing war via joinWar (Feature:
+    // intervention) — additive/absent-safe, mirrors `mods` above: a war doc
+    // predating this feature simply has no allies of either side.
+    allies: { att: [], def: [] },
     result: null
   };
-  engine.pushEvent(db.war, 'landing', units[0].pos, `${attacker.name} war fleet sighted in the Strait — invasion begins.`);
+  if (scenario.land) {
+    engine.pushEvent(db.war, 'battle', units[0].pos, `${attacker.name} forces cross the border — invasion begins.`);
+    SERVER_CTX.news(`WAR: ${attacker.name} FORCES CROSS THE BORDER`,
+      `Armed columns belonging to ${attacker.name} have crossed into Arcasian territory. The government has not yet issued a statement.`);
+  } else {
+    engine.pushEvent(db.war, 'landing', units[0].pos, `${attacker.name} war fleet sighted offshore — invasion begins.`);
+    SERVER_CTX.news(`WAR: ${attacker.name} FORCES SIGHTED OFF THE COAST`,
+      `Naval assets belonging to ${attacker.name} have been sighted massing offshore. The government has not yet issued a statement.`);
+  }
   store.log('event', `${attacker.name} launches an invasion`, scenario.name, 'WAR ENGINE', [attacker.id, defender.id]);
-  SERVER_CTX.news(`WAR: ${attacker.name} FORCES SIGHTED OFF THE COAST`,
-    `Naval assets belonging to ${attacker.name} have been sighted massing in the Strait of Valgos. The government has not yet issued a statement.`);
   return db.war;
 }
 
@@ -170,6 +195,137 @@ function endWar(db, actor, reason) {
 // orders optimistically); this shim only exists so api.js keeps one import.
 function commandUnits(db, side, orders, actor) {
   engine.applyOrders(db, side, orders);
+}
+
+// ---------- GM unit spawner (Feature: mid-war reinforcements) ----------
+// Spawns `count` fresh units of `kind` for `side` scattered in a small ring
+// around `pos`, using UNIT_DEFAULTS for any stat the GM didn't override.
+// Respects war.mods.hp exactly like setWarTuning's rescale (spawned strength
+// is multiplied by the CURRENT hp multiplier, so a mid-war-buffed scenario
+// stays consistent) and marks every unit `spawned: true` for provenance.
+const SPAWN_SCATTER_R = 50; // px — random ring radius units land in around the requested point
+function spawnUnits(db, opts, actor) {
+  const war = db.war;
+  if (!war || !war.active) return { ok: false, error: 'No war is active.' };
+  const side = opts.side === 'att' ? 'att' : (opts.side === 'def' ? 'def' : null);
+  if (!side) return { ok: false, error: 'Side must be att or def.' };
+  const pos = opts.pos;
+  const [W, H] = engine.worldBounds(war);
+  if (!Array.isArray(pos) || pos.length !== 2 ||
+      !Number.isFinite(Number(pos[0])) || !Number.isFinite(Number(pos[1])) ||
+      pos[0] < 0 || pos[0] > W || pos[1] < 0 || pos[1] > H) {
+    return { ok: false, error: 'Invalid spawn position.' };
+  }
+  const count = engine.clamp(Math.round(Number(opts.count) || 1), SPAWN_MIN_COUNT, SPAWN_MAX_COUNT);
+  const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
+  const kind = (typeof opts.kind === 'string' && opts.kind.trim()) || 'infantry';
+  const def = unitDefaults[kind] || { strength: 2000, speed: 4, atk: 1 };
+  const strengthIn = Number(opts.strength);
+  const baseStrength = Number.isFinite(strengthIn) ? engine.clamp(strengthIn, SPAWN_MIN_STR, SPAWN_MAX_STR) : def.strength;
+  const atkIn = Number(opts.atk);
+  const atk = Number.isFinite(atkIn) ? engine.clamp(atkIn, SPAWN_MIN_ATK, SPAWN_MAX_ATK) : (def.atk || 1);
+  const speedIn = Number(opts.speed);
+  const speed = Number.isFinite(speedIn) ? engine.clamp(speedIn, SPAWN_MIN_SPD, SPAWN_MAX_SPD) : def.speed;
+  const hpMod = (war.mods && war.mods.hp) || 1;
+  const strength = round1(baseStrength * hpMod);
+  const namePrefix = (typeof opts.name === 'string' && opts.name.trim()) ||
+    `GM-spawned ${side === 'att' ? 'Attacker' : 'Defender'} ${kind[0].toUpperCase()}${kind.slice(1)}`;
+
+  const spawned = [];
+  for (let i = 0; i < count; i++) {
+    const ang = rand(0, Math.PI * 2);
+    const r = rand(0, SPAWN_SCATTER_R);
+    const spawnPos = engine.clampToWorld(war, [pos[0] + Math.cos(ang) * r, pos[1] + Math.sin(ang) * r]);
+    const u = {
+      id: store.uid('warunit'), side,
+      name: count > 1 ? `${namePrefix} ${i + 1}` : namePrefix,
+      kind, pos: spawnPos, dest: null,
+      strength, maxStrength: strength, org: 100,
+      speed, atk, state: 'holding', objectiveId: null,
+      garrison: side === 'def' && kind === 'garrison',
+      spawned: true
+    };
+    war.units.push(u);
+    spawned.push(u.id);
+  }
+  engine.pushEvent(war, 'milestone', pos.slice(), `${count} ${kind} unit${count === 1 ? '' : 's'} deployed for the ${side === 'att' ? 'attacker' : 'defender'} by GM order.`);
+  store.log('gm', `GM spawned ${count} unit${count === 1 ? '' : 's'}`,
+    `${kind} × ${count} for the ${side === 'att' ? 'attacker' : 'defender'} at (${Math.round(pos[0])}, ${Math.round(pos[1])})`,
+    actor || 'WAR ENGINE', []);
+  return { ok: true, unitIds: spawned };
+}
+
+// ---------- foreign intervention (Feature: nation joins an ongoing war) ----------
+function toRoman(n) {
+  const table = [[10, 'X'], [9, 'IX'], [5, 'V'], [4, 'IV'], [1, 'I']];
+  let out = '';
+  for (const [v, sym] of table) while (n >= v) { out += sym; n -= v; }
+  return out || 'I';
+}
+// A joining nation's contingent lands near the attacker's existing staging
+// (any live attacker unit's position — the original scenario staging box is
+// not kept on war.war after startWar, so an existing unit is the simplest
+// live anchor) or, for the defence, near the capital / any held city.
+function joinEntryPoint(db, war, side) {
+  const [W, H] = engine.worldBounds(war);
+  if (side === 'att') {
+    const anchor = war.units.find(u => u.side === 'att' && isLive(u)) || war.units.find(u => u.side === 'att');
+    return anchor ? anchor.pos.slice() : [W / 2, 40];
+  }
+  const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
+  return capital ? capital.pos.slice() : [W / 2, H / 2];
+}
+function joinWar(db, opts, actor) {
+  const war = db.war;
+  if (!war || !war.active) return { ok: false, error: 'No war is active.' };
+  const side = opts.side === 'att' ? 'att' : (opts.side === 'def' ? 'def' : null);
+  if (!side) return { ok: false, error: 'Side must be att or def.' };
+  const entity = db.entities.find(e => e.id === opts.entityId);
+  if (!entity || entity.type !== 'foreign') return { ok: false, error: 'Unknown foreign power.' };
+  if (entity.id === war.attackerId) return { ok: false, error: `${entity.name} is already the attacker.` };
+  if (entity.id === war.defenderId) return { ok: false, error: `${entity.name} is already the defender.` };
+  war.allies = war.allies || { att: [], def: [] };
+  war.allies.att = war.allies.att || []; war.allies.def = war.allies.def || [];
+  if (war.allies.att.includes(entity.id) || war.allies.def.includes(entity.id)) {
+    return { ok: false, error: `${entity.name} has already entered the war.` };
+  }
+
+  const count = engine.clamp(Math.round(Number(opts.count) || JOIN_DEFAULT_COUNT), JOIN_MIN_COUNT, JOIN_MAX_COUNT);
+  const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
+  const def = unitDefaults.infantry || { strength: 2100, speed: 3.2, atk: 1 };
+  const hpMod = (war.mods && war.mods.hp) || 1;
+  const strength = round1(def.strength * hpMod);
+  const entryPos = joinEntryPoint(db, war, side);
+
+  const spawned = [];
+  for (let i = 0; i < count; i++) {
+    const ang = rand(0, Math.PI * 2);
+    const r = rand(40, 100);
+    const pos = engine.clampToWorld(war, [entryPos[0] + Math.cos(ang) * r, entryPos[1] + Math.sin(ang) * r]);
+    const u = {
+      id: store.uid('warunit'), side,
+      name: `${entity.name} Expeditionary ${toRoman(i + 1)}`,
+      kind: side === 'att' ? 'infantry' : 'garrison',
+      pos, dest: null, strength, maxStrength: strength, org: 100,
+      speed: side === 'att' ? (def.speed || 3.2) : 0,
+      atk: def.atk || 1, state: 'holding', objectiveId: null,
+      nationId: entity.id, garrison: side === 'def', spawned: true
+    };
+    war.units.push(u);
+    spawned.push(u.id);
+  }
+  war.allies[side].push(entity.id);
+
+  const attackerEnt = db.entities.find(e => e.id === war.attackerId);
+  const defenderEnt = db.entities.find(e => e.id === war.defenderId);
+  const sideEnt = side === 'att' ? attackerEnt : defenderEnt;
+  const sideName = sideEnt ? sideEnt.name : (side === 'att' ? 'the attacker' : 'the defender');
+  engine.pushEvent(war, 'milestone', entryPos.slice(), `${entity.name} enters the war on the side of ${sideName}.`);
+  store.log('event', `${entity.name} enters the war`,
+    `${entity.name} commits ${count} unit(s) on the side of ${sideName}.`, actor || 'WAR ENGINE', [entity.id]);
+  SERVER_CTX.news(`${entity.name.toUpperCase()} ENTERS THE WAR`,
+    `${entity.name} has entered the conflict on the side of ${sideName}. An expeditionary contingent is reported joining the front.`);
+  return { ok: true, unitIds: spawned };
 }
 
 // ---------- GM global tuning (Feature: war.mods) ----------
@@ -319,4 +475,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, isLive };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, isLive };

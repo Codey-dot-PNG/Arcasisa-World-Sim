@@ -416,6 +416,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 /* Phase 16 — interactive War layer: mobile defenders, corpses, bombs. */
 .war-unit-dead{opacity:.35; filter:grayscale(1);}
 .war-unit-dead .war-unit-box{stroke-dasharray:1 2;}
+/* Feature: foreign intervention — a joined nation's contingent gets a light
+   gold outline so it reads as distinct from the original belligerent without
+   a whole new marker style (see War.renderUnits' nationId check). */
+.war-unit-ally .war-unit-box{stroke:#e0a458; stroke-width:2.2;}
 .war-sel-ring{fill:none; stroke:#e0c34a; stroke-width:2.5; opacity:.95;}
 .war-crater{fill:#1a1410; opacity:.3; pointer-events:none; stroke:#0c0906; stroke-width:1; stroke-dasharray:6 4;}
 .war-marquee{fill:rgba(224,164,88,.12); stroke:#e0a458; stroke-width:1.5; stroke-dasharray:5 3; pointer-events:none;}

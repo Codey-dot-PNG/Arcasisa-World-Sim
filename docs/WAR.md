@@ -50,6 +50,7 @@ war: {
   bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } }, // {att,def} shape kept for compatibility, but only `def` is ever used — bombs are DEFENDER-ONLY
   craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
   mods: { dmg: 1, bombDmg: 1, hp: 1 },       // GM global tuning multipliers — additive/absent-safe, see "GM global tuning" below
+  allies: { att: [entityId, …], def: [entityId, …] }, // foreign entities that joined via joinWar — additive/absent-safe, see "Foreign intervention" below
   result: null | { winner:'att'|'def'|null, endedAt, reason }
 }
 ```
@@ -68,6 +69,13 @@ Unit `kind` is free-form scenario data (`marine`, `infantry`, `armored`,
 `reserve` for the attacker; every defender is spawned as `garrison`). Unit
 `state` is one of `embarked` (attacker only, still at sea), `moving`,
 `fighting`, `holding`, `routed`.
+
+A unit gets `spawned: true` when it was created outside `startWar`'s scenario
+roster — GM `spawnUnits` or `joinWar` reinforcements (see "GM unit spawner"
+and "Foreign intervention" below) — purely for provenance; the engine treats
+it identically to any scenario unit. A `joinWar` unit additionally carries
+`nationId` (the joining entity's id, for the client's ally tint/tooltip) and
+is named `"<Nation> Expeditionary <roman numeral>"`.
 
 Cell keys are **grid indices**, not pixel coordinates (`cx = floor(x/48)`).
 The `pid` on a captured cell is cached at capture time purely as a
@@ -216,6 +224,73 @@ The War Room panel's GM section (`public/js/war.js`'s `renderTuning`) exposes
 three sliders (range 0.1–5, step 0.1, live `×` readout) that POST on a ~300ms
 debounce so dragging doesn't spam the route.
 
+## GM unit spawner
+
+The GM can deploy fresh units mid-war for either side, with adjustable stats
+— `server/war.js`'s `spawnUnits(db, { side, pos, kind, name, count, strength,
+atk, speed }, actor)`:
+
+- Validates the war is active, `side` is `att`/`def`, `pos` is finite and
+  inside the war's grid (`engine.worldBounds`).
+- `count` clamps 1–12; `strength` 50–20000; `atk` 0.2–10; `speed` 0–12 — any
+  stat the GM leaves unset falls back to `UNIT_DEFAULTS[kind]` (kind defaults
+  to `infantry` if unset/unknown, same fallback `war-scenarios.js` uses
+  everywhere else).
+- Spawns `count` units scattered in a small ring (`SPAWN_SCATTER_R` = 50px)
+  around `pos`, state `'holding'` (idle until ordered — an attacker spawn
+  gets swept into the next AI replan as a "committed" unit exactly like a
+  land-invasion spawn does; see "Land invasions" above).
+- Respects `war.mods.hp`: spawned `strength`/`maxStrength` are the requested
+  value × the CURRENT hp multiplier, so a spawn on a GM-buffed war stays
+  consistent with the rest of the roster.
+- Marks every spawned unit `spawned: true`; a `kind: 'garrison'` defender
+  spawn also gets `garrison: true` so it picks up the static-defence combat
+  bonus like any other garrison. Pushes a `'milestone'` war event and a
+  `store.log('gm', …)` entry (no news wire — this is a GM tool, not an
+  in-fiction event).
+
+**UI** (`public/js/war.js`'s `renderSpawner`, War Room GM section): side
+toggle, kind select (`infantry`/`armored`/`marine`/`garrison`), and
+count/HP/damage/speed sliders (`Forms.sliderNum`) bound to
+`War._spawnDraft`. "Arm placement" sets `War._spawnArmed = true`; the next
+war-layer left-click calls `_doSpawn(pos)` (POSTs `/api/gm/war/spawn`) and
+disarms — mirrors the bomb-arming flow exactly (`onMapPointerDown` checks
+`_spawnArmed` the same way it checks `_bombArmed`, before the click can hit a
+unit marker underneath it), including an Esc handler and a floating
+war-toolbar chip (`🪖 Spawn armed (Att/Def) — click target`) so the armed
+state is visible while looking at the map, not just the panel it was armed
+from.
+
+## Foreign intervention
+
+A GM can bring an existing `type:'foreign'` entity into an ongoing war on
+either side — `server/war.js`'s `joinWar(db, { entityId, side, count? },
+actor)`:
+
+- Validates the war is active, `side` is `att`/`def`, `entityId` resolves to
+  a `foreign` entity that isn't already the attacker/defender or a prior
+  `war.allies[att|def]` entry.
+- Spawns a contingent (`count` clamped 1–10, default 4) of `infantry`-stat
+  units (garrison-kind and immobile for the defence) at a sensible entry
+  point: for `att`, near any existing live attacker unit (the closest thing
+  to "the original staging area" once `startWar`'s staging box itself isn't
+  kept on the war doc); for `def`, near the capital (or any city if none is
+  marked capital). Units are named `"<Nation> Expeditionary <roman
+  numeral>"` and carry `nationId` (the joining entity's id) for flavour —
+  the client tints their marker outline gold (`.war-unit-ally`) and appends
+  `"· <Nation> contingent"` to the unit tooltip.
+- Records the join in `war.allies = { att: [entityId, …], def: [entityId,
+  …] }` (additive, defaults to `{att:[], def:[]}` at `startWar`), pushes a
+  `'milestone'` war event, `store.log`s a timeline entry, and publishes a
+  news article via `sim.draftNews` ("`<NATION> ENTERS THE WAR`" / "*has
+  entered the conflict on the side of \<attacker/defender name\>*") — the
+  same mechanism war milestones already use.
+
+**UI** (`public/js/war.js`'s `renderIntervention`, War Room GM section): a
+nation select (every `foreign` entity not already the attacker, defender, or
+a listed ally — hidden entirely once none remain), a side toggle, and a Join
+button that POSTs `/api/gm/war/join`.
+
 ## AI grand strategy — attacker only
 
 Defenders never move: every defender unit is a static garrison spawned at a
@@ -256,10 +331,13 @@ Pure data, no engine logic (mirrors the `seed.js`/`sim.js` split). Exports
 ```js
 scenario = {
   id, name, attackerId, defenderId,        // entity ids — attackerId must resolve to a 'foreign' entity
-  staging: { x0, y0, x1, y1 },              // sea box; attacker units spawn 'embarked' at random points inside it
+  land: true,                              // OPTIONAL — see "Land invasions" below; omit/false for the default naval-embark flow
+  staging: { x0, y0, x1, y1 },              // sea box (or, when land:true, a land box in the attacker's own territory);
+                                            // units spawn at random points inside it
   objectives: [ { kind, ref?, priority } ], // ref is a city/province id. 'seize_capital' may omit ref —
                                             // war.js resolves whichever city has isCapital:true, so the
-                                            // scenario never has to name the capital twice.
+                                            // scenario never has to name the capital twice. A land:true
+                                            // scenario simply omits any 'landing' objective (see below).
   units: [ { name, kind } ],                // kind indexes UNIT_DEFAULTS for strength/speed/atk unless overridden per-unit
   defense: { citySizeStrength: {1,2,3}, militaryPropertyStrength }, // war.js spawns one garrison per city (by size)
                                             // and one per type:'military' property — no ids named here
@@ -282,6 +360,38 @@ province, west of the Valksland landmass), lands near Cape Valgos
 → take Razno (`city_razno`) → hold 65% of Lachevan province. Balanced (by
 playtesting at 8× speed) to reach the capital in single-digit minutes of
 real 1× time and finish the whole campaign in roughly 15–30 minutes.
+
+Two more scenarios ship alongside it:
+
+- **`delcasia_invasion`** ("The Kordi Incursion") — Del' Casia (`for_delcasia`,
+  the southern land-border neighbour) crosses the frontier south of Kordi
+  province: `land: true`, staged in Del' Casia's own territory just past the
+  road_fork_delcasia/road_delcasia_interior border crossing
+  (`server/mapdata.js`), objectives take Surat (`city_surat`) then hold 65%
+  of Kordi province. A smaller, land-only campaign — 7 units, no sea transit.
+- **`qinal_invasion`** ("The Kradon Landings") — the People's Republic of
+  Qinal (`for_qinal`, a distant hostile power with no shared border) runs the
+  standard embarked/landing flow like Valksland, but stages in the strait
+  north of Port Kradon (between the Mazon coast and Arcasia's north-west) and
+  drives inland through Grazi province (`city_kradon` → `city_kradesh` →
+  control `prov_grazi`) instead of toward the capital.
+
+### Land invasions (`scenario.land: true`)
+
+A land scenario spawns its attacker units already on solid ground instead of
+`embarked` at sea: `startWar` sets their initial `state` to `'moving'`
+instead of `'embarked'`, and the scenario's `objectives` list simply contains
+no `kind: 'landing'` entry (there is nothing to resolve — `startWar` only
+ever creates the objectives a scenario lists). No engine change was needed
+for this: `runAI`'s `landingObj` lookup already tolerates "no landing
+objective in this war" (`war.objectives.find(...)` returning `undefined`
+just skips the `landing` AI phase and goes straight to `breakout`), and
+`stepMovement`'s embarked-only branch only ever runs for units whose `state`
+literally is `'embarked'` — a `'moving'` unit with no `dest` yet simply waits
+(harmlessly) for the next `AI_INTERVAL` replan to assign one, exactly like a
+unit that just finished landing. The only server/war.js change is the spawn
+state itself, plus a land-flavoured start-of-war narration (log/news text
+reads "forces cross the border" instead of "war fleet sighted offshore").
 
 ## Interactive War layer (Phase 16)
 
@@ -493,6 +603,19 @@ CAS commit model.
   `war.setWarTuning` — see "GM global tuning" above for what each multiplier
   does and why `hp` rescales live units immediately while `dmg`/`bombDmg`
   just get read fresh next fight/bomb.
+- `GET /api/gm/war/scenarios` — GM-only; returns
+  `{ scenarios: [{id, name, attackerId, defenderId, attackerName, defenderName}, …] }`
+  for every entry in `server/war-scenarios.js`, so the War Room's Start form
+  doesn't hardcode the scenario list — see "GM Studio" client note below.
+- `POST /api/gm/war/spawn { side, pos:[x,y], kind?, name?, count?, strength?, atk?, speed? }`
+  — GM-only; calls `war.spawnUnits` (see "GM unit spawner" below). `side`
+  must be `att`/`def`, `pos` finite inside the grid, `count` clamped 1–12,
+  `strength` 50–20000, `atk` 0.2–10, `speed` 0–12; any omitted stat falls
+  back to `UNIT_DEFAULTS[kind]` (default kind `infantry`).
+- `POST /api/gm/war/join { entityId, side, count? }` — GM-only; calls
+  `war.joinWar` (see "Foreign intervention" below). `entityId` must resolve
+  to a `type:'foreign'` entity that isn't already the attacker/defender or a
+  prior `war.allies` entry; `count` clamps 1–10 (default 4).
 - `POST /api/war/command { side?, orders:[{unitId,dest}]|[{unitId,path}] }`
   and `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
   logged-in operator, not GM-gated); see "Interactive War layer" above for
@@ -582,8 +705,14 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
   `W.view === 'war'`, tab added to `App.PAGES`): status line, casualty/city
   counters, objective table, per-province control bars (`Views.barRow`), and
   a recent-events feed. GM-only: pause/resume, speed 1×/2×/4×/8×, End War,
-  and the scenario picker (currently just `valksland_invasion`) shown when no
-  war is running or the last one has concluded.
+  global tuning sliders, the unit spawner and foreign-intervention controls
+  (see "GM unit spawner" and "Foreign intervention" above), and the scenario
+  picker shown when no war is running or the last one has concluded — the
+  picker's option list is fetched from `GET /api/gm/war/scenarios`
+  (`War._ensureScenarioList`, cached after the first fetch) rather than
+  hardcoded, so a new `server/war-scenarios.js` entry appears automatically;
+  a small hardcoded fallback (`WAR_SCENARIOS_FALLBACK`) covers the one render
+  before the fetch resolves.
 
 ## Known rough edges
 

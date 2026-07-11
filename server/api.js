@@ -964,6 +964,43 @@ async function handle(req, res, pathname, method) {
         store.save(); broadcast('sync');
         return json(res, 200, { war: db.war });
       }
+      // Scenario picker data — {id, name, attacker/defender ids+names} for
+      // every scenario in server/war-scenarios.js, so the War Room's Start
+      // form doesn't have to hardcode the list client-side.
+      if (pathname === '/api/gm/war/scenarios' && method === 'GET') {
+        const list = Object.values(warScenarios.scenarios).map(s => {
+          const att = db.entities.find(e => e.id === s.attackerId);
+          const def = db.entities.find(e => e.id === s.defenderId);
+          return {
+            id: s.id, name: s.name, attackerId: s.attackerId, defenderId: s.defenderId,
+            attackerName: att ? att.name : s.attackerId, defenderName: def ? def.name : s.defenderId
+          };
+        });
+        return json(res, 200, { scenarios: list });
+      }
+      // GM unit spawner — deploy fresh units mid-war for either side at an
+      // arbitrary point, with adjustable stats (see war.spawnUnits).
+      if (pathname === '/api/gm/war/spawn' && method === 'POST') {
+        const b = await readBody(req);
+        if (!db.war || !db.war.active) return bad('No war is active.');
+        const result = war.spawnUnits(db, {
+          side: b.side, pos: b.pos, kind: b.kind, name: b.name,
+          count: b.count, strength: b.strength, atk: b.atk, speed: b.speed
+        }, actor);
+        if (!result.ok) return bad(result.error);
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war, unitIds: result.unitIds });
+      }
+      // Foreign intervention — an existing 'foreign' entity joins an ongoing
+      // war on either side (see war.joinWar).
+      if (pathname === '/api/gm/war/join' && method === 'POST') {
+        const b = await readBody(req);
+        if (!db.war || !db.war.active) return bad('No war is active.');
+        const result = war.joinWar(db, { entityId: b.entityId, side: b.side, count: b.count }, actor);
+        if (!result.ok) return bad(result.error);
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war, unitIds: result.unitIds });
+      }
       if (pathname === '/api/gm/election' && method === 'POST') {
         const b = await readBody(req);
         try {

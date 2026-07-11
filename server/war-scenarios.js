@@ -82,4 +82,82 @@ const valksland_invasion = {
   }
 };
 
-module.exports = { scenarios: { valksland_invasion }, UNIT_DEFAULTS };
+// Del' Casia (`for_delcasia`) — southern land-border neighbour on the same
+// island (see server/mapdata.js's `delcasia` country shape and the
+// road_fork_delcasia/road_delcasia_interior polylines that cross the border
+// south of Kordi). `land: true` tells war.js to spawn these units already on
+// land, state 'moving', with NO `landing` objective in the list below — see
+// docs/WAR.md "Land invasions" and startWar's `scenario.land` branch.
+const delcasia_invasion = {
+  id: 'delcasia_invasion',
+  name: 'The Kordi Incursion',
+  attackerId: 'for_delcasia',
+  defenderId: 'ent_gov',
+  land: true,
+  // Del' Casia's own territory just south-east of the Kordi border crossing
+  // — units spawn scattered here and march north-west over the frontier.
+  staging: { x0: 2380, y0: 1600, x1: 2600, y1: 1850 },
+  objectives: [
+    { kind: 'seize_city', ref: 'city_surat', priority: 1 },
+    { kind: 'control_province', ref: 'prov_kordi', priority: 2 }
+  ],
+  units: [
+    { name: '1st Del’ Casia Infantry Regiment', kind: 'infantry' },
+    { name: '2nd Del’ Casia Infantry Regiment', kind: 'infantry' },
+    { name: '3rd Del’ Casia Infantry Regiment', kind: 'infantry' },
+    { name: '5th Del’ Casia Infantry Regiment', kind: 'infantry' },
+    { name: '1st Del’ Casia Armoured Column', kind: 'armored' },
+    { name: '2nd Del’ Casia Armoured Column', kind: 'armored' },
+    { name: 'Del’ Casia Border Reserve', kind: 'reserve' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.35,
+    collapseFrac: 0.12
+  }
+};
+
+// People's Republic of Qinal (`for_qinal`) — distant hostile power, no shared
+// border on the map, so this is a standard embarked naval assault like
+// valksland_invasion but staged in the strait north of Port Kradon (between
+// the Mazon landmass and Arcasia's north-western coast), driving inland
+// through Grazi province instead of east toward the capital.
+const qinal_invasion = {
+  id: 'qinal_invasion',
+  name: 'The Kradon Landings',
+  attackerId: 'for_qinal',
+  defenderId: 'ent_gov',
+  staging: { x0: 850, y0: 330, x1: 1050, y1: 520 },
+  objectives: [
+    { kind: 'landing', ref: 'city_kradon', priority: 1 },
+    { kind: 'seize_city', ref: 'city_kradon', priority: 2 },
+    { kind: 'seize_city', ref: 'city_kradesh', priority: 3 },
+    { kind: 'control_province', ref: 'prov_grazi', priority: 4 }
+  ],
+  units: [
+    { name: '1st Qinal People’s Marine Brigade', kind: 'marine' },
+    { name: '2nd Qinal People’s Marine Brigade', kind: 'marine' },
+    { name: '4th Qinal Infantry Division', kind: 'infantry' },
+    { name: '7th Qinal Infantry Division', kind: 'infantry' },
+    { name: '11th Qinal Infantry Division', kind: 'infantry' },
+    { name: '19th Qinal Infantry Division', kind: 'infantry' },
+    { name: '2nd Qinal Armoured Regiment', kind: 'armored' },
+    { name: 'Qinal Revolutionary Reserve Corps', kind: 'reserve' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.35,
+    collapseFrac: 0.12
+  }
+};
+
+module.exports = {
+  scenarios: { valksland_invasion, delcasia_invasion, qinal_invasion },
+  UNIT_DEFAULTS
+};

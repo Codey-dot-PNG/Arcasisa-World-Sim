@@ -21,6 +21,7 @@ const engine = require('./war-engine');
 const BOMB_RADIUS = 95;               // px — blast radius
 const BOMB_UNIT_DMG = 90;             // max strength damage at the blast centre (falls off to 0 at BOMB_RADIUS)
 const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between bomb drops
+const TUNING_MIN = 0.1, TUNING_MAX = 10; // clamp range for GM global tuning sliders (war.mods)
 
 const isLive = engine.isLive;
 const dist = engine.dist;
@@ -142,6 +143,10 @@ function startWar(db, scenario) {
     stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [] },
     bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } },
     craters: [],
+    // GM global tuning (Feature: war.mods) — defaults are also the engine's
+    // fallback (`(war.mods && war.mods.dmg) || 1`), so a legacy war missing
+    // this field behaves identically without needing a migration.
+    mods: { dmg: 1, bombDmg: 1, hp: 1 },
     result: null
   };
   engine.pushEvent(db.war, 'landing', units[0].pos, `${attacker.name} war fleet sighted in the Strait — invasion begins.`);
@@ -167,6 +172,46 @@ function commandUnits(db, side, orders, actor) {
   engine.applyOrders(db, side, orders);
 }
 
+// ---------- GM global tuning (Feature: war.mods) ----------
+// Combat/bomb damage multipliers are read defensively straight off war.mods
+// by the engine (server/war.js's bomb path too, above) — this function's only
+// real job is the HP multiplier, which has to reach INTO every live unit
+// immediately (unlike dmg/bombDmg, which just get read fresh next fight):
+// scaling strength/maxStrength by the RATIO of new/old keeps each unit's
+// current damage fraction (e.g. a unit at 40% HP stays at 40% HP after a
+// rescale) rather than resetting everyone to full.
+function setWarTuning(db, patch, actor) {
+  const war = db.war;
+  if (!war) return { ok: false, error: 'No war is active.' };
+  war.mods = war.mods || { dmg: 1, bombDmg: 1, hp: 1 };
+  const clampMod = (v) => engine.clamp(Number(v), TUNING_MIN, TUNING_MAX);
+  const changes = [];
+  if (patch.dmg !== undefined && Number.isFinite(Number(patch.dmg))) {
+    war.mods.dmg = clampMod(patch.dmg);
+    changes.push(`dmg=${war.mods.dmg}×`);
+  }
+  if (patch.bombDmg !== undefined && Number.isFinite(Number(patch.bombDmg))) {
+    war.mods.bombDmg = clampMod(patch.bombDmg);
+    changes.push(`bombDmg=${war.mods.bombDmg}×`);
+  }
+  if (patch.hp !== undefined && Number.isFinite(Number(patch.hp))) {
+    const newHp = clampMod(patch.hp);
+    const oldHp = war.mods.hp || 1;
+    if (newHp !== oldHp) {
+      const ratio = newHp / oldHp;
+      for (const u of war.units) {
+        if (!isLive(u)) continue;
+        u.strength = round1(u.strength * ratio);
+        u.maxStrength = round1((u.maxStrength || u.strength) * ratio);
+      }
+    }
+    war.mods.hp = newHp;
+    changes.push(`hp=${war.mods.hp}×`);
+  }
+  if (changes.length) store.log('gm', 'War tuning updated', changes.join(' '), actor || 'WAR ENGINE', []);
+  return { ok: true, mods: war.mods };
+}
+
 // Falloff 1 at blast centre → 0 at BOMB_RADIUS.
 function bombFalloff(d) { return engine.clamp(1 - d / BOMB_RADIUS, 0, 1); }
 
@@ -185,11 +230,14 @@ function dropBomb(db, side, pos, actor) {
   bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
 
   // 1. Damage units of both sides within the blast.
+  // GM global tuning (war.mods.bombDmg) — read defensively so a war doc
+  // predating this feature (no `mods`) falls back to 1× exactly.
+  const bombDmgMod = (war.mods && war.mods.bombDmg) || 1;
   for (const u of war.units) {
     if (!isLive(u)) continue;
     const d = dist(u.pos, pos);
     if (d > BOMB_RADIUS) continue;
-    const dmg = BOMB_UNIT_DMG * bombFalloff(d);
+    const dmg = BOMB_UNIT_DMG * bombFalloff(d) * bombDmgMod;
     u.strength = Math.max(0, round1(u.strength - dmg));
     if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
     if (u.strength <= 0) engine.killUnit(war, u);
@@ -271,4 +319,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, isLive };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, isLive };

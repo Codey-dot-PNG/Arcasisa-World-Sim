@@ -149,11 +149,18 @@ const War = {
     this._pred = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [] };
     // Re-apply optimistic orders the server hasn't reflected yet, so an
     // in-flight command's arrow doesn't flicker away on an older snapshot.
+    // `o.dest` is always populated (for a path order it's the path's LAST
+    // point — exactly what engine.setManualPath assigns to unit.dest), so
+    // the "did the server pick this up yet" check works identically for
+    // both plain-move and path orders.
     const unconfirmed = outbox.filter(o => {
       const u = war.units.find(x => x.id === o.unitId);
       return !(u && u.dest && Math.hypot(u.dest[0] - o.dest[0], u.dest[1] - o.dest[1]) < 2);
     });
-    for (const o of unconfirmed) WarEngine.applyOrders(this._dbLike(war), o.side, [{ unitId: o.unitId, dest: o.dest }]);
+    for (const o of unconfirmed) {
+      const order = o.path ? { unitId: o.unitId, path: o.path } : { unitId: o.unitId, dest: o.dest };
+      WarEngine.applyOrders(this._dbLike(war), o.side, [order]);
+    }
     this._pred.outbox = unconfirmed;
   },
 
@@ -164,7 +171,12 @@ const War = {
     if (!war) return;
     WarEngine.applyOrders(this._dbLike(war), side, orders);
     const exp = Date.now() + 5000; // a write refetch lands well inside this
-    for (const o of orders) this._pred.outbox.push({ side, unitId: o.unitId, dest: o.dest, exp });
+    for (const o of orders) {
+      // A path order's effective "confirmed yet?" anchor is its last
+      // waypoint (see the comment in _rebase) — dest is always populated.
+      const dest = (Array.isArray(o.path) && o.path.length) ? o.path[o.path.length - 1] : o.dest;
+      this._pred.outbox.push({ side, unitId: o.unitId, dest, path: o.path || null, exp });
+    }
     this.refreshLayer(true);
   },
 
@@ -265,10 +277,13 @@ const War = {
      map.js only calls these while W.layer === 'war'. Each returns true when it
      consumed the gesture (map.js must then skip its own pan/click handling).
 
-     The scheme (Phase 17 redesign — the old one consumed plain left-clicks,
-     which blocked panning and forced a trip to the toolbar to deselect):
+     The scheme (Phase 19 redesign — right-drag used to be the formation
+     gesture; it now draws a freehand custom path instead, since that's the
+     more frequently wanted tool. Formation survives via its ctrl-left-drag
+     alias, which was already there):
        · RIGHT-click            = move order for the current selection
-       · RIGHT-drag             = formation line (ctrl-left-drag kept as alias)
+       · RIGHT-drag             = draw a custom path for the current selection
+                                  (ctrl-left-drag = formation line, unchanged)
        · LEFT-click on a soldier= select it (shift+click adds/toggles) —
                                   handled by per-marker listeners in renderUnits
        · SHIFT+left-drag        = box select
@@ -283,10 +298,11 @@ const War = {
     const map = GameMap;
     const world = map.clientToWorld(e.clientX, e.clientY);
     if (e.button === 2) {
-      // Right-button gesture: click = move order, drag = formation line.
-      // Which one it is only becomes known on pointerup (>6 world px moved),
-      // so start an 'order' gesture and grow the formation line lazily.
-      this._input = { mode: 'order', start: world, active: true, node: null };
+      // Right-button gesture: click = move order, drag = freehand custom
+      // path. Which one it is only becomes known on pointerup (>=12 world px
+      // moved — see PATH_CLICK_THRESHOLD below), so start a 'path' gesture
+      // and sample waypoints lazily as the drag grows.
+      this._input = { mode: 'path', start: world, active: true, node: null, points: [world] };
       return true;
     }
     if (e.button !== 0) return false;
@@ -294,7 +310,7 @@ const War = {
       this._input = { mode: 'box', start: world, active: true, node: this._marqueeNode(map) };
       return true;
     }
-    if (e.ctrlKey || e.metaKey) { // bonus alias — right-drag is the primary formation gesture
+    if (e.ctrlKey || e.metaKey) { // formation's surviving gesture, now that right-drag draws a path instead
       this._input = { mode: 'formation', start: world, active: true, node: this._formationNode(map) };
       return true;
     }
@@ -315,13 +331,21 @@ const War = {
     const world = map.clientToWorld(e.clientX, e.clientY);
     if (this._input.mode === 'box') this._updateMarquee(this._input.node, this._input.start, world);
     else if (this._input.mode === 'formation') this._updateFormationLine(this._input.node, this._input.start, world);
-    else if (this._input.mode === 'order') {
-      // Only materialise the formation line once the drag is unambiguous.
-      const moved = Math.hypot(world[0] - this._input.start[0], world[1] - this._input.start[1]) >= 6;
-      if (moved && !this._input.node) this._input.node = this._formationNode(map);
-      if (this._input.node) this._updateFormationLine(this._input.node, this._input.start, world);
+    else if (this._input.mode === 'path') {
+      const pts = this._input.points;
+      const last = pts[pts.length - 1];
+      // Sample waypoints ~25 world px apart — a point per pixel of mouse
+      // movement would balloon the order (the engine caps at 200 anyway).
+      if (Math.hypot(world[0] - last[0], world[1] - last[1]) >= this._pathSampleDist()) pts.push(world);
+      if (!this._input.node) this._input.node = this._pathPreviewNode(map);
+      this._updatePathPreview(this._input.node, pts, world);
     }
   },
+  // Below this drag distance a right-button gesture is treated as a plain
+  // click (move order), not a drawn path — matches the box/formation "tiny"
+  // threshold in spirit but a bit larger since a path is a deliberate draw.
+  _pathClickThreshold() { return 12; },
+  _pathSampleDist() { return 25; },
   onMapPointerUp(e) {
     if (!this._input || !this._input.active) return;
     const map = GameMap;
@@ -347,12 +371,18 @@ const War = {
     } else if (this._input.mode === 'formation') {
       if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
       if (!tiny && this._sel.size) this._issueFormation(start, world);
-    } else if (this._input.mode === 'order') {
+    } else if (this._input.mode === 'path') {
       if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
       if (this._sel.size) {
         if (!this.commandable()) { toast('The war has concluded — no orders can be issued.', true); }
-        else if (tiny) this._issueMove(world);
-        else this._issueFormation(start, world);
+        else if (Math.hypot(world[0] - start[0], world[1] - start[1]) < this._pathClickThreshold()) {
+          this._issueMove(world);
+        } else {
+          const pts = this._input.points.slice();
+          const last = pts[pts.length - 1];
+          if (Math.hypot(world[0] - last[0], world[1] - last[1]) >= 1) pts.push(world);
+          if (pts.length >= 2) this._issuePath(pts); else this._issueMove(world);
+        }
       }
     }
     this._input = null;
@@ -413,6 +443,19 @@ const War = {
     node.setAttribute('x1', a[0]); node.setAttribute('y1', a[1]);
     node.setAttribute('x2', b[0]); node.setAttribute('y2', b[1]);
   },
+  _pathPreviewNode(map) {
+    const NS = 'http://www.w3.org/2000/svg';
+    const p = document.createElementNS(NS, 'polyline');
+    p.setAttribute('class', 'war-path-preview');
+    p.setAttribute('fill', 'none');
+    map.world.appendChild(p);
+    return p;
+  },
+  _updatePathPreview(node, points, cursor) {
+    if (!node) return;
+    const pts = points.concat([cursor]);
+    node.setAttribute('points', pts.map(p => p[0] + ',' + p[1]).join(' '));
+  },
 
   // Plain click with an existing selection: move all selected units toward
   // the click point (spread slightly in a small ring so they don't stack).
@@ -451,6 +494,21 @@ const War = {
     const orders = units.map((u, i) => ({ unitId: u.id, dest: this._clamp(slots[i]) }));
     const side = this.commandableSide();
     if (window.WarEngine) this._optimistic(side, orders);
+    try { await POST('/api/war/command', { side, orders }); }
+    catch (e) { toast(e.message, true); }
+  },
+  // Right-drag custom path: every selected unit gets the SAME hand-drawn
+  // polyline (clamped world points) and ignores road/rail routing entirely —
+  // see engine.setManualPath / stepAlongPath's `manualPath` branch. Unlike
+  // _issueMove/_issueFormation there's no per-unit spread; units that stack
+  // up on the drawn line separate visually via the engine's FRIENDLY_SEP nudge.
+  async _issuePath(points) {
+    const ids = [...this._sel];
+    if (!ids.length) return;
+    const path = points.map(p => this._clamp(p));
+    const orders = ids.map(id => ({ unitId: id, path }));
+    const side = this.commandableSide();
+    if (window.WarEngine) this._optimistic(side, orders); // arrows + movement start NOW; the POST confirms
     try { await POST('/api/war/command', { side, orders }); }
     catch (e) { toast(e.message, true); }
   },
@@ -793,7 +851,7 @@ const War = {
     const onCooldown = now < bomb.cooldownUntil;
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
-      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
+      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
       : 'This war has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
     // Bombs are DEFENDER-ONLY (server-enforced in dropBomb / the /api/war/bomb
@@ -938,7 +996,38 @@ const War = {
       row.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'This war has concluded. Start a new scenario below to run another.'));
     }
     inner.appendChild(row);
+    if (!war.result) this.renderTuning(inner, war);
     if (war.result) this.renderStartForm(inner);
+  },
+
+  // GM global tuning sliders (war.mods) — combat damage, bomb damage and unit
+  // HP multipliers, all defaulting to 1×. Posts to /api/gm/war/tuning on a
+  // short debounce so dragging the slider doesn't spam the route on every
+  // 'input' tick; server/war.js's setWarTuning does the actual clamp/rescale.
+  _tuneTimers: {},
+  renderTuning(inner, war) {
+    inner.appendChild(Views.secLabel('Global Tuning'));
+    const mods = Object.assign({ dmg: 1, bombDmg: 1, hp: 1 }, war.mods || {});
+    const box = el('div');
+    box.appendChild(this._tuningRow('Combat damage ×', mods, 'dmg'));
+    box.appendChild(this._tuningRow('Bomb damage ×', mods, 'bombDmg'));
+    box.appendChild(this._tuningRow('Unit HP ×', mods, 'hp'));
+    inner.appendChild(box);
+  },
+  _tuningRow(label, mods, key) {
+    const slider = Forms.slider(mods, key, 0.1, 5, {
+      step: 0.1,
+      format: (v) => Number(v).toFixed(1) + '×',
+      onInput: (v) => this._debounceTuning(key, v)
+    });
+    return Forms.field(label, slider);
+  },
+  _debounceTuning(key, value) {
+    clearTimeout(this._tuneTimers[key]);
+    this._tuneTimers[key] = setTimeout(async () => {
+      try { await POST('/api/gm/war/tuning', { [key]: value }); }
+      catch (e) { toast(e.message, true); }
+    }, 300);
   }
 };
 window.War = War; // map.js feature-detects the War Room / map overlay via window, same as MapEdit/Entertainment

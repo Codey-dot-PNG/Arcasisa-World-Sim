@@ -47,11 +47,30 @@
   const DEF_MOVE_SPEED = 3.2;         // px/tick granted to a garrison the first time it's ordered to move
   const PLAYER_HOLD_TICKS = 12;       // ticks a GM-ordered ATTACKER unit is exempt from AI reassignment
   const CORPSE_MAX_AGE_TICKS = 400;   // corpses older than this are pruned
+  const WORLD_BORDER_INSET = 8;       // px — units/dests never sit closer than this to the map edge
+  const MAX_MANUAL_PATH_POINTS = 200; // cap on a player-drawn freehand path (also enforced by the API)
 
   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
   function dist(a, b) { return Math.hypot(a[0] - b[0], a[1] - b[1]); }
   function round1(n) { return Math.round(n * 10) / 10; }
+
+  // ---------- world border clamp ----------
+  // The master grid is 3840×2160, but W/H are DERIVED from war.grid (cols/rows
+  // × cell) rather than hardcoded, so a war built on a differently-sized grid
+  // (or a legacy doc) still clamps correctly. A small inset keeps unit symbols
+  // fully on-screen instead of allowing their center to sit exactly on row 0.
+  function worldBounds(war) {
+    const g = (war && war.grid) || {};
+    const cell = g.cell || CELL;
+    const cols = g.cols || Math.ceil(3840 / cell);
+    const rows = g.rows || Math.ceil(2160 / cell);
+    return [cols * cell, rows * cell];
+  }
+  function clampToWorld(war, pos) {
+    const [W, H] = worldBounds(war);
+    return [clamp(pos[0], WORLD_BORDER_INSET, W - WORLD_BORDER_INSET), clamp(pos[1], WORLD_BORDER_INSET, H - WORLD_BORDER_INSET)];
+  }
 
   // ---------- seeded PRNG ----------
   // mulberry32 — tiny, fast, good enough for combat rolls. A fresh stream is
@@ -319,34 +338,54 @@
     return path;
   }
   function setDest(db, u, dest, baseSpeed) {
-    u.dest = dest;
-    const path = computePath(db, u.pos, dest, baseSpeed || u.speed || 1);
+    const war = db.war;
+    u.dest = clampToWorld(war, dest);
+    u.manualPath = false; // a normal order always restores road/rail routing over any earlier freehand path
+    const path = computePath(db, u.pos, u.dest, baseSpeed || u.speed || 1);
     if (path && path.length) { u.path = path; u.pathIdx = 0; }
     else { u.path = null; u.pathIdx = 0; }
   }
-  function clearDest(u) {
-    u.dest = null; u.path = null; u.pathIdx = 0;
+  // Player-drawn freehand path (right-drag — see docs/WAR.md "Manual paths").
+  // Unlike setDest, this never consults the transport graph: manualPath units
+  // ignore road/rail speed entirely and just walk the drawn polyline at base
+  // speed (stepAlongPath below checks the flag).
+  function setManualPath(db, u, waypoints) {
+    const war = db.war;
+    const pts = (waypoints || []).slice(0, MAX_MANUAL_PATH_POINTS)
+      .map(p => clampToWorld(war, [Number(p[0]), Number(p[1])]))
+      .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pts.length < 1) return;
+    u.path = pts;
+    u.pathIdx = 0;
+    u.dest = pts[pts.length - 1];
+    u.manualPath = true;
   }
-  function stepAlongPath(u, baseSpeed) {
+  function clearDest(u) {
+    u.dest = null; u.path = null; u.pathIdx = 0; u.manualPath = false;
+  }
+  function stepAlongPath(war, u, baseSpeed) {
     const path = u.path;
     if (path && path.length) {
       const idx = u.pathIdx || 0;
       if (idx < path.length) {
         const wp = path[idx];
-        const spd = idx === 0 ? baseSpeed : baseSpeed * ROAD_SPEED_MULT;
-        advanceToward(u, wp, spd);
+        // Manual (freehand) paths ignore the road-speed bonus entirely — the
+        // player drew this line deliberately and expects the unit to just
+        // walk it, not silently divert onto the transport graph's speed rule.
+        const spd = u.manualPath ? baseSpeed : (idx === 0 ? baseSpeed : baseSpeed * ROAD_SPEED_MULT);
+        advanceToward(war, u, wp, spd);
         if (dist(u.pos, wp) < 12) u.pathIdx = idx + 1;
         return;
       }
     }
-    advanceToward(u, u.dest, baseSpeed);
+    advanceToward(war, u, u.dest, baseSpeed);
   }
-  function advanceToward(u, dest, speed) {
+  function advanceToward(war, u, dest, speed) {
     const dx = dest[0] - u.pos[0], dy = dest[1] - u.pos[1];
     const d = Math.hypot(dx, dy);
     if (d < 1e-6) return;
     const step = Math.min(speed, d);
-    u.pos = [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step];
+    u.pos = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
   }
 
   // ---------- events / notes ----------
@@ -443,7 +482,7 @@
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
         const spd = u.speed || DEF_MOVE_SPEED;
-        stepAlongPath(u, spd);
+        stepAlongPath(war, u, spd);
         u.state = 'moving';
         if (dist(u.pos, u.dest) < 12) { clearDest(u); u.orderedBy = null; u.state = 'holding'; }
         continue;
@@ -452,7 +491,7 @@
         const landingObj = war.objectives.find(o => o.kind === 'landing');
         if (!u.dest && landingObj) setDest(db, u, landingObj.pos.slice(), u.speed);
         if (u.dest) {
-          stepAlongPath(u, u.speed);
+          stepAlongPath(war, u, u.speed);
           if (dist(u.pos, u.dest) < 40) {
             u.state = 'moving';
             if (landingObj && landingObj.status === 'pending') {
@@ -478,7 +517,7 @@
           const m = Math.hypot(dx, dy) || 1;
           away = [u.pos[0] + dx / m * 100, u.pos[1] + dy / m * 100];
         }
-        advanceToward(u, away, u.speed * 0.8);
+        advanceToward(war, u, away, u.speed * 0.8);
         u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
         continue;
@@ -486,7 +525,7 @@
       if (u.dest) {
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
-        stepAlongPath(u, u.speed);
+        stepAlongPath(war, u, u.speed);
         if (u.orderedBy === 'player' && dist(u.pos, u.dest) < 12) { u.orderedBy = null; clearDest(u); u.state = 'holding'; continue; }
         if (dist(u.pos, u.dest) < 20 && u.objectiveId) {
           const obj = war.objectives.find(o => o.id === u.objectiveId);
@@ -509,8 +548,8 @@
         if (d > 0 && d < FRIENDLY_SEP) {
           const push = (FRIENDLY_SEP - d) / 2;
           const nx = dx / d, ny = dy / d;
-          a.pos = [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5];
-          b.pos = [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5];
+          a.pos = clampToWorld(war, [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5]);
+          b.pos = clampToWorld(war, [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5]);
         }
       }
     }
@@ -531,6 +570,9 @@
   function stepCombat(db, war, ctx, rng) {
     const atts = war.units.filter(u => u.side === 'att' && isLive(u) && u.state !== 'embarked');
     const defs = war.units.filter(u => u.side === 'def' && isLive(u));
+    // GM global tuning (Feature 3) — read defensively so a war doc without
+    // `mods` (every war predating this change) falls back to 1× exactly.
+    const dmgMod = (war.mods && war.mods.dmg) || 1;
     let anyFight = false;
     for (const a of atts) {
       let nearest = null, nd = Infinity;
@@ -541,8 +583,8 @@
       a.state = 'fighting'; if (d.state !== 'routed') d.state = 'fighting';
       const defStationary = d.garrison && !d.dest;
       const defBonus = defStationary ? 1.35 : 1;
-      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1);
-      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus;
+      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod;
+      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod;
       d.strength = Math.max(0, round1(d.strength - dmgToDef));
       a.strength = Math.max(0, round1(a.strength - dmgToAtt));
       war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
@@ -649,15 +691,23 @@
   }
 
   // ---------- player orders (pure — shared by the server route and optimistic client apply) ----------
+  // An order carries EITHER `dest` (plain move — road/rail routing applies)
+  // OR `path` (a player-drawn freehand polyline, ≥2 points — see setManualPath
+  // and docs/WAR.md "Manual paths"). `path` wins if both are present.
   function applyOrders(db, side, orders) {
     const war = db.war;
     if (!war || !Array.isArray(orders)) return;
     for (const o of orders) {
-      if (!o || !o.unitId || !Array.isArray(o.dest) || o.dest.length !== 2) continue;
+      if (!o || !o.unitId) continue;
+      const hasPath = Array.isArray(o.path) && o.path.length >= 2 &&
+        o.path.every(p => Array.isArray(p) && p.length === 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])));
+      const hasDest = Array.isArray(o.dest) && o.dest.length === 2 && Number.isFinite(Number(o.dest[0])) && Number.isFinite(Number(o.dest[1]));
+      if (!hasPath && !hasDest) continue;
       const u = war.units.find(x => x.id === o.unitId && x.side === side);
       if (!u || !isLive(u)) continue;
       if (u.side === 'def' && !u.speed) u.speed = DEF_MOVE_SPEED;
-      setDest(db, u, [Number(o.dest[0]), Number(o.dest[1])], u.speed);
+      if (hasPath) setManualPath(db, u, o.path);
+      else setDest(db, u, [Number(o.dest[0]), Number(o.dest[1])], u.speed);
       u.orderedBy = 'player';
       u.playerHoldUntil = war.tick + PLAYER_HOLD_TICKS;
     }
@@ -715,14 +765,14 @@
   const api = {
     // constants other modules need
     CELL, COMBAT_RANGE, CAPTURE_RANGE, DEF_MOVE_SPEED, PLAYER_HOLD_TICKS,
-    ROAD_SPEED_MULT, MAX_TICKS_PER_CALL,
+    ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry
     parseShape, polygonOf, pointInPolygon, provinceAt,
-    // grid / pathing
-    buildGrid, cellKey, randomProvincePoint,
-    transportFingerprint, getTransportGraph, computePath, setDest, clearDest,
+    // grid / pathing / world bounds
+    buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
+    transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick
   };

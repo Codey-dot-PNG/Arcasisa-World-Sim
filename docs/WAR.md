@@ -49,6 +49,7 @@ war: {
   stats: { attLosses, defLosses, provinceControl: { provId: 0..100 }, citiesHeld: [cityIds] },
   bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } }, // {att,def} shape kept for compatibility, but only `def` is ever used — bombs are DEFENDER-ONLY
   craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
+  mods: { dmg: 1, bombDmg: 1, hp: 1 },       // GM global tuning multipliers — additive/absent-safe, see "GM global tuning" below
   result: null | { winner:'att'|'def'|null, endedAt, reason }
 }
 ```
@@ -58,7 +59,10 @@ corpse — see below), `orderedBy:'player'`/`playerHoldUntil` (a direct player
 move order and, for attacker units only, how long `runAI` must leave it
 alone). Phase 17 adds `path` (array of `[x,y]` transport-graph waypoints) +
 `pathIdx`, set alongside `dest` whenever routing via roads/rails beats the
-straight line — see "Transport-graph pathing" below.
+straight line — see "Transport-graph pathing" below. Phase 19 adds
+`manualPath` (true when `path`/`dest` were set by a player-drawn freehand
+line rather than the transport graph — see "Manual paths" below) and the
+top-level `mods` field above.
 
 Unit `kind` is free-form scenario data (`marine`, `infantry`, `armored`,
 `reserve` for the attacker; every defender is spawned as `garrison`). Unit
@@ -141,6 +145,35 @@ with real route-following over a graph built from `settings.map.roads` **plus**
   destroyed mid-traversal does not reroute a unit already following its
   waypoints; it finishes the remembered path at on-network speed.
 
+### Manual paths (Phase 19)
+
+A player can draw a freehand path instead of issuing a plain move order — see
+"Right-drag" in the Input gestures table below. `applyOrders` accepts an order
+shaped `{ unitId, path:[[x,y],…] }` (instead of `{ unitId, dest }`); the
+engine's `setManualPath(db, u, waypoints)` clamps each point in-bounds (cap
+`MAX_MANUAL_PATH_POINTS` = 200), then sets `unit.path` to the drawn waypoints,
+`unit.pathIdx = 0`, `unit.dest` to the path's last point, and
+`unit.manualPath = true`. In `stepMovement`/`stepAlongPath`, a `manualPath`
+unit follows its waypoints at **base speed only** — it deliberately does NOT
+get the `ROAD_SPEED_MULT` (5×) bonus, even if the drawn line happens to run
+along a road, because the player chose to hand-route it rather than let the
+transport graph route it. `setDest()` (any later plain-move order, including
+the AI reassigning an attacker unit) clears `manualPath` back to `false` and
+restores normal road/rail routing; `clearDest()` clears it too.
+
+## World border clamp
+
+Every position write in the engine — normal straight-line advance, transport-
+graph/manual-path following, routed retreat, and the friendly-separation
+nudge — is clamped to `[WORLD_BORDER_INSET, W - WORLD_BORDER_INSET]` on each
+axis (`WORLD_BORDER_INSET` = 8px), where `W`/`H` are **derived** from
+`war.grid.cols/rows × war.grid.cell` rather than hardcoded 3840×2160 (see
+`worldBounds`/`clampToWorld` in war-engine.js). `setDest`/`setManualPath` also
+clamp the `dest`/waypoints they assign, so neither a player order nor an
+AI-assigned objective can send a unit off the map — the engine is the single
+choke point for this, covering both authoritative ticks and predicted-client
+ticks from optimistic orders.
+
 ## Combat tuning — collision-only fights, 10× HP (Phase 17)
 
 `COMBAT_RANGE` and `COLLIDE_ENEMY` are both 40px — the unit symbol's own
@@ -155,6 +188,33 @@ rather than annihilating them (intended). Org/rout thresholds are unchanged —
 fights resolve by routing more often than annihilation. These numbers apply
 to **new** wars only: an in-progress war keeps the strengths it started with
 (no migration of a live `war.units` array).
+
+## GM global tuning (Phase 19) — `war.mods`
+
+Three GM-adjustable multipliers, additive/absent-safe (`war.mods` may be
+missing entirely on a legacy war doc — every read is defensive, e.g.
+`(war.mods && war.mods.dmg) || 1`):
+
+- **`dmg`** — multiplies both `dmgToDef`/`dmgToAtt` in `stepCombat` (the
+  engine, so client prediction picks it up too).
+- **`bombDmg`** — multiplies `BOMB_UNIT_DMG` falloff damage in `dropBomb`
+  (server/war.js only — bombs are a server-only authority-layer mutation, not
+  part of the shared engine tick).
+- **`hp`** — does NOT get read per-tick; changing it immediately rescales
+  every LIVE unit's `strength`/`maxStrength` by the ratio `newHp / oldHp`
+  (proportional, so a unit at 40% HP stays at 40% HP after the rescale). This
+  happens once, in `server/war.js`'s `setWarTuning`, at the moment the GM
+  changes the slider — not in the engine, since it's a one-shot mutation of
+  existing units rather than a per-tick read. Newly spawned units aren't
+  affected retroactively by an `hp` set before their scenario starts (each
+  new war resets `mods` to `{dmg:1, bombDmg:1, hp:1}`).
+
+`POST /api/gm/war/tuning { dmg?, bombDmg?, hp? }` (GM-only) validates each
+provided key as a finite number, clamps it to `[0.1, 10]`, and calls
+`setWarTuning` (mutate → `store.log` → `store.save` → `broadcast('sync')`).
+The War Room panel's GM section (`public/js/war.js`'s `renderTuning`) exposes
+three sliders (range 0.1–5, step 0.1, live `×` readout) that POST on a ~300ms
+debounce so dragging doesn't spam the route.
 
 ## AI grand strategy — attacker only
 
@@ -237,16 +297,19 @@ client only sends orders; `server/war.js` validates and applies them.
   AI (`runAI`) keeps driving the invasion — a GM commanding `'att'` directly
   only pins the units it explicitly orders (see player-hold below); it
   doesn't disable the AI.
-- **Input gestures** (Phase 17 redesign — the base map's plain left-drag pan
-  is never consumed, and a click on empty ground deselects; map.js delegates
-  pointerdown/move/up to `War.onMapPointerDown/Move/Up` while
-  `W.layer === 'war'`, and suppresses the browser context menu on the map svg
-  for that layer only):
+- **Input gestures** (Phase 19 redesign — right-drag used to be the formation
+  gesture; it now draws a freehand custom path instead, and formation moved
+  to its ctrl-left-drag alias, which already existed. The base map's plain
+  left-drag pan is never consumed, and a click on empty ground deselects;
+  map.js delegates pointerdown/move/up to `War.onMapPointerDown/Move/Up`
+  while `W.layer === 'war'`, and suppresses the browser context menu on the
+  map svg for that layer only):
 
   | Gesture | Action |
   |---|---|
   | Right-click | Move order for the current selection (single unit goes to the point; multiple spread in a small ring) |
-  | Right-drag | Formation — distributes the selection along the drawn line, nearest-in-order (ctrl-left-drag kept as an alias) |
+  | Right-drag | **Custom path** — draws a freehand polyline for the current selection to follow at base speed, ignoring road/rail routing (see "Manual paths") |
+  | Ctrl+left-drag | Formation — distributes the selection along the drawn line, nearest-in-order (the gesture right-drag used to trigger) |
   | Left-click on an own live soldier | Select it (replaces the selection) — per-marker listeners, enemy/dead units aren't clickable |
   | Shift+left-click on a soldier | Add/toggle it in the selection |
   | Shift+left-drag on ground | Box-select all live units of the commandable side inside the marquee |
@@ -254,10 +317,19 @@ client only sends orders; `server/war.js` validates and applies them.
   | Plain left-drag | Pan — exactly the base map, War never consumes it |
   | Esc | Clear selection + disarm the bomb (window-level, bound once) |
   | Bomb armed + left-click | Drops the bomb at the click point (defender only — see below), then disarms |
+
+  A right-button drag under ~12 world px is still treated as a plain click
+  (move order); at or above that it samples pointer positions into a
+  polyline (points kept ≥25px apart) with a live dashed preview, and on
+  release with ≥2 points issues a path order for every selected unit.
 - **Command routes**:
-  - `POST /api/war/command { side?, orders:[{unitId,dest:[x,y]}] }` — any
-    logged-in operator; validates `orders` (array, cap 64, each dest a
-    finite `[x,y]` inside the 3840×2160 grid), then `war.commandUnits`.
+  - `POST /api/war/command { side?, orders:[{unitId,dest:[x,y]}]|[{unitId,path:[[x,y],…]}] }`
+    — any logged-in operator; validates `orders` (array, cap 64; each `dest`
+    a finite `[x,y]` inside the 3840×2160 grid, or each `path` an array of
+    2-200 such points), then `war.commandUnits` → `engine.applyOrders`. An
+    order carries either `dest` (plain move, road/rail routing applies) or
+    `path` (freehand — see "Manual paths"), never both meaningfully (`path`
+    wins if present).
   - `POST /api/war/bomb { side?, pos:[x,y] }` — same auth/side rule;
     `war.dropBomb`; returns the new cooldown timestamp.
   Both are outside the `/api/gm/...` block — deliberately player-accessible,
@@ -416,10 +488,16 @@ CAS commit model.
   — the next `war/start` fails with 409 while one is still `active`, and
   since `startWar` overwrites `db.war` wholesale, starting a new scenario
   after a `result` has been set naturally replaces the old record.
-- `POST /api/war/command { side?, orders:[{unitId,dest}] }` and
-  `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
+- `POST /api/gm/war/tuning { dmg?, bombDmg?, hp? }` — GM-only; each provided
+  key must be a finite number, clamped to `[0.1, 10]`; calls
+  `war.setWarTuning` — see "GM global tuning" above for what each multiplier
+  does and why `hp` rescales live units immediately while `dmg`/`bombDmg`
+  just get read fresh next fight/bomb.
+- `POST /api/war/command { side?, orders:[{unitId,dest}]|[{unitId,path}] }`
+  and `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
   logged-in operator, not GM-gated); see "Interactive War layer" above for
-  the authority model and validation.
+  the authority model and validation, and "Manual paths" for the `path` order
+  shape.
 - `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
   18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
   `{war, v}` only, with `war.ai` stripped for non-GM exactly like

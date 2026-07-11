@@ -458,9 +458,19 @@ async function handle(req, res, pathname, method) {
       if (!db.war || !db.war.active) return bad('No war is active.');
       const side = (u.role.perms.gm && b.side === 'att') ? 'att' : 'def';
       if (!Array.isArray(b.orders) || b.orders.length > 64) return bad('Invalid orders.');
-      const orders = b.orders.filter(o => o && typeof o.unitId === 'string' && Array.isArray(o.dest) && o.dest.length === 2 &&
-        Number.isFinite(o.dest[0]) && Number.isFinite(o.dest[1]) &&
-        o.dest[0] >= 0 && o.dest[0] <= 3840 && o.dest[1] >= 0 && o.dest[1] <= 2160);
+      const inBounds = (p) => Array.isArray(p) && p.length === 2 &&
+        Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
+        p[0] >= 0 && p[0] <= 3840 && p[1] >= 0 && p[1] <= 2160;
+      // Orders carry EITHER `dest` (plain move) OR `path` (a player-drawn
+      // freehand polyline, ≥2 points, cap 200 — see docs/WAR.md "Manual
+      // paths"). The engine (applyOrders) is the actual choke point that
+      // clamps/caps everything again — this is just the first filter so a
+      // malformed order never reaches it.
+      const orders = b.orders.filter(o => {
+        if (!o || typeof o.unitId !== 'string') return false;
+        if (Array.isArray(o.path)) return o.path.length >= 2 && o.path.length <= 200 && o.path.every(inBounds);
+        return inBounds(o.dest);
+      });
       war.commandUnits(db, side, orders, u.user.displayName);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });
@@ -933,6 +943,24 @@ async function handle(req, res, pathname, method) {
       if (pathname === '/api/gm/war/end' && method === 'POST') {
         if (!db.war) return bad('No war is active.');
         war.endWar(db, actor, 'Ended by the Gamemaster');
+        store.save(); broadcast('sync');
+        return json(res, 200, { war: db.war });
+      }
+      // GM global tuning sliders — combat/bomb damage and unit HP multipliers
+      // (war.mods). Validated here (finite number, clamped 0.1-10); the HP
+      // rescale of every live unit happens inside war.setWarTuning.
+      if (pathname === '/api/gm/war/tuning' && method === 'POST') {
+        const b = await readBody(req);
+        if (!db.war) return bad('No war is active.');
+        const patch = {};
+        for (const k of ['dmg', 'bombDmg', 'hp']) {
+          if (b[k] === undefined) continue;
+          const v = Number(b[k]);
+          if (!Number.isFinite(v)) return bad(`Invalid ${k}.`);
+          patch[k] = Math.max(0.1, Math.min(10, v));
+        }
+        const result = war.setWarTuning(db, patch, actor);
+        if (!result.ok) return bad(result.error);
         store.save(); broadcast('sync');
         return json(res, 200, { war: db.war });
       }

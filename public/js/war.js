@@ -7,11 +7,30 @@
         and (GM only) start/pause/speed/end controls.
 
    The server is authoritative for everything (unit positions, combat,
-   territory) — this module only ANIMATES what GET /api/state already
-   confirmed. Positions are tweened client-side between syncs so units don't
-   visibly teleport every tick; a persistent requestAnimationFrame loop keyed
-   by unit id survives GameMap's from-scratch DOM rebuilds because the
-   interpolation state (_anim) lives in this module, not in the DOM. */
+   territory) — but the client no longer merely animates it. Phase 18 adds
+   CLIENT-SIDE PREDICTION on top of the authoritative stream:
+
+     · A deep copy of the last authoritative war doc (the "predicted war")
+       is ticked locally by the SAME deterministic engine the server runs
+       (public/js/war-engine.js — byte-identical to server/war-engine.js,
+       seeded PRNG per tick), so units keep moving/fighting at full cadence
+       between server snapshots instead of freezing until the next sync.
+     · Move orders apply to the predicted war INSTANTLY (optimistically),
+       before the POST round-trips — an outbox re-applies them across
+       rebases until the server state reflects them.
+     · A lightweight heartbeat (GET /api/war/state, ~one tick interval)
+       drives the server's wall-clock tick gate and returns just the war
+       doc; without it, serverless deployments only tick when something
+       else polls (the 20s fallback), which is why wars used to advance in
+       slow bursts. Each response REBASES the predicted war, discarding any
+       prediction error — the server always wins.
+
+   Rendering reads the predicted war; the War Room panel and command
+   authority checks keep reading the authoritative S().war. Positions are
+   additionally tweened (~900ms ease) between renders, exactly as before; a
+   persistent requestAnimationFrame loop keyed by unit id survives GameMap's
+   from-scratch DOM rebuilds because the interpolation state (_anim) lives
+   in this module, not in the DOM. */
 
 const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰' };
 const WAR_SCENARIOS = [['valksland_invasion', 'The Valgos Crisis — Valksland invades across the Strait']];
@@ -35,6 +54,14 @@ const War = {
   _bombArmed: false,
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
 
+  // ---- client-side prediction state (Phase 18) ----
+  _pred: null,       // { war: <deep copy>, authRef: <the S().war object it was rebased from>, baseTick, outbox: [{side,unitId,dest,exp}] }
+  _warV: 0,          // last /api/war/state version applied — rejects out-of-order heartbeat responses
+  _rtTimer: null,    // 250ms realtime driver (local predicted ticks + heartbeat gate)
+  _hbDue: 0,         // epoch ms the next heartbeat poll is due
+  _hbBusy: false,    // a heartbeat fetch is in flight
+  _lastDraw: 0,      // performance.now() of the last prediction-triggered map redraw (throttle)
+
   active() { return !!(S() && S().war); },
   // A war OBJECT lingers after the fighting ends (active:false) so players can
   // review the final front — but its units are no longer commandable. Orders
@@ -53,6 +80,132 @@ const War = {
      regardless of what the client sends, but the client mirrors it so the UI
      never even offers an 'att' toggle to a non-GM. */
   commandableSide() { return (isGM() && this._gmSide === 'att') ? 'att' : 'def'; },
+
+  /* ═══════════ CLIENT-SIDE PREDICTION (Phase 18) ═══════════
+     The predicted war is a deep copy of the last authoritative snapshot,
+     ticked locally by WarEngine (same deterministic engine as the server,
+     no ctx = milestone logs/news are no-ops). Every new authoritative war
+     object — full /api/state refetch or /api/war/state heartbeat — REBASES
+     the prediction: server truth replaces local guesswork wholesale, then
+     any optimistic orders the server hasn't reflected yet are re-applied. */
+
+  // The engine's db-shaped view over client state: the predicted war plus
+  // the world data the tick pipeline reads (provinces for territory/geometry,
+  // cities for the AI's garrison rule, settings.map for the transport graph).
+  _dbLike(war) {
+    const s = S() || {};
+    return { war, provinces: s.provinces || [], cities: s.cities || [], settings: s.settings || {} };
+  },
+
+  // The war doc the MAP renders: predicted when available, else authoritative.
+  // Rebases lazily whenever the authoritative object identity changed (every
+  // state refetch swaps W.state wholesale, so identity is a reliable signal).
+  predictedWar() {
+    const auth = S() && S().war;
+    if (!auth) { this._pred = null; return null; }
+    if (!this._pred || this._pred.authRef !== auth) this._rebase(auth);
+    return this._pred.war;
+  },
+
+  _rebase(auth) {
+    // Ignore a STALE snapshot of the same war (overlapping refetches can
+    // resolve out of order; core.js guards its own path, but the heartbeat
+    // and full-state fetches race each other). Ticks only move forward.
+    if (this._pred && this._pred.war && auth.startedAt === this._pred.war.startedAt &&
+        typeof auth.tick === 'number' && auth.tick < this._pred.baseTick) {
+      this._pred.authRef = auth; // don't thrash re-checking it every render
+      return;
+    }
+    const war = JSON.parse(JSON.stringify(auth));
+    // The snapshot is fresh AS OF NOW on this client's clock — the next
+    // predicted tick is due one interval from now. (war._lastTick from the
+    // server is server-clock and would skew prediction on a drifted client.)
+    war._lastTick = Date.now();
+    const now = Date.now();
+    const outbox = (this._pred ? this._pred.outbox : []).filter(o => o.exp > now);
+    this._pred = { war, authRef: auth, baseTick: war.tick || 0, outbox };
+    // Re-apply optimistic orders the server hasn't reflected yet, so an
+    // in-flight command's arrow doesn't flicker away on an older snapshot.
+    const unconfirmed = outbox.filter(o => {
+      const u = war.units.find(x => x.id === o.unitId);
+      return !(u && u.dest && Math.hypot(u.dest[0] - o.dest[0], u.dest[1] - o.dest[1]) < 2);
+    });
+    for (const o of unconfirmed) WarEngine.applyOrders(this._dbLike(war), o.side, [{ unitId: o.unitId, dest: o.dest }]);
+    this._pred.outbox = unconfirmed;
+  },
+
+  // Apply orders to the predicted war IMMEDIATELY (the POST confirms later);
+  // remember them so rebases re-apply until the server state shows them.
+  _optimistic(side, orders) {
+    const war = this.predictedWar();
+    if (!war) return;
+    WarEngine.applyOrders(this._dbLike(war), side, orders);
+    const exp = Date.now() + 5000; // a write refetch lands well inside this
+    for (const o of orders) this._pred.outbox.push({ side, unitId: o.unitId, dest: o.dest, exp });
+    this._redraw(true);
+  },
+
+  // One 250ms driver while a war doc exists: (1) advance the local predicted
+  // simulation on the same wall-clock gate the server uses, (2) poll the
+  // lightweight heartbeat route at ~tick cadence so the SERVER keeps ticking
+  // too (serverless deployments have no timer — without a poller the war
+  // advances only on the 20s fallback, in ugly catch-up bursts).
+  _ensureRealtime() {
+    if (this._rtTimer) return;
+    this._rtTimer = setInterval(() => this._realtimeStep(), 250);
+  },
+  _stopRealtime() {
+    if (this._rtTimer) { clearInterval(this._rtTimer); this._rtTimer = null; }
+  },
+  _realtimeStep() {
+    const auth = S() && S().war;
+    if (!auth) { this._stopRealtime(); this._pred = null; return; }
+    if (!auth.active || auth.paused || document.hidden) return;
+    // 1. local predicted tick(s)
+    const war = this.predictedWar();
+    if (war && window.WarEngine && WarEngine.maybeWarTick(this._dbLike(war))) this._redraw();
+    // 2. authoritative heartbeat, one tick interval apart (never below 1s —
+    //    at 8× speed prediction carries the smoothness, not the network)
+    const interval = Math.max(1000, (auth.tickMs || 2000) / (auth.speed || 1));
+    const now = Date.now();
+    if (now >= this._hbDue && !this._hbBusy) {
+      this._hbDue = now + interval;
+      this._heartbeat();
+    }
+  },
+  async _heartbeat() {
+    this._hbBusy = true;
+    try {
+      const res = await fetch('/api/war/state');
+      if (res.ok) {
+        const data = await res.json();
+        // Version-guarded like core.js's refreshState: never apply a war
+        // older than one already applied (out-of-order responses).
+        if (data && data.v !== undefined && !(data.v <= this._warV)) {
+          this._warV = data.v;
+          if (W.state && data.war) {
+            W.state.war = data.war; // identity change → predictedWar() rebases
+            this._redraw(true);
+          }
+        }
+      }
+    } catch (e) { /* transient — next heartbeat retries */ }
+    this._hbBusy = false;
+  },
+
+  // Redraw the map (which re-renders the war layer from the predicted war),
+  // throttled so a heartbeat rebase and a predicted tick landing together
+  // don't rebuild the SVG twice back-to-back.
+  _redraw(force) {
+    const now = performance.now();
+    if (!force && now - this._lastDraw < 300) return;
+    // Only rebuild the map SVG when it's actually on screen — prediction and
+    // the heartbeat keep running on other views (so the war stays current and
+    // the server keeps ticking), but there's nothing to draw there.
+    if (!(window.GameMap && GameMap.render && GameMap.svg && GameMap.svg.isConnected)) return;
+    this._lastDraw = now;
+    GameMap.render();
+  },
 
   /* ═══════════ MAP INPUT (delegated from map.js's pointer handlers) ═══════════
      map.js only calls these while W.layer === 'war'. Each returns true when it
@@ -129,7 +282,7 @@ const War = {
         const x0 = Math.min(start[0], world[0]), x1 = Math.max(start[0], world[0]);
         const y0 = Math.min(start[1], world[1]), y1 = Math.max(start[1], world[1]);
         const side = this.commandableSide();
-        const war = S().war;
+        const war = (window.WarEngine && this.predictedWar()) || S().war;
         this._sel.clear();
         for (const u of (war ? war.units : [])) {
           if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0)) continue;
@@ -218,14 +371,16 @@ const War = {
       const r = 24;
       return { unitId: id, dest: this._clamp([dest[0] + Math.cos(ang) * r, dest[1] + Math.sin(ang) * r]) };
     });
-    try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
+    const side = this.commandableSide();
+    if (window.WarEngine) this._optimistic(side, orders); // arrows + movement start NOW; the POST confirms
+    try { await POST('/api/war/command', { side, orders }); }
     catch (e) { toast(e.message, true); }
   },
   // Ctrl-drag formation: distribute the current selection along the line A→B,
   // nearest-in-order (sort both units and slots by their projection onto the
   // line direction, then pair them up 1:1) so units don't cross paths.
   async _issueFormation(a, b) {
-    const war = S().war;
+    const war = (window.WarEngine && this.predictedWar()) || S().war;
     if (!war) return;
     const ids = [...this._sel];
     const n = ids.length;
@@ -240,7 +395,9 @@ const War = {
       slots.push([a[0] + dir[0] * t, a[1] + dir[1] * t]);
     }
     const orders = units.map((u, i) => ({ unitId: u.id, dest: this._clamp(slots[i]) }));
-    try { await POST('/api/war/command', { side: this.commandableSide(), orders }); }
+    const side = this.commandableSide();
+    if (window.WarEngine) this._optimistic(side, orders);
+    try { await POST('/api/war/command', { side, orders }); }
     catch (e) { toast(e.message, true); }
   },
   async _dropBomb(pos) {
@@ -248,6 +405,15 @@ const War = {
       const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos) });
       toast('Bombing run away — impact incoming.');
     } catch (e) { toast(e.message, true); }
+  },
+
+  // Tween duration ≈ one tick interval, so a unit glides continuously into
+  // each new simulated position instead of the old fixed 900ms ease that left
+  // it parked for the back half of every 2s tick (visible stop-start motion).
+  _tweenMs() {
+    const w = S() && S().war;
+    const interval = ((w && w.tickMs) || 2000) / ((w && w.speed) || 1);
+    return Math.min(2200, Math.max(250, interval));
   },
 
   /* ---------- shared animation loop ----------
@@ -265,7 +431,7 @@ const War = {
         const e = this._anim[id];
         if (!e.node || !e.node.isConnected) { delete this._anim[id]; continue; }
         any = true;
-        const u = Math.min(1, (now - e.t0) / 900);
+        const u = Math.min(1, (now - e.t0) / (e.dur || 900));
         const k = ease(u);
         e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
         // Fixed-world-size above WAR_FIXED_MODE_K, constant-screen-size below
@@ -290,8 +456,12 @@ const War = {
 
   /* ═══════════ MAP LAYER ═══════════ */
   renderMapLayer(map, mk, NS) {
-    const war = S().war;
-    if (!war) { this._anim = {}; this._flashAnim = {}; this._removeToolbar(); return; }
+    // Render the PREDICTED war (rebased-on-authority + locally ticked), so
+    // the front line the player sees is always at full cadence. Falls back
+    // to the raw authoritative doc if the engine script failed to load.
+    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    if (!war) { this._anim = {}; this._flashAnim = {}; this._removeToolbar(); this._stopRealtime(); this._pred = null; return; }
+    if (window.WarEngine) this._ensureRealtime();
     map.warLayer = document.createElementNS(NS, 'g');
     map.warLayer.setAttribute('class', 'war-layer');
     map.world.appendChild(map.warLayer);
@@ -511,7 +681,7 @@ const War = {
       g.appendChild(title);
       map.warLayer.appendChild(g);
 
-      this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), curPos: from.slice(), node: g };
+      this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g };
     }
     for (const id in this._anim) if (!liveIds.has(id)) delete this._anim[id];
   },

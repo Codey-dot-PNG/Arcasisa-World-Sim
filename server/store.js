@@ -386,6 +386,10 @@ function migrate(world) {
   // before this change simply lacks these fields until the next tick/order.
   if (world.war && !world.war.bombs) { world.war.bombs = { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } }; changed = true; }
   if (world.war && !world.war.craters) { world.war.craters = []; changed = true; }
+  // Phase 18 — deterministic shared engine. A war started before the engine
+  // split has no PRNG seed; default it to the same value the engine falls
+  // back to ((seed>>>0)||1), so server and predicting clients agree.
+  if (world.war && typeof world.war.seed !== 'number') { world.war.seed = 1; changed = true; }
 
   // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'
   // role, so live worlds pick up role changes made outside the normal API

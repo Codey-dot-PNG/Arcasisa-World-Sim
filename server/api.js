@@ -437,6 +437,19 @@ async function handle(req, res, pathname, method) {
     // sees war.ai at all — see filterState). The client only sends orders;
     // the server is authoritative for everything that actually moves a unit
     // or detonates a bomb.
+    // Lightweight war heartbeat (Phase 18 — client prediction). Clients
+    // watching an active war poll this at ~tick cadence instead of the full
+    // /api/state: it drives the wall-clock tick gate (the broadcast → refetch
+    // loop is NOT self-sustaining on serverless — a refetch lands well inside
+    // the next tick window and then nothing polls until the 20s fallback, so
+    // without a dedicated driver the war advances in 20-second bursts) and
+    // returns just the war doc, which the client rebases its local predicted
+    // simulation onto. Same fog-of-war filtering as filterState.
+    if (pathname === '/api/war/state' && method === 'GET') {
+      try { if (war.maybeWarTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* war optional */ }
+      const w = db.war ? (u.role.perms.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null;
+      return json(res, 200, { war: w, v: store.getVersion() });
+    }
     if (pathname === '/api/war/command' && method === 'POST') {
       const b = await readBody(req);
       if (!db.war || !db.war.active) return bad('No war is active.');

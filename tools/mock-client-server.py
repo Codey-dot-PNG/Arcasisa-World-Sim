@@ -158,7 +158,49 @@ TRANSACTIONS = [
      "amount": 120, "memo": "Gambling tax (15%)", "actor": "TREASURY", "kind": "transfer"},
 ]
 
-PAGES = ["map", "parliament", "companies", "economy", "population", "news", "entertainment"]
+PAGES = ["map", "parliament", "companies", "economy", "population", "news", "entertainment", "war"]
+
+# A small in-progress war so the client's War layer + prediction engine can be
+# eyeballed without node. The mock never ticks it — the CLIENT's local
+# prediction (public/js/war-engine.js) is what moves the units, which is
+# exactly the behaviour under test. /api/war/state returns it with a constant
+# version, so the client applies it once and then free-runs its prediction.
+def make_war(gm):
+    war = {
+        "active": True, "paused": False, "speed": 1,
+        "tickMs": 2000, "_lastTick": 0, "tick": 5, "seed": 424242,
+        "startedAt": "1960-01-05T00:00:00.000Z",
+        "scenarioId": "valksland_invasion", "name": "The Valgos Crisis",
+        "attackerId": "for_valksland", "defenderId": "ent_gov",
+        "grid": {"cell": 48, "cols": 80, "rows": 45,
+                 "provinceLandCells": {"prov_lachevan": 120}, "provinceCells": {}, "totalLandCells": 120},
+        "cells": {},
+        "units": [
+            {"id": "wu_att1", "side": "att", "name": "1st Marine Division", "kind": "marine",
+             "pos": [2950, 500], "dest": [2400, 500], "path": None, "pathIdx": 0,
+             "strength": 24000, "maxStrength": 24000, "org": 90, "speed": 4, "atk": 1.1,
+             "state": "moving", "objectiveId": "wo_prov"},
+            {"id": "wu_att2", "side": "att", "name": "2nd Armored Brigade", "kind": "armored",
+             "pos": [2980, 620], "dest": [2350, 640], "path": None, "pathIdx": 0,
+             "strength": 30000, "maxStrength": 30000, "org": 85, "speed": 5, "atk": 1.3,
+             "state": "moving", "objectiveId": "wo_prov"},
+            {"id": "wu_def1", "side": "def", "name": "Lachevan Garrison", "kind": "garrison",
+             "pos": [2300, 520], "dest": None, "strength": 22000, "maxStrength": 22000, "org": 100,
+             "speed": 0, "atk": 1, "state": "holding", "objectiveId": None, "garrison": True},
+        ],
+        "objectives": [
+            {"id": "wo_prov", "kind": "control_province", "ref": "prov_lachevan",
+             "pos": [2300, 520], "priority": 1, "status": "pending", "holdTicks": 0},
+        ],
+        "events": [], "craters": [],
+        "stats": {"attLosses": 0, "defLosses": 0, "provinceControl": {"prov_lachevan": 0}, "citiesHeld": []},
+        "bombs": {"att": {"cooldownUntil": 0}, "def": {"cooldownUntil": 0}},
+        "result": None,
+    }
+    if gm:
+        war["ai"] = {"phase": "breakout", "lastPlanTick": 0, "notes": [],
+                     "attackerStartStrength": 54000, "consolidateFrac": 0.35, "collapseFrac": 0.12}
+    return war
 
 PROVINCES = [
     {"id": "prov_lachevan", "name": "Lachevan", "color": "#c99a2e",
@@ -176,8 +218,9 @@ def role_perms(gm):
             "government": False, "statistics": False, "mapLayers": ["political"],
             "manageNews": False, "gm": False}
 
-def make_state():
+def make_state(gm=True):
     return {
+        "war": make_war(gm),
         "settings": {
             "worldName": "Republic of Arcasia", "currency": "₳", "currencyName": "Arcasian Koren",
             "time": {"turn": 4, "unit": "day", "perTurn": 1, "date": "1960-01-05", "auto": {"enabled": False}},
@@ -328,7 +371,9 @@ class Handler(SimpleHTTPRequestHandler):
                     "newspaperId": None,
                     "role": {"id": "gamemaster" if gm else "citizen",
                              "name": "Gamemaster" if gm else "Citizen", "perms": role_perms(gm)}}
-            return self._json({"user": user, "state": make_state(), "v": VERSION[0]})
+            return self._json({"user": user, "state": make_state(gm), "v": VERSION[0]})
+        if p == "/api/war/state":
+            return self._json({"war": make_war(gm), "v": VERSION[0]})
         if p == "/api/polling":
             return self._json({"national": {}, "byProvince": {}})
         if p == "/api/stream":

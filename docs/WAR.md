@@ -1,9 +1,27 @@
-# War (server/war.js, server/war-scenarios.js, public/js/war.js)
+# War (server/war-engine.js, server/war.js, server/war-scenarios.js, public/js/war-engine.js, public/js/war.js)
 
 A realtime, wall-clock-ticking battlefield RTS layered on top of the turn-based
 simulation. It does **not** touch the economy or politics yet — only the
 timeline log and auto-published news on milestones. It is meant to be wired
 into other systems (occupation effects, refugee flows, war economy) later.
+
+**Module split (Phase 18):**
+
+- `server/war-engine.js` — the deterministic, dependency-free SIMULATION
+  (movement, combat, territory, objectives, AI, transport-graph pathing,
+  embedded point-in-polygon geometry). Shared **byte-for-byte** with
+  `public/js/war-engine.js` (the browser copy — edit both together, same rule
+  as pricepath.js). All tick-time randomness comes from a mulberry32 PRNG
+  seeded per tick from `(war.seed ^ war.tick)` — never `Math.random()` — so
+  server and client compute identical ticks from identical state. Timeline
+  logs and news milestones are `ctx` hooks: the server passes real
+  `store.log`/`sim.draftNews`; a predicting client passes nothing (no-ops).
+- `server/war.js` — the server-only AUTHORITY layer: scenario spawning
+  (startWar mints `war.seed` once), endWar, bombs (mutate properties/roads/
+  deeds beyond `db.war`), the command shim, and `warTick`/`maybeWarTick`
+  bound to the server ctx.
+- `public/js/war.js` — input, rendering, **client-side prediction** (see
+  "Client-side prediction" below).
 
 ## State — `db.war`
 
@@ -14,6 +32,7 @@ war: {
   active: true, paused: false, speed: 1,     // speed ∈ {1,2,4,8}
   tickMs: 2000, _lastTick: <epoch ms>,       // wall-clock gate (see maybeWarTick)
   tick: 0, startedAt: <iso>,
+  seed: <uint32>,                            // minted once at startWar; per-tick PRNG = mulberry32(seed ^ tick) — the client-prediction determinism anchor
   scenarioId, name, attackerId, defenderId,  // entity ids — attacker is a 'foreign' entity
   grid: {
     cell: 48, cols, rows,                    // 48px cells over the 3840×2160 master grid
@@ -305,6 +324,58 @@ paused, the defender's cooldown expired) then, on success:
 5. Records a crater (`war.craters`, capped at 40) and a `'battle'` war event
    so the client flashes it.
 
+## Client-side prediction (Phase 18) — why the war feels realtime now
+
+The pre-Phase-18 war was poll-bound: ticks only ran when something hit the
+server's wall-clock gate, and clients only saw movement after a full
+`/api/state` refetch. Worse, on serverless the tick loop is **not
+self-sustaining** — a tick's own broadcast triggers refetches that land well
+inside the next 2s tick window (so they don't tick), and then nothing polls
+until the 20s fallback: idle wars advanced in 20-second catch-up bursts.
+
+Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
+
+1. **Predicted war** — the client keeps a deep copy of the last authoritative
+   `db.war` and ticks it locally with the SAME engine on the same wall-clock
+   gate (`WarEngine.maybeWarTick`, 250ms driver interval, paused while
+   `document.hidden`). The map renders the predicted doc, so units keep
+   moving/fighting at full cadence between server snapshots. Every new
+   authoritative war object (full refetch or heartbeat) **rebases** the
+   prediction — the server always wins, wholesale; `_lastTick` is reset to
+   the client clock at rebase so clock skew can't distort cadence. A stale
+   snapshot of the same war (`tick <` the rebase base tick) is ignored.
+   Non-GM clients have `war.ai` stripped, so the engine simply skips AI
+   replans in their prediction (units keep marching on existing dests; the
+   next snapshot carries any replan).
+2. **Optimistic orders** — `_issueMove`/`_issueFormation` apply orders to the
+   predicted war immediately via `WarEngine.applyOrders` (the same pure
+   function the server route uses), before the POST round-trips. An outbox
+   (5s expiry) re-applies them across rebases until a server snapshot
+   reflects the dest, so an in-flight order's arrow never flickers away.
+3. **War heartbeat** — while a war is active and the tab is visible, the
+   client polls `GET /api/war/state` once per tick interval (min 1s). The
+   route runs `maybeWarTick` (driving the authoritative simulation at
+   cadence — this is what makes the serverless tick loop self-sustaining)
+   and returns just `{war, v}` (ai stripped for non-GM), which the client
+   version-guards (`v` monotonic, same rule as core.js) and rebases onto.
+   Full `/api/state` refetches continue riding the normal realtime channel
+   for everything else.
+
+Determinism contract: `war.seed` is minted once at startWar (migrate defaults
+legacy wars to seed 1, matching the engine's `(seed>>>0)||1` fallback);
+combat rolls and sweep waypoints draw from the per-tick PRNG in state-defined
+order. Prediction still diverges when it can't know something (another
+player's orders, a bomb, an AI replan on non-GM clients) — that's fine; the
+next rebase discards the error, and the marker tween (whose duration now
+matches the tick interval instead of a fixed 900ms, so motion is continuous
+rather than stop-start) absorbs the correction visually.
+
+This snapshot → local deterministic simulation → optimistic writes →
+rebase-on-authority pattern is deliberately generic: it's the template for
+making other poll-bound systems (Day Market already does a read-only version
+via pricepath; turn previews could too) feel realtime without touching the
+CAS commit model.
+
 ## API — `server/api.js`
 
 - `POST /api/gm/war/start { scenario }` — GM-only; 409 if a war is already
@@ -324,10 +395,15 @@ paused, the defender's cooldown expired) then, on success:
   `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
   logged-in operator, not GM-gated); see "Interactive War layer" above for
   the authority model and validation.
-- Heartbeat: `GET /api/state` calls `war.maybeWarTick(db)` right after the
-  existing `market.maybeDayTick(db)` call, saving + broadcasting on a real
-  tick — identical wall-clock-gate pattern, so this works serverless with no
-  process-lifetime timer required.
+- `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
+  18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
+  `{war, v}` only, with `war.ai` stripped for non-GM exactly like
+  filterState. Clients watching an active war poll it at ~tick cadence; see
+  "Client-side prediction" above.
+- Heartbeat: `GET /api/state` also calls `war.maybeWarTick(db)` right after
+  the existing `market.maybeDayTick(db)` call, saving + broadcasting on a
+  real tick — identical wall-clock-gate pattern, so any traffic at all
+  drives the war even if no one is running the dedicated heartbeat.
 - `api.filterState`: `db.war` ships to every logged-in operator (so all
   players can watch the front), but `war.ai` (phase, notes, thresholds) is
   deleted for non-GM roles — the AI's planning is intentionally invisible to
@@ -351,7 +427,10 @@ the tick loop. No schema bump — `db.war` is additive/absent-by-default, and
 `'war'` was added to every role's `pages` list the same way `'entertainment'`
 was previously (see the `STD_PAGES` loop in `migrate()`). Phase 16 added two
 more additive guards next to it: a `db.war` missing `bombs` or `craters`
-(started before this change) gets them defaulted in place.
+(started before this change) gets them defaulted in place. Phase 18 adds one
+more: a `db.war` missing a numeric `seed` gets `seed: 1` — the same value the
+engine falls back to (`(seed>>>0)||1`), so server and predicting clients
+agree even on a pre-engine war.
 
 ## Client — `public/js/war.js`
 

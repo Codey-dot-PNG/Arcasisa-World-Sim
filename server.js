@@ -113,6 +113,11 @@ setInterval(() => {
 setInterval(() => {
   try {
     const war = require('./server/war');
-    if (war.maybeWarTick(store.get())) { store.save(); api.broadcast('sync'); }
+    // Save on any tick; broadcast only on milestones — war-watching clients
+    // pull routine tick churn via their own /api/war/state heartbeat, and
+    // per-tick broadcasts forced every client into full refetches at tick
+    // rate (see server/war.js maybeWarTickSignal).
+    const sig = war.maybeWarTickSignal(store.get());
+    if (sig.ticked) { store.save(); if (sig.milestone) api.broadcast('sync'); }
   } catch (e) { /* transient; retry next tick */ }
 }, 1000).unref();

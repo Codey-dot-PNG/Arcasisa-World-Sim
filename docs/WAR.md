@@ -338,28 +338,53 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
 1. **Predicted war** — the client keeps a deep copy of the last authoritative
    `db.war` and ticks it locally with the SAME engine on the same wall-clock
    gate (`WarEngine.maybeWarTick`, 250ms driver interval, paused while
-   `document.hidden`). The map renders the predicted doc, so units keep
-   moving/fighting at full cadence between server snapshots. Every new
-   authoritative war object (full refetch or heartbeat) **rebases** the
-   prediction — the server always wins, wholesale; `_lastTick` is reset to
-   the client clock at rebase so clock skew can't distort cadence. A stale
-   snapshot of the same war (`tick <` the rebase base tick) is ignored.
-   Non-GM clients have `war.ai` stripped, so the engine simply skips AI
-   replans in their prediction (units keep marching on existing dests; the
-   next snapshot carries any replan).
+   `document.hidden`, bounded to ≤10 ticks ahead of the last authoritative
+   tick). The map renders the predicted doc, so units keep moving/fighting
+   at full cadence between server snapshots. Every new authoritative war
+   object (full refetch or heartbeat) **rebases** the prediction with
+   ROLLBACK RECONCILIATION: a snapshot is usually *behind* the local sim
+   (network latency + the server only ticking when polled), so adopting it
+   raw would teleport units backward every sync — instead the snapshot is
+   fast-forwarded deterministically (≤12 ticks) to the tick the player is
+   already watching, folding in whatever the server knew (other players'
+   orders, bombs, AI replans) with a visually seamless swap. The local tick
+   PHASE (`_lastTick`) is carried across rebases (clamped if ≥2 intervals
+   stale) — resetting it per snapshot would starve prediction whenever
+   snapshots arrive faster than the tick interval, which is exactly what
+   happens at 4×/8×. A stale snapshot of the same war (`tick <` the rebase
+   base tick) is ignored. Non-GM clients have `war.ai` stripped, so the
+   engine simply skips AI replans in their prediction (units keep marching
+   on existing dests; the next snapshot carries any replan).
 2. **Optimistic orders** — `_issueMove`/`_issueFormation` apply orders to the
    predicted war immediately via `WarEngine.applyOrders` (the same pure
    function the server route uses), before the POST round-trips. An outbox
    (5s expiry) re-applies them across rebases until a server snapshot
    reflects the dest, so an in-flight order's arrow never flickers away.
-3. **War heartbeat** — while a war is active and the tab is visible, the
-   client polls `GET /api/war/state` once per tick interval (min 1s). The
-   route runs `maybeWarTick` (driving the authoritative simulation at
-   cadence — this is what makes the serverless tick loop self-sustaining)
-   and returns just `{war, v}` (ai stripped for non-GM), which the client
-   version-guards (`v` monotonic, same rule as core.js) and rebases onto.
-   Full `/api/state` refetches continue riding the normal realtime channel
-   for everything else.
+3. **War heartbeat** — while a war is active and the tab is visible (map
+   layer OR War Room panel), the client polls `GET /api/war/state` once per
+   tick interval (min 1s). The route runs `maybeWarTick` (driving the
+   authoritative simulation at cadence — this is what makes the serverless
+   tick loop self-sustaining) and returns just `{war, v}` (ai stripped for
+   non-GM), which the client version-guards (`v` monotonic, same rule as
+   core.js) and rebases onto.
+
+Two rendering rules keep it smooth (both born from live-server testing):
+
+- **War-layer-only redraws** — predicted ticks and heartbeat rebases rebuild
+  only the `war-layer` SVG group (`War.refreshLayer`), never the whole map;
+  a full `GameMap.render()` per tick was most of the perceived lag. Marker
+  interpolation is LINEAR with the leg duration equal to the tick interval,
+  and a mid-leg redraw whose target is unchanged KEEPS the in-flight leg
+  (recreating it restarted the motion clock — crawl-and-freeze stutter).
+  The rAF loop also drags each move arrow's tail along with its tweened
+  marker, so arrows track movement continuously instead of per render.
+- **Milestone-only broadcasts** — war ticks `store.save()` (commit bumps
+  `v`, which heartbeat pollers read) but only `broadcast('sync')` when the
+  milestone fingerprint changes (war ended / objective done / city fell —
+  `war.maybeWarTickSignal` in server/war.js, used by both api.js call sites
+  and server.js's local interval). Per-tick broadcasts forced EVERY client
+  into a full `/api/state` refetch + whole-app re-render at up to 1Hz
+  during a war — that global thrash, not the war itself, made the app lag.
 
 Determinism contract: `war.seed` is minted once at startWar (migrate defaults
 legacy wars to seed 1, matching the engine's `(seed>>>0)||1` fallback);

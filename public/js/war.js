@@ -44,7 +44,8 @@ const WAR_FIXED_MODE_K = 3;
 function warMarkerScale(k) { return Math.max(1, WAR_FIXED_MODE_K / Math.max(0.01, k)); }
 
 const War = {
-  _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, curPos:[x,y], node }
+  _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, dur, curPos:[x,y], node }
+  _arrowAnim: {},    // unitId -> { node, tail:'x,y x,y …' } — the marker end of each move arrow chases the tweened position every frame
   _flashAnim: {},    // synthetic flash id -> { node, t0, life }
   _raf: null,
 
@@ -108,22 +109,44 @@ const War = {
   },
 
   _rebase(auth) {
+    const prev = this._pred;
     // Ignore a STALE snapshot of the same war (overlapping refetches can
     // resolve out of order; core.js guards its own path, but the heartbeat
     // and full-state fetches race each other). Ticks only move forward.
-    if (this._pred && this._pred.war && auth.startedAt === this._pred.war.startedAt &&
-        typeof auth.tick === 'number' && auth.tick < this._pred.baseTick) {
-      this._pred.authRef = auth; // don't thrash re-checking it every render
+    if (prev && prev.war && auth.startedAt === prev.war.startedAt &&
+        typeof auth.tick === 'number' && auth.tick < prev.baseTick) {
+      prev.authRef = auth; // don't thrash re-checking it every render
       return;
     }
     const war = JSON.parse(JSON.stringify(auth));
-    // The snapshot is fresh AS OF NOW on this client's clock — the next
-    // predicted tick is due one interval from now. (war._lastTick from the
-    // server is server-clock and would skew prediction on a drifted client.)
-    war._lastTick = Date.now();
+    const sameWar = !!(prev && prev.war && prev.war.startedAt === war.startedAt);
+    // ROLLBACK RECONCILIATION: a snapshot describes the war as of the
+    // server's last tick, which on live deployments is usually BEHIND the
+    // local simulation (the heartbeat round-trips while prediction keeps
+    // ticking). Adopting it raw would teleport every unit backward — the
+    // "troops jump around on every sync" failure mode. Instead fast-forward
+    // the snapshot deterministically to the tick the player is already
+    // watching: same engine, same seed ⇒ near-identical state, so the swap
+    // is visually seamless while still folding in everything the server
+    // knew that we didn't (other players' orders, bombs, AI replans).
+    if (sameWar && war.active && !war.paused && prev.war.tick > (war.tick || 0)) {
+      const ahead = Math.min(prev.war.tick - (war.tick || 0), 12); // cap the catch-up CPU; beyond it, accept the jump
+      const dbl = this._dbLike(war);
+      for (let i = 0; i < ahead && war.active && !war.paused; i++) WarEngine.warTick(dbl);
+    }
+    // Carry the local tick PHASE across rebases — resetting it to "now" on
+    // every snapshot (the original design) meant snapshots arriving faster
+    // than the tick interval starved prediction completely: the client never
+    // ticked at all and the war degraded to raw server bursts. A phase older
+    // than ~2 intervals (hidden tab, stalled driver) is clamped so the next
+    // maybeWarTick can't burst-run a huge catch-up past the divergence bound.
+    const interval = Math.max(200, (war.tickMs || 2000) / (war.speed || 1));
+    let phase = sameWar ? (prev.war._lastTick || 0) : 0;
+    if (!phase || Date.now() - phase > interval * 2) phase = Date.now();
+    war._lastTick = phase;
     const now = Date.now();
-    const outbox = (this._pred ? this._pred.outbox : []).filter(o => o.exp > now);
-    this._pred = { war, authRef: auth, baseTick: war.tick || 0, outbox };
+    const outbox = (prev ? prev.outbox : []).filter(o => o.exp > now);
+    this._pred = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [] };
     // Re-apply optimistic orders the server hasn't reflected yet, so an
     // in-flight command's arrow doesn't flicker away on an older snapshot.
     const unconfirmed = outbox.filter(o => {
@@ -142,7 +165,7 @@ const War = {
     WarEngine.applyOrders(this._dbLike(war), side, orders);
     const exp = Date.now() + 5000; // a write refetch lands well inside this
     for (const o of orders) this._pred.outbox.push({ side, unitId: o.unitId, dest: o.dest, exp });
-    this._redraw(true);
+    this.refreshLayer(true);
   },
 
   // One 250ms driver while a war doc exists: (1) advance the local predicted
@@ -161,9 +184,15 @@ const War = {
     const auth = S() && S().war;
     if (!auth) { this._stopRealtime(); this._pred = null; return; }
     if (!auth.active || auth.paused || document.hidden) return;
-    // 1. local predicted tick(s)
+    // 1. local predicted tick(s) — but never run unboundedly ahead of the
+    //    last authoritative tick (if heartbeats stall, divergence would grow
+    //    and every eventual reconciliation would be a visible teleport).
     const war = this.predictedWar();
-    if (war && window.WarEngine && WarEngine.maybeWarTick(this._dbLike(war))) this._redraw();
+    if (war && window.WarEngine &&
+        war.tick - (this._pred.lastAuthTick || 0) < 10 &&
+        WarEngine.maybeWarTick(this._dbLike(war))) {
+      this.refreshLayer();
+    }
     // 2. authoritative heartbeat, one tick interval apart (never below 1s —
     //    at 8× speed prediction carries the smoothness, not the network)
     const interval = Math.max(1000, (auth.tickMs || 2000) / (auth.speed || 1));
@@ -185,7 +214,8 @@ const War = {
           this._warV = data.v;
           if (W.state && data.war) {
             W.state.war = data.war; // identity change → predictedWar() rebases
-            this._redraw(true);
+            this.refreshLayer(true);
+            this._maybeRefreshPanel();
           }
         }
       }
@@ -193,18 +223,42 @@ const War = {
     this._hbBusy = false;
   },
 
-  // Redraw the map (which re-renders the war layer from the predicted war),
-  // throttled so a heartbeat rebase and a predicted tick landing together
-  // don't rebuild the SVG twice back-to-back.
-  _redraw(force) {
+  // Rebuild ONLY the war layer group from the predicted war — never the whole
+  // map SVG. A full GameMap.render() per predicted tick (the original design)
+  // tore down and rebuilt every province/property/label up to 4× a second at
+  // 8× speed; that DOM churn WAS the lag. Throttled so a heartbeat rebase and
+  // a predicted tick landing together don't rebuild twice back-to-back.
+  refreshLayer(force) {
     const now = performance.now();
-    if (!force && now - this._lastDraw < 300) return;
-    // Only rebuild the map SVG when it's actually on screen — prediction and
-    // the heartbeat keep running on other views (so the war stays current and
+    if (!force && now - this._lastDraw < 150) return;
+    // NB: GameMap is a top-level `const` in map.js — a script-scope global
+    // that is NOT a window property, so it must be referenced bare (a
+    // `window.GameMap` guard is always undefined and silently no-ops).
+    const map = typeof GameMap !== 'undefined' ? GameMap : null;
+    // Only redraw when the map is actually on screen — prediction and the
+    // heartbeat keep running on other views (so the war stays current and
     // the server keeps ticking), but there's nothing to draw there.
-    if (!(window.GameMap && GameMap.render && GameMap.svg && GameMap.svg.isConnected)) return;
+    if (!(map && map.svg && map.svg.isConnected && map.world && map.world.isConnected && map.mk)) return;
+    if (window.MapEdit && MapEdit.dragging) return; // same guard as GameMap.render
     this._lastDraw = now;
-    GameMap.render();
+    if (map.warLayer && map.warLayer.parentNode) map.warLayer.parentNode.removeChild(map.warLayer);
+    this.renderMapLayer(map, map.mk, 'http://www.w3.org/2000/svg');
+  },
+
+  // The War Room panel (view 'war') reads the authoritative doc that the
+  // heartbeat just swapped in — re-render it occasionally so tick/casualty
+  // counters stay live now that war ticks no longer broadcast a full sync.
+  _maybeRefreshPanel() {
+    if (typeof W === 'undefined' || W.view !== 'war' || typeof App === 'undefined') return;
+    if (typeof editingBusy === 'function' && editingBusy()) return;
+    const now = Date.now();
+    if (now - (this._panelAt || 0) < 2500) return;
+    this._panelAt = now;
+    const dv = document.querySelector('#view .doc-view');
+    const st = dv ? dv.scrollTop : 0;
+    App.renderView();
+    const dv2 = document.querySelector('#view .doc-view');
+    if (dv2) dv2.scrollTop = st;
   },
 
   /* ═══════════ MAP INPUT (delegated from map.js's pointer handlers) ═══════════
@@ -424,16 +478,23 @@ const War = {
      ended/never-started war costs nothing. */
   ensureLoop() {
     if (this._raf) return;
-    const ease = (t) => (t < 0.5 ? 2 * t * t : -1 + (4 - 2 * t) * t);
     const step = (now) => {
       let any = false;
       for (const id in this._anim) {
         const e = this._anim[id];
         if (!e.node || !e.node.isConnected) { delete this._anim[id]; continue; }
         any = true;
-        const u = Math.min(1, (now - e.t0) / (e.dur || 900));
-        const k = ease(u);
+        // LINEAR interpolation, deliberately not eased: legs chain tick to
+        // tick, and an ease curve restarting on every leg made units
+        // accelerate/decelerate 1-4× a second — visible stutter. Constant
+        // velocity across chained legs reads as continuous marching.
+        const k = Math.min(1, (now - e.t0) / (e.dur || 900));
         e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
+        const ar = this._arrowAnim[id];
+        if (ar) {
+          if (!ar.node.isConnected) delete this._arrowAnim[id];
+          else ar.node.setAttribute('points', e.curPos[0] + ',' + e.curPos[1] + (ar.tail ? ' ' + ar.tail : ''));
+        }
         // Fixed-world-size above WAR_FIXED_MODE_K, constant-screen-size below
         // — computed every frame from the live zoom so the mode switches
         // during a wheel-zoom without waiting for a re-render. HP bar,
@@ -563,6 +624,7 @@ const War = {
       m.appendChild(tip);
       defs.appendChild(m);
     }
+    this._arrowAnim = {}; // rebuilt per layer render; the rAF loop keeps each tail pinned to its tweened marker
     for (const u of war.units) {
       if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0) || !u.dest) continue;
       const anim = this._anim[u.id];
@@ -578,6 +640,7 @@ const War = {
       line.setAttribute('class', sel ? 'war-move-arrow-sel' : 'war-move-arrow');
       line.setAttribute('marker-end', `url(#${sel ? 'war-arrowhead-sel' : 'war-arrowhead'})`);
       map.warLayer.appendChild(line);
+      this._arrowAnim[u.id] = { node: line, tail: pts.slice(1).map(p => p[0] + ',' + p[1]).join(' ') };
     }
   },
 
@@ -645,6 +708,13 @@ const War = {
 
       liveIds.add(u.id);
       const prevAnim = this._anim[u.id];
+      // If the unit's target hasn't changed since the last render (a war-layer
+      // refresh mid-leg — heartbeat rebase, selection change, toolbar render),
+      // KEEP the in-flight leg and just rebind the fresh node: recreating the
+      // leg from curPos restarted the motion clock and made units crawl-and-
+      // freeze instead of gliding. A new target starts a new linear leg.
+      const sameLeg = prevAnim && prevAnim.to &&
+        Math.abs(prevAnim.to[0] - u.pos[0]) < 0.5 && Math.abs(prevAnim.to[1] - u.pos[1]) < 0.5;
       const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : u.pos;
       g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
 
@@ -681,7 +751,8 @@ const War = {
       g.appendChild(title);
       map.warLayer.appendChild(g);
 
-      this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g };
+      if (sameLeg) { prevAnim.node = g; }
+      else this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g };
     }
     for (const id in this._anim) if (!liveIds.has(id)) delete this._anim[id];
   },
@@ -775,6 +846,9 @@ const War = {
     }
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:6px;' },
       'Command your forces directly on the map — switch to the ⚔ War layer.'));
+    // A viewer parked on this panel (map not mounted) still drives the
+    // heartbeat, keeping the authoritative war ticking and the counters live.
+    if (war.active && window.WarEngine) this._ensureRealtime();
 
     const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
     const mm = Math.floor(elapsed / 60), ss = elapsed % 60;

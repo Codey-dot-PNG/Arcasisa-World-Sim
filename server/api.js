@@ -299,7 +299,10 @@ async function handle(req, res, pathname, method) {
       // real tick, persist + signal so every client refetches the new prices —
       // this is what gives Vercel deployments a live ~5s market with no timer.
       try { if (market.maybeDayTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* market optional */ }
-      try { if (war.maybeWarTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* war optional */ }
+      // War ticks save (heartbeat pollers read the commit) but only broadcast
+      // on milestones — per-tick broadcasts made every client refetch the full
+      // world at tick rate during a war. See war.maybeWarTickSignal.
+      try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
       return json(res, 200, { user: userPayload(u), state: filterState(u), v: store.getVersion() });
     }
 
@@ -446,7 +449,7 @@ async function handle(req, res, pathname, method) {
     // returns just the war doc, which the client rebases its local predicted
     // simulation onto. Same fog-of-war filtering as filterState.
     if (pathname === '/api/war/state' && method === 'GET') {
-      try { if (war.maybeWarTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* war optional */ }
+      try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
       const w = db.war ? (u.role.perms.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null;
       return json(res, 200, { war: w, v: store.getVersion() });
     }

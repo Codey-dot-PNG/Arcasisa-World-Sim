@@ -248,4 +248,27 @@ function dropBomb(db, side, pos, actor) {
 function warTick(db) { return engine.warTick(db, SERVER_CTX); }
 function maybeWarTick(db) { return engine.maybeWarTick(db, SERVER_CTX); }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, buildGrid, dropBomb, commandUnits, isLive };
+// Milestone fingerprint — the changes worth a GLOBAL sync broadcast. Routine
+// tick-to-tick churn (positions, strengths, cells) is delivered to
+// war-watching clients by their own /api/war/state heartbeat; broadcasting
+// every tick made every connected client refetch the full world at up to
+// 1Hz during a war, which is what turned a fast war into a laggy app.
+function milestoneKey(war) {
+  if (!war) return 'none';
+  return [
+    war.active ? 1 : 0,
+    war.result ? 1 : 0,
+    war.objectives.filter(o => o.status === 'done').length,
+    (war.stats.citiesHeld || []).length
+  ].join(':');
+}
+
+// Tick + tell the caller how loudly to signal: save on any tick (the commit
+// is what heartbeat pollers read), broadcast only on a milestone.
+function maybeWarTickSignal(db) {
+  const before = milestoneKey(db.war);
+  const ticked = maybeWarTick(db);
+  return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
+}
+
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, isLive };

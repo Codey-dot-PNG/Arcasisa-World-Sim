@@ -151,6 +151,16 @@ function startWar(db, scenario) {
 
   const attackerTotal = units.filter(u => u.side === 'att').reduce((s, u) => s + u.strength, 0);
 
+  // Supply corridors (Feature: resupply healing) — the point the attacker's
+  // flood-fill seeds from each tick: the landing objective's position for a
+  // naval scenario, or the staging box's own centre for a land:true one
+  // (there is no landing objective to point at). Minted once here, like
+  // `seed`, so it never drifts mid-war even if objectives/positions change.
+  const landingObj = objectives.find(o => o.kind === 'landing');
+  const supplyAnchor = scenario.land
+    ? [(stage.x0 + stage.x1) / 2, (stage.y0 + stage.y1) / 2]
+    : (landingObj ? landingObj.pos.slice() : null);
+
   db.war = {
     active: true, paused: false, speed: 1,
     tickMs: 2000, _lastTick: Date.now(),
@@ -161,6 +171,7 @@ function startWar(db, scenario) {
     seed: (Math.floor(Math.random() * 0xffffffff)) >>> 0 || 1,
     scenarioId: scenario.id, name: scenario.name, attackerId: attacker.id, defenderId: defender.id,
     grid, cells: {}, units, objectives,
+    supplyAnchor,
     ai: { phase: 'landing', lastPlanTick: 0, notes: [], attackerStartStrength: attackerTotal,
       consolidateFrac: (scenario.tuning || {}).consolidateFrac || 0.35,
       collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12 },

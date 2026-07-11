@@ -471,14 +471,17 @@ async function handle(req, res, pathname, method) {
       const inBounds = (p) => Array.isArray(p) && p.length === 2 &&
         Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
         p[0] >= 0 && p[0] <= 3840 && p[1] >= 0 && p[1] <= 2160;
-      // Orders carry EITHER `dest` (plain move) OR `path` (a player-drawn
-      // freehand polyline, ≥2 points, cap 200 — see docs/WAR.md "Manual
-      // paths"). The engine (applyOrders) is the actual choke point that
-      // clamps/caps everything again — this is just the first filter so a
-      // malformed order never reaches it.
+      // Orders carry `dest` (plain move), `path` (a player-drawn freehand
+      // polyline, ≥2 points, cap 200 — see docs/WAR.md "Manual paths"), or
+      // `attackId` (chase a specific enemy unit id — see docs/WAR.md
+      // "Explicit attack orders"). The engine (applyOrders) is the actual
+      // choke point that clamps/caps everything again, and re-validates the
+      // attackId target itself (exists, alive, opposite side) — this is just
+      // the first filter so a malformed order never reaches it.
       const orders = b.orders.filter(o => {
         if (!o || typeof o.unitId !== 'string') return false;
         if (Array.isArray(o.path)) return o.path.length >= 2 && o.path.length <= 200 && o.path.every(inBounds);
+        if (typeof o.attackId === 'string') return true;
         return inBounds(o.dest);
       });
       war.commandUnits(db, side, orders, u.user.displayName);

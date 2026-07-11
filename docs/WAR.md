@@ -26,8 +26,8 @@ into other systems (occupation effects, refugee flows, war economy) later.
   bound to the server ctx.
 - `public/js/war.js` — input, rendering, **client-side prediction** (see
   "Client-side prediction" below), plus the airstrike's purely-cosmetic
-  plane/screenshake/flash/shockwave FX (see "Client — plane, screenshake,
-  flash, shockwave" below).
+  plane and fireball/shockwave/debris impact FX (see "Client — plane,
+  fireball, shockwave" below).
 
 ## State — `db.war`
 
@@ -56,6 +56,8 @@ war: {
   bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } }, // {att,def} shape kept for compatibility, but only `def` is ever used — bombs are DEFENDER-ONLY
   airstrikes: [ { id, side, pos:[x,y], from:[x,y], orderedTick, strikeTick,
                   orderedAt: <epoch ms>, done, groundApplied } ], // additive/absent-safe — see "Airstrikes" below
+  supplyAnchor: [x,y],                       // attacker supply source, minted once at startWar (landing objective pos, or the
+                                             // staging centre for land:true) — additive/absent-safe, see "Supply corridors" below
   craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
   mods: { dmg: 1, bombDmg: 1, hp: 1 },       // GM global tuning multipliers — additive/absent-safe, see "GM global tuning" below
   allies: { att: [entityId, …], def: [entityId, …] }, // foreign entities that joined via joinWar — additive/absent-safe, see "Foreign intervention" below
@@ -71,7 +73,12 @@ alone). Phase 17 adds `path` (array of `[x,y]` transport-graph waypoints) +
 straight line — see "Transport-graph pathing" below. Phase 19 adds
 `manualPath` (true when `path`/`dest` were set by a player-drawn freehand
 line rather than the transport graph — see "Manual paths" below) and the
-top-level `mods` field above.
+top-level `mods` field above. Phase 20 adds `attackId` (the enemy unit id a
+unit is chasing under an explicit attack order — see "Explicit attack orders"
+below) and `supplied` (recomputed every tick by `stepSupply`; `false` means
+the unit is cut off from its side's supply corridor — see "Supply corridors &
+resupply" below; absent on pre-Phase-20 docs, which every reader treats as
+supplied).
 
 Unit `kind` is free-form scenario data (`marine`, `infantry`, `armored`,
 `reserve` for the attacker; every defender is spawned as `garrison`). Unit
@@ -124,14 +131,18 @@ One tick does, in order:
 6. **`recomputeProvinceControl`** — captured-cell count ÷ that province's
    total land-cell count, per province, from the sparse `cells` map (cheap:
    proportional to cells actually captured, not the whole grid).
-7. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
+7. **Supply** (`stepSupply`) — flood-fills each side's supply corridor and
+   stamps `u.supplied` on every live unit; supplied units out of combat heal
+   `SUPPLY_HEAL_FRAC` (0.4%) of `maxStrength` per tick — see "Supply
+   corridors & resupply" below.
+8. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
    `seize_capital` objective completes once an attacker unit has held within
    60px of the city for `CAPTURE_HOLD_TICKS` (3) consecutive ticks with no
    defender unit in range; a `control_province` objective completes once its
    privince crosses `CITY_CONTROL_PCT` (65%). Each completion logs a
    `store.log('event', …)` entry and publishes a news article via
    `sim.draftNews` (the same mechanism `sim.js`'s `news` effect uses).
-8. **`checkVictory`** — all objectives done → attacker wins, war ends.
+9. **`checkVictory`** — all objectives done → attacker wins, war ends.
    (Defender victory is decided inside the AI step below, since it hinges on
    the attacker's total strength, not an objective.)
 
@@ -212,6 +223,93 @@ rather than annihilating them (intended). Org/rout thresholds are unchanged —
 fights resolve by routing more often than annihilation. These numbers apply
 to **new** wars only: an in-progress war keeps the strengths it started with
 (no migration of a live `war.units` array).
+
+### Morale collapse — garrisons rout too (Phase 20)
+
+`org` is the morale stat (0–100; the client renders it as a bar above HP).
+Field units still rout below `ROUT_ORG` (25). Garrisons used to be exempt
+entirely (dug in = infinitely stubborn); now a garrison routs once its
+morale FULLY collapses — `GARRISON_ROUT_ORG` (5) — so it holds far past a
+field unit's breaking point but is not unbreakable. Routed DEFENDERS also
+now retreat, recover org and rally exactly like routed attackers always
+have (mirrored branch at the top of `stepMovement`'s defender arm; a speed-0
+garrison scatters at `DEF_MOVE_SPEED × 0.8`): without it, a morale-broken
+garrison would stand frozen in the line, still soaking and dealing damage,
+and never regain organisation (the attacker-only org regen in `stepCombat`
+never covered defenders).
+
+## Explicit attack orders — chase a unit, not a point (Phase 20)
+
+The third order shape accepted by `applyOrders` (and `POST /api/war/command`):
+`{ unitId, attackId: <enemy unit id> }`. Precedence when several are present:
+`path > attackId > dest` (in practice an order carries exactly one).
+
+- **Validation** (engine-side, the route only pre-filters
+  `typeof attackId === 'string'`): the target must exist, be `isLive`, and
+  sit on the OPPOSITE side; an invalid target drops the order silently, the
+  same as every other malformed-order case.
+- On accept: `clearDest(u)`, `u.attackId = target.id`, state `'moving'`
+  (unless routed), plus the usual `orderedBy:'player'`/`playerHoldUntil`
+  bookkeeping (a defender with no speed gets `DEF_MOVE_SPEED`, same as a
+  move order).
+- **`stepChase`** runs in `stepMovement` before normal dest handling for
+  both sides: target gone/dead → `attackId` cleared, unit holds; any live
+  enemy within `COLLIDE_ENEMY` → `'fighting'` (the SAME collision rule as
+  normal movement, so a chase can't walk through a different enemy standing
+  in the way); otherwise advance straight toward the target's CURRENT
+  position at base speed. Routed units ignore their attack order until they
+  rally (the order survives on the unit).
+- **Accepted rough edge:** the chase is a straight line — no per-tick
+  Dijkstra re-plan toward a moving target (a full path recompute per chasing
+  unit per tick would swamp the tick budget; same spirit as the
+  computed-once transport routes above).
+- `setDest`/`setManualPath`/`clearDest` all clear `attackId` — any plain
+  move or drawn path cancels the chase, including the AI reassigning an
+  attacker unit once its player-hold expires.
+- **Client**: right-clicking an ENEMY soldier with a selection issues attack
+  orders for the whole selection (`_hitEnemyAt` hit-tests at the marker's
+  fixed-world radius, so "did I click the soldier" agrees with what's drawn).
+  Chasing units draw a red dashed arrow to their target; the target gets a
+  pulsing red ring. Applied optimistically ONCE, deliberately NOT via the
+  order outbox: the outbox's "confirmed?" check compares `o.dest`, but a
+  chase has no stable point to compare — worst case is one tick of visual
+  lag, not a stuck order.
+
+## Supply corridors & resupply (Phase 20)
+
+Units connected to their side's supply source through friendly territory
+slowly heal; cut-off units don't (no extra damage — being unable to heal is
+the punishment). All engine-side (`stepSupply`), so client prediction tracks
+it tick-for-tick.
+
+- **Attacker corridor**: `war.supplyAnchor` is minted once at `startWar` —
+  the landing objective's pos for a naval scenario, the staging-box centre
+  for a `land: true` one. Each tick, att-held cells within 2 cells
+  (Chebyshev) of the anchor seed an 8-neighbour BFS over att-held cells in
+  `war.cells`; an attacker unit is in supply iff its cell (or any
+  8-neighbour — see below) is in the reached set. Captured ground that got
+  pinched off from the beachhead by a defender recapture is out of supply
+  even though it's still att-held.
+- **Defender corridor**: defender-controlled land = every land cell (from
+  `grid.provinceCells`) NOT currently att-held; BFS from the capital's cell
+  (fallback: first city; no cities at all → all defenders supplied). A
+  defender inside the attacker's zone or in a cut-off pocket is unsupplied.
+- **Neighbour tolerance**: a unit counts as supplied when its own cell OR
+  any 8-neighbour is in the reached set — a unit at the coastline can stand
+  on a cell whose CENTRE falls in the sea (in neither side's cell set at
+  all); without the tolerance a garrison in a harbour city could read
+  permanently cut off.
+- **Healing**: a supplied, live, non-embarked unit not currently `fighting`
+  heals `SUPPLY_HEAL_FRAC` (0.004) × `maxStrength` per tick, capped at
+  `maxStrength`. Embarked units always read supplied (the fleet feeds them).
+- **Determinism**: fixed neighbour-offset order, array-based queue, seeds
+  built by iterating `war.cells` (insertion-ordered, part of state — the
+  same guarantee `stepTerritory` already leans on).
+- **Legacy docs**: no `supplyAnchor` and no landing objective → every
+  attacker unit reads supplied (the corridor can't be anchored); `supplied`
+  is additive — no migration needed.
+- **Client**: cut-off units get a dashed amber outline, a "⚠" corner glyph,
+  a "CUT OFF" line in the tooltip and the unit info card.
 
 ## GM global tuning (Phase 19) — `war.mods`
 
@@ -378,7 +476,7 @@ province, west of the Valksland landmass), lands near Cape Valgos
 playtesting at 8× speed) to reach the capital in single-digit minutes of
 real 1× time and finish the whole campaign in roughly 15–30 minutes.
 
-Two more scenarios ship alongside it:
+Six more scenarios ship alongside it:
 
 - **`delcasia_invasion`** ("The Kordi Incursion") — Del' Casia (`for_delcasia`,
   the southern land-border neighbour) crosses the frontier south of Kordi
@@ -392,6 +490,27 @@ Two more scenarios ship alongside it:
   north of Port Kradon (between the Mazon coast and Arcasia's north-west) and
   drives inland through Grazi province (`city_kradon` → `city_kradesh` →
   control `prov_grazi`) instead of toward the capital.
+- **`madrosia_invasion`** ("The Mezdov Landings") — Madrosia
+  (`for_madrosia`) lands a 12-unit amphibious force on Mezdov province's
+  western seaboard (staging box verified open sea against the
+  map-geometry polygons): land at `city_mezdov` → seize it → control
+  `prov_mezdov`.
+- **`solme_invasion`** ("The Solme Border Raid") — Solme (`for_solme`, the
+  south-western land neighbour), `land: true`, a fast 5-unit raid across the
+  Kordi frontier: seize `city_surat` → control `prov_kordi`. Tighter tuning
+  (`consolidateFrac` 0.30 / `collapseFrac` 0.10) so it folds quickly once
+  its momentum breaks.
+- **`mazon_invasion`** ("The Port Kradon Offensive") — Mazon (`for_mazon`,
+  the island state off the north-west) stages in the open water west of
+  Port Kradon and works through Grazi: land at `city_kradon` → seize it →
+  seize `city_kradesh` → control `prov_grazi`.
+- **`aldonesia_invasion`** ("The Aldonesian Offensive") — Aldonesia
+  (`for_aldonesia`) is an ARCHIPELAGO with no land border, so despite being
+  a neighbour this is a NAVAL scenario (a `land: true` version would march
+  units across the Strait of Casa): stage in verified open sea south-west
+  of Mezdov, land at `city_mezdov` (the coastline reaches within ~100px of
+  the city), seize it, then drive east to `city_surat` and control
+  `prov_kordi`.
 
 ### Land invasions (`scenario.land: true`)
 
@@ -435,9 +554,11 @@ client only sends orders; `server/war.js` validates and applies them.
   | Gesture | Action |
   |---|---|
   | Right-click | Move order for the current selection (single unit goes to the point; multiple spread in a small ring) |
+  | Right-click on an enemy soldier | **Attack order** — every selected unit chases that unit (`{unitId, attackId}` — see "Explicit attack orders" above); hit-tested at the marker's fixed-world radius before falling back to a plain move |
   | Right-drag | **Custom path** — draws a freehand polyline for the current selection to follow at base speed, ignoring road/rail routing (see "Manual paths") |
   | Ctrl+left-drag | Formation — distributes the selection along the drawn line, nearest-in-order (the gesture right-drag used to trigger) |
-  | Left-click on an own live soldier | Select it (replaces the selection) — per-marker listeners, enemy/dead units aren't clickable |
+  | Left-click on an own live soldier | Select it (replaces the selection) — per-marker listeners; dead units aren't clickable |
+  | Left-click on an ENEMY live soldier | Inspect it — opens the unit info card (`War._inspect`; no effect on the command selection). Crosshair cursor while a friendly selection exists doubles as the attack affordance |
   | Shift+left-click on a soldier | Add/toggle it in the selection |
   | Shift+left-drag on ground | Box-select all live units of the commandable side inside the marquee |
   | Plain left-click on ground | Deselect (the dossier handlers stand down on the war layer, so the click reaches the svg-level handler) |
@@ -450,13 +571,15 @@ client only sends orders; `server/war.js` validates and applies them.
   polyline (points kept ≥25px apart) with a live dashed preview, and on
   release with ≥2 points issues a path order for every selected unit.
 - **Command routes**:
-  - `POST /api/war/command { side?, orders:[{unitId,dest:[x,y]}]|[{unitId,path:[[x,y],…]}] }`
+  - `POST /api/war/command { side?, orders:[{unitId,dest:[x,y]}]|[{unitId,path:[[x,y],…]}]|[{unitId,attackId}] }`
     — any logged-in operator; validates `orders` (array, cap 64; each `dest`
-    a finite `[x,y]` inside the 3840×2160 grid, or each `path` an array of
-    2-200 such points), then `war.commandUnits` → `engine.applyOrders`. An
-    order carries either `dest` (plain move, road/rail routing applies) or
-    `path` (freehand — see "Manual paths"), never both meaningfully (`path`
-    wins if present).
+    a finite `[x,y]` inside the 3840×2160 grid, each `path` an array of
+    2-200 such points, or each `attackId` a string — the engine re-validates
+    the target itself), then `war.commandUnits` → `engine.applyOrders`. An
+    order carries `dest` (plain move, road/rail routing applies), `path`
+    (freehand — see "Manual paths"), or `attackId` (chase — see "Explicit
+    attack orders"); precedence `path > attackId > dest` if several are
+    present.
   - `POST /api/war/bomb { side?, pos:[x,y] }` — same auth/side rule;
     `war.dropBomb`; ORDERS an airstrike (see "Airstrikes" below) and returns
     `{ ok, cooldownUntil, strike }` — `strike` is the created
@@ -553,7 +676,7 @@ else in this file is:
 `war.airstrikes` is additive/absent-safe: the engine treats a missing array
 as `[]`, no migration was needed.
 
-### Client — plane, screenshake, flash, shockwave (all cosmetic)
+### Client — plane, fireball, shockwave (all cosmetic)
 
 Everything from here down is client-only dressing in `public/js/war.js`
 around the moment `stepAirstrikes` has already decided — none of it feeds
@@ -573,13 +696,34 @@ clients:
   rebuild for free.
 - **Impact FX** — triggered exactly once per strike, the first render where
   `strike.done` reads true (`War._checkAirstrikeLandings`, keyed by strike
-  id so it's idempotent across rebases): a brief decaying-oscillation
-  translate on `#map-wrap` (`.map-shake` CSS class+keyframes — deliberately
-  NOT on the SVG's own pan/zoom transform group, so it layers on top instead
-  of fighting it), a full-viewport white flash overlay
-  (`#war-flash-overlay`, opacity spike → fade), and an expanding shockwave
-  ring at the impact point (SVG circle, radius 0 → `BOMB_RADIUS × 1.6`,
-  fading, recreated each render like the existing battle-flash rings).
+  id so it's idempotent across rebases). Modelled frame-by-frame on
+  neal.fun's Asteroid Launcher impact (from a 24fps reference capture) —
+  soft light only, no debris lines, no turbulence displacement
+  (`renderExplosions`/`_updateExplosion`, `EXPLOSION_LIFE_MS` 2900ms, all
+  at the impact point):
+  1. a huge soft warm-white **bloom** (pure radial-gradient falloff, no
+     hard edges) washing over ~3× `BOMB_RADIUS` within ~450ms, holding to
+     ~650ms, bled away by ~1600ms — plus a flattened horizontal **lens
+     streak** (an ellipse reusing the same gradient in objectBoundingBox
+     units) for the anamorphic-flare look;
+  2. a bright **core ball** swelling to ~0.55× `BOMB_RADIUS` by 250ms and
+     then shrinking steadily into a small warm **ember** that lingers at
+     ground zero until the very end;
+  3. a **soap-bubble shockwave** detaching at ~480ms and expanding slowly
+     (ease-out) to ~2.6× `BOMB_RADIUS` by ~2750ms — a wide
+     `feGaussianBlur`-softened band plus a thinner bright rim, never a
+     crisp stroke.
+  Nodes are recreated each render (the whole war layer is torn down every
+  render, same as the hatch pattern), with timing carried across rebuilds
+  via `_strikeImpactAt` and per-frame animation driven by the shared rAF
+  loop keyed off `Date.now()` (matching `_strikeImpactAt`'s epoch — NOT the
+  rAF `performance.now()` timestamp, a different clock entirely).
+  **Replay guard:** the `_strikeImpactAt` stamp is kept until the strike
+  leaves `war.airstrikes` entirely (the engine prunes it
+  `AIRSTRIKE_PRUNE_TICKS` after impact) — deleting it when the FX ends (the
+  original code) let `_checkAirstrikeLandings` re-stamp the still-`done`
+  strike on the next render, replaying the explosion every
+  `EXPLOSION_LIFE_MS` until the prune caught up.
 - **UI language** — the toolbar button reads "✈ Call Airstrike"; armed:
   "Airstrike armed — click the target"; while a strike is inbound, a
   separate countdown chip reads "✈ Strike inbound — Ts"; cooldown reads "Air
@@ -817,9 +961,29 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
   - **Battle flashes** — a fading ring at each recent `war.events` position.
   - **Craters** — dark scorch circles at each `war.craters` entry, drawn under
     the territory/unit layers.
-  - **Airstrike planes and impact FX** — see "Client — plane, screenshake,
-    flash, shockwave" above: a cosmetic plane sprite per in-flight strike,
-    plus a one-shot screenshake/flash/shockwave the instant a strike lands.
+  - **Airstrike planes and impact FX** — see "Client — plane, fireball,
+    shockwave" above: a cosmetic plane sprite per in-flight strike, plus a
+    one-shot fireball/shockwave/debris explosion the instant a strike lands.
+  - **Attack arrows & target rings** — a red dashed line from every live
+    unit with an `attackId` to its target, plus a pulsing red ring on the
+    target (drawn for both sides — an ongoing attack is visible through
+    combat itself, unlike plain movement intent).
+  - **Morale bars** — a 3px steel-blue bar above each HP bar showing `org`
+    (0–100); turns red below the rout threshold (25) and pulses while the
+    unit is routed.
+  - **Damage feedback** — `renderUnits` tracks each unit's strength between
+    passes (`_lastStrength`); a drop stamps `_hitAt` and the marker plays a
+    ~450ms jitter + red flash. The effect lives on an INNER `<g
+    class="war-unit-inner">` wrapping the box+glyph, because the outer
+    group's transform is rewritten every rAF frame by the tween loop — CSS
+    animating the outer transform would fight it. Fighting units also blink
+    small muzzle-flash ticks.
+  - **Unit info card** — `#war-unit-card`, top-right of the map, shown while
+    exactly one own unit is selected or an enemy unit is inspected
+    (`War._inspect`): name, kind, side (+ ally contingent), HP and morale
+    with mini bars, state, speed/atk, garrison tag and supply status.
+    Re-rendered with the toolbar's 1s timer, reading the unit fresh from the
+    predicted war so a unit that dies degrades to a "destroyed" note.
   - **War toolbar** — a small floating control surface, present only while
     `W.layer === 'war'`: the gesture hint line, an arm/cooldown "✈ Call
     Airstrike" button (plus a "✈ Strike inbound — Ts" countdown chip while

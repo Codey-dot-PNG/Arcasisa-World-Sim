@@ -63,6 +63,8 @@
   const BOMB_RADIUS = 95;             // px — airstrike blast radius (also read by the client for shockwave FX sizing)
   const BOMB_UNIT_DMG = 90;           // max strength damage at the blast centre (falls off to 0 at BOMB_RADIUS)
   const AIRSTRIKE_PRUNE_TICKS = 30;   // a done strike is dropped from war.airstrikes this many ticks after impact
+  const SUPPLY_HEAL_FRAC = 0.004;     // fraction of maxStrength healed per tick for a unit reached by its side's supply flood-fill
+  const GARRISON_ROUT_ORG = 5;        // org threshold below which even a dug-in GARRISON routs (non-garrison defenders/attackers still use ROUT_ORG)
 
   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -355,6 +357,7 @@
     const war = db.war;
     u.dest = clampToWorld(war, dest);
     u.manualPath = false; // a normal order always restores road/rail routing over any earlier freehand path
+    u.attackId = null; // a plain move order cancels any in-progress chase (Feature: explicit attack orders)
     const path = computePath(db, u.pos, u.dest, baseSpeed || u.speed || 1);
     if (path && path.length) { u.path = path; u.pathIdx = 0; }
     else { u.path = null; u.pathIdx = 0; }
@@ -373,9 +376,10 @@
     u.pathIdx = 0;
     u.dest = pts[pts.length - 1];
     u.manualPath = true;
+    u.attackId = null; // a hand-drawn path also cancels any in-progress chase
   }
   function clearDest(u) {
-    u.dest = null; u.path = null; u.pathIdx = 0; u.manualPath = false;
+    u.dest = null; u.path = null; u.pathIdx = 0; u.manualPath = false; u.attackId = null;
   }
   function stepAlongPath(war, u, baseSpeed) {
     const path = u.path;
@@ -488,10 +492,59 @@
     }
     return { unit: nearest, dist: nd };
   }
+  // ---------- explicit attack (chase) orders ----------
+  // Straight-line chase toward a specific enemy unit rather than a fixed
+  // point. No per-tick Dijkstra re-plan toward the target's CURRENT position
+  // — that would mean a full path recompute every tick for every chasing
+  // unit, far more expensive than the transport graph's "compute once at
+  // order time" cost; an accepted rough edge, same spirit as the road-cut
+  // note above stepAlongPath. Called from stepMovement BEFORE the normal
+  // dest-handling for both the attacker and defender branches, but only
+  // reached for units that are live and past the embarked/routed `continue`s
+  // in each branch, so a chasing unit that dies, embarks, or routs falls out
+  // of this automatically. Returns true when the chase drove this unit's
+  // movement for the tick (caller should skip normal dest handling); false
+  // when there was no attackId, or the target is gone (in which case the
+  // unit is dropped back to 'holding' and normal dest handling — which will
+  // find no dest either — takes over).
+  function stepChase(war, u) {
+    if (!u.attackId) return false;
+    if (u.state === 'routed') return false; // a broken unit ignores its attack order until it rallies (the order survives on the unit)
+    const target = war.units.find(x => x.id === u.attackId);
+    if (!target || !isLive(target)) { u.attackId = null; u.state = 'holding'; return false; }
+    // Same collision rule as normal dest movement: ANY live enemy inside
+    // COLLIDE_ENEMY stops the advance and starts the fight — otherwise a
+    // chase could walk straight through a different enemy standing between
+    // the unit and its ordered target.
+    const near = nearestLiveEnemy(war, u);
+    if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; return true; }
+    if (dist(u.pos, target.pos) <= COLLIDE_ENEMY) { u.state = 'fighting'; }
+    else { advanceToward(war, u, target.pos, u.speed || DEF_MOVE_SPEED); u.state = 'moving'; }
+    return true;
+  }
   function stepMovement(db, war, ctx, rng) {
     for (const u of war.units) {
       if (!isLive(u)) continue;
       if (u.side === 'def') {
+        // Routed defenders retreat, recover and rally exactly like routed
+        // attackers do below — without this, a morale-broken garrison (now
+        // possible via GARRISON_ROUT_ORG) would stand frozen in the line,
+        // still soaking and dealing damage, and never regain organisation
+        // (the attacker-side org regen in stepCombat doesn't cover it).
+        if (u.state === 'routed') {
+          const near = nearestLiveEnemy(war, u);
+          if (near.unit) {
+            const dx = u.pos[0] - near.unit.pos[0], dy = u.pos[1] - near.unit.pos[1];
+            const m = Math.hypot(dx, dy) || 1;
+            // Garrisons spawn speed 0 — a broken one still scatters at the
+            // ordered-defender pace rather than standing in the fire.
+            advanceToward(war, u, [u.pos[0] + dx / m * 100, u.pos[1] + dy / m * 100], (u.speed || DEF_MOVE_SPEED) * 0.8);
+          }
+          u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
+          if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+          continue;
+        }
+        if (stepChase(war, u)) continue;
         if (!u.dest) continue;
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
@@ -536,6 +589,7 @@
         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
         continue;
       }
+      if (stepChase(war, u)) continue;
       if (u.dest) {
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
@@ -588,6 +642,7 @@
     // `mods` (every war predating this change) falls back to 1× exactly.
     const dmgMod = (war.mods && war.mods.dmg) || 1;
     let anyFight = false;
+    const engagedDefs = new Set(); // defenders an attacker actually fought this tick — the rest stand down below
     for (const a of atts) {
       let nearest = null, nd = Infinity;
       for (const d of defs) { const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
@@ -605,13 +660,33 @@
       a.org = clamp(a.org - ORG_DRAIN, 0, 100);
       d.org = clamp(d.org - ORG_DRAIN * 0.7, 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
-      if (d.org < ROUT_ORG && !d.garrison && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
+      // Garrisons used to never rout (dug in = infinitely stubborn); now a
+      // garrison's morale can still fully collapse, just at a much lower
+      // threshold (GARRISON_ROUT_ORG) than a field unit's ROUT_ORG — a
+      // garrison keeps fighting well past the point a mobile unit would break,
+      // but total organisational collapse still routs it.
+      const dRoutOrg = d.garrison ? GARRISON_ROUT_ORG : ROUT_ORG;
+      if (d.org < dRoutOrg && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
       if (a.strength <= 0) killUnit(war, a);
       if (d.strength <= 0) killUnit(war, d);
+      engagedDefs.add(d.id);
+    }
+    // Defenders whose state says 'fighting' but who had no attacker in range
+    // this tick stand down. Attackers get the same reset inline in the loop
+    // above (the `nd > COMBAT_RANGE` branch), but nothing ever visited a
+    // dest-less defender after its attacker died/left — it stayed 'fighting'
+    // forever, which since Phase 20 also silently blocked its supply healing
+    // (stepSupply skips units in 'fighting').
+    for (const d of defs) {
+      if (isLive(d) && d.state === 'fighting' && !engagedDefs.has(d.id)) d.state = d.dest ? 'moving' : 'holding';
     }
     pruneCorpses(war);
     if (!anyFight) {
-      for (const u of war.units) if (isLive(u) && u.state !== 'routed' && u.side === 'att') u.org = clamp(u.org + ORG_REGEN, 0, 100);
+      // Both sides recover morale while the whole front is quiet — the regen
+      // used to be attacker-only, which left a garrison that had fought
+      // parked at low org forever (and, with garrison routs now possible,
+      // one org-drain away from breaking on the next engagement).
+      for (const u of war.units) if (isLive(u) && u.state !== 'routed') u.org = clamp(u.org + ORG_REGEN, 0, 100);
     }
   }
 
@@ -675,6 +750,114 @@
           if (!pid) continue;
           war.cells[key] = { o: 'att', p: 1, pid };
         }
+      }
+    }
+  }
+
+  // ---------- supply corridors + resupply healing ----------
+  // Fixed 8-neighbour offset order — BFS visits neighbours in this exact
+  // order every time, which combined with the deterministic seed set below
+  // (built by iterating war.cells, an insertion-ordered object — the same
+  // guarantee stepTerritory/recomputeProvinceControl already lean on) makes
+  // the flood fill itself deterministic even though it never needs to be
+  // replayed bit-for-bit (only membership in the resulting set matters).
+  const SUPPLY_NEIGHBOR_OFFSETS = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+  // Generic array-queue BFS: `seeds` (cell-key strings) are ALWAYS included in
+  // the result regardless of `held(key)`; expansion to a neighbour requires
+  // held(neighbourKey) to be true. Shared by both sides below.
+  function floodFillCells(seeds, held) {
+    const visited = new Set();
+    const queue = [];
+    for (const key of seeds) { if (!visited.has(key)) { visited.add(key); queue.push(key); } }
+    let qi = 0;
+    while (qi < queue.length) {
+      const key = queue[qi++];
+      const comma = key.indexOf(',');
+      const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
+      for (const off of SUPPLY_NEIGHBOR_OFFSETS) {
+        const nkey = cellKey(cx + off[0], cy + off[1]);
+        if (visited.has(nkey)) continue;
+        if (!held(nkey)) continue;
+        visited.add(nkey);
+        queue.push(nkey);
+      }
+    }
+    return visited;
+  }
+  // war.supplyAnchor is minted once at startWar (landing objective's pos for
+  // a naval scenario, staging-box centre for land:true — see server/war.js).
+  // Falls back to a live `landing` objective's pos for a war doc that predates
+  // this field; returns null (caller then treats every attacker unit as
+  // supplied) only for a legacy doc with neither.
+  function attackerSupplyAnchorCell(war) {
+    let anchor = war.supplyAnchor;
+    if (!anchor) {
+      const landingObj = (war.objectives || []).find(o => o.kind === 'landing');
+      anchor = landingObj ? landingObj.pos : null;
+    }
+    if (!anchor) return null;
+    const cs = war.grid.cell;
+    return [Math.floor(anchor[0] / cs), Math.floor(anchor[1] / cs)];
+  }
+  function stepSupply(db, war) {
+    const cs = war.grid.cell;
+
+    // Attacker: seed with every att-held cell within 2 cells (Chebyshev) of
+    // the anchor cell, flood-fill outward staying on att-held cells.
+    let attSupply = null;
+    const anchorCell = attackerSupplyAnchorCell(war);
+    if (anchorCell) {
+      const seeds = [];
+      for (const key in war.cells) {
+        const c = war.cells[key];
+        if (c.o !== 'att') continue;
+        const comma = key.indexOf(',');
+        const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
+        if (Math.max(Math.abs(cx - anchorCell[0]), Math.abs(cy - anchorCell[1])) <= 2) seeds.push(key);
+      }
+      attSupply = floodFillCells(seeds, (k) => { const c = war.cells[k]; return !!c && c.o === 'att'; });
+    }
+
+    // Defender: every LAND cell (built fresh each call — a few thousand
+    // entries, cheap relative to the rest of a tick, see docs/WAR.md) minus
+    // whatever the attacker currently holds is "defender-controlled land";
+    // flood-fill that from the capital's cell so a cut-off pocket beyond
+    // attacker-held ground reads as unsupplied even though no unit sits on it.
+    let defSupply = null;
+    const capital = (db.cities || []).find(c => c.isCapital && c.pos) || (db.cities || []).find(c => c.pos);
+    if (capital && war.grid && war.grid.provinceCells) {
+      const landCells = new Set();
+      for (const pid in war.grid.provinceCells) {
+        for (const cell of war.grid.provinceCells[pid]) landCells.add(cellKey(cell[0], cell[1]));
+      }
+      const defHeld = (k) => landCells.has(k) && (!war.cells[k] || war.cells[k].o !== 'att');
+      const capCell = cellKey(Math.floor(capital.pos[0] / cs), Math.floor(capital.pos[1] / cs));
+      defSupply = floodFillCells([capCell], defHeld);
+    }
+
+    // A unit counts as in-supply when its own cell OR any 8-neighbour is in
+    // the supplied set — a unit standing at the coastline can sit on a cell
+    // whose CENTRE falls in the sea (so it's in neither side's cell set at
+    // all); without the neighbour tolerance a garrison in a harbour city
+    // could read permanently cut off.
+    const suppliedNear = (set, cx, cy) => {
+      if (set.has(cellKey(cx, cy))) return true;
+      for (const off of SUPPLY_NEIGHBOR_OFFSETS) if (set.has(cellKey(cx + off[0], cy + off[1]))) return true;
+      return false;
+    };
+    for (const u of war.units) {
+      if (!isLive(u)) continue;
+      if (u.state === 'embarked') { u.supplied = true; continue; }
+      const cx = Math.floor(u.pos[0] / cs), cy = Math.floor(u.pos[1] / cs);
+      if (u.side === 'att') {
+        // Membership in attSupply already implies att-held (seeds and every
+        // expansion step require it), so no separate war.cells check needed.
+        u.supplied = anchorCell ? suppliedNear(attSupply, cx, cy) : true; // legacy war doc with no anchor at all — see attackerSupplyAnchorCell
+      } else {
+        u.supplied = defSupply ? suppliedNear(defSupply, cx, cy) : true; // no cities at all (legacy/malformed doc) — treat as supplied
+      }
+      if (u.supplied && u.state !== 'fighting') {
+        u.strength = round1(Math.min(u.maxStrength || u.strength, u.strength + (u.maxStrength || u.strength) * SUPPLY_HEAL_FRAC));
       }
     }
   }
@@ -745,9 +928,11 @@
   }
 
   // ---------- player orders (pure — shared by the server route and optimistic client apply) ----------
-  // An order carries EITHER `dest` (plain move — road/rail routing applies)
-  // OR `path` (a player-drawn freehand polyline, ≥2 points — see setManualPath
-  // and docs/WAR.md "Manual paths"). `path` wins if both are present.
+  // An order carries `dest` (plain move — road/rail routing applies), `path`
+  // (a player-drawn freehand polyline, ≥2 points — see setManualPath and
+  // docs/WAR.md "Manual paths"), or `attackId` (chase a specific enemy unit —
+  // see stepChase above). Precedence when more than one is present: path >
+  // attackId > dest; in practice an order only ever carries one of the three.
   function applyOrders(db, side, orders) {
     const war = db.war;
     if (!war || !Array.isArray(orders)) return;
@@ -756,12 +941,25 @@
       const hasPath = Array.isArray(o.path) && o.path.length >= 2 &&
         o.path.every(p => Array.isArray(p) && p.length === 2 && Number.isFinite(Number(p[0])) && Number.isFinite(Number(p[1])));
       const hasDest = Array.isArray(o.dest) && o.dest.length === 2 && Number.isFinite(Number(o.dest[0])) && Number.isFinite(Number(o.dest[1]));
-      if (!hasPath && !hasDest) continue;
+      const hasAttack = typeof o.attackId === 'string' && o.attackId;
+      if (!hasPath && !hasDest && !hasAttack) continue;
       const u = war.units.find(x => x.id === o.unitId && x.side === side);
       if (!u || !isLive(u)) continue;
       if (u.side === 'def' && !u.speed) u.speed = DEF_MOVE_SPEED;
-      if (hasPath) setManualPath(db, u, o.path);
-      else setDest(db, u, [Number(o.dest[0]), Number(o.dest[1])], u.speed);
+      if (hasPath) {
+        setManualPath(db, u, o.path);
+      } else if (hasAttack) {
+        // Target must exist, be alive, and be on the OPPOSITE side — an
+        // invalid attackId drops the whole order silently (same pattern as
+        // every other malformed-order case in this function).
+        const target = war.units.find(x => x.id === o.attackId);
+        if (!target || !isLive(target) || target.side === u.side) continue;
+        clearDest(u);
+        u.attackId = target.id;
+        if (u.state !== 'routed') u.state = 'moving';
+      } else {
+        setDest(db, u, [Number(o.dest[0]), Number(o.dest[1])], u.speed);
+      }
       u.orderedBy = 'player';
       u.playerHoldUntil = war.tick + PLAYER_HOLD_TICKS;
     }
@@ -793,6 +991,7 @@
     stepAirstrikes(db, war, ctx);
     stepTerritory(db, war);
     recomputeProvinceControl(war);
+    stepSupply(db, war);
     stepObjectives(db, war, ctx);
     checkVictory(db, war, ctx);
     return true;

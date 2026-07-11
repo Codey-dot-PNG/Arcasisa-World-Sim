@@ -53,7 +53,17 @@ function warMarkerScale(k) { return Math.max(1, WAR_FIXED_MODE_K / Math.max(0.01
 // plane gets from `from` to `pos` is cosmetic and lives here).
 const AIRSTRIKE_FAR_OFFSET = 220;  // px — how far out the plane climbs before turning onto the attack run
 const AIRSTRIKE_EGRESS_TICKS = 3;  // ticks after impact the plane is still visible egressing/fading
-const AIRSTRIKE_SHOCKWAVE_MS = 650; // ms — expanding-ring FX lifetime
+// Total lifetime of the impact FX. Modelled frame-by-frame on neal.fun's
+// Asteroid Launcher impact (~2.9s at 24fps in the reference capture): bloom
+// wash 0-650ms, shockwave bubble 480-2750ms, ember lingering to the end.
+const EXPLOSION_LIFE_MS = 2900;
+
+// Feature: unit damage feedback — how long the hit-jitter/flash plays after a
+// live unit's strength is observed to drop between renderUnits passes.
+const WAR_HIT_FX_MS = 450;
+// Matches the engine's rout threshold (war-engine.js: org < 25 → routed) —
+// used purely for the client's morale-bar/info-card color, not gameplay.
+const WAR_ROUT_ORG = 25;
 
 const War = {
   _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, dur, curPos:[x,y], node }
@@ -63,14 +73,19 @@ const War = {
 
   // ---- cinematic airstrikes (Feature: two-phase bombing) ----
   _airstrikeAnim: {}, // strikeId -> { node, strike, timing:{tick,lastTick,tickMs,speed} } — plane marker, position is a pure function of predicted tick, no tween needed
-  _shockwaveAnim: {}, // strikeId -> { node, t0, life } — expanding impact ring, same recreate-each-render pattern as _flashAnim
-  _strikeImpactAt: {}, // strikeId -> epoch ms of the first render where we observed strike.done === true (drives the one-shot shake/flash trigger)
+  _explosionAnim: {}, // strikeId -> { node, streak, bloom, ring, rim, core, t0, life, bombR } — the soft bloom/shockwave/ember impact FX, same recreate-each-render pattern as _flashAnim
+  _strikeImpactAt: {}, // strikeId -> epoch ms of the first render where we observed strike.done === true (drives the one-shot explosion FX trigger)
+
+  // ---- unit damage feedback (Feature: hit jitter/flash + morale) ----
+  _lastStrength: {}, // unitId -> strength as of the last renderUnits pass, to detect a drop between renders
+  _hitAt: {},        // unitId -> epoch ms the last strength drop was observed; drives war-unit-hit while recent
 
   // ---- interactive War layer input state (Phase 16) ----
   _sel: new Set(),   // selected unit ids (commandable side only)
   _input: null,      // current pointer gesture: {mode:'box'|'formation', start:[x,y], active, node?}
   _bombArmed: false,
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
+  _inspect: null,    // Feature: unit info card — enemy unit id under inspection (own-side uses _sel instead)
 
   // ---- GM unit spawner (Feature: mid-war reinforcements) ----
   _spawnArmed: false,        // "arm placement" mode: next war-layer left-click places the spawn
@@ -465,7 +480,12 @@ const War = {
       if (this._sel.size) {
         if (!this.commandable()) { toast('The war has concluded — no orders can be issued.', true); }
         else if (Math.hypot(world[0] - start[0], world[1] - start[1]) < this._pathClickThreshold()) {
-          this._issueMove(world);
+          // Task 5: a plain right-click (not a drag) with a selection first
+          // hit-tests against enemy live units — clicking an enemy soldier
+          // issues an attack/chase order instead of a plain move.
+          const target = this._hitEnemyAt(world);
+          if (target) this._issueAttack(target.id);
+          else this._issueMove(world);
         } else {
           const pts = this._input.points.slice();
           const last = pts[pts.length - 1];
@@ -481,7 +501,10 @@ const War = {
   // dossier select() handlers stand down on the war layer): clear selection.
   onMapClick(e) {
     if (e.button !== 0) return;
-    if (this._sel.size) { this._sel.clear(); if (GameMap.render) GameMap.render(); }
+    let changed = false;
+    if (this._sel.size) { this._sel.clear(); changed = true; }
+    if (this._inspect) { this._inspect = null; changed = true; } // Feature: unit info card — ground click clears inspection too
+    if (changed && GameMap.render) GameMap.render();
   },
 
   // Left-click a commandable soldier: replace the selection; shift+click
@@ -500,8 +523,8 @@ const War = {
     this._keysBound = true;
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || W.layer !== 'war') return;
-      const had = this._sel.size || this._bombArmed || this._spawnArmed;
-      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null;
+      const had = this._sel.size || this._bombArmed || this._spawnArmed || this._inspect;
+      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null; this._inspect = null;
       if (had) { if (GameMap.render) GameMap.render(); this.renderToolbar(); }
     });
   },
@@ -598,6 +621,48 @@ const War = {
     const orders = ids.map(id => ({ unitId: id, path }));
     const side = this.commandableSide();
     if (window.WarEngine) this._optimistic(side, orders); // arrows + movement start NOW; the POST confirms
+    try { await POST('/api/war/command', { side, orders }); }
+    catch (e) { toast(e.message, true); }
+  },
+  // Task 5: hit-test a world point against ENEMY live units of the predicted
+  // war, using the same fixed-world symbol math the marker hitbox itself uses
+  // (30 world px base radius, counter-scaled below WAR_FIXED_MODE_K) so "did
+  // I click the enemy soldier" agrees with what's actually drawn on screen.
+  _hitEnemyAt(pt) {
+    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    if (!war) return null;
+    const side = this.commandableSide();
+    const k = GameMap.view ? GameMap.view.k : 1;
+    const threshold = 30 * warMarkerScale(k);
+    let best = null, bestD = threshold;
+    for (const u of war.units) {
+      if (u.side === side || u.dead || u.state === 'dead' || !(u.strength > 0)) continue;
+      const d = Math.hypot(u.pos[0] - pt[0], u.pos[1] - pt[1]);
+      if (d <= bestD) { best = u; bestD = d; }
+    }
+    return best;
+  },
+  // Explicit attack/chase order: every selected unit gets { unitId, attackId }
+  // (the shape server/war.js's commandUnits + the engine's applyOrders accept
+  // for a chase order — see docs/WAR.md "Explicit attack command"). Applied
+  // optimistically ONCE, not pushed onto the outbox like _issueMove/_issuePath:
+  // the outbox's "confirmed?" check reads o.dest, but a chasing unit's dest is
+  // engine-managed state that the engine itself keeps re-targeting every tick
+  // as the enemy moves — there's no stable point to compare against, so
+  // re-applying a stale order on every rebase would fight the engine's own
+  // tracking instead of just letting the next rebase/heartbeat reconcile it
+  // (worst case: one tick of visual lag before the arrow appears, not a stuck
+  // order).
+  async _issueAttack(targetId) {
+    const ids = [...this._sel];
+    if (!ids.length) return;
+    const orders = ids.map(id => ({ unitId: id, attackId: targetId }));
+    const side = this.commandableSide();
+    if (window.WarEngine) {
+      const w = this.predictedWar();
+      if (w) WarEngine.applyOrders(this._dbLike(w), side, orders);
+      this.refreshLayer(true);
+    }
     try { await POST('/api/war/command', { side, orders }); }
     catch (e) { toast(e.message, true); }
   },
@@ -701,18 +766,18 @@ const War = {
         any = true;
         this._updatePlanePose(e);
       }
-      // Impact shockwave rings — same recreate-each-render + rAF-driven fade
-      // as the battle-flash rings above.
-      for (const id in this._shockwaveAnim) {
-        const f = this._shockwaveAnim[id];
-        if (!f.node || !f.node.isConnected) { delete this._shockwaveAnim[id]; continue; }
+      // Impact explosion FX (fireball/shockwave/debris) — same recreate-
+      // each-render + rAF-driven animation as the battle-flash rings above,
+      // but keyed off Date.now() (matching _strikeImpactAt's epoch), NOT the
+      // rAF timestamp `now` (which is performance.now()-based — a different
+      // clock epoch entirely; mixing the two would make age wildly wrong).
+      for (const id in this._explosionAnim) {
+        const e = this._explosionAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._explosionAnim[id]; continue; }
         any = true;
-        const age = now - f.t0;
-        if (age > f.life) { delete this._shockwaveAnim[id]; continue; }
-        const k = age / f.life;
-        const maxR = ((window.WarEngine && WarEngine.BOMB_RADIUS) || 95) * 1.6;
-        f.node.setAttribute('r', String(maxR * k));
-        f.node.style.opacity = String(1 - k);
+        const age = Date.now() - e.t0;
+        if (age > e.life) { delete this._explosionAnim[id]; continue; }
+        this._updateExplosion(e, age);
       }
       this._raf = any ? requestAnimationFrame(step) : null;
     };
@@ -727,8 +792,10 @@ const War = {
     const war = (window.WarEngine && this.predictedWar()) || S().war;
     if (!war) {
       this._anim = {}; this._flashAnim = {};
-      this._airstrikeAnim = {}; this._shockwaveAnim = {}; this._strikeImpactAt = {};
-      this._removeToolbar(); this._stopRealtime(); this._pred = null; return;
+      this._airstrikeAnim = {}; this._explosionAnim = {}; this._strikeImpactAt = {};
+      this._lastStrength = {}; this._hitAt = {};
+      this._removeToolbar(); this._removeUnitCard(); this._inspect = null;
+      this._stopRealtime(); this._pred = null; return;
     }
     if (window.WarEngine) this._ensureRealtime();
     map.warLayer = document.createElementNS(NS, 'g');
@@ -738,14 +805,16 @@ const War = {
     this.renderCraters(map, mk, NS, war);
     this.renderTerritory(map, mk, NS, war);
     this.renderMoveArrows(map, mk, NS, war);
+    this.renderAttackArrows(map, mk, NS, war);
     this.renderUnits(map, mk, NS, war);
     this._checkAirstrikeLandings(war);
     this.renderAirstrikePlanes(map, mk, NS, war);
-    this.renderShockwaves(map, mk, NS, war);
+    this.renderExplosions(map, mk, NS, war);
     this.renderFlashes(map, mk, NS, war);
     this.ensureLoop();
     this.bindKeys();
-    if (W.layer === 'war') this.renderToolbar(); else this._removeToolbar();
+    if (W.layer === 'war') { this.renderToolbar(); this.renderUnitCard(); }
+    else { this._removeToolbar(); this._removeUnitCard(); }
   },
 
   // Dark scorch circles from recent bomb drops — drawn UNDER units/territory
@@ -855,6 +924,46 @@ const War = {
     }
   },
 
+  // Task 5 (Explicit attack command): a red dashed arrow from every LIVE unit
+  // chasing a target (u.attackId set, either by a player order or the AI/
+  // engine) to that target's current position — distinct from the amber move
+  // arrows above, drawn for BOTH sides (fog-of-war on intent only applies to
+  // plain movement; an ongoing attack is already visible via combat itself).
+  // `attackId` is absent until the engine agent's applyOrders wires it up —
+  // this loop is then simply a no-op, same "additive/absent-safe" contract as
+  // every other new war field.
+  renderAttackArrows(map, mk, NS, war) {
+    const defs = document.createElementNS(NS, 'defs');
+    map.warLayer.appendChild(defs);
+    const m = document.createElementNS(NS, 'marker');
+    m.setAttribute('id', 'war-attackhead');
+    m.setAttribute('viewBox', '0 0 10 10');
+    m.setAttribute('refX', '8'); m.setAttribute('refY', '5');
+    m.setAttribute('markerWidth', '5'); m.setAttribute('markerHeight', '5');
+    m.setAttribute('orient', 'auto-start-reverse');
+    const tip = document.createElementNS(NS, 'path');
+    tip.setAttribute('d', 'M0,0 L10,5 L0,10 z');
+    tip.setAttribute('class', 'war-attack-arrowhead');
+    m.appendChild(tip);
+    defs.appendChild(m);
+
+    for (const u of war.units) {
+      if (u.dead || u.state === 'dead' || !(u.strength > 0) || !u.attackId) continue;
+      const target = war.units.find(t => t.id === u.attackId);
+      if (!target || target.dead || target.state === 'dead' || !(target.strength > 0)) continue;
+      const anim = this._anim[u.id];
+      const from = anim && anim.curPos ? anim.curPos : u.pos;
+      const tAnim = this._anim[target.id];
+      const to = tAnim && tAnim.curPos ? tAnim.curPos : target.pos;
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', from[0]); line.setAttribute('y1', from[1]);
+      line.setAttribute('x2', to[0]); line.setAttribute('y2', to[1]);
+      line.setAttribute('class', 'war-attack-arrow');
+      line.setAttribute('marker-end', 'url(#war-attackhead)');
+      map.warLayer.appendChild(line);
+    }
+  },
+
   // NATO-ish rectangle markers, one per live unit. Position is animated by
   // the shared rAF loop (ensureLoop) — here we only decide the tween's `from`
   // (the last known interpolated position, so a mid-tween re-render never
@@ -864,16 +973,30 @@ const War = {
   // equals the visual symbol exactly); enemy and dead units get no handlers.
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
+    const seenIds = new Set(); // every unit id this pass, dead or alive — drives _lastStrength/_hitAt pruning
     const cmdSide = this.commandableSide();
     const canCommand = this.commandable();
     const scaleNow = warMarkerScale(map.view ? map.view.k : 1);
+    // Task 5: units currently being chased (attackId points at them) get a
+    // pulsing red ring, regardless of which side is doing the chasing.
+    const attackTargets = new Set();
+    for (const a of war.units) {
+      if (a.attackId && !(a.dead || a.state === 'dead') && a.strength > 0) attackTargets.add(a.attackId);
+    }
     for (const u of war.units) {
+      seenIds.add(u.id);
       const isDead = u.dead || u.state === 'dead';
       const clickable = canCommand && !isDead && u.side === cmdSide;
+      // Task 4: enemy LIVE markers become inspectable (own-side units already
+      // select via `clickable` above) — crosshair cursor doubles as the
+      // attack-targeting affordance once a friendly selection exists.
+      const inspectable = !isDead && u.side !== cmdSide;
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}` +
         (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : '') +
-        (clickable ? ' war-unit-cmd' : '') + (u.nationId ? ' war-unit-ally' : ''));
+        (clickable ? ' war-unit-cmd' : '') + (u.nationId ? ' war-unit-ally' : '') +
+        (inspectable ? ' war-unit-inspect' + (this._sel.size > 0 ? ' war-attackable' : '') : '') +
+        (!isDead && u.supplied === false ? ' war-unit-cutoff' : ''));
       g.setAttribute('data-warunit', u.id);
       if (clickable) {
         // Left-click selects / shift-toggles. Propagation is stopped on BOTH
@@ -892,6 +1015,19 @@ const War = {
           if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
           e.stopPropagation();
           this.onUnitClick(u.id, e);
+        });
+      } else if (inspectable) {
+        // Task 4: enemy inspection — mirrors the own-unit listener pattern,
+        // but LEFT-BUTTON ONLY and deliberately no pointerdown handler at all
+        // (unlike the own-unit case above) so a plain left-drag starting over
+        // an enemy marker still pans the map normally; only pointerup (a
+        // motionless click) is intercepted, and only enough to stop it
+        // reaching the svg-level empty-ground deselect.
+        g.addEventListener('pointerup', (e) => {
+          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+          e.stopPropagation();
+          this._inspect = u.id;
+          if (GameMap.render) GameMap.render();
         });
       }
 
@@ -918,6 +1054,18 @@ const War = {
         continue;
       }
 
+      // Feature: unit damage feedback — compare this pass's strength against
+      // the last one seen for this unit; a drop (from combat OR an airstrike)
+      // stamps _hitAt, which drives the war-unit-hit jitter/flash below for
+      // ~WAR_HIT_FX_MS. Read over the PREDICTED war, same as everything else
+      // this method reads, so the flash fires the instant a local tick
+      // predicts the hit, not only after the next server snapshot.
+      const prevStrength = this._lastStrength[u.id];
+      if (prevStrength !== undefined && u.strength < prevStrength - 0.001) this._hitAt[u.id] = Date.now();
+      this._lastStrength[u.id] = u.strength;
+      const hitAge = Date.now() - (this._hitAt[u.id] || -1e9);
+      const isHit = hitAge < WAR_HIT_FX_MS;
+
       liveIds.add(u.id);
       const prevAnim = this._anim[u.id];
       // If the unit's target hasn't changed since the last render (a war-layer
@@ -928,27 +1076,86 @@ const War = {
       const sameLeg = prevAnim && prevAnim.to &&
         Math.abs(prevAnim.to[0] - u.pos[0]) < 0.5 && Math.abs(prevAnim.to[1] - u.pos[1]) < 0.5;
       const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : u.pos;
+      // NB: this outer <g>'s transform is rewritten every rAF frame by
+      // ensureLoop — the hit jitter/flash below deliberately lives on an
+      // INNER <g> instead (see war-unit-inner), never here.
       g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
 
       if (u.state === 'fighting') {
         const ring = document.createElementNS(NS, 'circle');
         ring.setAttribute('r', 30); ring.setAttribute('class', 'war-fight-ring');
         g.appendChild(ring);
+        // Optional tasteful flourish: a couple of small blinking muzzle ticks
+        // while actively engaged, beyond the existing pulsing fight ring.
+        const muzzle = document.createElementNS(NS, 'g');
+        muzzle.setAttribute('class', 'war-muzzle');
+        muzzle.setAttribute('transform', 'translate(15,-6)');
+        const tick1 = document.createElementNS(NS, 'line');
+        tick1.setAttribute('x1', 0); tick1.setAttribute('y1', 0); tick1.setAttribute('x2', 7); tick1.setAttribute('y2', -3);
+        tick1.setAttribute('class', 'war-muzzle-tick');
+        muzzle.appendChild(tick1);
+        const tick2 = document.createElementNS(NS, 'line');
+        tick2.setAttribute('x1', 0); tick2.setAttribute('y1', 0); tick2.setAttribute('x2', 6); tick2.setAttribute('y2', 4);
+        tick2.setAttribute('class', 'war-muzzle-tick');
+        muzzle.appendChild(tick2);
+        g.appendChild(muzzle);
+      }
+      if (attackTargets.has(u.id)) {
+        const aRing = document.createElementNS(NS, 'circle');
+        aRing.setAttribute('r', 34); aRing.setAttribute('class', 'war-attack-ring');
+        g.appendChild(aRing);
       }
       if (this._sel.has(u.id)) {
         const selRing = document.createElementNS(NS, 'circle');
         selRing.setAttribute('r', 30); selRing.setAttribute('class', 'war-sel-ring');
         g.appendChild(selRing);
       }
+
+      // Feature: unit damage feedback — box+glyph live inside an inner <g> so
+      // the war-unit-hit jitter (a CSS transform animation) never fights the
+      // outer group's JS-driven translate/scale attribute (rewritten by
+      // ensureLoop every frame).
+      const inner = document.createElementNS(NS, 'g');
+      inner.setAttribute('class', 'war-unit-inner' + (isHit ? ' war-unit-hit' : ''));
+      g.appendChild(inner);
       const box = document.createElementNS(NS, 'rect');
       box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
       box.setAttribute('class', 'war-unit-box');
-      g.appendChild(box);
+      inner.appendChild(box);
+      if (isHit) {
+        const flash = document.createElementNS(NS, 'rect');
+        flash.setAttribute('x', -20); flash.setAttribute('y', -14); flash.setAttribute('width', 40); flash.setAttribute('height', 28);
+        flash.setAttribute('class', 'war-hit-flash');
+        inner.appendChild(flash);
+      }
       const glyph = document.createElementNS(NS, 'text');
       glyph.setAttribute('class', 'war-unit-glyph');
       glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
       glyph.textContent = WAR_KIND_GLYPH[u.kind] || '?';
-      g.appendChild(glyph);
+      inner.appendChild(glyph);
+
+      // Task 6: supply cut-off glyph, top-right corner of the symbol.
+      if (u.supplied === false) {
+        const warn = document.createElementNS(NS, 'text');
+        warn.setAttribute('x', 15); warn.setAttribute('y', -11);
+        warn.setAttribute('class', 'war-unit-cutoff-glyph');
+        warn.textContent = '⚠';
+        g.appendChild(warn);
+      }
+
+      // Task 3: morale bar, above the HP bar (HP sits at y=-22 h4).
+      const org = typeof u.org === 'number' ? u.org : 100;
+      const orgPct = Math.max(0, Math.min(100, org));
+      const routed = u.state === 'routed';
+      const moraleBg = document.createElementNS(NS, 'rect');
+      moraleBg.setAttribute('x', -20); moraleBg.setAttribute('y', -28); moraleBg.setAttribute('width', 40); moraleBg.setAttribute('height', 3);
+      moraleBg.setAttribute('class', 'war-morale-bg');
+      g.appendChild(moraleBg);
+      const moraleFill = document.createElementNS(NS, 'rect');
+      moraleFill.setAttribute('x', -20); moraleFill.setAttribute('y', -28); moraleFill.setAttribute('width', 40 * orgPct / 100); moraleFill.setAttribute('height', 3);
+      moraleFill.setAttribute('class', 'war-morale-fill' + (orgPct < WAR_ROUT_ORG ? ' war-morale-danger' : '') + (routed ? ' war-morale-pulse' : ''));
+      g.appendChild(moraleFill);
+
       const pct = Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
       const hpBg = document.createElementNS(NS, 'rect');
       hpBg.setAttribute('x', -20); hpBg.setAttribute('y', -22); hpBg.setAttribute('width', 40); hpBg.setAttribute('height', 4);
@@ -959,8 +1166,9 @@ const War = {
       hpFill.setAttribute('class', 'war-hp-fill');
       g.appendChild(hpFill);
       const title = document.createElementNS(NS, 'title');
-      title.textContent = `${u.name} — ${Math.round(u.strength)}/${u.maxStrength} · ${u.state}` +
-        (u.nationId ? ` · ${entName(u.nationId)} contingent` : '');
+      title.textContent = `${u.name} — ${Math.round(u.strength)}/${u.maxStrength} · ${u.state} · Morale ${Math.round(orgPct)}%` +
+        (u.nationId ? ` · ${entName(u.nationId)} contingent` : '') +
+        (u.supplied === false ? ' · CUT OFF' : '');
       g.appendChild(title);
       map.warLayer.appendChild(g);
 
@@ -968,6 +1176,7 @@ const War = {
       else this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g };
     }
     for (const id in this._anim) if (!liveIds.has(id)) delete this._anim[id];
+    for (const id in this._lastStrength) if (!seenIds.has(id)) { delete this._lastStrength[id]; delete this._hitAt[id]; }
   },
 
   renderFlashes(map, mk, NS, war) {
@@ -995,8 +1204,9 @@ const War = {
      strikeTick — identically on server and predicting client. Everything
      below is purely cosmetic dressing around that moment: a plane that flies
      from the airport out to a turn-in point and back through the target
-     timed to strikeTick, then a screenshake/flash/shockwave the instant the
-     strike's `done` flag is first observed true. None of it feeds back into
+     timed to strikeTick, then a fireball/shockwave/debris explosion the
+     instant the strike's `done` flag is first observed true. None of it
+     feeds back into
      gameplay, so it's safe to get wrong on any given client — the next
      rebase just carries on from wherever the predicted war actually is. */
 
@@ -1085,68 +1295,161 @@ const War = {
 
   // Detect the FIRST render where a strike's `done` flag reads true (works
   // identically whether that came from a real predicted tick or a rebase
-  // catch-up) and fire the one-shot impact FX exactly once per strike —
-  // idempotent across re-renders and rebases since it's keyed by strike id,
-  // not by any per-frame state.
+  // catch-up) and stamp the one-shot impact FX timing exactly once per strike
+  // — idempotent across re-renders and rebases since it's keyed by strike id,
+  // not by any per-frame state. The actual explosion is built by
+  // renderExplosions below, keyed off this same map.
   _checkAirstrikeLandings(war) {
     for (const s of (war.airstrikes || [])) {
       if (s.done && !(s.id in this._strikeImpactAt)) {
         this._strikeImpactAt[s.id] = Date.now();
-        this._screenShake();
-        this._flashScreen();
       }
     }
   },
-  // Brief decaying-oscillation translate on #map-wrap (the OUTER div holding
-  // the SVG) — deliberately not on map.world (the SVG <g> the pan/zoom
-  // transform already lives on), so this CSS animation class layers on top
-  // instead of fighting the JS-driven transform attribute.
-  _screenShake() {
-    const wrap = document.getElementById('map-wrap');
-    if (!wrap) return;
-    wrap.classList.remove('map-shake');
-    void wrap.offsetWidth; // force reflow so re-adding the class restarts the animation
-    wrap.classList.add('map-shake');
-    setTimeout(() => wrap.classList.remove('map-shake'), 520);
-  },
-  // Full-viewport white flash — a persistent overlay div (created once,
-  // reused for every strike) rather than one per explosion, so back-to-back
-  // impacts don't stack DOM nodes.
-  _flashScreen() {
-    let overlay = document.getElementById('war-flash-overlay');
-    if (!overlay) {
-      overlay = document.createElement('div');
-      overlay.id = 'war-flash-overlay';
-      document.body.appendChild(overlay);
+  // A radialGradient helper — stops is an array of [offset(0-1), color, opacity].
+  _radialGrad(NS, id, stops) {
+    const grad = document.createElementNS(NS, 'radialGradient');
+    grad.setAttribute('id', id);
+    for (const [off, color, op] of stops) {
+      const stop = document.createElementNS(NS, 'stop');
+      stop.setAttribute('offset', String(off));
+      stop.setAttribute('stop-color', color);
+      stop.setAttribute('stop-opacity', String(op));
+      grad.appendChild(stop);
     }
-    overlay.classList.remove('firing');
-    void overlay.offsetWidth;
-    overlay.classList.add('firing');
+    return grad;
   },
-  // Expanding ring at the impact point, radius 0 → BOMB_RADIUS×1.6, fading —
-  // recreated each render like the battle-flash rings (renderFlashes) with
-  // timing carried across rebuilds via _strikeImpactAt (wall-clock, cosmetic
-  // only) rather than any tick-based state.
-  renderShockwaves(map, mk, NS, war) {
+  // Task 1: soft nuclear-flash impact FX, modelled directly on neal.fun's
+  // Asteroid Launcher (frame-by-frame from a 24fps reference capture):
+  //   · 0-650ms   a huge soft warm-white BLOOM (pure radial-gradient falloff,
+  //               no hard edges) washes over ~3× the blast radius, with a
+  //               flattened horizontal lens streak — the anamorphic-flare look;
+  //   · 250ms+    a bright CORE ball sits at ground zero and slowly shrinks
+  //               into a small warm ember that lingers to the very end;
+  //   · 480-2750ms a delicate soap-bubble SHOCKWAVE ring detaches and expands
+  //               slowly to ~2.6× the blast radius — a blurred wide band plus
+  //               a thinner bright rim, never a crisp stroke;
+  //   · no debris lines, no turbulence displacement — the reference reads as
+  //   pure light, and the soft gradients are also far cheaper to composite.
+  // Recreated each render (the whole war-layer is torn down every render,
+  // same reasoning as the hatch pattern / arrowhead defs) and then animated
+  // frame-to-frame by ensureLoop → _updateExplosion, keyed off
+  // _strikeImpactAt so it survives full-layer rebuilds without restarting.
+  renderExplosions(map, mk, NS, war) {
     const now = Date.now();
-    const maxR = ((window.WarEngine && WarEngine.BOMB_RADIUS) || 95) * 1.6;
     const byId = {};
     for (const s of (war.airstrikes || [])) byId[s.id] = s;
+    const bombR = (window.WarEngine && WarEngine.BOMB_RADIUS) || 95;
+    let defs = null; // built lazily — only when at least one explosion is live this pass
     for (const id in this._strikeImpactAt) {
+      const strike = byId[id];
+      // Forget the impact stamp ONLY once the strike has left the war doc
+      // entirely (the engine prunes it AIRSTRIKE_PRUNE_TICKS after impact).
+      // The old code deleted it the moment the FX finished — but the strike
+      // was still in war.airstrikes with done:true, so _checkAirstrikeLandings
+      // immediately re-stamped it on the next render and the explosion
+      // REPLAYED every EXPLOSION_LIFE_MS until the prune finally caught up.
+      if (!strike) { delete this._strikeImpactAt[id]; delete this._explosionAnim[id]; continue; }
       const t0 = this._strikeImpactAt[id];
       const age = now - t0;
-      if (age > AIRSTRIKE_SHOCKWAVE_MS) { delete this._strikeImpactAt[id]; delete this._shockwaveAnim[id]; continue; }
-      const strike = byId[id];
-      if (!strike) continue; // pruned server-side before the FX finished — let the timer run out quietly
-      const k = age / AIRSTRIKE_SHOCKWAVE_MS;
-      const circ = document.createElementNS(NS, 'circle');
-      circ.setAttribute('cx', strike.pos[0]); circ.setAttribute('cy', strike.pos[1]);
-      circ.setAttribute('r', String(maxR * k));
-      circ.style.opacity = String(1 - k);
-      circ.setAttribute('class', 'war-shockwave');
-      map.warLayer.appendChild(circ);
-      this._shockwaveAnim[id] = { node: circ, t0, life: AIRSTRIKE_SHOCKWAVE_MS };
+      if (age > EXPLOSION_LIFE_MS) { delete this._explosionAnim[id]; continue; } // FX over — keep the stamp (see above)
+
+      if (!defs) {
+        defs = document.createElementNS(NS, 'defs');
+        map.warLayer.appendChild(defs);
+        // Shared by every simultaneous explosion — the reference effect has
+        // no per-strike variance (every neal.fun impact looks the same), so
+        // fixed ids are fine and per-strike turbulence seeds are gone.
+        defs.appendChild(this._radialGrad(NS, 'war-nuke-bloom', [
+          [0, '#ffffff', .95], [0.25, '#fff4dc', .8], [0.5, '#ffdfbc', .5], [0.75, '#ffc9a6', .22], [1, '#ffc9a6', 0]
+        ]));
+        defs.appendChild(this._radialGrad(NS, 'war-nuke-core', [
+          [0, '#ffffff', 1], [0.55, '#fff1cf', .95], [0.85, '#ffc38f', .5], [1, '#ffc38f', 0]
+        ]));
+        const soft = document.createElementNS(NS, 'filter');
+        soft.setAttribute('id', 'war-nuke-soft');
+        soft.setAttribute('x', '-50%'); soft.setAttribute('y', '-50%');
+        soft.setAttribute('width', '200%'); soft.setAttribute('height', '200%');
+        const blur = document.createElementNS(NS, 'feGaussianBlur');
+        blur.setAttribute('stdDeviation', '5');
+        soft.appendChild(blur);
+        defs.appendChild(soft);
+      }
+
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('class', 'war-explosion');
+      g.setAttribute('transform', `translate(${strike.pos[0]},${strike.pos[1]})`);
+
+      // 1. horizontal lens streak (under the bloom, same gradient — a
+      //    radialGradient in objectBoundingBox units stretches to the
+      //    ellipse's own box, giving the flattened flare for free)
+      const streak = document.createElementNS(NS, 'ellipse');
+      streak.setAttribute('fill', 'url(#war-nuke-bloom)');
+      g.appendChild(streak);
+      // 2. the big soft bloom wash
+      const bloom = document.createElementNS(NS, 'circle');
+      bloom.setAttribute('fill', 'url(#war-nuke-bloom)');
+      g.appendChild(bloom);
+      // 3. shockwave bubble: a blurred wide band + a thinner bright rim
+      const ring = document.createElementNS(NS, 'circle');
+      ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', '#ffffff');
+      ring.setAttribute('filter', 'url(#war-nuke-soft)');
+      g.appendChild(ring);
+      const rim = document.createElementNS(NS, 'circle');
+      rim.setAttribute('fill', 'none'); rim.setAttribute('stroke', '#ffffff');
+      g.appendChild(rim);
+      // 4. the core ball / lingering ember (on top of everything)
+      const core = document.createElementNS(NS, 'circle');
+      core.setAttribute('fill', 'url(#war-nuke-core)');
+      g.appendChild(core);
+
+      map.warLayer.appendChild(g);
+      const entry = { node: g, streak, bloom, ring, rim, core, t0, life: EXPLOSION_LIFE_MS, bombR };
+      this._explosionAnim[id] = entry;
+      this._updateExplosion(entry, age);
     }
+  },
+  // Age-driven pose for one explosion — called once at creation (renderExplosions)
+  // and then every rAF frame (ensureLoop) so the FX keeps animating between
+  // the (throttled) war-layer rebuilds. All timings below are the reference
+  // capture's, scaled to EXPLOSION_LIFE_MS = 2900.
+  _updateExplosion(e, age) {
+    const bombR = e.bombR;
+    const clamp01 = (v) => Math.max(0, Math.min(1, v));
+    const easeOut = (k) => 1 - Math.pow(1 - clamp01(k), 3);
+
+    // 1+2. bloom wash (and its lens streak): grows fast to ~3× blast radius
+    // with a slow residual creep, full brightness almost instantly, holds to
+    // ~650ms, then bleeds away by ~1600ms.
+    const bloomR = Math.max(0.01, bombR * 3.0 * (0.92 * easeOut(age / 450) + 0.08 * clamp01(age / e.life)));
+    const bloomOp = age < 650 ? clamp01(age / 120) : clamp01(1 - (age - 650) / 950);
+    e.bloom.setAttribute('r', String(bloomR));
+    e.bloom.style.opacity = String(bloomOp);
+    e.streak.setAttribute('rx', String(bloomR * 1.9));
+    e.streak.setAttribute('ry', String(Math.max(0.01, bloomR * 0.22)));
+    e.streak.style.opacity = String(bloomOp * 0.65);
+
+    // 3. shockwave bubble: detaches at ~480ms, expands slowly (ease-out) to
+    // ~2.6× blast radius by ~2750ms, softening and fading the whole way.
+    const rt = clamp01((age - 480) / (2750 - 480));
+    const rk = 1 - Math.pow(1 - rt, 2);
+    const ringR = Math.max(0.01, bombR * (0.55 + 2.05 * rk));
+    const ringW = Math.max(1, bombR * (0.30 - 0.20 * rk));
+    const ringOp = clamp01((age - 480) / 150) * (1 - rt) * 0.9;
+    e.ring.setAttribute('r', String(ringR));
+    e.ring.setAttribute('stroke-width', String(ringW));
+    e.ring.style.opacity = String(ringOp);
+    e.rim.setAttribute('r', String(ringR * 0.985));
+    e.rim.setAttribute('stroke-width', String(Math.max(0.5, ringW * 0.35)));
+    e.rim.style.opacity = String(Math.min(1, ringOp * 1.25));
+
+    // 4. core → ember: swells to ~0.55× blast radius by 250ms, then shrinks
+    // steadily into a small warm ember (~0.1×) that only fades out at the
+    // very end — the lingering glow at ground zero in the reference.
+    const coreR = Math.max(0.01, bombR * 0.55 * easeOut(age / 250) * (1 - 0.82 * clamp01((age - 250) / 2250)));
+    const coreOp = age < 1700 ? 1 : clamp01(1 - (age - 1700) / 1050);
+    e.core.setAttribute('r', String(coreR));
+    e.core.style.opacity = String(coreOp);
   },
 
   /* ═══════════ WAR MAP TOOLBAR ═══════════
@@ -1168,7 +1471,7 @@ const War = {
     const predWar = (window.WarEngine && this.predictedWar()) || war;
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
-      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
+      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
       : 'This war has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
     // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
@@ -1217,16 +1520,76 @@ const War = {
     bar.appendChild(row);
     const wrap = document.getElementById('map-wrap');
     if (wrap) wrap.appendChild(bar);
-    // Re-render the toolbar periodically so the bomb cooldown counts down
-    // without waiting for the next server sync.
+    // Re-render the toolbar (+ the unit info card, same lifecycle) periodically
+    // so the bomb cooldown / HP / morale / supply readouts stay live without
+    // waiting for the next server sync.
     if (!this._toolbarTimer) {
-      this._toolbarTimer = setInterval(() => { if (W.layer === 'war' && this.active()) this.renderToolbar(); else this._removeToolbar(); }, 1000);
+      this._toolbarTimer = setInterval(() => {
+        if (W.layer === 'war' && this.active()) { this.renderToolbar(); this.renderUnitCard(); }
+        else { this._removeToolbar(); this._removeUnitCard(); }
+      }, 1000);
     }
   },
   _removeToolbar() {
     const bar = document.getElementById('war-toolbar');
     if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
     if (this._toolbarTimer) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
+  },
+
+  // Task 4: floating unit info card — shown while exactly one unit is
+  // selected (own side) OR an enemy unit is under _inspect (no single
+  // selection active). Re-read the unit fresh from the predicted war each
+  // call so it reflects the latest HP/morale/supply, and so a unit that died
+  // since the card was opened degrades gracefully instead of showing stale
+  // stats. Same lifecycle as the toolbar: rebuilt on every war-layer render
+  // and on the toolbar's 1s timer, removed the instant the layer changes.
+  renderUnitCard() {
+    const old = document.getElementById('war-unit-card');
+    if (old && old.parentNode) old.parentNode.removeChild(old);
+    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    if (!war) return;
+    let unitId = null;
+    if (this._sel.size === 1) unitId = [...this._sel][0];
+    else if (this._inspect) unitId = this._inspect;
+    if (!unitId) return;
+    const u = war.units.find(x => x.id === unitId);
+    const wrap = document.getElementById('map-wrap');
+    if (!wrap) return;
+    const card = el('div#war-unit-card.war-unit-card');
+    if (!u) {
+      card.appendChild(el('div.war-card-title', 'Unit unavailable'));
+      card.appendChild(el('div.war-card-row', 'This unit has been destroyed or is no longer tracked.'));
+      wrap.appendChild(card);
+      return;
+    }
+    const isDead = u.dead || u.state === 'dead';
+    const glyph = WAR_KIND_GLYPH[u.kind] || '?';
+    const kindLabel = (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
+    card.appendChild(el('div.war-card-title', `${glyph} ${u.name}`));
+    card.appendChild(el('div.war-card-sub',
+      `${kindLabel} · ${u.side === 'att' ? 'Attacker' : 'Defender'}` +
+      (u.nationId ? ` · ${entName(u.nationId)} contingent` : '')));
+    if (isDead) {
+      card.appendChild(el('div.war-card-row', 'Status: destroyed'));
+    } else {
+      const pct = Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
+      card.appendChild(el('div.war-card-row', `HP: ${Math.round(u.strength)}/${u.maxStrength}`));
+      card.appendChild(el('div.war-card-bar', el('div.war-card-bar-fill', { style: `width:${Math.round(pct * 100)}%;` })));
+      const org = typeof u.org === 'number' ? u.org : 100;
+      const orgPct = Math.max(0, Math.min(100, org));
+      card.appendChild(el('div.war-card-row', `Morale: ${Math.round(orgPct)}%`));
+      card.appendChild(el('div.war-card-bar', el('div.war-card-bar-fill.war-card-bar-morale',
+        { class: orgPct < WAR_ROUT_ORG ? 'danger' : '', style: `width:${orgPct}%;` })));
+      card.appendChild(el('div.war-card-row', `State: ${u.state}${u.garrison ? ' · garrison' : ''}`));
+      card.appendChild(el('div.war-card-row', `Speed: ${u.speed} · Atk: ${u.atk}`));
+      card.appendChild(el('div.war-card-row',
+        u.supplied === false ? el('span.war-card-cutoff', '⚠ CUT OFF') : 'In supply'));
+    }
+    wrap.appendChild(card);
+  },
+  _removeUnitCard() {
+    const card = document.getElementById('war-unit-card');
+    if (card && card.parentNode) card.parentNode.removeChild(card);
   },
 
   /* ═══════════ WAR ROOM PANEL ═══════════ */

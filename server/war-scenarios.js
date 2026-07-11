@@ -157,7 +157,171 @@ const qinal_invasion = {
   }
 };
 
+// Madrosia (`for_madrosia`) — northern maritime republic to the north-east,
+// launches a traditional amphibious assault across the coastal waters onto
+// Mezdov province's western seaboard. Stages in open water north-west of
+// Mezdov's harbor (coastal assault zone), driving south-east into the province.
+const madrosia_invasion = {
+  id: 'madrosia_invasion',
+  name: 'The Mezdov Landings',
+  attackerId: 'for_madrosia',
+  defenderId: 'ent_gov',
+  // Sea north-west of Mezdov harbor (Mezdov city at [1115, 1225], staging in
+  // open water north of the city, between Mazon's island territory and the
+  // Arcasian coast).
+  staging: { x0: 900, y0: 800, x1: 1100, y1: 1000 },
+  objectives: [
+    { kind: 'landing', ref: 'city_mezdov', priority: 1 },
+    { kind: 'seize_city', ref: 'city_mezdov', priority: 2 },
+    { kind: 'control_province', ref: 'prov_mezdov', priority: 3 }
+  ],
+  units: [
+    { name: '1st Madrosian Royal Marine Regiment', kind: 'marine' },
+    { name: '2nd Madrosian Royal Marine Regiment', kind: 'marine' },
+    { name: '1st Madrosian Naval Infantry Division', kind: 'infantry' },
+    { name: '2nd Madrosian Naval Infantry Division', kind: 'infantry' },
+    { name: '3rd Madrosian Naval Infantry Division', kind: 'infantry' },
+    { name: '4th Madrosian Naval Infantry Division', kind: 'infantry' },
+    { name: 'Madrosian Coastal Guard Regiment', kind: 'armored' },
+    { name: 'Madrosian Imperial Armoured Squadron', kind: 'armored' },
+    { name: 'Madrosian Imperial Reserve', kind: 'reserve' },
+    { name: 'Madrosian Garrison Force', kind: 'reserve' },
+    { name: 'Madrosian Naval Support Corps', kind: 'infantry' },
+    { name: 'Madrosian Shock Contingent', kind: 'armored' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.35,
+    collapseFrac: 0.12
+  }
+};
+
+// Solme (`for_solme`) — small south-western land-border neighbour (shares
+// borders with Kordi province to the south-west). Launches a swift expeditionary
+// raid across the border with light, fast-moving forces. Stages in Solme's own
+// territory just south of the frontier (below the road_fork_delcasia and road_fork_solme
+// junction). Designed as a rapid strike: few units, high mobility, tight tuning
+// so it collapses quickly if momentum is lost.
+const solme_invasion = {
+  id: 'solme_invasion',
+  name: 'The Solme Border Raid',
+  attackerId: 'for_solme',
+  defenderId: 'ent_gov',
+  land: true,
+  // Solme's own territory south-west of the Kordi border (Surat at [1768, 1180],
+  // staging in Solme territory on the near side of the frontier).
+  staging: { x0: 1500, y0: 1600, x1: 1750, y1: 1900 },
+  objectives: [
+    { kind: 'seize_city', ref: 'city_surat', priority: 1 },
+    { kind: 'control_province', ref: 'prov_kordi', priority: 2 }
+  ],
+  units: [
+    { name: 'Solme Light Marines', kind: 'marine' },
+    { name: 'Solme 1st Border Infantry', kind: 'infantry' },
+    { name: 'Solme 2nd Border Infantry', kind: 'infantry' },
+    { name: 'Solme Coastal Armoured Squadron', kind: 'armored' },
+    { name: 'Solme Border Guard Contingent', kind: 'reserve' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.30, // digs in sooner — lighter invasion
+    collapseFrac: 0.10     // collapses faster — no deep supply
+  }
+};
+
+// Mazon (`for_mazon`) — island state off the north-western fjords, launches a
+// naval assault on Grazi province's western coast, targeting the great port city
+// and the heartland of Arcasia's shipyards. Stages in open water west of Port
+// Kradon (Mazon sits at [803, 280], Kradon at [348, 186], staging between them
+// in the open strait), drives inland to consolidate the maritime province.
+const mazon_invasion = {
+  id: 'mazon_invasion',
+  name: 'The Port Kradon Offensive',
+  attackerId: 'for_mazon',
+  defenderId: 'ent_gov',
+  // Sea west of Grazi, in the coastal waters north-west of Port Kradon,
+  // between Mazon's island territory and the Arcasian coast.
+  staging: { x0: 400, y0: 200, x1: 600, y1: 450 },
+  objectives: [
+    { kind: 'landing', ref: 'city_kradon', priority: 1 },
+    { kind: 'seize_city', ref: 'city_kradon', priority: 2 },
+    { kind: 'seize_city', ref: 'city_kradesh', priority: 3 },
+    { kind: 'control_province', ref: 'prov_grazi', priority: 4 }
+  ],
+  units: [
+    { name: '1st Mazon Island Defence Marines', kind: 'marine' },
+    { name: '2nd Mazon Island Defence Marines', kind: 'marine' },
+    { name: 'Mazon Naval Infantry 1st Regiment', kind: 'infantry' },
+    { name: 'Mazon Naval Infantry 2nd Regiment', kind: 'infantry' },
+    { name: 'Mazon Coastal Rangers', kind: 'infantry' },
+    { name: 'Mazon Garrison Force', kind: 'armored' },
+    { name: 'Mazon Naval Support Squadron', kind: 'armored' },
+    { name: 'Mazon Island Reserve Corps', kind: 'reserve' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.35,
+    collapseFrac: 0.12
+  }
+};
+
+// Aldonesia (`for_aldonesia`) — south-western archipelago power. Its islands
+// are scattered across the Strait of Casa with NO land border to Arcasia, so
+// this is a naval assault like valksland/qinal, not a land:true scenario:
+// the fleet stages in open Antacean water south-west of Mezdov (verified sea
+// on the master grid — the coastline reaches within ~100px of Mezdov on its
+// south-western side, making it a viable beachhead), lands at the highland
+// harbour, then drives east over the mountains into the Kordi interior. An
+// ambitious two-city campaign that stretches the attacker across two
+// provinces' worth of front.
+const aldonesia_invasion = {
+  id: 'aldonesia_invasion',
+  name: 'The Aldonesian Offensive',
+  attackerId: 'for_aldonesia',
+  defenderId: 'ent_gov',
+  // Open sea between the Aldonesian archipelago and the Mezdov coast — every
+  // corner of this box is water (checked against the province/country
+  // polygons in server/map-geometry.js).
+  staging: { x0: 900, y0: 1400, x1: 1100, y1: 1600 },
+  objectives: [
+    { kind: 'landing', ref: 'city_mezdov', priority: 1 },
+    { kind: 'seize_city', ref: 'city_mezdov', priority: 2 },
+    { kind: 'seize_city', ref: 'city_surat', priority: 3 },
+    { kind: 'control_province', ref: 'prov_kordi', priority: 4 }
+  ],
+  units: [
+    { name: '1st Aldonesian Expeditionary Marines', kind: 'marine' },
+    { name: 'Aldonesian 1st Infantry Brigade', kind: 'infantry' },
+    { name: 'Aldonesian 2nd Infantry Brigade', kind: 'infantry' },
+    { name: 'Aldonesian 3rd Infantry Brigade', kind: 'infantry' },
+    { name: 'Aldonesian Heavy Armour Regiment', kind: 'armored' },
+    { name: 'Aldonesian Armoured Squadron', kind: 'armored' },
+    { name: 'Aldonesian Assault Armoured Column', kind: 'armored' },
+    { name: 'Aldonesian Island Defence Corps', kind: 'reserve' },
+    { name: 'Aldonesian Strategic Reserve', kind: 'reserve' },
+    { name: 'Aldonesian Garrison Force', kind: 'infantry' },
+    { name: 'Aldonesian Combined Operations Group', kind: 'reserve' }
+  ],
+  defense: {
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
+  },
+  tuning: {
+    consolidateFrac: 0.35,  // standard consolidation
+    collapseFrac: 0.12      // standard collapse threshold
+  }
+};
+
 module.exports = {
-  scenarios: { valksland_invasion, delcasia_invasion, qinal_invasion },
+  scenarios: { valksland_invasion, delcasia_invasion, qinal_invasion, madrosia_invasion, solme_invasion, mazon_invasion, aldonesia_invasion },
   UNIT_DEFAULTS
 };

@@ -20,6 +20,17 @@
 // needs server-only modules (store.uid, deeds, scenario spawning, bombs)
 // stays in server/war.js — this module has ZERO requires.
 //
+// Airstrikes (cinematic two-phase bombing) split the same way: server/war.js's
+// dropBomb only ENQUEUES a strike onto war.airstrikes (additive, absent-safe
+// — a missing array reads as []); the DETERMINISTIC blast (unit damage,
+// crater, event) applies here in stepAirstrikes, at war.tick >=
+// strike.strikeTick, so a predicting client detonates it at the same tick as
+// the server. The server-only ground effects — destroying properties, cutting
+// roads, the audit log — are NOT part of the simulation (a predicting client
+// must never mutate db.properties/settings.map.roads) and instead ride the
+// `ctx.onAirstrike(war, strike)` hook, exactly like log/news: the server
+// binds a real handler, a predicting client's ctx omits it and gets a no-op.
+//
 // Cosmetic exception to determinism: event timestamps (events[].t) and
 // result.endedAt use wall-clock time — they are display-only and never feed
 // back into the simulation.
@@ -49,6 +60,9 @@
   const CORPSE_MAX_AGE_TICKS = 400;   // corpses older than this are pruned
   const WORLD_BORDER_INSET = 8;       // px — units/dests never sit closer than this to the map edge
   const MAX_MANUAL_PATH_POINTS = 200; // cap on a player-drawn freehand path (also enforced by the API)
+  const BOMB_RADIUS = 95;             // px — airstrike blast radius (also read by the client for shockwave FX sizing)
+  const BOMB_UNIT_DMG = 90;           // max strength damage at the blast centre (falls off to 0 at BOMB_RADIUS)
+  const AIRSTRIKE_PRUNE_TICKS = 30;   // a done strike is dropped from war.airstrikes this many ticks after impact
 
   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -601,6 +615,46 @@
     }
   }
 
+  // ---------- airstrikes (cinematic two-phase bombing) ----------
+  // Falloff 1 at blast centre → 0 at BOMB_RADIUS, same shape as the old
+  // instant-bomb falloff (formerly server/war.js's bombFalloff).
+  function airstrikeFalloff(d) { return clamp(1 - d / BOMB_RADIUS, 0, 1); }
+  // war.airstrikes: { id, side, pos:[x,y], from:[x,y], orderedTick, strikeTick,
+  // orderedAt, done, groundApplied } — enqueued by server/war.js's dropBomb
+  // (the order/scheduling is server-only), detonated HERE once
+  // war.tick >= strikeTick so the predicted client sees the same explosion at
+  // the same tick as the server. Processing is in array order (deterministic).
+  function stepAirstrikes(db, war, ctx) {
+    if (!Array.isArray(war.airstrikes) || !war.airstrikes.length) return;
+    const bombDmgMod = (war.mods && war.mods.bombDmg) || 1;
+    for (const strike of war.airstrikes) {
+      if (strike.done || war.tick < strike.strikeTick) continue;
+      for (const u of war.units) {
+        if (!isLive(u)) continue;
+        const d = dist(u.pos, strike.pos);
+        if (d > BOMB_RADIUS) continue;
+        const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d) * bombDmgMod;
+        u.strength = Math.max(0, round1(u.strength - dmg));
+        if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
+        if (u.strength <= 0) killUnit(war, u);
+      }
+      pruneCorpses(war);
+      war.craters = war.craters || [];
+      war.craters.push({ pos: strike.pos.slice(), t: Date.now(), side: strike.side });
+      if (war.craters.length > 40) war.craters.shift();
+      pushEvent(war, 'battle', strike.pos.slice(), 'Airstrike impact — the blast wave rips through the area.');
+      strike.done = true;
+      // Server-only: destroy properties/cut roads/audit log. No-op (and thus
+      // safely skipped) on a predicting client, which must never touch
+      // db.properties or settings.map.roads outside the authoritative tick.
+      ctx.onAirstrike(war, strike);
+    }
+    // Prune old resolved strikes so the array doesn't grow across a long war —
+    // the client keeps its plane/FX animation going for a few seconds past
+    // impact (see public/js/war.js), well inside this window.
+    war.airstrikes = war.airstrikes.filter(s => !s.done || (war.tick - s.strikeTick) < AIRSTRIKE_PRUNE_TICKS);
+  }
+
   // ---------- territory fracture ----------
   function stepTerritory(db, war) {
     const cs = war.grid.cell;
@@ -717,7 +771,7 @@
   const NOOP = function () { };
   function normCtx(ctx) {
     ctx = ctx || {};
-    return { log: ctx.log || NOOP, news: ctx.news || NOOP };
+    return { log: ctx.log || NOOP, news: ctx.news || NOOP, onAirstrike: ctx.onAirstrike || NOOP };
   }
   function warTick(db, ctx) {
     const war = db.war;
@@ -736,6 +790,7 @@
     }
     stepMovement(db, war, ctx, rng);
     stepCombat(db, war, ctx, rng);
+    stepAirstrikes(db, war, ctx);
     stepTerritory(db, war);
     recomputeProvinceControl(war);
     stepObjectives(db, war, ctx);
@@ -766,6 +821,7 @@
     // constants other modules need
     CELL, COMBAT_RANGE, CAPTURE_RANGE, DEF_MOVE_SPEED, PLAYER_HOLD_TICKS,
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
+    BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS,
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry

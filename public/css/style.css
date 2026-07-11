@@ -432,6 +432,46 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 }
 .war-toolbar-hint{font-size:11px; color:var(--ink-faint); margin-bottom:6px;}
 .war-toolbar .btn-row{flex-wrap:wrap; gap:6px;}
+/* GM Quick Actions fix: the GM command bar (.gm-bar, fixed, bottom:32px,
+   38px tall — see "GM COMMAND BAR" below) sits ABOVE the war toolbar in the
+   root stacking context (its z-index:95 beats #map-wrap's unstacked
+   descendants outright, regardless of the war toolbar's own z-index:20,
+   since neither #view nor #map-wrap establishes a stacking context). The
+   toolbar's GM rows (spawn/join/side-toggle buttons) can wrap to more than
+   one line, so a bottom-offset bump — not a z-index race — is what actually
+   keeps both usable: lift the toolbar clear of the bar's footprint whenever
+   it's visible. Same :has() pattern as #toast-root's own gm-bar offset. */
+body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
+@media (max-width:900px){
+  /* .gm-bar wraps to two lines below 900px (see its own media rule) — give
+     the toolbar extra clearance to match the taller footprint. */
+  body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:118px; }
+}
+
+/* Feature: cinematic airstrikes — plane run + impact FX (all purely cosmetic
+   client-side; the server only ever cares about war.airstrikes[].done). */
+.war-plane{pointer-events:none;}
+.war-plane-body{fill:#2f3d52; stroke:var(--paper); stroke-width:0.8;}
+.war-shockwave{fill:none; stroke:#e0a458; stroke-width:3; pointer-events:none;}
+#war-flash-overlay{
+  position:fixed; inset:0; z-index:150; background:#fff; opacity:0; pointer-events:none;
+}
+#war-flash-overlay.firing{animation:warFlash .25s ease-out;}
+@keyframes warFlash{
+  0%{opacity:.85;}
+  100%{opacity:0;}
+}
+.map-shake{animation:warShake .5s ease-out;}
+@keyframes warShake{
+  0%{transform:translate(0,0);}
+  15%{transform:translate(-6px,3px);}
+  30%{transform:translate(5px,-4px);}
+  45%{transform:translate(-4px,-3px);}
+  60%{transform:translate(3px,4px);}
+  75%{transform:translate(-2px,2px);}
+  90%{transform:translate(1px,-1px);}
+  100%{transform:translate(0,0);}
+}
 
 /* Phase 17 — RTS input redesign: clickable own-side markers + movement arrows.
    .war-unit is pointer-events:none (enemy/dead symbols never intercept the

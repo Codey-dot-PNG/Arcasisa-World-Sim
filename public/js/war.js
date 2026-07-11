@@ -48,11 +48,23 @@ const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['mar
 const WAR_FIXED_MODE_K = 3;
 function warMarkerScale(k) { return Math.max(1, WAR_FIXED_MODE_K / Math.max(0.01, k)); }
 
+// Feature: cinematic airstrikes — client-only flight-path shaping (the
+// server/engine only know orderedTick/strikeTick; everything about HOW the
+// plane gets from `from` to `pos` is cosmetic and lives here).
+const AIRSTRIKE_FAR_OFFSET = 220;  // px — how far out the plane climbs before turning onto the attack run
+const AIRSTRIKE_EGRESS_TICKS = 3;  // ticks after impact the plane is still visible egressing/fading
+const AIRSTRIKE_SHOCKWAVE_MS = 650; // ms — expanding-ring FX lifetime
+
 const War = {
   _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, dur, curPos:[x,y], node }
   _arrowAnim: {},    // unitId -> { node, tail:'x,y x,y …' } — the marker end of each move arrow chases the tweened position every frame
   _flashAnim: {},    // synthetic flash id -> { node, t0, life }
   _raf: null,
+
+  // ---- cinematic airstrikes (Feature: two-phase bombing) ----
+  _airstrikeAnim: {}, // strikeId -> { node, strike, timing:{tick,lastTick,tickMs,speed} } — plane marker, position is a pure function of predicted tick, no tween needed
+  _shockwaveAnim: {}, // strikeId -> { node, t0, life } — expanding impact ring, same recreate-each-render pattern as _flashAnim
+  _strikeImpactAt: {}, // strikeId -> epoch ms of the first render where we observed strike.done === true (drives the one-shot shake/flash trigger)
 
   // ---- interactive War layer input state (Phase 16) ----
   _sel: new Set(),   // selected unit ids (commandable side only)
@@ -557,7 +569,20 @@ const War = {
   async _dropBomb(pos) {
     try {
       const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos) });
-      toast('Bombing run away — impact incoming.');
+      // Insert the server-created strike into the predicted war IMMEDIATELY
+      // (same optimistic-order spirit as _issueMove) — the plane and the
+      // toolbar countdown start now instead of waiting for the next
+      // heartbeat; the engine's deterministic stepAirstrikes then predicts
+      // the blast locally at strikeTick, and rebases reconcile as usual.
+      if (window.WarEngine && r && r.strike) {
+        const war = this.predictedWar();
+        if (war) {
+          war.airstrikes = war.airstrikes || [];
+          if (!war.airstrikes.some(s => s.id === r.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(r.strike)));
+          this.refreshLayer(true);
+        }
+      }
+      toast('Air wing scrambles — strike inbound.');
     } catch (e) { toast(e.message, true); }
   },
   // GM unit spawner (Feature: mid-war reinforcements) — placement click after
@@ -624,6 +649,28 @@ const War = {
         if (age > f.life) { delete this._flashAnim[id]; continue; }
         f.node.style.opacity = String(1 - age / f.life);
       }
+      // Airstrike planes — position is a pure function of predicted tick, so
+      // every frame just recomputes it from the entry's captured timing/strike
+      // rather than interpolating toward a stored target.
+      for (const id in this._airstrikeAnim) {
+        const e = this._airstrikeAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._airstrikeAnim[id]; continue; }
+        any = true;
+        this._updatePlanePose(e);
+      }
+      // Impact shockwave rings — same recreate-each-render + rAF-driven fade
+      // as the battle-flash rings above.
+      for (const id in this._shockwaveAnim) {
+        const f = this._shockwaveAnim[id];
+        if (!f.node || !f.node.isConnected) { delete this._shockwaveAnim[id]; continue; }
+        any = true;
+        const age = now - f.t0;
+        if (age > f.life) { delete this._shockwaveAnim[id]; continue; }
+        const k = age / f.life;
+        const maxR = ((window.WarEngine && WarEngine.BOMB_RADIUS) || 95) * 1.6;
+        f.node.setAttribute('r', String(maxR * k));
+        f.node.style.opacity = String(1 - k);
+      }
       this._raf = any ? requestAnimationFrame(step) : null;
     };
     this._raf = requestAnimationFrame(step);
@@ -635,7 +682,11 @@ const War = {
     // the front line the player sees is always at full cadence. Falls back
     // to the raw authoritative doc if the engine script failed to load.
     const war = (window.WarEngine && this.predictedWar()) || S().war;
-    if (!war) { this._anim = {}; this._flashAnim = {}; this._removeToolbar(); this._stopRealtime(); this._pred = null; return; }
+    if (!war) {
+      this._anim = {}; this._flashAnim = {};
+      this._airstrikeAnim = {}; this._shockwaveAnim = {}; this._strikeImpactAt = {};
+      this._removeToolbar(); this._stopRealtime(); this._pred = null; return;
+    }
     if (window.WarEngine) this._ensureRealtime();
     map.warLayer = document.createElementNS(NS, 'g');
     map.warLayer.setAttribute('class', 'war-layer');
@@ -645,6 +696,9 @@ const War = {
     this.renderTerritory(map, mk, NS, war);
     this.renderMoveArrows(map, mk, NS, war);
     this.renderUnits(map, mk, NS, war);
+    this._checkAirstrikeLandings(war);
+    this.renderAirstrikePlanes(map, mk, NS, war);
+    this.renderShockwaves(map, mk, NS, war);
     this.renderFlashes(map, mk, NS, war);
     this.ensureLoop();
     this.bindKeys();
@@ -893,6 +947,165 @@ const War = {
     }
   },
 
+  /* ═══════════ CINEMATIC AIRSTRIKES (Feature: two-phase bombing) ═══════════
+     A strike's DAMAGE is decided by the shared engine (stepAirstrikes) at
+     strikeTick — identically on server and predicting client. Everything
+     below is purely cosmetic dressing around that moment: a plane that flies
+     from the airport out to a turn-in point and back through the target
+     timed to strikeTick, then a screenshake/flash/shockwave the instant the
+     strike's `done` flag is first observed true. None of it feeds back into
+     gameplay, so it's safe to get wrong on any given client — the next
+     rebase just carries on from wherever the predicted war actually is. */
+
+  // Continuous (fractional) predicted tick — same idea as the rest of the
+  // client's tick-driven interpolation (_tweenMs et al): war.tick is the last
+  // whole tick, war._lastTick is the wall-clock moment that tick landed, so
+  // "how far into the NEXT tick are we" comes from elapsed real time.
+  _continuousTick(war) {
+    const interval = Math.max(200, (war.tickMs || 2000) / (war.speed || 1));
+    const since = Date.now() - (war._lastTick || Date.now());
+    return (war.tick || 0) + Math.max(0, Math.min(1, since / interval));
+  },
+
+  // Where the plane is (world pos), which way it's facing (degrees, for the
+  // silhouette's rotation) and how opaque it should be, purely as a function
+  // of the strike's timing fields and "now". Three legs:
+  //   1. [0, 0.3)  climb-out: `from` → a turn-in point FAR from the target
+  //   2. [0.3, 1]  attack run: turn-in point → `pos`, arriving exactly at
+  //                strikeTick (t=1) — this is what makes the plane cross the
+  //                target as the blast (computed by the engine) lands.
+  //   3. (1, ∞)    egress: peel away back toward `from`, fading out over
+  //                AIRSTRIKE_EGRESS_TICKS.
+  _planeState(strike, timing) {
+    const interval = Math.max(200, timing.tickMs / timing.speed);
+    const nowTick = timing.tick + Math.max(0, Math.min(1, (Date.now() - timing.lastTick) / interval));
+    const span = Math.max(1, strike.strikeTick - strike.orderedTick);
+    const tOverall = (nowTick - strike.orderedTick) / span;
+    const from = strike.from, target = strike.pos;
+    const dx = from[0] - target[0], dy = from[1] - target[1];
+    const dm = Math.hypot(dx, dy) || 1;
+    const away = [dx / dm, dy / dm];
+    const far = [from[0] + away[0] * AIRSTRIKE_FAR_OFFSET, from[1] + away[1] * AIRSTRIKE_FAR_OFFSET];
+    const lerp = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+    const heading = (a, b) => Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI;
+    if (tOverall <= 0) return { pos: from.slice(), angle: heading(from, far), opacity: 1 };
+    if (tOverall < 0.3) {
+      const k = tOverall / 0.3;
+      return { pos: lerp(from, far, k), angle: heading(from, far), opacity: 1 };
+    }
+    if (tOverall <= 1) {
+      const k = (tOverall - 0.3) / 0.7;
+      return { pos: lerp(far, target, k), angle: heading(far, target), opacity: 1 };
+    }
+    const k = Math.min(1, ((tOverall - 1) * span) / AIRSTRIKE_EGRESS_TICKS);
+    return { pos: lerp(target, from, k * 0.6), angle: heading(target, from), opacity: 1 - k, egressDone: k >= 1 };
+  },
+  _updatePlanePose(e) {
+    if (!e.node || !e.node.isConnected) return;
+    const st = this._planeState(e.strike, e.timing);
+    const scale = warMarkerScale(GameMap.view ? GameMap.view.k : 1);
+    e.node.setAttribute('transform', `translate(${st.pos[0]},${st.pos[1]}) scale(${scale}) rotate(${st.angle})`);
+    e.node.style.opacity = String(Math.max(0, st.opacity));
+  },
+  // A swept-wing dart silhouette pointing along +X at rotate(0), so `angle`
+  // from _planeState (an atan2 in degrees) can be applied directly.
+  _makePlaneNode(map, NS) {
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'war-plane');
+    const body = document.createElementNS(NS, 'path');
+    body.setAttribute('d', 'M12,0 L-7,-7 L-2,0 L-7,7 Z');
+    body.setAttribute('class', 'war-plane-body');
+    g.appendChild(body);
+    map.warLayer.appendChild(g);
+    return g;
+  },
+  // One node per in-flight strike, recreated each render pass (the whole
+  // war-layer group is torn down and rebuilt every render — same reasoning
+  // as renderUnits/renderMoveArrows). Position itself is recomputed by the
+  // rAF loop every frame from `timing` + `strike`, not tweened, since it's a
+  // pure function of predicted tick rather than a snapshot-to-snapshot leg.
+  renderAirstrikePlanes(map, mk, NS, war) {
+    const activeIds = new Set();
+    const timing = { tick: war.tick || 0, lastTick: war._lastTick || Date.now(), tickMs: war.tickMs || 2000, speed: war.speed || 1 };
+    for (const s of (war.airstrikes || [])) {
+      const span = Math.max(1, s.strikeTick - s.orderedTick);
+      const state = this._planeState(s, timing);
+      if (state.egressDone) continue; // fully faded — nothing to draw
+      activeIds.add(s.id);
+      const node = this._makePlaneNode(map, NS);
+      const entry = { node, strike: s, timing };
+      this._airstrikeAnim[s.id] = entry;
+      this._updatePlanePose(entry);
+    }
+    for (const id in this._airstrikeAnim) if (!activeIds.has(id)) delete this._airstrikeAnim[id];
+  },
+
+  // Detect the FIRST render where a strike's `done` flag reads true (works
+  // identically whether that came from a real predicted tick or a rebase
+  // catch-up) and fire the one-shot impact FX exactly once per strike —
+  // idempotent across re-renders and rebases since it's keyed by strike id,
+  // not by any per-frame state.
+  _checkAirstrikeLandings(war) {
+    for (const s of (war.airstrikes || [])) {
+      if (s.done && !(s.id in this._strikeImpactAt)) {
+        this._strikeImpactAt[s.id] = Date.now();
+        this._screenShake();
+        this._flashScreen();
+      }
+    }
+  },
+  // Brief decaying-oscillation translate on #map-wrap (the OUTER div holding
+  // the SVG) — deliberately not on map.world (the SVG <g> the pan/zoom
+  // transform already lives on), so this CSS animation class layers on top
+  // instead of fighting the JS-driven transform attribute.
+  _screenShake() {
+    const wrap = document.getElementById('map-wrap');
+    if (!wrap) return;
+    wrap.classList.remove('map-shake');
+    void wrap.offsetWidth; // force reflow so re-adding the class restarts the animation
+    wrap.classList.add('map-shake');
+    setTimeout(() => wrap.classList.remove('map-shake'), 520);
+  },
+  // Full-viewport white flash — a persistent overlay div (created once,
+  // reused for every strike) rather than one per explosion, so back-to-back
+  // impacts don't stack DOM nodes.
+  _flashScreen() {
+    let overlay = document.getElementById('war-flash-overlay');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.id = 'war-flash-overlay';
+      document.body.appendChild(overlay);
+    }
+    overlay.classList.remove('firing');
+    void overlay.offsetWidth;
+    overlay.classList.add('firing');
+  },
+  // Expanding ring at the impact point, radius 0 → BOMB_RADIUS×1.6, fading —
+  // recreated each render like the battle-flash rings (renderFlashes) with
+  // timing carried across rebuilds via _strikeImpactAt (wall-clock, cosmetic
+  // only) rather than any tick-based state.
+  renderShockwaves(map, mk, NS, war) {
+    const now = Date.now();
+    const maxR = ((window.WarEngine && WarEngine.BOMB_RADIUS) || 95) * 1.6;
+    const byId = {};
+    for (const s of (war.airstrikes || [])) byId[s.id] = s;
+    for (const id in this._strikeImpactAt) {
+      const t0 = this._strikeImpactAt[id];
+      const age = now - t0;
+      if (age > AIRSTRIKE_SHOCKWAVE_MS) { delete this._strikeImpactAt[id]; delete this._shockwaveAnim[id]; continue; }
+      const strike = byId[id];
+      if (!strike) continue; // pruned server-side before the FX finished — let the timer run out quietly
+      const k = age / AIRSTRIKE_SHOCKWAVE_MS;
+      const circ = document.createElementNS(NS, 'circle');
+      circ.setAttribute('cx', strike.pos[0]); circ.setAttribute('cy', strike.pos[1]);
+      circ.setAttribute('r', String(maxR * k));
+      circ.style.opacity = String(1 - k);
+      circ.setAttribute('class', 'war-shockwave');
+      map.warLayer.appendChild(circ);
+      this._shockwaveAnim[id] = { node: circ, t0, life: AIRSTRIKE_SHOCKWAVE_MS };
+    }
+  },
+
   /* ═══════════ WAR MAP TOOLBAR ═══════════
      Small floating control surface, only present while W.layer === 'war'.
      Rebuilt on every render (cheap — a handful of buttons); removed the
@@ -907,22 +1120,35 @@ const War = {
     const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
     const now = Date.now();
     const onCooldown = now < bomb.cooldownUntil;
+    // The predicted war (when available) gives a smoother countdown than the
+    // authoritative doc — same reasoning as every other tick-driven readout.
+    const predWar = (window.WarEngine && this.predictedWar()) || war;
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
       ? 'Click soldier: select (Shift adds) · Right-click: move · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
       : 'This war has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
-    // Bombs are DEFENDER-ONLY (server-enforced in dropBomb / the /api/war/bomb
-    // route) — a GM commanding the attacker gets a disabled button + hint
-    // instead of a bomb that would only bounce off the server.
+    // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
+    // /api/war/bomb route) — a GM commanding the attacker gets a disabled
+    // button + hint instead of a call that would only bounce off the server.
     const bombBtn = (side === 'att')
-      ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '💣 No air arm')
+      ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '✈ No air arm')
       : el('button.dash-btn', {
           class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
           onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-        }, !live ? '💣 Bomb' : onCooldown ? `Bomb (${Math.ceil((bomb.cooldownUntil - now) / 1000)}s)` : (this._bombArmed ? 'Bomb armed — click target' : '💣 Bomb'));
+        }, !live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike'));
     row.appendChild(bombBtn);
-    if (side === 'att') this._bombArmed = false; // never leave a bomb armed while commanding the side that has none
+    if (side === 'att') this._bombArmed = false; // never leave an airstrike armed while commanding the side that has none
+    // Countdown chip for a pending (not-yet-landed) strike this side ordered —
+    // visible even after clicking away from the arming flow, since the plane
+    // is airborne for several seconds.
+    const pendingStrike = (predWar.airstrikes || []).find(s => !s.done && s.side === side);
+    if (pendingStrike) {
+      const remainingTicks = Math.max(0, pendingStrike.strikeTick - this._continuousTick(predWar));
+      const interval = Math.max(200, (predWar.tickMs || 2000) / (predWar.speed || 1));
+      const remainingS = Math.ceil((remainingTicks * interval) / 1000);
+      row.appendChild(el('div.chip.active', `✈ Strike inbound — ${remainingS}s`));
+    }
     row.appendChild(el('button.dash-btn', {
       onclick: () => { this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; if (GameMap.render) GameMap.render(); }
     }, 'Clear selection'));

@@ -6,10 +6,17 @@
 // remains server-only:
 //   - startWar/endWar     — scenario spawning (store.uid, Math.random staging
 //                           scatter, war.seed minting) and lifecycle logging
-//   - dropBomb            — mutates db.properties/roads and syncs deeds
+//   - dropBomb            — ORDERS a cinematic airstrike: enqueues onto
+//                           war.airstrikes; the deterministic blast (unit
+//                           damage, crater, event) is applied by the engine's
+//                           stepAirstrikes, not here — see applyAirstrike-
+//                           GroundEffects below for what stays server-only
 //   - commandUnits        — thin auth shim over engine.applyOrders
 //   - warTick/maybeWarTick— engine ticks bound to the SERVER ctx, so
-//                           milestones write the real timeline + news wire
+//                           milestones write the real timeline + news wire,
+//                           and a landing airstrike's ground effects
+//                           (destroyed properties, cut roads) apply via the
+//                           ctx.onAirstrike hook
 //
 // State shape, tick pipeline and tuning are documented in docs/WAR.md.
 const store = require('./store');
@@ -17,10 +24,13 @@ const sim = require('./sim');
 const engine = require('./war-engine');
 
 // Interactive-layer tunables that stay server-side (bombs mutate the world
-// beyond db.war, so the engine knows nothing about them).
-const BOMB_RADIUS = 95;               // px — blast radius
-const BOMB_UNIT_DMG = 90;             // max strength damage at the blast centre (falls off to 0 at BOMB_RADIUS)
-const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between bomb drops
+// beyond db.war, so the engine knows nothing about them). BOMB_RADIUS/
+// BOMB_UNIT_DMG themselves moved INTO the engine (see war-engine.js) since
+// stepAirstrikes — the deterministic blast — needs to run identically on a
+// predicting client; read via engine.BOMB_RADIUS below where still needed
+// (finding what a strike will destroy on the ground).
+const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between airstrike orders — starts at ORDER time, not impact
+const AIRSTRIKE_FLIGHT_TICKS = 4;     // ticks between order and impact — 4 × the default 2000ms tickMs ≈ 8s at 1×, within the ~6–10s cinematic window
 const TUNING_MIN = 0.1, TUNING_MAX = 10; // clamp range for GM global tuning sliders (war.mods)
 
 // GM spawn/join tunables (Feature: mid-war reinforcements) — clamp ranges
@@ -368,13 +378,31 @@ function setWarTuning(db, patch, actor) {
   return { ok: true, mods: war.mods };
 }
 
-// Falloff 1 at blast centre → 0 at BOMB_RADIUS.
-function bombFalloff(d) { return engine.clamp(1 - d / BOMB_RADIUS, 0, 1); }
+// The airstrike's launch point: the seed's airport property (kind:'airport')
+// at its CURRENT position — properties move (GM map edits) and can be
+// destroyed outright (bombs level properties, including airports, so this is
+// a real case), hence the fallback chain: capital city, then a fixed
+// map-edge point derived from the war's own grid bounds (always in range).
+function findAirstrikeOrigin(db) {
+  const airport = (db.properties || []).find(p => p.kind === 'airport' && p.pos);
+  if (airport) return airport.pos.slice();
+  const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
+  if (capital) return capital.pos.slice();
+  const inset = engine.WORLD_BORDER_INSET || 8;
+  return [inset, inset];
+}
 
+// ---------- dropBomb: ORDERS an airstrike (Feature: cinematic two-phase bombing) ----------
+// Only ENQUEUES the strike onto war.airstrikes — the deterministic blast
+// (unit damage, crater, event) and the strike's done:true flip happen in the
+// engine's stepAirstrikes at war.tick >= strikeTick, so a predicting client
+// detonates it on the same tick as the server. This function keeps the same
+// name/route/auth/cooldown contract the client already calls.
 function dropBomb(db, side, pos, actor) {
-  // Bombs are DEFENDER-ONLY — the attacker AI never bombs, and even a GM
-  // commanding the attacker side directly has no air arm to call in. This is
-  // enforced here, not just hidden client-side, since the client is untrusted.
+  // Bombs are DEFENDER-ONLY — the attacker AI never calls in an airstrike,
+  // and even a GM commanding the attacker side directly has no air arm. This
+  // is enforced here, not just hidden client-side, since the client is
+  // untrusted.
   if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
   const war = db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
@@ -383,50 +411,69 @@ function dropBomb(db, side, pos, actor) {
   const now = Date.now();
   if (now < bomb.cooldownUntil) return { ok: false, error: 'Bomb is on cooldown.' };
   if (!Array.isArray(pos) || pos.length !== 2) return { ok: false, error: 'Invalid target position.' };
+  // Cooldown starts at ORDER time, same as the old instant bomb — a player
+  // can't spam strikes just because the last one hasn't landed yet.
   bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
 
-  // 1. Damage units of both sides within the blast.
-  // GM global tuning (war.mods.bombDmg) — read defensively so a war doc
-  // predating this feature (no `mods`) falls back to 1× exactly.
-  const bombDmgMod = (war.mods && war.mods.bombDmg) || 1;
-  for (const u of war.units) {
-    if (!isLive(u)) continue;
-    const d = dist(u.pos, pos);
-    if (d > BOMB_RADIUS) continue;
-    const dmg = BOMB_UNIT_DMG * bombFalloff(d) * bombDmgMod;
-    u.strength = Math.max(0, round1(u.strength - dmg));
-    if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
-    if (u.strength <= 0) engine.killUnit(war, u);
-  }
-  engine.pruneCorpses(war);
+  war.airstrikes = war.airstrikes || [];
+  const strike = {
+    id: store.uid('airstrike'),
+    side,
+    pos: pos.slice(),
+    from: findAirstrikeOrigin(db),
+    orderedTick: war.tick,
+    strikeTick: war.tick + AIRSTRIKE_FLIGHT_TICKS,
+    orderedAt: now,
+    done: false,
+    groundApplied: false // guards applyAirstrikeGroundEffects against double-application
+  };
+  war.airstrikes.push(strike);
+  return { ok: true, strike };
+}
 
-  // 2. Destroy properties within the blast; sync the deed mirror ONCE after.
+// ---------- authority-only ground effects, wired via ctx.onAirstrike ----------
+// Everything the engine must NOT do (a predicting client's ctx omits this
+// hook entirely — see war-engine.js's normCtx): destroying properties in the
+// blast radius, cutting roads, and the audit-log entries for both. Called
+// from the server's tick binding (see ctxFor below) the instant a strike
+// crosses done:false → true. Idempotent via strike.groundApplied — the
+// engine only calls this once per strike, but a defensive guard costs
+// nothing and protects against any future double-tick edge case.
+function applyAirstrikeGroundEffects(db, war, strike) {
+  if (strike.groundApplied) return;
+  strike.groundApplied = true;
+  const pos = strike.pos;
+  const radius = engine.BOMB_RADIUS;
+
+  // Destroy properties within the blast; sync the deed mirror ONCE after —
+  // properties are never hand-deleted from the deed register (see
+  // docs/CONVENTIONS.md's canonical-record-+-mirror table).
   const destroyed = [];
   db.properties = (db.properties || []).filter(p => {
-    if (!p.pos || dist(p.pos, pos) > BOMB_RADIUS) return true;
+    if (!p.pos || dist(p.pos, pos) > radius) return true;
     destroyed.push(p);
     return false;
   });
   if (destroyed.length) {
     require('./deeds').syncAllDeeds(db);
     for (const p of destroyed) {
-      store.log('event', `${p.name} destroyed`, 'Levelled by aerial bombardment', actor || 'WAR ENGINE', []);
+      store.log('event', `${p.name} destroyed`, 'Levelled by aerial bombardment', 'WAR ENGINE', []);
     }
   }
 
-  // 3. Cut roads: strip points within the blast, split surviving runs.
+  // Cut roads: strip points within the blast, split surviving runs.
   const roads = ((db.settings || {}).map || {}).roads || [];
   const nextRoads = [];
   let roadsCut = 0;
   for (const r of roads) {
     const pts = r.pts || [];
-    const inBlast = pts.some(p => dist(p, pos) <= BOMB_RADIUS);
+    const inBlast = pts.some(p => dist(p, pos) <= radius);
     if (!inBlast) { nextRoads.push(r); continue; }
     roadsCut++;
     let run = [];
     const runs = [];
     for (const p of pts) {
-      if (dist(p, pos) <= BOMB_RADIUS) { if (run.length) runs.push(run); run = []; }
+      if (dist(p, pos) <= radius) { if (run.length) runs.push(run); run = []; }
       else run.push(p);
     }
     if (run.length) runs.push(run);
@@ -437,20 +484,27 @@ function dropBomb(db, side, pos, actor) {
     db.settings.map.roads = nextRoads;
   }
 
-  // 4. Crater.
-  war.craters = war.craters || [];
-  war.craters.push({ pos: pos.slice(), t: now, side });
-  if (war.craters.length > 40) war.craters.shift();
-
-  // 5. Battle event.
-  engine.pushEvent(war, 'battle', pos.slice(), `Bombing run — ${destroyed.length} structure${destroyed.length === 1 ? '' : 's'} levelled.`);
-
-  return { ok: true };
+  if (destroyed.length || roadsCut) {
+    store.log('event', 'Airstrike impact',
+      `${destroyed.length} structure${destroyed.length === 1 ? '' : 's'} levelled` +
+      (roadsCut ? `, ${roadsCut} road${roadsCut === 1 ? '' : 's'} cut` : '') + '.',
+      'WAR ENGINE', []);
+  }
 }
 
 // ---------- ticks (engine bound to the server ctx) ----------
-function warTick(db) { return engine.warTick(db, SERVER_CTX); }
-function maybeWarTick(db) { return engine.maybeWarTick(db, SERVER_CTX); }
+// onAirstrike needs `db` (to mutate db.properties/settings.map.roads), which
+// log/news don't — SERVER_CTX stays a static object for those two, and this
+// binds a fresh onAirstrike closure over the per-call `db` each tick.
+function ctxFor(db) {
+  return {
+    log: SERVER_CTX.log,
+    news: SERVER_CTX.news,
+    onAirstrike: (war, strike) => applyAirstrikeGroundEffects(db, war, strike)
+  };
+}
+function warTick(db) { return engine.warTick(db, ctxFor(db)); }
+function maybeWarTick(db) { return engine.maybeWarTick(db, ctxFor(db)); }
 
 // Milestone fingerprint — the changes worth a GLOBAL sync broadcast. Routine
 // tick-to-tick churn (positions, strengths, cells) is delivered to

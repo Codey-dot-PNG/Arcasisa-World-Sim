@@ -489,7 +489,9 @@ async function handle(req, res, pathname, method) {
       const result = war.dropBomb(db, side, pos, u.user.displayName);
       if (!result.ok) return bad(result.error);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil });
+      // strike is returned so the client can insert it into the predicted
+      // war immediately (plane/countdown start before the next heartbeat).
+      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil, strike: result.strike });
     }
 
     if (pathname === '/api/trade' && method === 'POST') {

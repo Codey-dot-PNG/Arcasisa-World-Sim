@@ -9,19 +9,25 @@ into other systems (occupation effects, refugee flows, war economy) later.
 
 - `server/war-engine.js` — the deterministic, dependency-free SIMULATION
   (movement, combat, territory, objectives, AI, transport-graph pathing,
-  embedded point-in-polygon geometry). Shared **byte-for-byte** with
-  `public/js/war-engine.js` (the browser copy — edit both together, same rule
-  as pricepath.js). All tick-time randomness comes from a mulberry32 PRNG
-  seeded per tick from `(war.seed ^ war.tick)` — never `Math.random()` — so
-  server and client compute identical ticks from identical state. Timeline
-  logs and news milestones are `ctx` hooks: the server passes real
-  `store.log`/`sim.draftNews`; a predicting client passes nothing (no-ops).
+  airstrike blast resolution, embedded point-in-polygon geometry). Shared
+  **byte-for-byte** with `public/js/war-engine.js` (the browser copy — edit
+  both together, same rule as pricepath.js). All tick-time randomness comes
+  from a mulberry32 PRNG seeded per tick from `(war.seed ^ war.tick)` — never
+  `Math.random()` — so server and client compute identical ticks from
+  identical state. Timeline logs, news milestones and an airstrike's
+  authority-only ground effects are all `ctx` hooks: the server passes real
+  `store.log`/`sim.draftNews`/`onAirstrike`; a predicting client passes
+  nothing (no-ops).
 - `server/war.js` — the server-only AUTHORITY layer: scenario spawning
-  (startWar mints `war.seed` once), endWar, bombs (mutate properties/roads/
-  deeds beyond `db.war`), the command shim, and `warTick`/`maybeWarTick`
+  (startWar mints `war.seed` once), endWar, dropBomb (ORDERS an airstrike —
+  the blast itself is engine-side, see "Airstrikes" below), the ground
+  effects an impact triggers (mutate properties/roads/deeds beyond `db.war`,
+  via `ctx.onAirstrike`), the command shim, and `warTick`/`maybeWarTick`
   bound to the server ctx.
 - `public/js/war.js` — input, rendering, **client-side prediction** (see
-  "Client-side prediction" below).
+  "Client-side prediction" below), plus the airstrike's purely-cosmetic
+  plane/screenshake/flash/shockwave FX (see "Client — plane, screenshake,
+  flash, shockwave" below).
 
 ## State — `db.war`
 
@@ -48,6 +54,8 @@ war: {
   events: [ { t, kind:'battle'|'capture'|'landing'|'milestone', pos, text } ], // cap 60, for client animation
   stats: { attLosses, defLosses, provinceControl: { provId: 0..100 }, citiesHeld: [cityIds] },
   bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } }, // {att,def} shape kept for compatibility, but only `def` is ever used — bombs are DEFENDER-ONLY
+  airstrikes: [ { id, side, pos:[x,y], from:[x,y], orderedTick, strikeTick,
+                  orderedAt: <epoch ms>, done, groundApplied } ], // additive/absent-safe — see "Airstrikes" below
   craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
   mods: { dmg: 1, bombDmg: 1, hp: 1 },       // GM global tuning multipliers — additive/absent-safe, see "GM global tuning" below
   allies: { att: [entityId, …], def: [entityId, …] }, // foreign entities that joined via joinWar — additive/absent-safe, see "Foreign intervention" below
@@ -101,22 +109,29 @@ One tick does, in order:
    property) get a 1.35× defend bonus and drain organisation more slowly. Org
    drops below 25 → rout; strength ≤ 0 → destroyed (killUnit, with a `battle`
    event).
-4. **Territory fracture** (`stepTerritory`) — every non-embarked, living unit
+4. **Airstrikes** (`stepAirstrikes`) — any `war.airstrikes` entry with
+   `!done && war.tick >= strikeTick` detonates: every live unit within
+   `BOMB_RADIUS` takes falloff damage (same shape as the old instant bomb),
+   a crater and a `battle` event are pushed, and the strike is flipped
+   `done: true` — see "Airstrikes" below for the full order→impact design.
+   Processed in array order for determinism; resolved strikes older than
+   `AIRSTRIKE_PRUNE_TICKS` (30) are dropped from the array afterward.
+5. **Territory fracture** (`stepTerritory`) — every non-embarked, living unit
    projects control ~1.5 cells out; attacker cells whose CENTRE falls inside
    a province polygon (`geometry.provinceAt`) are marked captured, defender
    units in range recapture (delete the cell). Sea cells are never
    capturable (no province contains them).
-5. **`recomputeProvinceControl`** — captured-cell count ÷ that province's
+6. **`recomputeProvinceControl`** — captured-cell count ÷ that province's
    total land-cell count, per province, from the sparse `cells` map (cheap:
    proportional to cells actually captured, not the whole grid).
-6. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
+7. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
    `seize_capital` objective completes once an attacker unit has held within
    60px of the city for `CAPTURE_HOLD_TICKS` (3) consecutive ticks with no
    defender unit in range; a `control_province` objective completes once its
    privince crosses `CITY_CONTROL_PCT` (65%). Each completion logs a
    `store.log('event', …)` entry and publishes a news article via
    `sim.draftNews` (the same mechanism `sim.js`'s `news` effect uses).
-7. **`checkVictory`** — all objectives done → attacker wins, war ends.
+8. **`checkVictory`** — all objectives done → attacker wins, war ends.
    (Defender victory is decided inside the AI step below, since it hinges on
    the attacker's total strength, not an objective.)
 
@@ -134,8 +149,9 @@ with real route-following over a graph built from `settings.map.roads` **plus**
 - **Cache**: the built graph lives in a module-level variable keyed by a cheap
   content fingerprint (`polylineCount:pointCount:roundedCoordSum`). This is a
   *pure derived cache* — no gameplay state of its own — so it's serverless-safe
-  (a cold start simply rebuilds it) and needs no dirty flag: a bomb cutting a
-  road changes the fingerprint, invalidating it on the next path computation.
+  (a cold start simply rebuilds it) and needs no dirty flag: an airstrike
+  cutting a road changes the fingerprint, invalidating it on the next path
+  computation.
 - **`computePath(db, from, to, baseSpeed)`**: nearest node to `from` (entry)
   and `to` (exit), Dijkstra between them (simple O(V²) array scan — the seed
   network is a few hundred nodes), total route time = off-network entry leg +
@@ -191,7 +207,7 @@ range (`CAPTURE_RANGE` stays 60). All scenario strengths were multiplied ×10
 `militaryPropertyStrength` 2600) **and** `K_COMBAT` divided by 10 (0.035 →
 0.0035): damage is `k × enemyStrength`, so ×10 strengths alone would leave
 relative attrition identical — the k reduction is what actually stretches
-time-to-kill ~10×. `BOMB_UNIT_DMG` stays 90, so a bomb now wounds units
+time-to-kill ~10×. `BOMB_UNIT_DMG` stays 90, so an airstrike now wounds units
 rather than annihilating them (intended). Org/rout thresholds are unchanged —
 fights resolve by routing more often than annihilation. These numbers apply
 to **new** wars only: an in-progress war keeps the strengths it started with
@@ -205,9 +221,10 @@ missing entirely on a legacy war doc — every read is defensive, e.g.
 
 - **`dmg`** — multiplies both `dmgToDef`/`dmgToAtt` in `stepCombat` (the
   engine, so client prediction picks it up too).
-- **`bombDmg`** — multiplies `BOMB_UNIT_DMG` falloff damage in `dropBomb`
-  (server/war.js only — bombs are a server-only authority-layer mutation, not
-  part of the shared engine tick).
+- **`bombDmg`** — multiplies `BOMB_UNIT_DMG` falloff damage in the engine's
+  `stepAirstrikes` (moved there from `dropBomb` with the two-phase airstrike
+  rework — see "Airstrikes" below — so client prediction picks it up too,
+  same as `dmg` above).
 - **`hp`** — does NOT get read per-tick; changing it immediately rescales
   every LIVE unit's `strength`/`maxStrength` by the ratio `newHp / oldHp`
   (proportional, so a unit at 40% HP stays at 40% HP after the rescale). This
@@ -254,9 +271,9 @@ toggle, kind select (`infantry`/`armored`/`marine`/`garrison`), and
 count/HP/damage/speed sliders (`Forms.sliderNum`) bound to
 `War._spawnDraft`. "Arm placement" sets `War._spawnArmed = true`; the next
 war-layer left-click calls `_doSpawn(pos)` (POSTs `/api/gm/war/spawn`) and
-disarms — mirrors the bomb-arming flow exactly (`onMapPointerDown` checks
-`_spawnArmed` the same way it checks `_bombArmed`, before the click can hit a
-unit marker underneath it), including an Esc handler and a floating
+disarms — mirrors the airstrike-arming flow exactly (`onMapPointerDown`
+checks `_spawnArmed` the same way it checks `_bombArmed`, before the click
+can hit a unit marker underneath it), including an Esc handler and a floating
 war-toolbar chip (`🪖 Spawn armed (Att/Def) — click target`) so the armed
 state is visible while looking at the map, not just the panel it was armed
 from.
@@ -425,8 +442,8 @@ client only sends orders; `server/war.js` validates and applies them.
   | Shift+left-drag on ground | Box-select all live units of the commandable side inside the marquee |
   | Plain left-click on ground | Deselect (the dossier handlers stand down on the war layer, so the click reaches the svg-level handler) |
   | Plain left-drag | Pan — exactly the base map, War never consumes it |
-  | Esc | Clear selection + disarm the bomb (window-level, bound once) |
-  | Bomb armed + left-click | Drops the bomb at the click point (defender only — see below), then disarms |
+  | Esc | Clear selection + disarm the airstrike (window-level, bound once) |
+  | Airstrike armed + left-click | Orders an airstrike on the click point (defender only — see below), then disarms |
 
   A right-button drag under ~12 world px is still treated as a plain click
   (move order); at or above that it samples pointer positions into a
@@ -441,7 +458,9 @@ client only sends orders; `server/war.js` validates and applies them.
     `path` (freehand — see "Manual paths"), never both meaningfully (`path`
     wins if present).
   - `POST /api/war/bomb { side?, pos:[x,y] }` — same auth/side rule;
-    `war.dropBomb`; returns the new cooldown timestamp.
+    `war.dropBomb`; ORDERS an airstrike (see "Airstrikes" below) and returns
+    `{ ok, cooldownUntil, strike }` — `strike` is the created
+    `war.airstrikes` entry, used by the client for optimistic prediction.
   Both are outside the `/api/gm/...` block — deliberately player-accessible,
   unlike every other war route.
 
@@ -474,37 +493,106 @@ for the rest of the war (the roster is small, ~24 units) but pruned once
 older than `CORPSE_MAX_AGE_TICKS` (400) so a very long war doesn't grow
 `war.units` unbounded.
 
-### Bombs — defender-only
+### Airstrikes — defender-only, cinematic two-phase bombing
 
 Only the defence has an air arm: `dropBomb` rejects any `side !== 'def'`
 outright, and `/api/war/bomb` forces `side = 'def'` for everyone including
 the GM (the GM `att` branch exists only on `/api/war/command`). The client
-mirrors this — the Bomb button is disabled with a "The invader has no air
-arm." hint while the GM is commanding the attacker. `war.bombs` keeps its
+mirrors this — the airstrike button is disabled with a "The invader has no
+air arm." hint while the GM is commanding the attacker. `war.bombs` keeps its
 `{att,def}` shape for compatibility with existing war docs, but only `def`
 is ever used now.
 
-`dropBomb(db, side, pos, actor)` — validated (side is 'def', war active, not
-paused, the defender's cooldown expired) then, on success:
-1. Sets a `BOMB_COOLDOWN_MS` (12s) cooldown for that side.
-2. Damages every live unit (both sides) within `BOMB_RADIUS` (95px) by up to
-   `BOMB_UNIT_DMG` (90), falling off linearly to 0 at the radius edge; a unit
-   that drops to 0 becomes a corpse via the same `killUnit` path as combat.
-3. Destroys every property within the blast radius (removed from
-   `db.properties`), then calls `deeds.syncAllDeeds(db)` **once** after the
-   loop — properties are never hand-deleted from the deed register; this is
-   the sanctioned choke point that retires the orphaned deed items and
-   inventory rows in one idempotent pass.
-4. Cuts roads: any `settings.map.roads` polyline with a point inside the
-   blast has those points stripped; if that splits the line into two or more
-   surviving runs of ≥2 points, each run becomes its own new road object
-   (`{ id: store.uid('road'), pts: run }`) — this changes the transport
-   graph's content fingerprint, so the cached routing graph rebuilds on the
-   next path computation and the cut immediately costs mobility for NEW
-   orders (units already mid-route keep their old waypoints — see the
-   pathing section's rough edge).
-5. Records a crater (`war.craters`, capped at 40) and a `'battle'` war event
-   so the client flashes it.
+What used to be an instant blast is now an **order → flight → impact**
+sequence split across the engine/authority boundary the same way everything
+else in this file is:
+
+- **`dropBomb(db, side, pos, actor)`** (`server/war.js`, unchanged route/name)
+  — validated exactly as before (side is 'def', war active, not paused, the
+  defender's cooldown expired), but instead of applying the blast it just
+  ENQUEUES a strike onto `war.airstrikes`:
+  `{ id, side, pos:[x,y], from:[x,y], orderedTick: war.tick,
+  strikeTick: war.tick + AIRSTRIKE_FLIGHT_TICKS, orderedAt: <epoch ms>,
+  done: false, groundApplied: false }`. `AIRSTRIKE_FLIGHT_TICKS` is 4 — at
+  the default 2000ms `tickMs` that's an ~8s flight at 1× speed, inside the
+  ~6–10s cinematic window. `from` is the launch point: the seed's
+  `kind:'airport'` property (`prop_airport`, "Lachevan International
+  Airport") at its CURRENT position, falling back to the capital city, then
+  to a fixed map-edge point — the airport can itself be bombed to rubble
+  mid-war, so the fallback chain is a real case, not defensive padding.
+  The `BOMB_COOLDOWN_MS` (12s) cooldown still starts at ORDER time, same as
+  before — a player can't spam strikes just because the last one hasn't
+  landed. Returns `{ ok: true, strike }`; `POST /api/war/bomb` includes
+  `strike` in its response so the client can predict it immediately (see
+  "Client-side prediction" below).
+- **`stepAirstrikes`** (`server/war-engine.js`, shared byte-for-byte with the
+  browser copy) — part of the tick pipeline (see above): once
+  `war.tick >= strike.strikeTick`, applies the DETERMINISTIC blast (moved
+  here from the old `dropBomb` so a predicting client resolves it on the
+  same tick as the server): every live unit within `BOMB_RADIUS` (95px, now
+  an engine constant) takes falloff damage up to `BOMB_UNIT_DMG` (90) ×
+  `war.mods.bombDmg`, a corpse is made via the usual `killUnit` path, a
+  crater is pushed to `war.craters`, a `'battle'` war event fires, and
+  `strike.done = true`. Strikes are processed in array order (determinism);
+  resolved strikes older than `AIRSTRIKE_PRUNE_TICKS` (30) are dropped
+  afterward so the array doesn't grow across a long war.
+- **`ctx.onAirstrike(war, strike)`** — the moment a strike flips
+  `done: true`, the engine calls this hook for everything it must NOT do
+  itself (a predicting client must never mutate `db.properties` or
+  `settings.map.roads`): destroying properties in the blast radius (then
+  `deeds.syncAllDeeds(db)` **once**, the same choke point the old instant
+  bomb used), cutting roads (identical split-the-polyline logic as before),
+  and the audit-log entries for both. `server/war.js`'s
+  `applyAirstrikeGroundEffects(db, war, strike)` implements it, bound into
+  the server's `ctxFor(db)` (closing over `db` per tick call — the only
+  hook that needs it; `log`/`news` don't). It's idempotent via
+  `strike.groundApplied` even though the engine only ever calls it once per
+  strike. A predicting client's ctx simply omits `onAirstrike` and the
+  engine's `normCtx` defaults it to a no-op — exactly the log/news pattern.
+
+`war.airstrikes` is additive/absent-safe: the engine treats a missing array
+as `[]`, no migration was needed.
+
+### Client — plane, screenshake, flash, shockwave (all cosmetic)
+
+Everything from here down is client-only dressing in `public/js/war.js`
+around the moment `stepAirstrikes` has already decided — none of it feeds
+back into gameplay, so it's safe to render slightly differently on different
+clients:
+
+- **Plane** — a small swept-wing SVG silhouette (`.war-plane`, tinted
+  defender navy), one per in-flight `war.airstrikes` entry. Its position is
+  a pure function of `(strike, "now")`, not a snapshot-to-snapshot tween: a
+  three-leg flight (climb-out from `from` to a turn-in point
+  `AIRSTRIKE_FAR_OFFSET` px away from the target, an attack run from there
+  through `pos` timed to arrive exactly at `strikeTick`, then egress back
+  toward `from` fading over `AIRSTRIKE_EGRESS_TICKS`) computed from the
+  predicted war's `tick`/`_lastTick`/`tickMs`/`speed` every rAF frame
+  (`War._planeState`). Because it's derived fresh each frame instead of
+  tweened between renders, it survives the war-layer's every-render DOM
+  rebuild for free.
+- **Impact FX** — triggered exactly once per strike, the first render where
+  `strike.done` reads true (`War._checkAirstrikeLandings`, keyed by strike
+  id so it's idempotent across rebases): a brief decaying-oscillation
+  translate on `#map-wrap` (`.map-shake` CSS class+keyframes — deliberately
+  NOT on the SVG's own pan/zoom transform group, so it layers on top instead
+  of fighting it), a full-viewport white flash overlay
+  (`#war-flash-overlay`, opacity spike → fade), and an expanding shockwave
+  ring at the impact point (SVG circle, radius 0 → `BOMB_RADIUS × 1.6`,
+  fading, recreated each render like the existing battle-flash rings).
+- **UI language** — the toolbar button reads "✈ Call Airstrike"; armed:
+  "Airstrike armed — click the target"; while a strike is inbound, a
+  separate countdown chip reads "✈ Strike inbound — Ts"; cooldown reads "Air
+  wing rearming — Ts"; the attacker-side disabled state reads "✈ No air arm"
+  with the same "The invader has no air arm." hint as before. Esc still
+  disarms.
+- **Prediction** — `War._dropBomb` inserts the strike the POST response
+  returns straight into the predicted war (same optimistic-order pattern as
+  `_issueMove`), so the plane and countdown start before the next heartbeat;
+  the engine's `stepAirstrikes` then predicts the blast locally at
+  `strikeTick` exactly like the server, and the next rebase reconciles
+  anything a predicting client couldn't know (another player's strike, an
+  AI replan).
 
 ## Client-side prediction (Phase 18) — why the war feels realtime now
 
@@ -689,9 +777,17 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
   - **Battle flashes** — a fading ring at each recent `war.events` position.
   - **Craters** — dark scorch circles at each `war.craters` entry, drawn under
     the territory/unit layers.
+  - **Airstrike planes and impact FX** — see "Client — plane, screenshake,
+    flash, shockwave" above: a cosmetic plane sprite per in-flight strike,
+    plus a one-shot screenshake/flash/shockwave the instant a strike lands.
   - **War toolbar** — a small floating control surface, present only while
-    `W.layer === 'war'`: the gesture hint line, an arm/cooldown Bomb button,
-    Clear selection, and (GM-only) a Defender/Attacker command-side toggle.
+    `W.layer === 'war'`: the gesture hint line, an arm/cooldown "✈ Call
+    Airstrike" button (plus a "✈ Strike inbound — Ts" countdown chip while
+    one is in flight), Clear selection, and (GM-only) a Defender/Attacker
+    command-side toggle. Offset above the GM command bar's footprint when
+    it's visible (`body:has(.gm-bar:not(.hidden)) .war-toolbar`, mirroring
+    the same `:has()` pattern `#toast-root` already used for the same bar)
+    so the toolbar and the bar's Quick Actions dropdown never overlap.
   - Positions are **tweened client-side**: a module-level `_anim` registry
     (keyed by unit id, not DOM node) remembers each unit's last interpolated
     position across renders, so even though `GameMap.render()` tears down
@@ -735,9 +831,13 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
 - The formation gesture assigns slots along a straight line only — no
   wedge/column presets, and a very uneven selection (wildly different
   positions) can produce awkward nearest-in-order pairings.
-- Bomb blast radius and combat range are both simple circle checks, matching
-  the rest of the engine's coarse-by-design approach (see
+- Airstrike blast radius and combat range are both simple circle checks,
+  matching the rest of the engine's coarse-by-design approach (see
   docs/CONVENTIONS.md) — no line-of-sight, no terrain occlusion.
 - Corpses are pruned by age (`CORPSE_MAX_AGE_TICKS`), not by count; an
   unusually long, static war could still accumulate a few hundred stale
   corpse entries before the age cutoff catches up.
+- A transport-graph route computed before an airstrike cuts the road it runs
+  on isn't re-planned (same rough edge as any other mid-traversal road cut,
+  see above) — a unit already following the old path finishes it at
+  on-network speed regardless of when the cut landed.

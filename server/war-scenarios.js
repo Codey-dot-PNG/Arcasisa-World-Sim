@@ -26,11 +26,16 @@
 
 // Per-kind unit defaults. `atk` is a damage-dealt multiplier (armour hits
 // harder per engagement); `speed` is in px/tick on the 3840×2160 grid.
+// Strengths ×10 (Phase 17 — collision-only combat + 10× HP, see docs/WAR.md):
+// paired with server/war.js's K_COMBAT ÷10, this stretches time-to-kill
+// roughly 10× so engagements grind instead of resolving in a couple of ticks.
+// Applies to NEW wars only — an in-progress war keeps whatever strengths it
+// was started with (no migration of a live war.units array).
 const UNIT_DEFAULTS = {
-  marine:   { strength: 130, speed: 5.2, atk: 1.0 },
-  infantry: { strength: 210, speed: 3.2, atk: 1.0 },
-  armored:  { strength: 280, speed: 4.6, atk: 1.25 },
-  reserve:  { strength: 240, speed: 3.2, atk: 1.0 }
+  marine:   { strength: 1300, speed: 5.2, atk: 1.0 },
+  infantry: { strength: 2100, speed: 3.2, atk: 1.0 },
+  armored:  { strength: 2800, speed: 4.6, atk: 1.25 },
+  reserve:  { strength: 2400, speed: 3.2, atk: 1.0 }
 };
 
 const valksland_invasion = {
@@ -68,8 +73,8 @@ const valksland_invasion = {
     { name: 'Valks Expeditionary Reserve Corps', kind: 'reserve' }
   ],
   defense: {
-    citySizeStrength: { 1: 130, 2: 220, 3: 380 },
-    militaryPropertyStrength: 260
+    citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
+    militaryPropertyStrength: 2600
   },
   tuning: {
     consolidateFrac: 0.35, // AI digs in and stops pushing below this fraction of its starting strength

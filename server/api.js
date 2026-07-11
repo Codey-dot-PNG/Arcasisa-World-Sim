@@ -452,7 +452,11 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/war/bomb' && method === 'POST') {
       const b = await readBody(req);
       if (!db.war || !db.war.active) return bad('No war is active.');
-      const side = (u.role.perms.gm && b.side === 'att') ? 'att' : 'def';
+      // Bombs are defender-only (server/war.js's dropBomb also enforces this
+      // itself) — even a GM commanding the attacker side has no air arm to
+      // call in for this scenario, so unlike /api/war/command there is no
+      // GM 'att' branch here at all.
+      const side = 'def';
       const pos = b.pos;
       if (!Array.isArray(pos) || pos.length !== 2 || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1]) ||
         pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');

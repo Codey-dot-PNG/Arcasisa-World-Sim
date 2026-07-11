@@ -14,7 +14,11 @@
 //   cells: { "cx,cy": { o:'att', p:1, pid: provId } }  — SPARSE; absent = defender-held
 //   units: [{ id, side, name, kind, pos:[x,y], dest:[x,y]|null, strength,
 //             maxStrength, org, speed, atk, state, objectiveId, garrison?,
-//             dead?, deadAt?, orderedBy?:'player', playerHoldUntil? }]
+//             dead?, deadAt?, orderedBy?:'player', playerHoldUntil?,
+//             path?:[[x,y],…], pathIdx? }]  — path/pathIdx are set whenever
+//             dest is (see setDest()); network-node waypoints for the
+//             transport-graph route, followed at ROAD_SPEED_MULT until the
+//             last one, then a normal-speed leg to dest.
 //   objectives: [{ id, kind, ref, pos:[x,y], priority, status, holdTicks }]
 //   ai: { phase, lastPlanTick, notes:[…] }   — GM-only (stripped in filterState)
 //   events: [{ t, kind, pos, text }]         — capped 60, for client animation
@@ -36,23 +40,23 @@ const geometry = require('./geometry');
 // ---------- tunables (generic — scenario data only supplies strengths/roster) ----------
 const CELL = 48;
 const CONTROL_RADIUS_CELLS = 1.5;     // a unit projects control this many cells out
-const COMBAT_RANGE = 80;              // px — opposing units this close fight
+const COMBAT_RANGE = 40;              // px — opposing units this close fight (symbols are 40 world units wide — combat on box-touch)
 const CAPTURE_RANGE = 60;             // px — how close to a city counts as "holding" it
 const CAPTURE_HOLD_TICKS = 3;         // consecutive uncontested ticks to flip a city
 const AI_INTERVAL = 10;               // ticks between grand-strategy replans
-const K_COMBAT = 0.035;               // per-tick strength loss ~ k × enemy strength
+const K_COMBAT = 0.0035;              // per-tick strength loss ~ k × enemy strength (÷10 vs the old value — strengths are now ×10, so this is what actually stretches time-to-kill ~10×; leaving k unchanged would have left relative attrition identical)
 const ORG_DRAIN = 3.5;                // per-tick org loss while fighting
 const ORG_REGEN = 0.6;                // per-tick org recovery while not fighting
 const ROUT_ORG = 25;                  // org threshold that triggers a rout
 const RALLY_ORG = 45;                 // org a routed unit needs to rejoin the line
-const ROAD_BONUS = 1.5;               // speed multiplier near a road
-const ROAD_RANGE = 60;                // px — "near" a road for the speed bonus
+const ROAD_SPEED_MULT = 5;            // speed multiplier while following the road/rail transport graph
+const ROAD_JUNCTION_RANGE = 50;       // px — nodes from different polylines within this range are linked (roads/rails meeting at a junction)
 const CITY_CONTROL_PCT = 65;          // province-control % that satisfies control_province
 const MAX_TICKS_PER_CALL = 20;        // catch-up cap, same spirit as autoTick's 30
 // ---- interactive War layer tunables (Phase 16 — player-commanded defenders,
 // mobile garrisons, collision/firefights, corpses, bombs) ----
 const UNIT_RADIUS = 26;               // px — a unit's collider radius
-const COLLIDE_ENEMY = 46;             // px — a unit will not advance within this of a live enemy; it stops and fights instead
+const COLLIDE_ENEMY = 40;             // px — a unit will not advance within this of a live enemy; it stops and fights instead (matches the 40-unit-wide symbol/COMBAT_RANGE)
 const FRIENDLY_SEP = 30;              // px — soft separation distance between live friendlies
 const DEF_MOVE_SPEED = 3.2;           // px/tick granted to a garrison the first time the player orders it to move
 const BOMB_RADIUS = 95;               // px — blast radius
@@ -115,26 +119,158 @@ function randomProvincePoint(war, provId) {
 
 function cellKey(cx, cy) { return cx + ',' + cy; }
 
-// nearest distance from a point to any road polyline segment (coarse — good
-// enough for a "near a road" speed bonus, not a real routing graph)
-function distToRoads(pos, roads) {
-  let best = Infinity;
-  for (const r of (roads || [])) {
+// ---------- transport graph (roads + rails) — route-following movement ----------
+// This is a PURE DERIVED CACHE built from db.settings.map.{roads,rails}: it
+// holds no gameplay-authoritative state of its own (everything a client can
+// observe still lives on db.war/db.settings), so it is safe under serverless
+// cold starts — a fresh worker just rebuilds it on first use, same as any
+// other in-process memoisation. It's keyed by a cheap content fingerprint
+// (polyline count + point count + a coordinate checksum) so a bomb cutting a
+// road (server/war.js's dropBomb, step 4) invalidates it the next time a path
+// is computed, without needing an explicit "dirty" flag.
+let _graphCache = { fingerprint: null, graph: null };
+
+function transportFingerprint(db) {
+  const map = (db.settings || {}).map || {};
+  const lines = [].concat(map.roads || [], map.rails || []);
+  let points = 0, coordSum = 0;
+  for (const r of lines) {
     const pts = r.pts || [];
-    for (let i = 0; i < pts.length - 1; i++) {
-      const d = distToSegment(pos, pts[i], pts[i + 1]);
-      if (d < best) best = d;
+    points += pts.length;
+    for (const p of pts) coordSum += p[0] + p[1];
+  }
+  return lines.length + ':' + points + ':' + Math.round(coordSum);
+}
+
+// nodes = every polyline point (roads + rails); edges connect consecutive
+// points of the same polyline (weight = segment length / ROAD_SPEED_MULT —
+// travelling the network is ROAD_SPEED_MULT times faster than the same
+// distance off-network) plus edges between any two nodes from DIFFERENT
+// polylines within ROAD_JUNCTION_RANGE px, so roads/rails that meet at a
+// junction (per mapdata) are actually walkable across each other.
+function buildTransportGraph(db) {
+  const map = (db.settings || {}).map || {};
+  const lines = [].concat(map.roads || [], map.rails || []);
+  const nodes = [];
+  const adj = [];
+  function addNode(pt) { nodes.push([pt[0], pt[1]]); adj.push([]); return nodes.length - 1; }
+  function addEdge(i, j, w) { adj[i].push([j, w]); adj[j].push([i, w]); }
+
+  for (const r of lines) {
+    const pts = r.pts || [];
+    if (pts.length < 2) continue;
+    let prevIdx = null;
+    for (const p of pts) {
+      const idx = addNode(p);
+      if (prevIdx !== null) addEdge(prevIdx, idx, dist(nodes[prevIdx], nodes[idx]) / ROAD_SPEED_MULT);
+      prevIdx = idx;
     }
   }
-  return best;
+  // Junction links — O(n^2) over the whole node set, but the network is only
+  // a few hundred nodes for the seed map, so this is cheap.
+  for (let i = 0; i < nodes.length; i++) {
+    for (let j = i + 1; j < nodes.length; j++) {
+      const d = dist(nodes[i], nodes[j]);
+      if (d > 0 && d <= ROAD_JUNCTION_RANGE) addEdge(i, j, d / ROAD_SPEED_MULT);
+    }
+  }
+  return { nodes, adj };
 }
-function distToSegment(p, a, b) {
-  const dx = b[0] - a[0], dy = b[1] - a[1];
-  const len2 = dx * dx + dy * dy;
-  if (len2 === 0) return dist(p, a);
-  let t = ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2;
-  t = clamp(t, 0, 1);
-  return dist(p, [a[0] + t * dx, a[1] + t * dy]);
+
+function getTransportGraph(db) {
+  const fp = transportFingerprint(db);
+  if (_graphCache.fingerprint !== fp) _graphCache = { fingerprint: fp, graph: buildTransportGraph(db) };
+  return _graphCache.graph;
+}
+
+function nearestNode(graph, pos) {
+  let best = -1, bd = Infinity;
+  for (let i = 0; i < graph.nodes.length; i++) {
+    const d = dist(graph.nodes[i], pos);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return { idx: best, dist: bd };
+}
+
+// Simple array-scan Dijkstra — fine for a few hundred nodes (no heap needed).
+function dijkstra(graph, startIdx) {
+  const n = graph.nodes.length;
+  const distArr = new Array(n).fill(Infinity);
+  const prev = new Array(n).fill(-1);
+  const visited = new Array(n).fill(false);
+  distArr[startIdx] = 0;
+  for (let iter = 0; iter < n; iter++) {
+    let u = -1, ud = Infinity;
+    for (let i = 0; i < n; i++) if (!visited[i] && distArr[i] < ud) { ud = distArr[i]; u = i; }
+    if (u === -1) break;
+    visited[u] = true;
+    for (const edge of graph.adj[u]) {
+      const v = edge[0], w = edge[1];
+      if (distArr[u] + w < distArr[v]) { distArr[v] = distArr[u] + w; prev[v] = u; }
+    }
+  }
+  return { dist: distArr, prev };
+}
+
+// Returns an array of [x,y] waypoints (network nodes only, entry → exit) if
+// routing beats a straight line; otherwise null (caller falls back to the
+// direct line, exactly as before this feature existed). baseSpeed cancels
+// out of the route-vs-direct comparison (both sides divide by it), but is
+// threaded through for clarity/parity with how the caller actually moves.
+// Known rough edge: this is computed once, at order time — a road destroyed
+// mid-traversal (a bomb cutting it) does not reroute a unit already
+// following its waypoints; it just finishes the (now-fictional) path at
+// on-network speed. See docs/WAR.md.
+function computePath(db, from, to, baseSpeed) {
+  const graph = getTransportGraph(db);
+  if (!graph || graph.nodes.length < 2) return null;
+  const entry = nearestNode(graph, from);
+  const exit = nearestNode(graph, to);
+  if (entry.idx < 0 || exit.idx < 0 || entry.idx === exit.idx) return null;
+  const { dist: distArr, prev } = dijkstra(graph, entry.idx);
+  const graphDist = distArr[exit.idx];
+  if (!Number.isFinite(graphDist)) return null;
+  const routeDist = entry.dist + graphDist + exit.dist;
+  const directDist = dist(from, to);
+  if (routeDist >= directDist) return null;
+  const path = [];
+  let cur = exit.idx;
+  while (cur !== -1) {
+    path.unshift(graph.nodes[cur].slice());
+    if (cur === entry.idx) break;
+    cur = prev[cur];
+  }
+  return path;
+}
+
+// Assign a dest + (re)compute its route in one place, so every call site
+// (player orders, AI target/sweep assignment, embarked-landing handoff) gets
+// consistent path/pathIdx bookkeeping.
+function setDest(db, u, dest, baseSpeed) {
+  u.dest = dest;
+  const path = computePath(db, u.pos, dest, baseSpeed || u.speed || 1);
+  if (path && path.length) { u.path = path; u.pathIdx = 0; }
+  else { u.path = null; u.pathIdx = 0; }
+}
+function clearDest(u) {
+  u.dest = null; u.path = null; u.pathIdx = 0;
+}
+// Advances a unit toward its dest, following u.path if present: the leg onto
+// the network (path[0]) and the leg off it (after the last waypoint) run at
+// baseSpeed; legs BETWEEN network nodes run at baseSpeed × ROAD_SPEED_MULT.
+function stepAlongPath(u, baseSpeed) {
+  const path = u.path;
+  if (path && path.length) {
+    const idx = u.pathIdx || 0;
+    if (idx < path.length) {
+      const wp = path[idx];
+      const spd = idx === 0 ? baseSpeed : baseSpeed * ROAD_SPEED_MULT;
+      advanceToward(u, wp, spd);
+      if (dist(u.pos, wp) < 12) u.pathIdx = idx + 1;
+      return;
+    }
+  }
+  advanceToward(u, u.dest, baseSpeed);
 }
 
 // ---------- objective resolution ----------
@@ -182,7 +318,7 @@ function startWar(db, scenario) {
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
   const stage = scenario.staging;
   const units = scenario.units.map(u => {
-    const def = unitDefaults[u.kind] || { strength: 200, speed: 4, atk: 1 };
+    const def = unitDefaults[u.kind] || { strength: 2000, speed: 4, atk: 1 }; // ×10 fallback, consistent with the scenario-data tuning (see war-scenarios.js)
     const strength = u.strength || def.strength;
     return {
       id: store.uid('warunit'),
@@ -203,10 +339,10 @@ function startWar(db, scenario) {
   // Defender garrisons: one per city (by size) and one per military property —
   // fully generic, no ids named here (scenario.defense only supplies numbers).
   const def = scenario.defense || {};
-  const sizeStrength = def.citySizeStrength || { 1: 130, 2: 220, 3: 380 };
+  const sizeStrength = def.citySizeStrength || { 1: 1300, 2: 2200, 3: 3800 }; // ×10 fallback, consistent with the scenario-data tuning
   for (const c of db.cities) {
     if (!c.pos) continue;
-    const strength = sizeStrength[c.size] || sizeStrength[1] || 130;
+    const strength = sizeStrength[c.size] || sizeStrength[1] || 1300;
     units.push({
       id: store.uid('warunit'), side: 'def', name: c.name + ' Garrison', kind: 'garrison',
       pos: [c.pos[0], c.pos[1]], dest: null, strength, maxStrength: strength, org: 100,
@@ -215,7 +351,7 @@ function startWar(db, scenario) {
   }
   for (const p of db.properties) {
     if (p.type !== 'military' || !p.pos) continue;
-    const strength = def.militaryPropertyStrength || 260;
+    const strength = def.militaryPropertyStrength || 2600;
     units.push({
       id: store.uid('warunit'), side: 'def', name: p.name + ' Garrison', kind: 'garrison',
       pos: [p.pos[0], p.pos[1]], dest: null, strength, maxStrength: strength, org: 100,
@@ -299,7 +435,7 @@ function runAI(db, war) {
     for (const u of war.units) {
       if (u.side !== 'att' || !isLive(u) || u.state === 'embarked') continue;
       if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
-      u.dest = null;
+      clearDest(u);
       if (u.state !== 'routed') u.state = 'holding';
     }
     note(war, 'Digging in on captured ground — no further advances ordered.');
@@ -323,11 +459,11 @@ function runAI(db, war) {
     const lastHeld = war.stats.citiesHeld.length ? war.stats.citiesHeld[war.stats.citiesHeld.length - 1] : null;
     if (lastHeld && i % 4 === 3) {
       const city = db.cities.find(c => c.id === lastHeld);
-      if (city) { u.dest = null; u.state = 'holding'; u.objectiveId = null; garrisoned++; continue; }
+      if (city) { clearDest(u); u.state = 'holding'; u.objectiveId = null; garrisoned++; continue; }
     }
-    if (target) { u.dest = target.pos.slice(); u.objectiveId = target.id; assigned++; }
+    if (target) { setDest(db, u, target.pos.slice(), u.speed); u.objectiveId = target.id; assigned++; }
     else if (sweepObj) {
-      u.dest = randomProvincePoint(war, sweepObj.ref) || sweepObj.pos.slice();
+      setDest(db, u, randomProvincePoint(war, sweepObj.ref) || sweepObj.pos.slice(), u.speed);
       u.objectiveId = sweepObj.id; assigned++;
     }
   }
@@ -348,7 +484,6 @@ function nearestLiveEnemy(war, u) {
   return { unit: nearest, dist: nd };
 }
 function stepMovement(db, war) {
-  const roads = ((db.settings || {}).map || {}).roads || [];
   for (const u of war.units) {
     if (!isLive(u)) continue;
     if (u.side === 'def') {
@@ -362,16 +497,16 @@ function stepMovement(db, war) {
       const near = nearestLiveEnemy(war, u);
       if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
       const spd = u.speed || DEF_MOVE_SPEED;
-      advanceToward(u, u.dest, spd);
+      stepAlongPath(u, spd);
       u.state = 'moving';
-      if (dist(u.pos, u.dest) < 12) { u.dest = null; u.orderedBy = null; u.state = 'holding'; }
+      if (dist(u.pos, u.dest) < 12) { clearDest(u); u.orderedBy = null; u.state = 'holding'; }
       continue;
     }
     if (u.state === 'embarked') {
       const landingObj = war.objectives.find(o => o.kind === 'landing');
-      if (!u.dest && landingObj) u.dest = landingObj.pos.slice();
+      if (!u.dest && landingObj) setDest(db, u, landingObj.pos.slice(), u.speed);
       if (u.dest) {
-        advanceToward(u, u.dest, u.speed);
+        stepAlongPath(u, u.speed);
         if (dist(u.pos, u.dest) < 40) {
           u.state = 'moving';
           if (landingObj && landingObj.status === 'pending') {
@@ -381,7 +516,7 @@ function stepMovement(db, war) {
             newsMilestone('INVASION FORCES LAND', `${u.name} has come ashore under fire. The beachhead is holding for now.`);
           }
           const next = primaryObjective(war);
-          u.dest = next ? next.pos.slice() : null;
+          if (next) setDest(db, u, next.pos.slice(), u.speed); else clearDest(u);
           u.objectiveId = next ? next.id : null;
         }
       }
@@ -408,19 +543,17 @@ function stepMovement(db, war) {
       // enemy — it stops and fights instead (stepCombat handles damage).
       const near = nearestLiveEnemy(war, u);
       if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
-      let speed = u.speed;
-      if (distToRoads(u.pos, roads) <= ROAD_RANGE) speed *= ROAD_BONUS;
-      advanceToward(u, u.dest, speed);
+      stepAlongPath(u, u.speed);
       // A player-ordered attacker unit that reaches its dest reverts to
       // normal AI-eligible behaviour on the next replan.
-      if (u.orderedBy === 'player' && dist(u.pos, u.dest) < 12) { u.orderedBy = null; u.dest = null; u.state = 'holding'; continue; }
+      if (u.orderedBy === 'player' && dist(u.pos, u.dest) < 12) { u.orderedBy = null; clearDest(u); u.state = 'holding'; continue; }
       // Reached a sweep waypoint (control_province patrol) with the objective
       // still short of its threshold — pick a fresh waypoint immediately
       // rather than idling until the next AI replan (up to AI_INTERVAL ticks).
       if (dist(u.pos, u.dest) < 20 && u.objectiveId) {
         const obj = war.objectives.find(o => o.id === u.objectiveId);
         if (obj && obj.kind === 'control_province' && obj.status !== 'done') {
-          u.dest = randomProvincePoint(war, obj.ref) || obj.pos.slice();
+          setDest(db, u, randomProvincePoint(war, obj.ref) || obj.pos.slice(), u.speed);
         }
       }
     }
@@ -605,10 +738,10 @@ function commandUnits(db, side, orders, actor) {
     if (!o || !o.unitId || !Array.isArray(o.dest) || o.dest.length !== 2) continue;
     const u = war.units.find(x => x.id === o.unitId && x.side === side);
     if (!u || !isLive(u)) continue; // unknown/dead/wrong-side — ignore silently
-    u.dest = [Number(o.dest[0]), Number(o.dest[1])];
+    if (u.side === 'def' && !u.speed) u.speed = DEF_MOVE_SPEED;
+    setDest(db, u, [Number(o.dest[0]), Number(o.dest[1])], u.speed);
     u.orderedBy = 'player';
     u.playerHoldUntil = war.tick + PLAYER_HOLD_TICKS;
-    if (u.side === 'def' && !u.speed) u.speed = DEF_MOVE_SPEED;
   }
 }
 
@@ -616,6 +749,10 @@ function commandUnits(db, side, orders, actor) {
 function bombFalloff(d) { return clamp(1 - d / BOMB_RADIUS, 0, 1); }
 
 function dropBomb(db, side, pos, actor) {
+  // Bombs are DEFENDER-ONLY — the attacker AI never bombs, and even a GM
+  // commanding the attacker side directly has no air arm to call in. This is
+  // enforced here, not just hidden client-side, since the client is untrusted.
+  if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
   const war = db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
   war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };

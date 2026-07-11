@@ -96,11 +96,24 @@ const War = {
   // gate the command/bomb affordances on this, not on active() (= war exists).
   commandable() { const w = S() && S().war; return !!(w && w.active); },
 
-  // Clamp a world point to the 3840×2160 map so orders/bombs never land
-  // out of bounds — the ocean rect extends far past the map frame, so a
-  // click in open water would otherwise send coordinates the server rejects
-  // (bomb → "Invalid target position.") or silently drops (move order).
-  _clamp(pt) { return [Math.max(0, Math.min(3840, pt[0])), Math.max(0, Math.min(2160, pt[1]))]; },
+  // Clamp a world point to the map so orders/bombs never land out of bounds
+  // — the ocean rect extends far past the map frame, so a click in open
+  // water would otherwise send coordinates the server rejects (bomb →
+  // "Invalid target position.") or silently drops (move order). Delegates to
+  // the shared engine's own clampToWorld (grid-derived bounds MINUS
+  // WORLD_BORDER_INSET) whenever a predicted war is available, instead of a
+  // hand-rolled [0,3840]x[0,2160] clamp with no inset — the mismatch used to
+  // mean a near-edge order's optimistic `dest` never matched what
+  // engine.setDest/setManualPath actually clamped it to server-side (off by
+  // up to WORLD_BORDER_INSET px), so the order's outbox entry never read as
+  // "confirmed" and kept re-applying itself every rebase until its 5s expiry
+  // (harmless — both sides converged on the same final position — but wasted
+  // cycles and could show a flickering arrow near the map edge).
+  _clamp(pt) {
+    const war = window.WarEngine && this._pred && this._pred.war;
+    if (war) return WarEngine.clampToWorld(war, pt);
+    return [Math.max(0, Math.min(3840, pt[0])), Math.max(0, Math.min(2160, pt[1]))];
+  },
 
   /* ═══════════ AUTHORITY ═══════════
      Non-GM operators always command the defender — the server enforces this
@@ -146,6 +159,29 @@ const War = {
     }
     const war = JSON.parse(JSON.stringify(auth));
     const sameWar = !!(prev && prev.war && prev.war.startedAt === war.startedAt);
+    const now = Date.now();
+    // AIRSTRIKE OUTBOX: _dropBomb splices the strike POST /api/war/bomb
+    // returns straight into the predicted war so the plane/countdown start
+    // immediately (see docs/WAR.md "Prediction"). But dropBomb saves
+    // server-side SYNCHRONOUSLY before that response returns, and this
+    // client also polls GET /api/war/state on its own ~1 tick-interval timer
+    // — a heartbeat request already in flight the instant the order lands
+    // can resolve with a snapshot from just BEFORE the strike existed. Left
+    // alone, adopting that snapshot here would silently drop the strike
+    // (no plane, no countdown) until the NEXT heartbeat/refetch arrives, a
+    // whole interval later. Re-splice any outbox strike this snapshot
+    // doesn't know about yet — BEFORE the fast-forward below, so if the
+    // snapshot needs catching up it ticks the strike through stepAirstrikes
+    // exactly like the server would (it may even resolve it, same as the
+    // server, if the catch-up crosses strikeTick).
+    const strikeOutbox = ((prev && prev.strikeOutbox) || []).filter(o =>
+      o.exp > now && !(auth.airstrikes || []).some(s => s.id === o.strike.id));
+    if (strikeOutbox.length) {
+      war.airstrikes = war.airstrikes || [];
+      for (const o of strikeOutbox) {
+        if (!war.airstrikes.some(s => s.id === o.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(o.strike)));
+      }
+    }
     // ROLLBACK RECONCILIATION: a snapshot describes the war as of the
     // server's last tick, which on live deployments is usually BEHIND the
     // local simulation (the heartbeat round-trips while prediction keeps
@@ -168,11 +204,10 @@ const War = {
     // maybeWarTick can't burst-run a huge catch-up past the divergence bound.
     const interval = Math.max(200, (war.tickMs || 2000) / (war.speed || 1));
     let phase = sameWar ? (prev.war._lastTick || 0) : 0;
-    if (!phase || Date.now() - phase > interval * 2) phase = Date.now();
+    if (!phase || now - phase > interval * 2) phase = now;
     war._lastTick = phase;
-    const now = Date.now();
     const outbox = (prev ? prev.outbox : []).filter(o => o.exp > now);
-    this._pred = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [] };
+    this._pred = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [], strikeOutbox };
     // Re-apply optimistic orders the server hasn't reflected yet, so an
     // in-flight command's arrow doesn't flicker away on an older snapshot.
     // `o.dest` is always populated (for a path order it's the path's LAST
@@ -579,6 +614,14 @@ const War = {
         if (war) {
           war.airstrikes = war.airstrikes || [];
           if (!war.airstrikes.some(s => s.id === r.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(r.strike)));
+          // Remember it in the "strike outbox" too — see _rebase's comment —
+          // so a heartbeat that was already in flight when this order landed
+          // (and therefore resolves with a snapshot from just before it)
+          // doesn't silently drop the strike for a whole interval.
+          if (this._pred) {
+            (this._pred.strikeOutbox = this._pred.strikeOutbox || [])
+              .push({ strike: JSON.parse(JSON.stringify(r.strike)), exp: Date.now() + 8000 });
+          }
           this.refreshLayer(true);
         }
       }

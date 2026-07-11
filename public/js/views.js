@@ -1819,6 +1819,15 @@ const Views = {
   viewExchange(inner) {
     const companies = S().entities.filter(e => e.type === 'company' && e.sharePrice !== undefined);
     inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'Lachevan Exchange — Company Value updates each turn; the Day Market moves live'));
+    // Day-tick countdown (Feature: extend the war layer's snapshot → local
+    // deterministic prediction pattern to the Day Market — see docs/WAR.md's
+    // "Client-side prediction" closing note and docs/SIMULATION.md). Purely
+    // cosmetic and read-only: the actual next dayPrice is decided
+    // server-side with true randomness (market.js's noise draw), so this
+    // only tells the player WHEN the next tick lands, ticked locally off
+    // dayTick.lastAt/intervalMs (see server/api.js's filterState) rather
+    // than waiting for a refetch to notice time passed.
+    inner.appendChild(el('div#day-tick-countdown', { style: 'font-family:var(--font-mono); font-size:10.5px; color:var(--ink-faint); margin:-4px 0 12px;' }, this.dayTickCountdownText()));
     if (!companies.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:20px 0;' }, 'No listed companies on file.'));
       return;
@@ -1888,12 +1897,16 @@ const Views = {
 
       const cols = el('div', { style: 'display:flex; gap:18px; align-items:flex-start; margin-top:8px; flex-wrap:wrap;' });
       // Left: turn-based Company Value (fundamentals). Right: live Day Market.
-      const dayHist = (c.dayHistory || []).map((p, i) => ({ x: i, y: p }));
       const valWrap = el('div.sparkline-cell');
       valWrap.appendChild(Charts.chartLine(priceHist.length ? priceHist : [], { width: 300, height: 110, title: 'COMPANY VALUE / TURN', yFormat: v => CUR() + fmtNum(v) }));
       cols.appendChild(valWrap);
-      const dayWrap = el('div.sparkline-cell');
-      dayWrap.appendChild(Charts.chartLine(dayHist.length ? [{ name: 'Day', color: 'var(--accent)', points: dayHist }] : [], { width: 300, height: 110, title: 'DAY MARKET (LIVE)', xLabels: dayHist.map(() => ''), yFormat: v => CUR() + fmtNum(v) }));
+      // data-day-chart marks this cell for startPriceTicker's 900ms refresh
+      // (same interval that already updates the live price label) — it
+      // rebuilds the chart with a fresh trailing LIVE point each tick (see
+      // dayChartNode) so the sparkline visibly wanders between real
+      // dayHistory commits instead of sitting frozen until the next refetch.
+      const dayWrap = el('div.sparkline-cell', { 'data-day-chart': c.id });
+      dayWrap.appendChild(this.dayChartNode(c));
       cols.appendChild(dayWrap);
 
       const btns = el('div.btn-row', { style: 'flex-direction:column; align-items:flex-start; gap:8px;' });
@@ -1931,15 +1944,50 @@ const Views = {
   livePriceEl(c) {
     return el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(this.livePrice(c)));
   },
+  // The Day Market sparkline, with one EXTRA trailing point beyond the real
+  // committed dayHistory — the live wiggle price (same PricePath call the
+  // label already uses), so the chart visibly extends/wanders between real
+  // ticks instead of sitting frozen until the next server commit. This is
+  // read-only visual prediction only: the extra point is never treated as a
+  // real history entry (it's recomputed from scratch every redraw, never
+  // written back to c.dayHistory), and the next REAL point's value is still
+  // decided entirely server-side (market.js's dayMarketTick uses true
+  // randomness, not something a client could predict).
+  dayChartNode(c) {
+    const dayHist = (c.dayHistory || []).map((p, i) => ({ x: i, y: p }));
+    const points = dayHist.concat([{ x: dayHist.length, y: this.livePrice(c) }]);
+    return Charts.chartLine([{ name: 'Day', color: 'var(--accent)', points }],
+      { width: 300, height: 110, title: 'DAY MARKET (LIVE)', xLabels: points.map(() => ''), yFormat: v => CUR() + fmtNum(v) });
+  },
+  // "Next tick in ~Xs" — purely a countdown, never a price guess. dayTick
+  // comes from filterState (server/api.js), mirroring war.tick/tickMs's
+  // heartbeat exposure but read-only (no route to poll early, no order to
+  // send — the Day Market already advances on ordinary traffic via
+  // market.maybeDayTick, this just narrates the wait).
+  dayTickCountdownText() {
+    const dt = S().dayTick;
+    if (!dt || !dt.lastAt) return 'Day Market prices wiggle continuously between server ticks.';
+    const next = dt.lastAt + (dt.intervalMs || 5000);
+    const remaining = Math.max(0, Math.round((next - Date.now()) / 1000));
+    return `Prices wiggle continuously; next Day Market tick in ~${remaining}s.`;
+  },
   startPriceTicker() {
     if (this._priceTicker) return;
     this._priceTicker = setInterval(() => {
-      const nodes = document.querySelectorAll('.live-price[data-co]');
-      if (!nodes.length) return;
-      nodes.forEach(n => {
+      const priceNodes = document.querySelectorAll('.live-price[data-co]');
+      priceNodes.forEach(n => {
         const c = S().entities.find(e => e.id === n.getAttribute('data-co'));
         if (c) n.textContent = CUR() + fmtNum(this.livePrice(c));
       });
+      const chartNodes = document.querySelectorAll('[data-day-chart]');
+      chartNodes.forEach(n => {
+        const c = S().entities.find(e => e.id === n.getAttribute('data-day-chart'));
+        if (!c) return;
+        while (n.firstChild) n.removeChild(n.firstChild);
+        n.appendChild(this.dayChartNode(c));
+      });
+      const cd = document.getElementById('day-tick-countdown');
+      if (cd) cd.textContent = this.dayTickCountdownText();
     }, 900);
   },
 

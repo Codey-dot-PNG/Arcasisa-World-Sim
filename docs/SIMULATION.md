@@ -104,6 +104,28 @@ stockpile. Flows land in `trade.lastFlows` / `lastExportFill` / `stockIn` and th
 (default 5000ms, `economy.dayTickMs`); ridden by `GET /api/state` and the local 5s timer, plus
 one tick per turn — the gate prevents double-ticking.
 
+**Day Market client prediction** — the read-only half of the war layer's
+snapshot → local prediction → rebase pattern (see docs/WAR.md's "Client-side
+prediction"), applied where it's actually safe: nothing here predicts a
+trade or any money movement, only what's already public, deterministic
+display state.
+- `server/api.js`'s `filterState` exposes `dayTick: { lastAt, intervalMs }` —
+  `db._lastDayTick`/the resolved `dayTickMs` gate `maybeDayTick` itself already
+  reads, just surfaced to every operator (a timestamp and an interval, not
+  sensitive). `public/js/views.js`'s `viewExchange` renders a "next Day
+  Market tick in ~Xs" countdown from it (`dayTickCountdownText`), ticked by
+  the same 900ms interval that already drives the live-price label
+  (`startPriceTicker`), instead of only updating on the next full refetch.
+- The DAY MARKET (LIVE) sparkline (`dayChartNode`) appends ONE extra trailing
+  point beyond the real `dayHistory` array: the current live wiggle price
+  (the same `PricePath.price(...)` call `livePrice`/`livePriceEl` already
+  use for the text label), recomputed from scratch on every 900ms tick and
+  never written back into `c.dayHistory`. This is why it's safe: the
+  server remains the sole source of the next REAL `dayPrice` (`dayMarketTick`
+  draws `Math.random()` noise, deliberately not reproducible client-side,
+  unlike the war engine's seeded PRNG) — the chart's live point is always
+  discarded and recomputed, never asserted as a committed history entry.
+
 **Counterparty = the National Bank (`ent_bank`).** Buys pay the Bank; sells and offerings are
 paid BY the Bank from its finite visible reserve; buybacks pay the Bank. The Bank may go
 negative on sells (players can always exit) — which triggers…

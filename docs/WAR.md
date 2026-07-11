@@ -625,11 +625,21 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
    base tick) is ignored. Non-GM clients have `war.ai` stripped, so the
    engine simply skips AI replans in their prediction (units keep marching
    on existing dests; the next snapshot carries any replan).
-2. **Optimistic orders** — `_issueMove`/`_issueFormation` apply orders to the
-   predicted war immediately via `WarEngine.applyOrders` (the same pure
-   function the server route uses), before the POST round-trips. An outbox
-   (5s expiry) re-applies them across rebases until a server snapshot
-   reflects the dest, so an in-flight order's arrow never flickers away.
+2. **Optimistic orders** — `_issueMove`/`_issueFormation`/`_issuePath` apply
+   orders to the predicted war immediately via `WarEngine.applyOrders` (the
+   same pure function the server route uses), before the POST round-trips.
+   An outbox (5s expiry) re-applies them across rebases until a server
+   snapshot reflects the dest, so an in-flight order's arrow never flickers
+   away — `path` orders are re-applied exactly like `dest` orders (the
+   outbox entry's "confirmed?" anchor is always the order's final point:
+   `path`'s last waypoint for a manual path, `dest` for a plain move).
+   `War._clamp` delegates to `WarEngine.clampToWorld` (rather than a
+   hand-rolled `[0,3840]x[0,2160]` bound) so an order issued near the map
+   edge clamps to the SAME point client- and server-side — otherwise the
+   outbox's 2px "did the server pick this up yet?" check could never read
+   as confirmed near the border and would keep re-applying until its 5s
+   expiry (harmless, since both sides converged on the same final position
+   either way, but wasteful and could show a flickering arrow).
 3. **War heartbeat** — while a war is active and the tab is visible (map
    layer OR War Room panel), the client polls `GET /api/war/state` once per
    tick interval (min 1s). The route runs `maybeWarTick` (driving the
@@ -637,6 +647,25 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
    tick loop self-sustaining) and returns just `{war, v}` (ai stripped for
    non-GM), which the client version-guards (`v` monotonic, same rule as
    core.js) and rebases onto.
+
+**Airstrike outbox** — `_dropBomb` splices the strike `POST /api/war/bomb`
+returns straight into the predicted war (see "Prediction" under Airstrikes
+above), but `dropBomb` saves server-side SYNCHRONOUSLY before that response
+returns, and the client ALSO polls `GET /api/war/state` on its own ~1-tick
+timer independently of any order it just sent. A heartbeat request already
+in flight the instant a bomb order lands can resolve with a snapshot from
+just BEFORE the strike existed; adopting that snapshot naively would drop
+the just-ordered strike (no plane, no countdown) for a whole heartbeat
+interval, until the next poll picked it back up. `War._rebase` guards
+against this with a small strike outbox (`_pred.strikeOutbox`, 8s expiry,
+mirroring the order outbox): any outbox strike the incoming snapshot doesn't
+know about yet (by id) is re-spliced into the rebased war BEFORE the
+rollback-reconciliation fast-forward runs below, so a snapshot that needs
+catching up ticks the strike through `stepAirstrikes` exactly like the
+server would — it can even resolve it locally, same as the server, if the
+catch-up crosses `strikeTick`. `tools/war-divergence-check.js` scripts this
+exact race (a snapshot captured one tick before the order, delivered one
+tick after) and reports the gap in ticks with the fix on/off.
 
 Two rendering rules keep it smooth (both born from live-server testing):
 
@@ -667,9 +696,20 @@ rather than stop-start) absorbs the correction visually.
 
 This snapshot → local deterministic simulation → optimistic writes →
 rebase-on-authority pattern is deliberately generic: it's the template for
-making other poll-bound systems (Day Market already does a read-only version
-via pricepath; turn previews could too) feel realtime without touching the
-CAS commit model.
+making other poll-bound systems feel realtime without touching the CAS
+commit model. The Day Market applies the READ-ONLY half of it (no orders to
+predict, since money never gets predicted client-side — see
+docs/SIMULATION.md's "Day Market client prediction"); turn previews could
+still do the full version.
+
+**Testing determinism/prediction** — `tools/war-divergence-check.js` (plain
+`node`, no running server) ticks `server/war-engine.js` as an authoritative
+"server" and a ported copy of `public/js/war.js`'s rebase/outbox logic as a
+"client", replaying a scripted order/airstrike sequence including the raced
+snapshot described above, and prints max position/strength divergence plus
+whether an in-flight airstrike ever visibly disappears from the predicted
+war. Useful as a regression check whenever `_rebase`, `_optimistic`,
+`_dropBomb`, or the engine's tick pipeline changes shape.
 
 ## API — `server/api.js`
 

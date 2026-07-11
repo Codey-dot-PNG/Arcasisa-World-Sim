@@ -187,6 +187,14 @@ def make_war(gm):
             {"id": "wu_def1", "side": "def", "name": "Lachevan Garrison", "kind": "garrison",
              "pos": [2300, 520], "dest": None, "strength": 22000, "maxStrength": 22000, "org": 100,
              "speed": 0, "atk": 1, "state": "holding", "objectiveId": None, "garrison": True},
+            # Manual (freehand right-drag) path unit — exercises stepAlongPath's
+            # manualPath branch (base speed only, no road/rail bonus) in the
+            # client's local prediction with nothing but this frozen snapshot.
+            {"id": "wu_def2", "side": "def", "name": "2nd Coastal Battalion", "kind": "garrison",
+             "pos": [2150, 700], "dest": [2050, 900], "path": [[2100, 780], [2050, 900]], "pathIdx": 0,
+             "manualPath": True, "strength": 15000, "maxStrength": 15000, "org": 100,
+             "speed": 3.2, "atk": 1, "state": "moving", "objectiveId": None, "garrison": True,
+             "orderedBy": "player", "playerHoldUntil": 17},
         ],
         "objectives": [
             {"id": "wo_prov", "kind": "control_province", "ref": "prov_lachevan",
@@ -194,8 +202,22 @@ def make_war(gm):
         ],
         "events": [], "craters": [],
         "stats": {"attLosses": 0, "defLosses": 0, "provinceControl": {"prov_lachevan": 0}, "citiesHeld": []},
-        "bombs": {"att": {"cooldownUntil": 0}, "def": {"cooldownUntil": 0}},
+        "bombs": {"att": {"cooldownUntil": 0}, "def": {"cooldownUntil": 60000}},
         "result": None,
+        # GM global tuning (war.mods) — non-default values so the War Room's
+        # tuning sliders and the engine's defensive `(war.mods && ...) || 1`
+        # reads both get exercised, not just their absent-safe fallback.
+        "mods": {"dmg": 1.2, "bombDmg": 1.5, "hp": 1},
+        "allies": {"att": [], "def": []},
+        # An in-flight airstrike (Feature: two-phase bombing) — exercises the
+        # client's plane FX (public/js/war.js's _planeState) and the "Strike
+        # inbound" countdown chip purely from local prediction, since the mock
+        # never ticks server-side. strikeTick is a few ticks past the frozen
+        # tick=5 above so the flight is still airborne when the page loads.
+        "airstrikes": [
+            {"id": "strike_mock1", "side": "def", "pos": [2950, 500], "from": [2300, 520],
+             "orderedTick": 4, "strikeTick": 9, "orderedAt": 0, "done": False, "groundApplied": False},
+        ],
     }
     if gm:
         war["ai"] = {"phase": "breakout", "lastPlanTick": 0, "notes": [],
@@ -221,6 +243,13 @@ def role_perms(gm):
 def make_state(gm=True):
     return {
         "war": make_war(gm),
+        # Day Market tick clock (Feature: extend the war layer's prediction
+        # pattern to the Day Market — see docs/SIMULATION.md's "Day Market
+        # client prediction"). A fixed lastAt a couple seconds in the past so
+        # the countdown chip in viewExchange shows a plausible ~3s remaining
+        # on load, ticking down via the client's own 900ms interval same as
+        # the live-price label and the DAY MARKET (LIVE) chart's trailing point.
+        "dayTick": {"lastAt": int(time.time() * 1000) - 2000, "intervalMs": 5000},
         "settings": {
             "worldName": "Republic of Arcasia", "currency": "₳", "currencyName": "Arcasian Koren",
             "time": {"turn": 4, "unit": "day", "perTurn": 1, "date": "1960-01-05", "auto": {"enabled": False}},

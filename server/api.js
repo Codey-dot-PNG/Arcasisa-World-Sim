@@ -170,6 +170,16 @@ function filterState(u) {
     // units, objectives, casualties — but the AI's internal reasoning
     // (war.ai.notes/phase) is GM-only intel, stripped here like events/users.
     war: db.war ? (p.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null,
+    // Day Market tick clock — same "expose the wall-clock gate so the client
+    // can predict the next tick" idea as war.tick/tickMs (see docs/WAR.md's
+    // heartbeat), applied read-only to market.maybeDayTick's gate: not
+    // sensitive (a timestamp + an interval, nothing about price or money),
+    // so it ships to every operator and drives a purely cosmetic "next tick
+    // in ~Xs" countdown plus a live trailing point on the Day Market chart —
+    // see public/js/views.js's viewExchange/dayChartNode. The server remains
+    // the sole source of the actual next dayPrice (market.js's noise draw
+    // uses Math.random(), deliberately NOT reproducible client-side).
+    dayTick: { lastAt: db._lastDayTick || 0, intervalMs: (db.settings.economy && db.settings.economy.dayTickMs) || 5000 },
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
     users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined

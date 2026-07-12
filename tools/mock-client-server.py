@@ -98,8 +98,10 @@ ITEMS = [
      "marketValue": 15800, "tradable": True, "meta": {}, "description": "Reserve bullion."},
     {"id": "item_crude", "name": "Crude Oil (barrel)", "icon": "O", "category": "Commodities",
      "marketValue": 2.9, "tradable": True, "meta": {}, "description": "Unrefined crude."},
-    {"id": "item_weapons", "name": "Weapons (crate)", "icon": "W", "category": "Military",
-     "marketValue": 520, "tradable": True, "meta": {}, "description": "Small arms, crated."},
+    {"id": "item_gun_arc_m58", "name": "ARC M38 Bolt Action", "icon": "W", "category": "Military",
+     "marketValue": 170, "tradable": True,
+     "meta": {"weapon": {"kind": "smallarms", "dmg": 0.12, "hp": 0.08, "morale": 0.05}},
+     "description": "ARC-pattern bolt-action service rifle, model of 1938."},
 ]
 
 ACCOUNTS = [
@@ -112,9 +114,9 @@ TRADE = {
     "govBuyPrices": {"item_crude": 2.61},
     "partners": [
         {"entityId": "for_sarom", "tariff": "Low", "exports": ["item_crude"],
-         "imports": ["item_weapons"], "prices": {"item_crude": 3.04, "item_weapons": 676.0}, "priceDrift": 0.05},
+         "imports": ["item_gun_arc_m58"], "prices": {"item_crude": 3.04, "item_gun_arc_m58": 221.0}, "priceDrift": 0.05},
         {"entityId": "for_valksland", "tariff": "High", "exports": ["item_crude"],
-         "imports": ["item_weapons"], "prices": {"item_crude": 3.04, "item_weapons": 598.0}, "priceDrift": 0.05},
+         "imports": ["item_gun_arc_m58"], "prices": {"item_crude": 3.04, "item_gun_arc_m58": 195.0}, "priceDrift": 0.05},
         {"entityId": "for_qinal", "tariff": "High", "exports": ["item_crude"],
          "imports": [], "prices": {"item_crude": 3.04}, "priceDrift": 0.05},
         {"entityId": "for_aldonesia", "tariff": "Low", "exports": ["item_crude"],
@@ -123,13 +125,13 @@ TRADE = {
     "lastFlows": [
         {"itemId": "item_crude", "partnerId": "for_sarom", "qty": 300, "value": 912.0},
         {"itemId": "item_crude", "partnerId": "for_valksland", "qty": 300, "value": 905.0},
-        {"itemId": "item_weapons", "partnerId": "for_sarom", "qty": 5, "value": -3380.0},
+        {"itemId": "item_gun_arc_m58", "partnerId": "for_sarom", "qty": 5, "value": -1105.0},
     ],
     "history": [{"turn": t, "date": "1960-01-0%d" % (t + 1), "exportValue": 1500 + t * 120,
                  "importValue": 300 + t * 40, "byItem": {"item_crude": 1500 + t * 120}} for t in range(4)],
     "exportPool": {"item_crude": 740},
     "exportAlloc": {"item_crude": 70},
-    "imports": [{"itemId": "item_weapons", "partnerId": "for_sarom", "qtyPerTurn": 5}],
+    "imports": [{"itemId": "item_gun_arc_m58", "partnerId": "for_sarom", "qtyPerTurn": 5}],
     "tariffs": {"global": {"import": 0, "export": 0}, "byCountry": {}, "byCompany": {}},
     "orders": {"turn": 4, "buys": [], "sells": []},
 }

@@ -41,7 +41,14 @@ const DEVASTATION_DEFAULTS = {
 // settings.war wins over any of these.
 const EQUIP_DEFAULTS = {
   fuelPerStrength: 0.01,   // fuel units a unit's full tank holds per point of strength
-  fuelBurnFrac: 0.02       // fraction of a full tank burned per authoritative call while moving/fighting
+  fuelBurnFrac: 0.02,      // fraction of a full tank burned per authoritative call while moving/fighting
+  // What the UNARMED fraction of a unit is worth (fists vs rifles): each
+  // soldier without a gun contributes these factors to the unit's kit
+  // instead of the armed 1×(+weapon stats). A fully unarmed division deals a
+  // quarter damage, takes double (hp 0.5) and breaks three times faster.
+  unarmedDmg: 0.25,
+  unarmedHp: 0.5,
+  unarmedMorale: 0.3
 };
 function warCfg(db) { return Object.assign({}, DEVASTATION_DEFAULTS, EQUIP_DEFAULTS, (db.settings && db.settings.war) || {}); }
 
@@ -262,8 +269,11 @@ function resupplyUnits(db, war) {
     }
 
     // 4. Fold the unit's own packs into its combat kit (consumed by the
-    //    engine's unitMul).
-    const kit = { dmg: 1, hp: 1, morale: 1, speed: 1 };
+    //    engine's unitMul). Each ARMED soldier contributes the 1× baseline
+    //    plus his weapon's stats; each UNARMED one contributes the (savage)
+    //    settings.war.unarmed* factors instead — a division with empty racks
+    //    is fighting with fists, and its dmg/hp/morale collapse accordingly.
+    const kit = { dmg: 0, hp: 0, morale: 0, speed: 1 };
     let unarmed = troops;
     for (const g of guns) {
       if (unarmed <= 0) break;
@@ -272,10 +282,16 @@ function resupplyUnits(db, war) {
       const armed = Math.min(unarmed, row.qty);
       const frac = armed / troops;
       const wpn = g.meta.weapon;
-      kit.dmg += frac * (Number(wpn.dmg) || 0);
-      kit.hp += frac * (Number(wpn.hp) || 0);
-      kit.morale += frac * (Number(wpn.morale) || 0);
+      kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
+      kit.hp += frac * (1 + (Number(wpn.hp) || 0));
+      kit.morale += frac * (1 + (Number(wpn.morale) || 0));
       unarmed -= armed;
+    }
+    const unarmedFrac = Math.max(0, unarmed) / troops;
+    if (unarmedFrac > 0) {
+      kit.dmg += unarmedFrac * (Number(cfg.unarmedDmg) || 0.25);
+      kit.hp += unarmedFrac * (Number(cfg.unarmedHp) || 0.5);
+      kit.morale += unarmedFrac * (Number(cfg.unarmedMorale) || 0.3);
     }
     let fuelQty = 0, fuelBonus = 0;
     for (const r of u.inv) {

@@ -41,9 +41,12 @@ comments; state fields are all additive/absent-safe):
   entity-inventory row shape) and its combat multipliers `u.kit =
   {dmg,hp,morale,speed}` are folded from THAT before every authoritative
   tick (server/war.js resupplyUnits: the unit's soldiers armed
-  best-gun-first from its own packs, bonus × armed fraction; speed from the
-  best fuel grade carried × tank fullness, full tank = strength ×
-  `settings.war.fuelPerStrength`). Resupply is the drain on the item
+  best-gun-first from its own packs, each armed man contributing 1× + his
+  weapon's stats and each UNARMED man only `settings.war.unarmedDmg/
+  unarmedHp/unarmedMorale` — defaults 0.25/0.5/0.3, so a gunless division
+  fights with fists: quarter damage, double damage taken, breaks 3× faster;
+  speed from the best fuel grade carried × tank fullness, full tank =
+  strength × `settings.war.fuelPerStrength`). Resupply is the drain on the item
   economy: a unit inside its supply corridor tops up to one gun per soldier
   and refills its tank OUT OF its own nation's stockpile — the entity
   inventory of `u.nationId` (fallback: the side's principal belligerent;
@@ -852,9 +855,12 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
    stale) — resetting it per snapshot would starve prediction whenever
    snapshots arrive faster than the tick interval, which is exactly what
    happens at 4×/8×. A stale snapshot of the same war (`tick <` the rebase
-   base tick) is ignored. Non-GM clients have `war.ai` stripped, so the
-   engine simply skips AI replans in their prediction (units keep marching
-   on existing dests; the next snapshot carries any replan).
+   base tick) is ignored. Non-GM clients receive a REDACTED `war.ai`
+   (numeric plan state with `notes: []` — see api.js `warForPlayers`), so
+   their prediction replays the attacker's replans deterministically too;
+   only the reasoning notes stay GM-only. (Before Phase 27 `ai` was stripped
+   wholesale and player predictions kept units marching on stale dests —
+   on slow serverless heartbeats every AI turn surfaced as a rubberband.)
 2. **Optimistic orders** — `_issueMove`/`_issueFormation`/`_issuePath` apply
    orders to the predicted war immediately via `WarEngine.applyOrders` (the
    same pure function the server route uses), before the POST round-trips.
@@ -983,20 +989,22 @@ war. Useful as a regression check whenever `_rebase`, `_optimistic`,
   shape.
 - `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
   18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
-  `{war, v}` only, with `war.ai` stripped for non-GM exactly like
-  filterState. Clients watching an active war poll it at ~tick cadence; see
-  "Client-side prediction" above.
+  `{war, v}` only, with `war.ai` redacted for non-GM exactly like
+  filterState (numeric plan state ships, `notes` emptied — see
+  `warForPlayers`). Clients watching an active war poll it at ~tick cadence;
+  see "Client-side prediction" above.
 - Heartbeat: `GET /api/state` also calls `war.maybeWarTick(db)` right after
   the existing `market.maybeDayTick(db)` call, saving + broadcasting on a
   real tick — identical wall-clock-gate pattern, so any traffic at all
   drives the war even if no one is running the dedicated heartbeat.
 - `api.filterState`: `db.war` ships to every logged-in operator (so all
-  players can watch the front), but `war.ai` (phase, notes, thresholds) is
-  deleted for non-GM roles — the AI's planning is intentionally invisible to
-  players, only its visible consequences (units, territory, objectives,
-  events) are public. This means the War Room panel's phase readout is also
-  GM-only in practice, since it lives inside `ai`; players still see
-  objectives, casualties, province control and the event feed.
+  players can watch the front). Since Phase 27 non-GM roles receive a
+  REDACTED `war.ai` — the numeric plan state (phase, lastPlanTick,
+  thresholds) with `notes: []` — because the client's predicted engine
+  needs it to replay `runAI` deterministically between snapshots (see
+  `warForPlayers` in api.js). The AI's REASONING (`ai.notes`) remains
+  GM-only intel; players still see objectives, casualties, province control
+  and the event feed.
 
 ## Local realtime — `server.js`
 

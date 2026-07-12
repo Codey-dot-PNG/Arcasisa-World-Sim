@@ -464,7 +464,8 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   100%{r:34; opacity:0;}
 }
 .war-flash{fill:none; stroke-width:3; pointer-events:none;}
-.war-flash-battle{stroke:#c9503f;}
+/* battle flashes are no longer drawn (see War.renderFlashes) — only the
+   rarer capture/landing/milestone events keep their fading ring */
 .war-flash-capture{stroke:#e0a458;}
 .war-flash-landing{stroke:#6f93a8;}
 .war-flash-milestone{stroke:#f4ecdc;}

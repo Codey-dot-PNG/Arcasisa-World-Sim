@@ -903,6 +903,42 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 26 — retire the generic "Weapons (crate)" trade good ---------
+  // Real gun models with meta.weapon stats ARE the military economy now
+  // (national stockpiles arm units directly); a stats-less catch-all crate
+  // just muddies the arsenal. One-shot, flag-gated: drop the item and scrub
+  // every reference — inventories, production lines, foreign-trade config,
+  // the open order book, and pending trade offers that promised crates.
+  if (!world._weaponsCrateRetired) {
+    const WID = 'item_weapons';
+    if ((world.items || []).some(i => i.id === WID)) {
+      world.items = world.items.filter(i => i.id !== WID);
+      for (const holder of [...(world.entities || []), ...(world.properties || [])]) {
+        if (Array.isArray(holder.inventory)) holder.inventory = holder.inventory.filter(r => r.itemId !== WID);
+      }
+      for (const p of (world.properties || [])) {
+        if (Array.isArray(p.produces)) p.produces = p.produces.filter(x => x.itemId !== WID);
+      }
+      const t = (world.settings || {}).trade;
+      if (t) {
+        for (const p of (t.partners || [])) {
+          for (const k of ['exports', 'imports']) if (Array.isArray(p[k])) p[k] = p[k].filter(id => id !== WID);
+          for (const k of ['prices', 'priceMult', 'demand', 'supply']) if (p[k]) delete p[k][WID];
+        }
+        if (t.govBuyPrices) delete t.govBuyPrices[WID];
+        if (t.orders) for (const k of ['buys', 'sells']) {
+          if (Array.isArray(t.orders[k])) t.orders[k] = t.orders[k].filter(o => o.itemId !== WID);
+        }
+      }
+      if (Array.isArray(world.trades)) {
+        world.trades = world.trades.filter(tr => tr.status !== 'open' ||
+          !([...(tr.give || []), ...(tr.get || [])].some(r => r.itemId === WID)));
+      }
+    }
+    world._weaponsCrateRetired = true;
+    changed = true;
+  }
+
   return changed;
 }
 

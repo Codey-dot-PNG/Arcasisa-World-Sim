@@ -184,6 +184,21 @@ function histView(db, p) {
   const hist = db.history || [];
   return p.statistics ? hist : hist.map(h => ({ turn: h.turn, shares: h.shares }));
 }
+// The war doc as non-GM operators see it (fog of war). The AI's REASONING
+// (ai.notes) stays GM-only intel, but the numeric plan state — phase,
+// lastPlanTick, collapse/consolidate thresholds — ships to everyone: the
+// client's predicted engine needs it to replay runAI deterministically, so
+// enemy columns turn at the same tick locally as they do on the server.
+// (Stripping ai wholesale meant a player's prediction could never replan the
+// attacker between snapshots; on slow serverless heartbeats every AI turn
+// surfaced as a visible rubberband correction.) notes is [] not absent so
+// the engine's note() can push into a predicted doc without guards. Shared
+// by filterState and the GET /api/war/state heartbeat.
+function warForPlayers(war) {
+  if (!war || !war.ai) return war;
+  const { notes, ...aiRest } = war.ai;
+  return { ...war, ai: { ...aiRest, notes: [] } };
+}
 function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
@@ -268,9 +283,10 @@ function filterState(u) {
     timeline, trades,
     elections: db.elections,
     // War (fog of war): every logged-in operator sees the front — territory,
-    // units, objectives, casualties — but the AI's internal reasoning
-    // (war.ai.notes/phase) is GM-only intel, stripped here like events/users.
-    war: db.war ? (p.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null,
+    // units, objectives, casualties — plus the AI's numeric plan state so
+    // client prediction can replay replans; only ai.notes (the reasoning)
+    // stays GM-only. See warForPlayers above.
+    war: db.war ? (p.gm ? db.war : warForPlayers(db.war)) : null,
     // Day Market tick clock — same "expose the wall-clock gate so the client
     // can predict the next tick" idea as war.tick/tickMs (see docs/WAR.md's
     // heartbeat), applied read-only to market.maybeDayTick's gate: not
@@ -412,6 +428,14 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true });
     }
     if (pathname === '/api/state' && method === 'GET') {
+      // Serverless-friendly TURN advance: with no resident process the
+      // auto-advance timer never runs and the Vercel cron only fires daily,
+      // so overdue auto-turns ride state fetches through the same gated-tick
+      // pattern as the Day Market below. autoTick is a no-op unless
+      // settings.time.auto is enabled and a full interval has elapsed;
+      // advanceTurn itself saves + broadcasts. Long-lived mode keeps the
+      // real timer and skips this (riding both would double-advance).
+      try { if (!sim.isLongLived()) sim.autoTick('AUTO'); } catch (e) { console.error('auto-turn tick failed:', e.message); }
       // Serverless-friendly Day Market advance: ride this fetch to tick the
       // market on wall-clock cadence (gated, so at most once per window). On a
       // real tick, persist + signal so every client refetches the new prices —
@@ -586,7 +610,7 @@ async function handle(req, res, pathname, method) {
     // simulation onto. Same fog-of-war filtering as filterState.
     if (pathname === '/api/war/state' && method === 'GET') {
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
-      const w = db.war ? (u.role.perms.gm ? db.war : (() => { const { ai, ...rest } = db.war; return rest; })()) : null;
+      const w = db.war ? (u.role.perms.gm ? db.war : warForPlayers(db.war)) : null;
       return json(res, 200, { war: w, v: store.getVersion() });
     }
     if (pathname === '/api/war/command' && method === 'POST') {
@@ -1419,7 +1443,13 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         const s = db.settings;
         for (const k of ['worldName', 'currency', 'currencyName', 'parliamentSeats']) if (b[k] !== undefined) s[k] = b[k];
-        if (b.time) { Object.assign(s.time, b.time); if (b.time.auto) Object.assign(s.time.auto, b.time.auto); }
+        if (b.time) {
+          Object.assign(s.time, b.time);
+          // editing the auto schedule restarts its clock — otherwise a stale
+          // lastTick from a previous enable makes the serverless autoTick
+          // "catch up" with a burst of turns the moment auto is re-enabled
+          if (b.time.auto) { Object.assign(s.time.auto, b.time.auto); s.time.auto.lastTick = Date.now(); }
+        }
         if (b.registration) Object.assign(s.registration, b.registration);
         if (b.newsThresholds) Object.assign(s.newsThresholds, b.newsThresholds);
         if (b.taxation) {

@@ -1507,6 +1507,12 @@ function runElection(actor, manual) {
 let longLived = false;
 let autoTimer = null;
 function setLongLived(v) { longLived = !!v; }
+// Whether a resident process owns the auto-advance timer. When it doesn't
+// (serverless / cloud mode), overdue turns ride ordinary /api/state fetches
+// through the gated autoTick below — same pattern as market.maybeDayTick.
+// Riding requests in long-lived mode too would DOUBLE-advance (the timer
+// doesn't maintain auto.lastTick), hence the guard.
+function isLongLived() { return longLived; }
 
 function scheduleAuto() {
   if (!longLived) return;
@@ -1542,7 +1548,7 @@ function autoTick(actor) {
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
   runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
-  scheduleAuto, setLongLived, autoTick, syncPresidency,
+  scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf,
   findProv, findEnt, findItem

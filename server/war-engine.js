@@ -1220,10 +1220,13 @@
     // — no-op when the key matches, so this is a cheap per-tick guard that
     // keeps server and predicting client in step without extra sync plumbing.
     refreshWarZones(db, war);
-    // AI runs only when war.ai is present: always on the server; on a
-    // predicting client only for the GM (filterState strips ai for players).
-    // A player client simply keeps units marching on their existing dests
-    // between snapshots — the next authoritative state carries any replan.
+    // AI runs whenever war.ai is present: always on the server, and on every
+    // predicting client too — players receive a REDACTED ai (numeric plan
+    // state, notes emptied — see api.js) precisely so their local replay
+    // makes the same deterministic replans the server makes. Before that, a
+    // player client kept units marching on stale dests between snapshots and
+    // every AI turn showed up as a rubberband correction. A legacy snapshot
+    // with no ai at all still just coasts on existing dests.
     if (war.ai && war.tick - (war.ai.lastPlanTick || 0) >= AI_INTERVAL) {
       runAI(db, war, ctx, rng);
       war.ai.lastPlanTick = war.tick;
@@ -1255,7 +1258,17 @@
       if (!warTick(db, ctx)) break;
       any = true;
     }
-    war._lastTick = now;
+    // Advance the gate by the ticks actually consumed instead of snapping to
+    // `now` — snapping threw away `elapsed % interval` on EVERY call, which
+    // on a request-driven server (serverless: ticks ride ~heartbeat-cadence
+    // requests, each arriving mid-window) stretched the effective tick
+    // period to interval + avg(remainder). The 250ms-driven client predicted
+    // at the true rate, drifted ahead to its cap, and every rebase became a
+    // 10+ tick fast-forward — the visible "rubberband" on Vercel. The
+    // `now - interval` clamp keeps a long stall (idle war, hidden tab) from
+    // banking unbounded catch-up debt: at most one extra backlog tick
+    // survives past the burst that MAX_TICKS_PER_CALL already allows.
+    war._lastTick = Math.max(last + steps * interval, now - interval);
     return any;
   }
 

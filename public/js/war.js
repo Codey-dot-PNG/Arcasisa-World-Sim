@@ -804,9 +804,19 @@ const War = {
 
     this.renderCraters(map, mk, NS, war);
     this.renderTerritory(map, mk, NS, war);
-    this.renderMoveArrows(map, mk, NS, war);
-    this.renderAttackArrows(map, mk, NS, war);
-    this.renderUnits(map, mk, NS, war);
+    // Once a war concludes the soldiers leave the field — draw the move/attack
+    // arrows and unit markers only while the war is still active. The craters
+    // and captured territory above remain so the final front can be reviewed.
+    if (war.active) {
+      this.renderMoveArrows(map, mk, NS, war);
+      this.renderAttackArrows(map, mk, NS, war);
+      this.renderUnits(map, mk, NS, war);
+    } else {
+      // Drop any lingering per-unit animation/selection state so a re-render
+      // (or a later war) doesn't try to tween ghosts of the departed units.
+      this._anim = {}; this._flashAnim = {}; this._arrowAnim = {};
+      this._lastStrength = {}; this._hitAt = {}; this._sel.clear();
+    }
     this._checkAirstrikeLandings(war);
     this.renderAirstrikePlanes(map, mk, NS, war);
     this.renderExplosions(map, mk, NS, war);
@@ -1203,6 +1213,12 @@ const War = {
     for (const ev of (war.events || [])) {
       i++;
       if (!ev.pos) continue;
+      // 'battle' events (unit destroyed, routs, strike impacts) fire far too
+      // often mid-war for a ring each — units already show fight rings,
+      // muzzle ticks and hit feedback, so the red flash circles were pure
+      // noise and are dropped. Rarer kinds (capture/landing/milestone) keep
+      // their flash.
+      if (ev.kind === 'battle') continue;
       const age = now - ev.t;
       if (age > 4000) continue;
       const c = document.createElementNS(NS, 'circle');

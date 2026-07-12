@@ -850,6 +850,24 @@ const War = {
     pat.appendChild(bg); pat.appendChild(stripe);
     defs.appendChild(pat);
 
+    // Defender counter-occupation of attacker homeland (Phase 22) — a second
+    // hatch in the defence's blue, drawn unclipped (country polygons aren't
+    // per-province clip targets; the cells themselves are already rasterised
+    // to the homeland, so a plain cell fill reads fine at map scale).
+    const defPat = pat.cloneNode(true);
+    defPat.setAttribute('id', 'war-hatch-def');
+    for (const r of defPat.childNodes) r.setAttribute('fill', '#2f4a6e');
+    defs.appendChild(defPat);
+    let defD = '';
+    const csDef = (war.grid && war.grid.cell) || 48;
+    for (const key in (war.cells || {})) {
+      const c = war.cells[key];
+      if (c.o !== 'def') continue;
+      const parts = key.split(',');
+      defD += `M${Number(parts[0]) * csDef},${Number(parts[1]) * csDef} h${csDef} v${csDef} h${-csDef} z `;
+    }
+    if (defD) mk('path', { d: defD, fill: 'url(#war-hatch-def)', class: 'war-territory' }, map.warLayer);
+
     const byProv = {};
     for (const key in (war.cells || {})) {
       const c = war.cells[key];
@@ -1609,15 +1627,26 @@ const War = {
 
     const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
     const mm = Math.floor(elapsed / 60), ss = elapsed % 60;
-    const statusText = war.result ? (war.result.winner === 'att' ? 'ENDED — INVASION SUCCEEDED' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED') : (war.paused ? 'PAUSED' : 'IN PROGRESS');
+    const statusText = war.result ? (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED') : (war.paused ? 'PAUSED' : (war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS'));
     inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${mm}m ${ss}s elapsed · ${statusText}`));
 
     inner.appendChild(Views.statStrip([
       ['Attacker Losses', fmtNum(Math.round(war.stats.attLosses))],
       ['Defender Losses', fmtNum(Math.round(war.stats.defLosses))],
+      ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
+      ['Refugees', fmtCompact(war.stats.refugees || 0)],
       ['Cities Held', String((war.stats.citiesHeld || []).length)],
       ['Speed', war.speed + '×']
     ]));
+
+    // Equipment quality (Phase 23) — what each army's arsenal is worth in the
+    // field. Multipliers come from war.equip (guns/fuel stocks, server-computed).
+    if (war.equip && (war.equip.att || war.equip.def)) {
+      const fmtEq = (e) => e ? `dmg ${e.dmg}× · armour ${e.hp}× · morale ${e.morale}× · speed ${e.speed}×` : '—';
+      inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); margin:4px 0 8px; letter-spacing:.04em;' },
+        el('div', 'ATTACKER ARSENAL  ' + fmtEq(war.equip.att)),
+        el('div', 'DEFENDER ARSENAL  ' + fmtEq(war.equip.def))));
+    }
 
     if (isGM()) this.renderControls(inner, war);
 
@@ -1641,6 +1670,20 @@ const War = {
       provBox.appendChild(Views.barRow(prov.name, control[pid] || 0, prov.color));
     }
     inner.appendChild(provBox);
+
+    // Defender counter-invasion of attacker home soil (Phase 22)
+    const enemyCtl = war.stats.enemyControl || {};
+    const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
+    if (enemyIds.length) {
+      inner.appendChild(Views.secLabel('Enemy Homeland Occupied'));
+      const box = el('div');
+      const countries = ((S().settings || {}).map || {}).countries || [];
+      for (const cid of enemyIds) {
+        const c = countries.find(x => x.id === cid);
+        box.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
+      }
+      inner.appendChild(box);
+    }
 
     inner.appendChild(Views.secLabel('Front-Line Report'));
     const evBox = el('div');
@@ -1764,7 +1807,54 @@ const War = {
       this.renderSpawner(inner, war);
       this.renderIntervention(inner, war);
     }
+    this.renderTreaty(inner, war);
     if (war.result) this.renderStartForm(inner);
+  },
+
+  // ---------- peace treaty desk (Phase 24 — GM-only) ----------
+  // Any combination of clauses in one signing: reparations, ceding a Republic
+  // province to a foreign nation, annexing a map nation as a new province.
+  // Signing during an active war ends it first (server-side).
+  _treatyDraft: null,
+  renderTreaty(inner, war) {
+    inner.appendChild(Views.secLabel('Peace Treaty (GM)'));
+    const d = this._treatyDraft = this._treatyDraft || { repFrom: '', repTo: '', repAmount: 0, cedeProv: '', cedeTo: '', annex: '' };
+    const box = el('div');
+    const nations = S().entities.filter(e => e.type === 'foreign');
+    const natOpts = (allowNone) => [(allowNone ? ['', '— none —'] : null), ...nations.map(n => [n.id, n.name])].filter(Boolean);
+    const parties = [['', '— none —'], ['ent_gov', 'The Republic (Government)'], ...nations.map(n => [n.id, n.name])];
+    const sel = (obj, key, opts) => {
+      const s = el('select.text-input', opts.map(o => el('option', { value: o[0], selected: String(obj[key]) === String(o[0]) ? 'selected' : undefined }, o[1])));
+      s.addEventListener('change', () => { obj[key] = s.value; });
+      return s;
+    };
+    box.appendChild(Forms.field('Reparations — payer', sel(d, 'repFrom', parties)));
+    box.appendChild(Forms.field('Reparations — recipient', sel(d, 'repTo', parties)));
+    box.appendChild(Forms.field('Reparations — amount (' + CUR() + ')',
+      el('input.text-input', { type: 'number', min: '0', step: '1000', value: d.repAmount || '', oninput: (e) => { d.repAmount = Number(e.target.value) || 0; } })));
+    box.appendChild(Forms.field('Cede province', sel(d, 'cedeProv', [['', '— none —'], ...S().provinces.map(p => [p.id, p.name])]), 'The province leaves the Republic and becomes the recipient nation’s territory.'));
+    box.appendChild(Forms.field('Cede to', sel(d, 'cedeTo', natOpts(true))));
+    const countries = ((S().settings || {}).map || {}).countries || [];
+    box.appendChild(Forms.field('Annex nation', sel(d, 'annex', [['', '— none —'], ...countries.map(c => [c.id, c.name])]), 'The nation becomes a new Republic province — shape, people, a namesake city.'));
+    box.appendChild(el('div.btn-row', el('button.danger-btn', {
+      onclick: () => {
+        const clauses = [];
+        if (d.repFrom && d.repTo && d.repAmount > 0) clauses.push(`${fmtMoney(d.repAmount)} reparations`);
+        if (d.cedeProv && d.cedeTo) clauses.push('cede ' + ((provById(d.cedeProv) || {}).name || d.cedeProv));
+        if (d.annex) clauses.push('annex ' + d.annex);
+        if (!clauses.length) return toast('The treaty has no clauses.', true);
+        confirmModal('SIGN TREATY', 'Sign and execute: ' + clauses.join(' · ') + '? This redraws the world and cannot be undone.', async () => {
+          const body = {};
+          if (d.repFrom && d.repTo && d.repAmount > 0) body.reparations = { fromEntityId: d.repFrom, toEntityId: d.repTo, amount: d.repAmount };
+          if (d.cedeProv && d.cedeTo) body.cede = { provinceId: d.cedeProv, toEntityId: d.cedeTo };
+          if (d.annex) body.annex = { countryId: d.annex };
+          const r = await POST('/api/gm/war/treaty', body);
+          this._treatyDraft = null;
+          toast('Treaty executed: ' + r.applied.join(' · '));
+        }, 'Sign Treaty');
+      }
+    }, '✒ Sign Treaty…')));
+    inner.appendChild(box);
   },
 
   // GM global tuning sliders (war.mods) — combat damage, bomb damage and unit

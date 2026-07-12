@@ -1,5 +1,6 @@
 'use strict';
 const crypto = require('crypto');
+const zlib = require('zlib');
 const store = require('./store');
 const sim = require('./sim');
 const ownership = require('./ownership');
@@ -26,12 +27,14 @@ function broadcast(type, data) {
 setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 
 // ---------- helpers -------------------------------------------------------
-// Mutating endpoints that must stay lean: war orders/heartbeat ride their own
-// prediction + heartbeat channel (docs/WAR.md), auth precedes a full page
-// boot, stream/config/cron are not world mutations at all.
-const SYNC_SKIP = /^\/api\/(auth\/|war\/|stream$|config$|cron$)/;
+// Mutating endpoints that must stay lean: war orders/heartbeat AND GM war
+// actions (tuning-slider drags, mid-battle spawns) ride the war prediction +
+// heartbeat channel (docs/WAR.md) — attaching a full state payload to each
+// would undo the payload diet; auth precedes a full page boot;
+// stream/config/cron are not world mutations at all.
+const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$)/;
 
-// Response-sync (Phase 20): every successful world-mutating response carries
+// Response-sync (Phase 21): every successful world-mutating response carries
 // the freshly-mutated, permission-filtered world, so the client applies its
 // own write in ONE round-trip instead of POST → debounce → GET /api/state →
 // GET /api/polling. handle() tags the response object with the authed user;
@@ -59,10 +62,45 @@ function json(res, code, obj) {
   if (store.MODE === 'supabase' && obj && typeof obj === 'object' && !Array.isArray(obj) && ('v' in obj || obj.sync)) {
     headers['X-World-V'] = 'pending';
   }
-  const body = JSON.stringify(obj);
+  let body = JSON.stringify(obj);
+  // gzip (Phase 21, stdlib zlib — the zero-dep rule is intact): only in file
+  // mode (Vercel already compresses at the edge) and only for bodies big
+  // enough to beat the CPU cost. A ~600KB state payload shrinks ~8-10x.
+  if (store.MODE === 'file' && res._gzipOk && body.length > 2048) {
+    try {
+      body = zlib.gzipSync(Buffer.from(body, 'utf8'));
+      headers['Content-Encoding'] = 'gzip';
+      headers['Vary'] = 'Accept-Encoding';
+    } catch (e) { body = JSON.stringify(obj); } // fall back to plain
+  }
   res.writeHead(code, headers);
   res.end(body);
   return true; // handled — the static server must not touch this response
+}
+
+// What changed between two world snapshots — global vars, province vars,
+// money moved, news drafted. Shared by the event Simulate button and the
+// GM turn preview (Phase 25).
+function computeWorldDiff(before, after) {
+  const diff = { globalVars: [], provinces: [], moneyMoved: 0, news: [] };
+  const beforeG = before.globalVars || {}, afterG = after.globalVars || {};
+  for (const k of new Set([...Object.keys(beforeG), ...Object.keys(afterG)])) {
+    if (beforeG[k] !== afterG[k]) diff.globalVars.push({ key: k, from: beforeG[k], to: afterG[k] });
+  }
+  for (const bp of before.provinces || []) {
+    const ap = (after.provinces || []).find(p => p.id === bp.id);
+    if (!ap) continue;
+    const changes = [];
+    for (const k of new Set([...Object.keys(bp.vars || {}), ...Object.keys(ap.vars || {})])) {
+      if ((bp.vars || {})[k] !== (ap.vars || {})[k]) changes.push({ key: k, from: (bp.vars || {})[k], to: (ap.vars || {})[k] });
+    }
+    if (changes.length) diff.provinces.push({ id: bp.id, name: bp.name, changes });
+  }
+  const newTxns = (after.transactions || []).slice((before.transactions || []).length);
+  diff.moneyMoved = newTxns.reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0);
+  const beforeNewsIds = new Set((before.news || []).map(a => a.id));
+  diff.news = (after.news || []).filter(a => !beforeNewsIds.has(a.id)).map(a => ({ id: a.id, headline: a.headline, paperId: a.paperId }));
+  return diff;
 }
 
 // Party-support percentages (national + per province) — public political
@@ -135,6 +173,17 @@ function userPayload(u) {
 }
 
 // ---------- permission-filtered world view --------------------------------
+// History as a role sees it: statistics clearance gets the full entries,
+// everyone else only the public share-price series. Shared by filterState's
+// recent window and GET /api/history's full archive.
+// 60 turns rides every state fetch (enough for dossier sparklines and the
+// first paint of any chart); long-range charts lazily pull GET /api/history
+// once per turn (Views.histAll), so the hot path stays light.
+const HIST_STATE_CAP = 60;
+function histView(db, p) {
+  const hist = db.history || [];
+  return p.statistics ? hist : hist.map(h => ({ turn: h.turn, shares: h.shares }));
+}
 function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
@@ -179,7 +228,11 @@ function filterState(u) {
       return out;
     });
 
-  const news = (p.manageNews ? db.news : db.news.filter(n => n.status === 'published')).slice(-300);
+  // News list ships METADATA ONLY (Phase 21 payload diet — bodies were ~100KB
+  // of every state fetch). The full article body is fetched lazily via
+  // GET /api/news/:id when a reader opens it (or a journalist edits it).
+  const news = (p.manageNews ? db.news : db.news.filter(n => n.status === 'published')).slice(-300)
+    .map(n => { const { body, ...meta } = n; return meta; });
 
   // Timeline visibility (Phase 6, tightened): the full record is GM-only.
   // Non-GM operators receive only transfer/trade/market/inventory entries
@@ -208,7 +261,10 @@ function filterState(u) {
     // Share prices are public market information — everyone gets them so the
     // Exchange price-history graphs work for citizens. National statistics
     // (GDP, money supply, …) stay gated on the statistics clearance.
-    history: p.statistics ? (db.history || []) : (db.history || []).map(h => ({ turn: h.turn, shares: h.shares })),
+    // Phase 21 payload diet: the hot path carries only the recent window
+    // (~180 turns — the full 1000-entry archive was ~300KB of every state
+    // fetch); charts that want the whole record pull GET /api/history once.
+    history: histView(db, p).slice(-HIST_STATE_CAP),
     timeline, trades,
     elections: db.elections,
     // War (fog of war): every logged-in operator sees the front — territory,
@@ -267,6 +323,7 @@ async function handle(req, res, pathname, method) {
   const u = getUser(req);
   // response-sync context (see attachSync) — per-response, never module state
   res._syncUser = u; res._syncMethod = method; res._syncPath = pathname;
+  res._gzipOk = /\bgzip\b/.test(req.headers['accept-encoding'] || '');
   const deny = (msg) => json(res, 403, { error: msg || 'Not permitted' });
   const bad = (msg) => json(res, 400, { error: msg || 'Bad request' });
 
@@ -297,6 +354,10 @@ async function handle(req, res, pathname, method) {
       if (!user) return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
       const hash = crypto.scryptSync(String(b.password || ''), user.salt, 32).toString('hex');
       if (hash !== user.passHash) return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
+      // prune sessions past the cookie's own 30-day Max-Age — they can never
+      // authenticate again but used to accumulate in the world doc forever
+      const sessionCutoff = Date.now() - 2592000e3;
+      for (const oldSid in db.sessions) if ((db.sessions[oldSid].ts || 0) < sessionCutoff) delete db.sessions[oldSid];
       const sid = crypto.randomBytes(24).toString('hex');
       db.sessions[sid] = { userId: user.id, ts: Date.now() };
       user.lastLogin = Date.now();
@@ -382,6 +443,21 @@ async function handle(req, res, pathname, method) {
       return true;
     }
 
+    // Full stat-history archive (Phase 21 payload diet) — /api/state carries
+    // only the recent HIST_STATE_CAP window; long-range charts pull this once
+    // per turn and cache client-side. Same role filtering as filterState.
+    if (pathname === '/api/history' && method === 'GET') {
+      return json(res, 200, { history: histView(db, u.role.perms), turn: db.settings.time.turn });
+    }
+    // Full article body (Phase 21 payload diet) — the state's news list is
+    // metadata-only. Visibility mirrors filterState: drafts require manageNews.
+    if (pathname.startsWith('/api/news/') && method === 'GET') {
+      const id = pathname.slice('/api/news/'.length);
+      const article = db.news.find(n => n.id === id);
+      if (!article) return json(res, 404, { error: 'No such article.' });
+      if (article.status !== 'published' && !u.role.perms.manageNews) return deny('Not published.');
+      return json(res, 200, { article });
+    }
     if (pathname === '/api/polling' && method === 'GET') {
       // public political knowledge — newspapers publish polls; every operator
       // may see the party-support landscape (national and per province).
@@ -638,6 +714,114 @@ async function handle(req, res, pathname, method) {
 
     // ---- negotiated trade offers (Phase 4.3) ----
     // Instant transfers (above) move goods immediately; these are proposals
+    // ---- war bonds (Phase 25) ----
+    // Float a series: whoever CONTROLS the government (President, or GM) mints
+    // `count` certificates as a tradable Securities item priced at `price`,
+    // paying `faceValue` per certificate `maturityTurns` turns out. Redemption
+    // is automatic in sim.redeemMaturedBonds during the turn loop.
+    if (pathname === '/api/gov/bonds' && method === 'POST') {
+      const b = await readBody(req);
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, 'ent_gov')) return deny('Only the government may float a bond issue.');
+      const face = Math.round(Number(b.faceValue) || 0);
+      const price = Math.round(Number(b.price) || 0);
+      const count = Math.round(Number(b.count) || 0);
+      const maturityTurns = Math.round(Number(b.maturityTurns) || 0);
+      if (!(face > 0) || !(price > 0) || !(count > 0 && count <= 1e6) || !(maturityTurns > 0 && maturityTurns <= 3650)) {
+        return bad('A bond issue needs a positive face value, sale price, certificate count and maturity (in turns).');
+      }
+      const turn = db.settings.time.turn;
+      const series = String.fromCharCode(65 + (db.items.filter(i => i.meta && i.meta.bond).length % 26));
+      const item = {
+        id: store.uid('item'), icon: 'B',
+        name: `War Bond Series ${series} (T${turn + maturityTurns})`,
+        category: 'Securities', tradable: true, marketValue: price,
+        meta: { bond: { faceValue: face, maturityTurn: turn + maturityTurns, issuerId: 'ent_gov' } },
+        description: `Government bond: pays ${db.settings.currency}${face.toLocaleString('en-US')} per certificate at turn ${turn + maturityTurns}. Floated at ${db.settings.currency}${price.toLocaleString('en-US')}.`
+      };
+      db.items.push(item);
+      const gov = db.entities.find(e => e.id === 'ent_gov');
+      gov.inventory = gov.inventory || [];
+      gov.inventory.push({ qty: count, itemId: item.id });
+      store.log('economy', 'War bond issue floated', `${count.toLocaleString('en-US')} certificates of ${item.name}.`, u.user.displayName, ['ent_gov']);
+      sim.draftNews(`TREASURY FLOATS ${item.name.toUpperCase()}`,
+        `The government has opened subscriptions for ${count.toLocaleString('en-US')} war bond certificates at ${db.settings.currency}${price.toLocaleString('en-US')} each, redeeming at ${db.settings.currency}${face.toLocaleString('en-US')} in ${maturityTurns} turns. Patriotism now pays interest.`, 'Economy', true, 'State Financial Desk');
+      store.save(); broadcast('sync');
+      return json(res, 200, { item });
+    }
+    // Subscribe to an open issue: cash to the issuer, certificates to you.
+    if (pathname === '/api/gov/bonds/buy' && method === 'POST') {
+      const b = await readBody(req);
+      const item = db.items.find(i => i.id === b.itemId && i.meta && i.meta.bond);
+      if (!item) return bad('Unknown bond series.');
+      if (item.meta.bond.redeemed) return bad('That series has already matured.');
+      const qty = Math.round(Number(b.qty) || 0);
+      if (!(qty > 0)) return bad('Quantity must be positive.');
+      const buyerId = u.user.entityId;
+      if (!buyerId) return bad('No entity is linked to your operator.');
+      if (buyerId === (item.meta.bond.issuerId || 'ent_gov')) return bad('The issuer cannot subscribe to its own bonds.');
+      const gov = db.entities.find(e => e.id === (item.meta.bond.issuerId || 'ent_gov'));
+      const row = gov && (gov.inventory || []).find(r => r.itemId === item.id);
+      if (!row || row.qty < qty) return bad('Not enough certificates remain in the issue.');
+      const cost = Math.round(item.marketValue * qty * 100) / 100;
+      const buyerAcct = sim.primaryAccount(buyerId, true);
+      if (!u.role.perms.gm && buyerAcct.balance < cost) return bad('Insufficient funds.');
+      sim.txn(buyerAcct.id, sim.primaryAccount(gov.id, true).id, cost, `Subscription: ${qty} × ${item.name}`, u.user.displayName, 'transfer');
+      row.qty -= qty;
+      if (row.qty <= 0) gov.inventory = gov.inventory.filter(r => r !== row);
+      const buyer = db.entities.find(e => e.id === buyerId);
+      buyer.inventory = buyer.inventory || [];
+      const brow = buyer.inventory.find(r => r.itemId === item.id);
+      if (brow) brow.qty += qty; else buyer.inventory.push({ qty, itemId: item.id });
+      store.log('economy', `${buyer.name} subscribes to ${item.name}`, `${qty} certificate(s) for ${db.settings.currency}${cost.toLocaleString('en-US')}.`, u.user.displayName, [buyerId, 'ent_gov']);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, cost, qty });
+    }
+
+    // ---- journalist investigation (Phase 25 QoL — scoops) ----
+    // Once per turn a credentialed journalist can work their sources and get
+    // a DRAFT article revealing something the public state doesn't show:
+    // a company's true books, the invader's war-room posture, the real
+    // treasury balance. The draft lands in their own paper, ready to edit.
+    if (pathname === '/api/press/investigate' && method === 'POST') {
+      if (!u.role.perms.manageNews) return deny('Press credentials required.');
+      const turn = db.settings.time.turn;
+      if ((u.user.lastInvestigateTurn ?? -1) >= turn) return bad('You have already worked your sources this turn — file again after the next turn.');
+      u.user.lastInvestigateTurn = turn;
+      const fmt = (n) => Math.round(Number(n) || 0).toLocaleString('en-US');
+      const scoops = [];
+      const cos = db.entities.filter(e => e.type === 'company');
+      if (cos.length) {
+        const c = cos[Math.floor(Math.random() * cos.length)];
+        const profit = c.vars && (c.vars.lastProfit !== undefined ? c.vars.lastProfit : c.vars.profit);
+        scoops.push({
+          headline: `THE BOOKS AT ${String(c.name).toUpperCase()}`,
+          body: `Documents passed to this desk show ${c.name} closed the last period ` +
+            (profit !== undefined ? `with a net position of ${db.settings.currency}${fmt(profit)}. ` : 'in a state its directors would prefer stayed private. ') +
+            `Market confidence stands at ${Math.round(c.confidence || 50)}, and the register lists ${(c.shareholders || []).length} holders of record.`
+        });
+      }
+      if (db.war && db.war.active && db.war.ai) {
+        const lastNote = (db.war.ai.notes || []).slice(-1)[0];
+        scoops.push({
+          headline: 'INSIDE THE INVADER’S WAR ROOM',
+          body: `Sources close to the front say the invading command has entered its “${db.war.ai.phase}” posture.` +
+            (lastNote ? ` A staff note passed to this paper reads: “${lastNote.text}”` : '')
+        });
+      }
+      const tre = db.accounts.find(a => a.id === 'acct_treasury');
+      if (tre) {
+        scoops.push({
+          headline: 'WHAT THE TREASURY REALLY HOLDS',
+          body: `A source inside the Finance Ministry puts the true federal balance at ${db.settings.currency}${fmt(tre.balance)} — a figure the government has never published.`
+        });
+      }
+      if (!scoops.length) return bad('Your sources have nothing tonight.');
+      const scoop = scoops[Math.floor(Math.random() * scoops.length)];
+      const article = sim.draftNews(scoop.headline, scoop.body, 'Politics', false, u.user.displayName, u.user.newspaperId || undefined);
+      store.save(); broadcast('sync');
+      return json(res, 200, { article });
+    }
+
     // that sit in db.trades until the counterparty accepts/declines, or the
     // creator cancels. Nothing is escrowed — balances/inventories are only
     // checked (and moved) at accept time.
@@ -927,7 +1111,22 @@ async function handle(req, res, pathname, method) {
 
       if (pathname === '/api/gm/advance' && method === 'POST') {
         const b = await readBody(req);
-        const time = sim.advanceTurn(Math.round(Number(b.steps) || 1), actor);
+        const steps = Math.round(Number(b.steps) || 1);
+        if (b.preview) {
+          // Turn preview (Phase 25 QoL): the event Simulate button's
+          // snapshot → run → diff → restore dance, applied to a whole turn.
+          // Same accepted cloud-mode caveat as below: pending timeline/txn
+          // rows flush even though the doc is restored.
+          const before = JSON.parse(JSON.stringify(store.get()));
+          let err = null;
+          try { sim.advanceTurn(steps, actor + ' (preview)'); } catch (e) { err = e.message; }
+          const diff = computeWorldDiff(before, store.get());
+          const live = store.get();
+          for (const k of Object.keys(live)) delete live[k];
+          Object.assign(live, before);
+          return json(res, 200, { preview: true, steps, error: err, diff });
+        }
+        const time = sim.advanceTurn(steps, actor);
         return json(res, 200, { time });
       }
       if (pathname === '/api/gm/run-event' && method === 'POST') {
@@ -953,28 +1152,7 @@ async function handle(req, res, pathname, method) {
           const before = JSON.parse(JSON.stringify(store.get()));
           let ran = false, err = null;
           try { ran = sim.runEvent(ev, actor); } catch (e) { err = e.message; }
-          const after = store.get();
-          const diff = { globalVars: [], provinces: [], moneyMoved: 0, news: [] };
-          if (ran) {
-            const beforeG = before.globalVars || {}, afterG = after.globalVars || {};
-            for (const k of new Set([...Object.keys(beforeG), ...Object.keys(afterG)])) {
-              if (beforeG[k] !== afterG[k]) diff.globalVars.push({ key: k, from: beforeG[k], to: afterG[k] });
-            }
-            for (const bp of before.provinces || []) {
-              const ap = (after.provinces || []).find(p => p.id === bp.id);
-              if (!ap) continue;
-              const changes = [];
-              for (const k of new Set([...Object.keys(bp.vars || {}), ...Object.keys(ap.vars || {})])) {
-                if ((bp.vars || {})[k] !== (ap.vars || {})[k]) changes.push({ key: k, from: (bp.vars || {})[k], to: (ap.vars || {})[k] });
-              }
-              if (changes.length) diff.provinces.push({ id: bp.id, name: bp.name, changes });
-            }
-            const beforeTxCount = (before.transactions || []).length;
-            const newTxns = (after.transactions || []).slice(beforeTxCount);
-            diff.moneyMoved = newTxns.reduce((s, t) => s + Math.abs(Number(t.amount) || 0), 0);
-            const beforeNewsIds = new Set((before.news || []).map(a => a.id));
-            diff.news = (after.news || []).filter(a => !beforeNewsIds.has(a.id)).map(a => ({ id: a.id, headline: a.headline, paperId: a.paperId }));
-          }
+          const diff = ran ? computeWorldDiff(before, store.get()) : { globalVars: [], provinces: [], moneyMoved: 0, news: [] };
           // restore the live db in place — callers elsewhere hold the same
           // reference returned by store.get(), so we mutate it rather than
           // reassign.
@@ -1066,6 +1244,16 @@ async function handle(req, res, pathname, method) {
         if (!result.ok) return bad(result.error);
         store.save(); broadcast('sync');
         return json(res, 200, { war: db.war, unitIds: result.unitIds });
+      }
+      // Peace treaty (Phase 24 — GM-only): reparations, province cession,
+      // nation annexation, in any combination; an active war ends first.
+      // See war.applyTreaty for the world mutations each clause performs.
+      if (pathname === '/api/gm/war/treaty' && method === 'POST') {
+        const b = await readBody(req);
+        const applied = war.applyTreaty(db, b || {}, actor);
+        if (!applied.length) return bad('The treaty contained no valid clauses.');
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true, applied });
       }
       // Foreign intervention — an existing 'foreign' entity joins an ongoing
       // war on either side (see war.joinWar).

@@ -96,6 +96,54 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
+
+  // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded
+  // once (flag-gated); the GM freely edits stats/names or mints new models
+  // from the template afterwards, so re-running must never re-add or reset.
+  if (!world._weaponsSeeded && Array.isArray(world.items)) {
+    const mkGun = (id, name, originId, dmg, hp, morale, value, desc) => ({
+      id, icon: 'W', name, category: 'Military', tradable: true, marketValue: value,
+      meta: { weapon: { kind: 'smallarms', dmg, hp, morale }, originId },
+      description: desc
+    });
+    const guns = [
+      mkGun('item_gun_arc_m58', 'ARC M-58 Service Rifle', null, 0.18, 0.12, 0.08, 260, 'Standard-issue Arcasian battle rifle. Honest, heavy, everywhere.'),
+      mkGun('item_gun_sarom55', 'Saromese Model 55 Auto', 'for_sarom', 0.35, 0.22, 0.15, 520, 'Select-fire Saromese automatic. The gold standard of the region’s small arms.'),
+      mkGun('item_gun_narinco38', 'Narinco ’38 Bolt-Action', 'for_madrosia', 0.08, 0.05, 0.02, 90, 'Madrosia’s ageing bolt gun. Better than bare hands, barely.'),
+      mkGun('item_gun_valks_vk3', 'Valkslander VK-3 Carbine', 'for_valksland', 0.30, 0.18, 0.12, 460, 'Compact assault carbine of the Valksland expeditionary corps.'),
+      mkGun('item_gun_delcasia_df1', 'Del’ Casian DF-1 Field Rifle', 'for_delcasia', 0.16, 0.10, 0.06, 210, 'Del’ Casia’s licence-built field rifle. Rugged and plentiful.'),
+      mkGun('item_gun_qinal_type7', 'Qinal Type-7 Infantry Rifle', 'for_qinal', 0.14, 0.12, 0.05, 180, 'Mass-produced Qinal service rifle. Quantity is its own quality.'),
+      mkGun('item_gun_karaz_kz44', 'Karaznian KZ-44 Machine Carbine', 'for_karaznia', 0.26, 0.14, 0.10, 380, 'Karaznia’s stamped-steel machine carbine. Cheap, fast, loud.'),
+      mkGun('item_gun_estal_e9', 'Estal E-9 Marksman Rifle', 'for_estal', 0.22, 0.08, 0.09, 340, 'Precision Estal marksman rifle in limited runs.')
+    ];
+    for (const g of guns) if (!world.items.some(i => i.id === g.id)) world.items.push(g);
+    // Refined Fuel powers army mobility from here on.
+    const fuel = world.items.find(i => i.id === 'item_fuel');
+    if (fuel && !(fuel.meta && fuel.meta.weapon)) {
+      fuel.meta = fuel.meta || {};
+      fuel.meta.weapon = { kind: 'fuel', speed: 0.5 };
+    }
+    // Starting stocks: the Republic fields its own rifle + a fuel reserve;
+    // each armed foreign power stocks its national model.
+    const grant = (entId, itemId, qty) => {
+      const e = world.entities.find(x => x.id === entId);
+      if (!e) return;
+      e.inventory = e.inventory || [];
+      const row = e.inventory.find(r => r.itemId === itemId);
+      if (row) row.qty = (row.qty || 0) + qty; else e.inventory.push({ qty, itemId });
+    };
+    grant('ent_gov', 'item_gun_arc_m58', 30000);
+    grant('ent_gov', 'item_fuel', 900);
+    grant('for_sarom', 'item_gun_sarom55', 25000);
+    grant('for_madrosia', 'item_gun_narinco38', 12000);
+    grant('for_valksland', 'item_gun_valks_vk3', 45000);
+    grant('for_delcasia', 'item_gun_delcasia_df1', 40000);
+    grant('for_qinal', 'item_gun_qinal_type7', 35000);
+    grant('for_karaznia', 'item_gun_karaz_kz44', 20000);
+    grant('for_estal', 'item_gun_estal_e9', 8000);
+    world._weaponsSeeded = true;
+    changed = true;
+  }
   // Phase 5 — newspapers. Fixed four-paper list; additive so a GM rename of
   // an existing paper is never clobbered by re-running this migration.
   if (world.settings && !world.settings.newspapers) {
@@ -1095,5 +1143,5 @@ function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 module.exports = {
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
   snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR,
-  getVersion, hasUncommitted, invalidate
+  getVersion, hasUncommitted, invalidate, migrate
 };

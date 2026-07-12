@@ -22,6 +22,194 @@
 const store = require('./store');
 const sim = require('./sim');
 const engine = require('./war-engine');
+const geometry = require('./geometry');
+
+// ---------- occupation devastation (Phase 22) ----------
+// AUTHORITY-ONLY, like ctx.onAirstrike: everything here mutates the world
+// beyond db.war (province populations, demographics), so a predicting client
+// never runs it — the tick wrappers at the bottom of this file call
+// applyDevastation after each real engine tick. All numbers are data:
+// settings.war overrides any of these defaults (engine-generic, rule 7).
+const DEVASTATION_DEFAULTS = {
+  civPerFightTick: 6,      // civilians killed per FIGHTING unit per tick, scaled by unit strength/2000
+  civPerStrike: 500,       // civilians killed by one airstrike impact (× war.mods.bombDmg)
+  refugeeStages: [25, 50, 75, 95], // provinceControl % thresholds that trigger a flight wave
+  refugeeFrac: 0.05,       // fraction of a province's remaining population fleeing per wave
+  civNewsEvery: 15000      // wire piece every N cumulative civilian deaths
+};
+function warCfg(db) { return Object.assign({}, DEVASTATION_DEFAULTS, (db.settings && db.settings.war) || {}); }
+
+// Population changes always move vars.population AND demographics together
+// (pro-rata), so the election model sees the same world the map does.
+function scalePopulation(prov, ratio) {
+  for (const g in (prov.demographics || {})) {
+    const grp = prov.demographics[g];
+    if (grp && Number.isFinite(Number(grp.population))) grp.population = Math.max(0, Math.round(grp.population * ratio));
+  }
+}
+function killCivilians(db, war, provId, amount) {
+  const prov = db.provinces.find(p => p.id === provId);
+  if (!prov || !(amount > 0)) return 0;
+  const pop = Math.max(0, Math.round(Number(prov.vars.population) || 0));
+  const loss = Math.min(pop, Math.round(amount));
+  if (!loss) return 0;
+  prov.vars.population = pop - loss;
+  scalePopulation(prov, (pop - loss) / (pop || 1));
+  war.stats.civilianDeaths = (war.stats.civilianDeaths || 0) + loss;
+  return loss;
+}
+// A flight wave: frac of the source province's people move "inward" — split
+// across the up-to-3 LEAST-occupied other provinces, weighted equally.
+function moveRefugees(db, war, sourceProv, frac) {
+  if (!sourceProv) return 0;
+  const pop = Math.max(0, Math.round(Number(sourceProv.vars.population) || 0));
+  const moving = Math.round(pop * frac);
+  if (!moving) return 0;
+  const ctl = war.stats.provinceControl || {};
+  const dests = db.provinces
+    .filter(p => p.id !== sourceProv.id)
+    .sort((a, b) => (ctl[a.id] || 0) - (ctl[b.id] || 0))
+    .slice(0, 3);
+  if (!dests.length) return 0;
+  sourceProv.vars.population = pop - moving;
+  scalePopulation(sourceProv, (pop - moving) / (pop || 1));
+  const share = Math.floor(moving / dests.length);
+  for (const d of dests) {
+    const dPop = Math.max(0, Math.round(Number(d.vars.population) || 0));
+    d.vars.population = dPop + share;
+    scalePopulation(d, dPop ? (dPop + share) / dPop : 1);
+  }
+  war.stats.refugees = (war.stats.refugees || 0) + moving;
+  return moving;
+}
+function applyDevastation(db) {
+  const war = db.war;
+  if (!war || !war.active) return;
+  const cfg = warCfg(db);
+  war.stats._refStage = war.stats._refStage || {};
+
+  // 1. Ground combat kills civilians where the fighting is.
+  const tolls = {};
+  for (const u of war.units) {
+    if (!isLive(u) || u.state !== 'fighting') continue;
+    const pid = geometry.provinceAt(db.provinces, u.pos);
+    if (!pid) continue;
+    tolls[pid] = (tolls[pid] || 0) + cfg.civPerFightTick * Math.max(0.3, (u.strength || 0) / 2000);
+  }
+  for (const pid in tolls) killCivilians(db, war, pid, tolls[pid]);
+
+  // 2. Occupation crossing a threshold sends a refugee wave inward.
+  const ctl = war.stats.provinceControl || {};
+  for (const pid in ctl) {
+    const stages = cfg.refugeeStages;
+    let stage = war.stats._refStage[pid] || 0;
+    while (stage < stages.length && (ctl[pid] || 0) >= stages[stage]) {
+      stage++;
+      const prov = db.provinces.find(p => p.id === pid);
+      const moved = moveRefugees(db, war, prov, cfg.refugeeFrac);
+      if (moved > 0 && prov) {
+        store.log('event', `Refugees flee ${prov.name}`,
+          `${moved.toLocaleString('en-US')} civilians flee inward as occupation of ${prov.name} reaches ${ctl[pid]}%.`,
+          'WAR ENGINE', []);
+        SERVER_CTX.news(`COLUMNS OF REFUGEES POUR OUT OF ${prov.name.toUpperCase()}`,
+          `An estimated ${moved.toLocaleString('en-US')} civilians are on the roads out of ${prov.name} as the front advances. Interior provinces are opening schools and church halls to the displaced.`);
+      }
+    }
+    war.stats._refStage[pid] = stage;
+  }
+
+  // 3. Periodic wire coverage of the mounting toll.
+  const civ = war.stats.civilianDeaths || 0;
+  if (civ - (war.stats._civNewsAt || 0) >= cfg.civNewsEvery) {
+    war.stats._civNewsAt = civ;
+    SERVER_CTX.news('CIVILIAN TOLL OF THE WAR MOUNTS',
+      `Officials now put the number of civilians killed since the invasion began at more than ${Math.round(civ / 1000) * 1000}. Hospitals near the front report they are past capacity.`);
+  }
+}
+
+// ---------- equipment quality (Phase 23: weapons & fuel) ----------
+// An army fights with what its nation actually stocks. Guns and fuel are
+// ordinary tradable items carrying meta.weapon — the GM mints new models
+// from a template and edits their stats; quantities move through the normal
+// trade/production plumbing, which is what makes an arms industry matter.
+//   Small arms (kind != 'fuel'): troops are armed best-gun-first; the bonus
+//   contributed by each model is its stats × the fraction of troops it arms.
+//   Fuel (kind 'fuel'): mobility scales with stock vs. need
+//   (settings.war.fuelPerStrength × total strength).
+// The result is written to war.equip each authoritative tick; the shared
+// engine only consumes it (see equipMul), so prediction stays deterministic.
+function sideArsenalPools(db, war, side) {
+  const ids = side === 'att'
+    ? [war.attackerId].concat((war.allies && war.allies.att) || [])
+    : [war.defenderId].concat((war.allies && war.allies.def) || []);
+  const pools = [];
+  for (const id of ids) {
+    const e = db.entities.find(x => x.id === id);
+    if (e && Array.isArray(e.inventory)) pools.push(e.inventory);
+  }
+  // the defence also draws on its military depots
+  if (side === 'def') {
+    for (const p of db.properties) if (p.type === 'military' && Array.isArray(p.inventory)) pools.push(p.inventory);
+  }
+  return pools;
+}
+function computeEquip(db, war) {
+  const cfg = warCfg(db);
+  const fuelPerStrength = Number(cfg.fuelPerStrength) || 0.01;
+  const weaponsById = {};
+  for (const it of db.items) if (it.meta && it.meta.weapon) weaponsById[it.id] = it;
+  const out = {};
+  for (const side of ['att', 'def']) {
+    const troops = war.units.filter(u => u.side === side && isLive(u)).reduce((s, u) => s + (u.strength || 0), 0);
+    const stock = {};
+    for (const inv of sideArsenalPools(db, war, side)) {
+      for (const row of inv) if (weaponsById[row.itemId]) stock[row.itemId] = (stock[row.itemId] || 0) + (row.qty || 0);
+    }
+    const mul = { dmg: 1, hp: 1, morale: 1, speed: 1 };
+    if (troops > 0) {
+      const guns = Object.keys(stock)
+        .map(id => weaponsById[id])
+        .filter(it => ((it.meta.weapon.kind || 'smallarms') !== 'fuel'))
+        .sort((a, b) => (Number(b.meta.weapon.dmg) || 0) - (Number(a.meta.weapon.dmg) || 0));
+      let unarmed = troops;
+      for (const gun of guns) {
+        if (unarmed <= 0) break;
+        const armed = Math.min(unarmed, stock[gun.id]);
+        const frac = armed / troops;
+        const wpn = gun.meta.weapon;
+        mul.dmg += frac * (Number(wpn.dmg) || 0);
+        mul.hp += frac * (Number(wpn.hp) || 0);
+        mul.morale += frac * (Number(wpn.morale) || 0);
+        unarmed -= armed;
+      }
+      let fuel = 0, fuelBonus = 0;
+      for (const id in stock) {
+        const wpn = weaponsById[id].meta.weapon;
+        if ((wpn.kind || 'smallarms') !== 'fuel') continue;
+        fuel += stock[id];
+        fuelBonus = Math.max(fuelBonus, Number(wpn.speed) || 0);
+      }
+      const need = troops * fuelPerStrength;
+      if (fuelBonus > 0 && need > 0) mul.speed += fuelBonus * Math.min(1, fuel / need);
+    }
+    for (const k in mul) mul[k] = Math.round(mul[k] * 1000) / 1000;
+    out[side] = mul;
+  }
+  war.equip = out;
+}
+
+// Active wars started before Phase 22 lack country cells in their grid —
+// upgrade in place, once, additively (same spirit as store.migrate()).
+function ensureWarGrid(db) {
+  const war = db.war;
+  if (!war || !war.active || !war.grid) return;
+  if (!war.grid.countryCells) {
+    const fresh = engine.buildGrid(db);
+    war.grid.countryCells = fresh.countryCells;
+    war.grid.countryLandCells = fresh.countryLandCells;
+    war._zonesKey = null; // force refreshWarZones to derive enemy/neutral sets next tick
+  }
+}
 
 // Interactive-layer tunables that stay server-side (bombs mutate the world
 // beyond db.war, so the engine knows nothing about them). BOMB_RADIUS/
@@ -176,7 +364,7 @@ function startWar(db, scenario) {
       consolidateFrac: (scenario.tuning || {}).consolidateFrac || 0.35,
       collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12 },
     events: [],
-    stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [] },
+    stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [], civilianDeaths: 0, refugees: 0, enemyControl: {} },
     bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } },
     craters: [],
     // GM global tuning (Feature: war.mods) — defaults are also the engine's
@@ -199,6 +387,8 @@ function startWar(db, scenario) {
       `Naval assets belonging to ${attacker.name} have been sighted massing offshore. The government has not yet issued a statement.`);
   }
   store.log('event', `${attacker.name} launches an invasion`, scenario.name, 'WAR ENGINE', [attacker.id, defender.id]);
+  // invading someone is the fastest way to ruin a relationship (Phase 25)
+  try { sim.shiftRelations(db, attacker.id, -40, 'Launched an invasion of the Republic', 'WAR ENGINE'); } catch (e) { /* diplomacy optional */ }
   return db.war;
 }
 
@@ -283,18 +473,34 @@ function toRoman(n) {
   for (const [v, sym] of table) while (n >= v) { out += sym; n -= v; }
   return out || 'I';
 }
-// A joining nation's contingent lands near the attacker's existing staging
-// (any live attacker unit's position — the original scenario staging box is
-// not kept on war.war after startWar, so an existing unit is the simplest
-// live anchor) or, for the defence, near the capital / any held city.
-function joinEntryPoint(db, war, side) {
+// Where a joining nation's contingent musters. Phase 22: a nation whose
+// homeland is ON the map actually mobilises FROM that homeland — the home
+// cell nearest to where it's needed (the front for an attacker ally, the
+// capital for a defender ally). Off-map nations keep the old behaviour:
+// appearing near the attacker staging / near the capital.
+function joinEntryPoint(db, war, side, entityId) {
   const [W, H] = engine.worldBounds(war);
+  let target;
   if (side === 'att') {
     const anchor = war.units.find(u => u.side === 'att' && isLive(u)) || war.units.find(u => u.side === 'att');
-    return anchor ? anchor.pos.slice() : [W / 2, 40];
+    target = anchor ? anchor.pos.slice() : [W / 2, 40];
+  } else {
+    const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
+    target = capital ? capital.pos.slice() : [W / 2, H / 2];
   }
-  const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
-  return capital ? capital.pos.slice() : [W / 2, H / 2];
+  const cid = entityId ? engine.countryIdForEntity(db, entityId) : null;
+  const homeCells = (cid && war.grid && war.grid.countryCells) ? war.grid.countryCells[cid] : null;
+  if (homeCells && homeCells.length) {
+    const cs = war.grid.cell;
+    let best = null, bd = Infinity;
+    for (const cell of homeCells) {
+      const p = [(cell[0] + 0.5) * cs, (cell[1] + 0.5) * cs];
+      const d = dist(p, target);
+      if (d < bd) { bd = d; best = p; }
+    }
+    return best || target;
+  }
+  return target;
 }
 function joinWar(db, opts, actor) {
   const war = db.war;
@@ -316,7 +522,16 @@ function joinWar(db, opts, actor) {
   const def = unitDefaults.infantry || { strength: 2100, speed: 3.2, atk: 1 };
   const hpMod = (war.mods && war.mods.hp) || 1;
   const strength = round1(def.strength * hpMod);
-  const entryPos = joinEntryPoint(db, war, side);
+  ensureWarGrid(db); // homeland muster needs grid.countryCells on a pre-Phase-22 war
+  const entryPos = joinEntryPoint(db, war, side, entity.id);
+  // A nation mobilising FROM its own map homeland fields mobile infantry on
+  // both sides (a speed-0 garrison stuck on home soil would never reach the
+  // war); off-map defenders keep the old static-garrison behaviour.
+  const homeland = !!engine.countryIdForEntity(db, entity.id);
+  const mobile = side === 'att' || homeland;
+  // Defender allies marching from home need somewhere to march TO.
+  const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
+  const marchTo = side === 'def' && homeland && capital ? capital.pos : null;
 
   const spawned = [];
   for (let i = 0; i < count; i++) {
@@ -326,16 +541,21 @@ function joinWar(db, opts, actor) {
     const u = {
       id: store.uid('warunit'), side,
       name: `${entity.name} Expeditionary ${toRoman(i + 1)}`,
-      kind: side === 'att' ? 'infantry' : 'garrison',
+      kind: mobile ? 'infantry' : 'garrison',
       pos, dest: null, strength, maxStrength: strength, org: 100,
-      speed: side === 'att' ? (def.speed || 3.2) : 0,
+      speed: mobile ? (def.speed || 3.2) : 0,
       atk: def.atk || 1, state: 'holding', objectiveId: null,
-      nationId: entity.id, garrison: side === 'def', spawned: true
+      nationId: entity.id, garrison: side === 'def' && !mobile, spawned: true
     };
     war.units.push(u);
     spawned.push(u.id);
+    if (marchTo) engine.setDest(db, u, [marchTo[0] + rand(-60, 60), marchTo[1] + rand(-60, 60)], u.speed);
   }
   war.allies[side].push(entity.id);
+  war._zonesKey = null; // belligerent set changed — refreshWarZones re-derives neutral/enemy soil next tick
+  // intervention is a diplomatic statement (Phase 25): joining the defence
+  // wins hearts, joining the invader burns them
+  try { sim.shiftRelations(db, entity.id, side === 'def' ? 25 : -30, side === 'def' ? 'Intervened in defence of the Republic' : 'Joined the invasion of the Republic', 'WAR ENGINE'); } catch (e) { /* diplomacy optional */ }
 
   const attackerEnt = db.entities.find(e => e.id === war.attackerId);
   const defenderEnt = db.entities.find(e => e.id === war.defenderId);
@@ -387,6 +607,121 @@ function setWarTuning(db, patch, actor) {
   }
   if (changes.length) store.log('gm', 'War tuning updated', changes.join(' '), actor || 'WAR ENGINE', []);
   return { ok: true, mods: war.mods };
+}
+
+// ---------- peace treaties (Phase 24 — GM-only) ----------
+// A treaty is the GM's pen redrawing the world after (or during) a war:
+// reparations move money, cession hands a Republic province to a foreign
+// nation (the land becomes that nation's territory on the map; its cities
+// and properties pass out of the Republic's books), and annexation turns a
+// whole map nation INTO a new province — shape, generated demographics,
+// a namesake city — ready for the economy/elections to pick up next turn.
+// Everything here is ordinary data mutation: no engine changes, no schema.
+function applyTreaty(db, terms, actor) {
+  const applied = [];
+  if (db.war && db.war.active) {
+    endWar(db, actor, 'Peace treaty signed');
+    applied.push('active war ended');
+  }
+  if (terms && terms.reparations) {
+    const t = terms.reparations;
+    const amount = Math.round(Number(t.amount) || 0);
+    const from = db.entities.find(e => e.id === t.fromEntityId);
+    const to = db.entities.find(e => e.id === t.toEntityId);
+    if (amount > 0 && from && to && from.id !== to.id) {
+      const fromAcct = sim.primaryAccount(from.id, true);
+      const toAcct = sim.primaryAccount(to.id, true);
+      sim.txn(fromAcct.id, toAcct.id, amount, 'War reparations under the peace treaty', actor, 'transfer');
+      applied.push(`reparations of ${amount} from ${from.name} to ${to.name}`);
+      SERVER_CTX.news('REPARATIONS AGREED UNDER THE TREATY',
+        `${from.name} will pay ${to.name} substantial reparations under the settlement's financial clauses.`);
+    }
+  }
+  if (terms && terms.cede) cedeProvince(db, terms.cede.provinceId, terms.cede.toEntityId, actor, applied);
+  if (terms && terms.annex) annexCountry(db, terms.annex.countryId, actor, applied);
+  return applied;
+}
+function cedeProvince(db, provinceId, toEntityId, actor, applied) {
+  const prov = db.provinces.find(p => p.id === provinceId);
+  const recipient = db.entities.find(e => e.id === toEntityId);
+  if (!prov || !recipient || !prov.shape) return;
+  db.settings.map = db.settings.map || {};
+  db.settings.map.countries = db.settings.map.countries || [];
+  const recipientCountry = db.settings.map.countries.find(c => c.id === engine.countryIdForEntity(db, recipient.id));
+  db.settings.map.countries.push({
+    id: 'ceded_' + prov.id,
+    name: recipient.name,
+    fill: (recipientCountry && recipientCountry.fill) || recipient.color || '#8a8474',
+    shape: prov.shape
+  });
+  const lostCities = db.cities.filter(c => c.provinceId === prov.id).length;
+  db.cities = db.cities.filter(c => c.provinceId !== prov.id);
+  const lostProps = db.properties.filter(p => p.provinceId === prov.id).length;
+  db.properties = db.properties.filter(p => p.provinceId !== prov.id);
+  if (lostProps) require('./deeds').syncAllDeeds(db);
+  db.provinces = db.provinces.filter(p => p.id !== prov.id);
+  applied.push(`ceded ${prov.name} to ${recipient.name}`);
+  store.log('event', `${prov.name} ceded to ${recipient.name}`,
+    `Under the treaty, ${prov.name} passes out of the Republic — ${lostCities} cities and ${lostProps} properties with it.`,
+    actor || 'TREATY', [recipient.id]);
+  SERVER_CTX.news(`${String(prov.name).toUpperCase()} IS CEDED TO ${String(recipient.name).toUpperCase()}`,
+    `By the terms of the settlement, the province of ${prov.name} passes under the sovereignty of ${recipient.name}. Border posts are already changing flags.`);
+}
+function annexCountry(db, countryId, actor, applied) {
+  db.settings.map = db.settings.map || {};
+  const countries = db.settings.map.countries || [];
+  const idx = countries.findIndex(c => c.id === countryId);
+  if (idx < 0) return;
+  const country = countries[idx];
+  const cfg = warCfg(db);
+  let centroid = [1920, 1080];
+  try {
+    const poly = engine.parseShape(country.shape);
+    const pts = (poly && poly[0]) || [];
+    if (pts.length) {
+      centroid = [Math.round(pts.reduce((s, p) => s + p[0], 0) / pts.length),
+        Math.round(pts.reduce((s, p) => s + p[1], 0) / pts.length)];
+    }
+  } catch (e) { /* malformed shape — centre of the map */ }
+  // demographics: the Republic's own mix, scaled to the annexed population —
+  // conquered subjects start poorer, unhappier and colder to the government
+  const template = db.provinces[0];
+  const pop = Math.round(Number(cfg.annexPopulation) || 1200000);
+  const demographics = {};
+  if (template && template.demographics) {
+    const tPop = Object.values(template.demographics).reduce((s, g) => s + (g.population || 0), 0) || 1;
+    for (const gName in template.demographics) {
+      const g = template.demographics[gName];
+      demographics[gName] = Object.assign({}, g, {
+        population: Math.round((g.population || 0) / tPop * pop),
+        happiness: 30, governmentSupport: 12
+      });
+    }
+  }
+  const baseVars = Object.assign({}, (template && template.vars) || {});
+  Object.assign(baseVars, { population: pop, happiness: 30, approval: 12, employment: 62, infrastructure: Math.min(40, baseVars.infrastructure || 40) });
+  const prov = {
+    id: store.uid('prov'),
+    name: country.name,
+    color: country.fill || '#9a927e',
+    shape: country.shape,
+    labelPos: centroid,
+    labelSize: 40,
+    capital: null,
+    description: `Former sovereign territory of ${country.name}, annexed into the Republic by treaty.`,
+    vars: baseVars,
+    demographics,
+    annexedFrom: countryId
+  };
+  db.provinces.push(prov);
+  db.cities.push({ id: store.uid('city'), name: country.name, provinceId: prov.id, pos: centroid.slice(), size: 2, isCapital: false });
+  countries.splice(idx, 1);
+  applied.push(`annexed ${country.name} as a province`);
+  store.log('event', `${country.name} annexed`,
+    `The territory of ${country.name} is incorporated into the Republic as a new province of ${pop.toLocaleString('en-US')} people.`,
+    actor || 'TREATY', []);
+  SERVER_CTX.news(`${String(country.name).toUpperCase()} IS ANNEXED`,
+    `Under the treaty's territorial clauses, ${country.name} ceases to exist as a sovereign state and is incorporated into the Republic as a province. Occupation authorities are standing up a civil administration.`);
 }
 
 // The airstrike's launch point: the seed's airport property (kind:'airport')
@@ -501,6 +836,18 @@ function applyAirstrikeGroundEffects(db, war, strike) {
       (roadsCut ? `, ${roadsCut} road${roadsCut === 1 ? '' : 's'} cut` : '') + '.',
       'WAR ENGINE', []);
   }
+
+  // Civilian toll (Phase 22 devastation) — bombing a populated province
+  // kills far more civilians than ground fighting does.
+  const cfg = warCfg(db);
+  const pid = geometry.provinceAt(db.provinces, pos);
+  if (pid) {
+    const deaths = killCivilians(db, war, pid, cfg.civPerStrike * ((war.mods && war.mods.bombDmg) || 1));
+    if (deaths) {
+      store.log('event', 'Civilians killed in air raid',
+        `${deaths.toLocaleString('en-US')} civilians confirmed dead after the strike.`, 'WAR ENGINE', []);
+    }
+  }
 }
 
 // ---------- ticks (engine bound to the server ctx) ----------
@@ -514,8 +861,20 @@ function ctxFor(db) {
     onAirstrike: (war, strike) => applyAirstrikeGroundEffects(db, war, strike)
   };
 }
-function warTick(db) { return engine.warTick(db, ctxFor(db)); }
-function maybeWarTick(db) { return engine.maybeWarTick(db, ctxFor(db)); }
+function warTick(db) {
+  ensureWarGrid(db);
+  if (db.war && db.war.active) computeEquip(db, db.war);
+  const ticked = engine.warTick(db, ctxFor(db));
+  if (ticked) applyDevastation(db);
+  return ticked;
+}
+function maybeWarTick(db) {
+  ensureWarGrid(db);
+  if (db.war && db.war.active && !db.war.paused) computeEquip(db, db.war);
+  const ticked = engine.maybeWarTick(db, ctxFor(db));
+  if (ticked) applyDevastation(db);
+  return ticked;
+}
 
 // Milestone fingerprint — the changes worth a GLOBAL sync broadcast. Routine
 // tick-to-tick churn (positions, strengths, cells) is delivered to
@@ -527,6 +886,7 @@ function milestoneKey(war) {
   return [
     war.active ? 1 : 0,
     war.result ? 1 : 0,
+    war.totalWar ? 1 : 0, // the shift to total war is front-page news for every client
     war.objectives.filter(o => o.status === 'done').length,
     (war.stats.citiesHeld || []).length
   ].join(':');
@@ -540,4 +900,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, isLive };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive };

@@ -1,9 +1,70 @@
 # War (server/war-engine.js, server/war.js, server/war-scenarios.js, public/js/war-engine.js, public/js/war.js)
 
 A realtime, wall-clock-ticking battlefield RTS layered on top of the turn-based
-simulation. It does **not** touch the economy or politics yet — only the
-timeline log and auto-published news on milestones. It is meant to be wired
-into other systems (occupation effects, refugee flows, war economy) later.
+simulation. Since Phase 22 the war **does** touch the world: ground combat and
+air raids kill civilians (province populations + demographics shrink),
+occupation sends refugee waves to interior provinces, and treaties (Phase 24)
+redraw the map itself. Equipment (Phase 23) ties armies to the item economy:
+gun and fuel stocks scale damage/armour/morale/speed per side.
+
+**Phase 22–25 additions at a glance** (details live in the matching code
+comments; state fields are all additive/absent-safe):
+
+- **Total war** — completing the scenario objectives no longer ends the war;
+  it sets `war.totalWar` (milestone broadcast + news) and the AI enters a
+  'total' phase: hunt every remaining defender (chase orders), then sweep the
+  least-controlled province. The war ends only on a complete win: attacker
+  holds ≥ TOTAL_VICTORY_PCT (97%) of EVERY province with no defender alive,
+  or the invasion force is annihilated outright / collapses (the existing
+  collapse rule remains the other defender win).
+- **Defender invasion & closed borders** — `buildGrid` also rasterises every
+  map nation (`grid.countryCells/countryLandCells`); `refreshWarZones`
+  derives `grid.enemyCells` (attacker-side homelands — defender units CAPTURE
+  these as `{o:'def', c: countryId}` cells, drawn in the defence's blue) and
+  `grid.neutralCells` (non-belligerent soil — NO unit may enter: `advanceToward`
+  refuses the step and wall-follows ±45°/±90°/±135° around the border,
+  deterministically). `war.stats.enemyControl` tracks % of each enemy
+  homeland occupied; zones re-derive when the belligerent set changes
+  (`war._zonesKey`, reset by joinWar). Entities link to a map country by
+  `e.countryId` or normalised name match (`countryIdForEntity`).
+- **Occupation devastation** (authority-only — `server/war.js
+  applyDevastation`, called after every real tick; a predicting client never
+  runs it): fighting units kill `settings.war.civPerFightTick` (default 6,
+  scaled by strength) civilians per tick in their province; an airstrike
+  kills `civPerStrike` (500 × bombDmg). Occupation crossing each
+  `refugeeStages` threshold (25/50/75/95%) moves `refugeeFrac` (5%) of the
+  province's people inward to the 3 least-occupied provinces, demographics
+  pro-rata, with news. `war.stats.civilianDeaths/refugees` accumulate.
+- **Equipment quality (Phase 23)** — items carrying `meta.weapon`
+  (`{kind:'smallarms', dmg, hp, morale}` or `{kind:'fuel', speed}`) in a
+  side's arsenal (attacker/defender entity + allies' inventories, plus
+  military-property depots for the defence) are folded into `war.equip =
+  {att:{dmg,hp,morale,speed}, def:{…}}` before every authoritative tick
+  (server/war.js computeEquip: troops armed best-gun-first, bonus × armed
+  fraction; fuel stock vs `settings.war.fuelPerStrength` scales speed). The
+  shared engine only CONSUMES the stored multipliers (`equipMul` in
+  stepCombat's damage/armour/morale drain and advanceToward's step), so
+  client prediction replays identically. Weapon items are seeded once by
+  store.migrate (`world._weaponsSeeded`); the GM mints more from the item
+  template "Weapon — small arms" and edits stats in the Metadata JSON.
+- **Homeland musters** — joinWar contingents from nations with a map homeland
+  mobilise FROM that homeland (nearest home cell to where they're needed),
+  as mobile infantry on either side (a def ally marches on the capital);
+  off-map nations keep the old near-the-front spawn.
+- **Peace treaties (Phase 24, GM-only)** — `POST /api/gm/war/treaty` with any
+  of: `reparations {fromEntityId, toEntityId, amount}` (sim.txn between
+  primary accounts), `cede {provinceId, toEntityId}` (the province's shape
+  becomes a new country entry in the recipient's colours; its cities and
+  properties leave the Republic's books — deeds re-synced), `annex
+  {countryId}` (the nation's polygon becomes a NEW province with generated
+  demographics scaled to `settings.war.annexPopulation`, a namesake city at
+  the polygon centroid, and the country entry removed — map render,
+  geometry.provinceAt, elections and future war grids all pick it up because
+  they read `province.shape`). Signing during an active war ends it first.
+  GM UI: the "Peace Treaty" desk in the War Room panel.
+- **Relations shocks (Phase 25)** — startWar hits the attacker −40; joinWar
+  +25 (defence) / −30 (invader) via `sim.shiftRelations` — see
+  docs/SIMULATION.md "Foreign relations".
 
 **Module split (Phase 18):**
 
@@ -584,7 +645,7 @@ client only sends orders; `server/war.js` validates and applies them.
     `war.dropBomb`; ORDERS an airstrike (see "Airstrikes" below) and returns
     `{ ok, cooldownUntil, strike }` — `strike` is the created
     `war.airstrikes` entry, used by the client for optimistic prediction.
-  Both routes `store.save()` WITHOUT `broadcast('sync')` (Phase 20): an
+  Both routes `store.save()` WITHOUT `broadcast('sync')` (Phase 21): an
   order/strike only touches `db.war`, which every watcher pulls through the
   ~1s heartbeat — a per-order broadcast forced every client (war-watching or
   not) into a full /api/state refetch, the same global thrash per-tick
@@ -849,7 +910,7 @@ rebase-on-authority pattern is deliberately generic: it's the template for
 making other poll-bound systems feel realtime without touching the CAS
 commit model. The Day Market applies the READ-ONLY half of it (no orders to
 predict, since money never gets predicted client-side — see
-docs/SIMULATION.md's "Day Market client prediction"). Phase 20 generalised
+docs/SIMULATION.md's "Day Market client prediction"). Phase 21 generalised
 the WRITE half game-wide: mutation responses carry the freshly-committed
 filtered world (response-sync) and hot actions paint optimistic guesses via
 core.js's `Optimistic` outbox — see docs/SYNC-ARCHITECTURE.md.

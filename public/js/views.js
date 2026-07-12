@@ -4,6 +4,35 @@
 const Views = {
 
   /* ═══════════ shared bits ═══════════ */
+  // Full stat-history for long-range charts (Phase 21 payload diet):
+  // /api/state carries only the recent window, so charts call this — it
+  // returns the best data available NOW (cache or the state window) and
+  // lazily pulls GET /api/history once per turn, re-rendering when the full
+  // archive extends what's on screen. Synchronous by design: chart code
+  // stays plain, no awaits threaded through every view.
+  histAll() {
+    const local = S().history || [];
+    const turn = S().settings.time.turn;
+    const c = this._histCache;
+    if (c && c.turn === turn && c.data.length >= local.length) return c.data;
+    if (this._histFetching !== turn) {
+      this._histFetching = turn;
+      GET('/api/history').then(r => {
+        this._histCache = { turn: r.turn, data: r.history || [] };
+        if ((r.history || []).length > local.length) App.renderView();
+      }).catch(() => { this._histFetching = null; });
+    }
+    return (c && c.data.length > local.length) ? c.data : local;
+  },
+  // Article bodies are lazy (state news is metadata-only). Cached per id;
+  // journalist saves update the cache directly so the editor stays warm.
+  _newsBodies: {},
+  async newsBody(id) {
+    if (this._newsBodies[id] !== undefined) return this._newsBodies[id];
+    const r = await GET('/api/news/' + id);
+    this._newsBodies[id] = (r.article && r.article.body) || '';
+    return this._newsBodies[id];
+  },
   kv(label, value, cls) {
     return el('div.var-row', el('span.var-label', label), el('span.var-value', { class: cls || '' }, value));
   },
@@ -554,6 +583,17 @@ const Views = {
     wrap.appendChild(el('div.insp-sub', subBits.join(' · ')));
     if (e.description) wrap.appendChild(el('div.insp-desc', e.description));
 
+    // Diplomacy (Phase 25) — the measured relations score behind the stance
+    // label: moved by trade, tariffs and war acts; feeds trade pricing ±10%.
+    if (e.type === 'foreign' && e.vars && e.vars.relations !== undefined) {
+      const r = Math.max(0, Math.min(100, Number(e.vars.relations) || 0));
+      const tone = r >= 65 ? 'var(--good)' : r <= 35 ? 'var(--accent)' : 'var(--ink-soft)';
+      wrap.appendChild(this.secLabel('Foreign Relations'));
+      wrap.appendChild(this.barRow('Standing with the Republic', r, tone, fmtNum(r, 0) + '/100'));
+      wrap.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-top:2px;' },
+        r >= 65 ? 'Warm — their buyers pay a premium for Arcasian goods.' : r <= 35 ? 'Hostile — expect lowball offers and hard bargaining.' : 'Correct but cool — strictly business.'));
+    }
+
     if (e.type === 'company') {
       wrap.appendChild(this.secLabel('Corporate Record'));
       wrap.appendChild(this.kv('Controlled by', this.ownerLink(e.ownerId)));
@@ -995,7 +1035,7 @@ const Views = {
 
       /* Phase 7.3 — polling-over-time, one series per party, drawn only from
          the weekly rows that carry a polling snapshot (r.polling). */
-      const hist = S().history;
+      const hist = Views.histAll();
       if (hist && hist.length) {
         const pollRows = hist.filter(r => r.polling);
         if (pollRows.length >= 2) {
@@ -1539,7 +1579,7 @@ const Views = {
     }
 
     // ---- historical graphs ----
-    const hist = S().history || [];
+    const hist = Views.histAll();
     const profRows = hist.filter(h => h.profits && h.profits[c.id] !== undefined);
     const revRows = hist.filter(h => h.revenues && h.revenues[c.id] !== undefined);
     if (profRows.length >= 2) {
@@ -1572,7 +1612,7 @@ const Views = {
       ['Imports / turn', fmtMoney(g.lastImportSpend || 0)]
     ]));
 
-    const hist = (S().history || []).filter(h => h.treasury !== undefined);
+    const hist = Views.histAll().filter(h => h.treasury !== undefined);
     if (hist.length >= 2) {
       inner.appendChild(this.secLabel('Federal Treasury Over Time'));
       inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: h.treasury || 0 })),
@@ -1781,7 +1821,7 @@ const Views = {
     /* Phase 7.3 — GDP & money-supply history, gated on statistics clearance
        (filterState strips gdp/moneySupply from state.history without
        perms.statistics — only share prices survive for the Exchange tab). */
-    const hist = S().history;
+    const hist = Views.histAll();
     if (hist && hist.length && hist.some(h => h.gdp !== undefined || h.moneySupply !== undefined)) {
       const xLabels = hist.map(h => 'T' + h.turn);
       inner.appendChild(this.secLabel('National GDP Over Time'));
@@ -1843,9 +1883,76 @@ const Views = {
   },
 
   /* ---- Exchange (Phase 4.4) ---- */
+  // ---------- war bonds desk (Phase 25) ----------
+  // Bond items live in the ordinary item collection with meta.bond; the gov
+  // (or GM) floats a series via POST /api/gov/bonds, anyone subscribes via
+  // /api/gov/bonds/buy, and sim.redeemMaturedBonds pays face value at
+  // maturity. This section is just a storefront over those routes.
+  bondsSection(inner) {
+    const gov = entById('ent_gov');
+    const bonds = S().items.filter(i => i.meta && i.meta.bond && !i.meta.bond.redeemed);
+    const canIssue = isGM() || (W.me.entityId && ownership_controlsClient(W.me.entityId, 'ent_gov'));
+    if (!bonds.length && !canIssue) return;
+    inner.appendChild(this.secLabel('Government Bonds'));
+    const turn = S().settings.time.turn;
+    const remaining = (b) => { const row = gov && (gov.inventory || []).find(r => r.itemId === b.id); return row ? row.qty : 0; };
+    const myHolding = (b) => { const me = myEntity(); const row = me && (me.inventory || []).find(r => r.itemId === b.id); return row ? row.qty : 0; };
+    if (bonds.length) {
+      const tbl = el('table.data',
+        el('thead', el('tr', el('th', 'Series'), el('th', 'Price'), el('th', 'Pays'), el('th', 'Matures'), el('th', 'Remaining'), el('th', 'Held'), el('th', ''))),
+        el('tbody', bonds.map(b => el('tr',
+          el('td', b.name),
+          el('td', fmtMoney(b.marketValue)),
+          el('td', fmtMoney(b.meta.bond.faceValue)),
+          el('td', 'T' + b.meta.bond.maturityTurn + (b.meta.bond.maturityTurn <= turn ? ' (due)' : ` (${b.meta.bond.maturityTurn - turn} turns)`)),
+          el('td', fmtNum(remaining(b))),
+          el('td', fmtNum(myHolding(b))),
+          el('td', remaining(b) > 0 && W.me.entityId && W.me.entityId !== 'ent_gov' ? el('button.dash-btn', {
+            onclick: () => {
+              const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1' });
+              openModal('SUBSCRIBE — ' + b.name, el('div',
+                el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
+                  `Pay ${fmtMoney(b.marketValue)} per certificate now; the Treasury redeems each at ${fmtMoney(b.meta.bond.faceValue)} on turn ${b.meta.bond.maturityTurn}.`),
+                el('label.field-label', 'Certificates'), qty
+              ), [{
+                label: 'Subscribe', onClick: async () => {
+                  const n = Math.round(Number(qty.value));
+                  if (!(n > 0)) throw new Error('Enter a positive count.');
+                  const r = await POST('/api/gov/bonds/buy', { itemId: b.id, qty: n });
+                  toast(`Subscribed: ${n} certificate(s) for ${fmtMoney(r.cost)}.`);
+                }
+              }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+            }
+          }, 'Buy') : null
+        )))));
+      inner.appendChild(tbl);
+    } else {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin:4px 0 8px;' }, 'No bond series is currently open.'));
+    }
+    if (canIssue) {
+      inner.appendChild(el('div.btn-row', el('button.dash-btn', {
+        onclick: () => {
+          const d = { faceValue: 1200, price: 1000, count: 5000, maturityTurns: 30 };
+          openModal('FLOAT A BOND ISSUE', el('div',
+            Forms.field('Sale price per certificate (' + CUR() + ')', Forms.num(d, 'price')),
+            Forms.field('Face value paid at maturity (' + CUR() + ')', Forms.num(d, 'faceValue')),
+            Forms.field('Certificates to mint', Forms.num(d, 'count')),
+            Forms.field('Maturity (turns from now)', Forms.num(d, 'maturityTurns'))
+          ), [{
+            label: 'Float Issue', onClick: async () => {
+              const r = await POST('/api/gov/bonds', d);
+              toast(r.item.name + ' floated.');
+            }
+          }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+        }
+      }, '⚑ Float a bond issue…')));
+    }
+  },
+
   viewExchange(inner) {
     const companies = S().entities.filter(e => e.type === 'company' && e.sharePrice !== undefined);
     inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' }, 'Lachevan Exchange — Company Value updates each turn; the Day Market moves live'));
+    this.bondsSection(inner);
     // Day-tick countdown (Feature: extend the war layer's snapshot → local
     // deterministic prediction pattern to the Day Market — see docs/WAR.md's
     // "Client-side prediction" closing note and docs/SIMULATION.md). Purely
@@ -1870,7 +1977,7 @@ const Views = {
         el('span', { style: 'font-weight:700; color:' + tone }, fmtNum(econC, 0) + '% · ' + mood),
         el('span', { style: 'color:var(--ink-faint);' }, '— consumer speculation drives revenue and public mood')));
     }
-    const hist = S().history || [];
+    const hist = Views.histAll();
     const controlsCompany = (c) => isGM() || (W.me.entityId && (c.ownerId === W.me.entityId || c.ceoId === W.me.entityId || ownership_controlsClient(W.me.entityId, c.id)));
 
     for (const c of companies) {
@@ -2333,7 +2440,7 @@ const Views = {
        gated on statistics clearance (filterState only sends state.history
        when perms.statistics is set). Needs at least 2 recorded rows with
        data for this province to be worth plotting. */
-    const hist = S().history;
+    const hist = Views.histAll();
     if (hist && hist.length) {
       const provRows = hist.filter(r => r.provinces && r.provinces[p.id]);
       if (provRows.length >= 2) {
@@ -2424,7 +2531,21 @@ const Views = {
       const tabs = el('div.chip-row',
         el('button.chip', { class: W.newsTab === 'published' ? 'active' : '', onclick: () => { W.newsTab = 'published'; App.renderView(); } }, 'Published'),
         el('button.chip', { class: W.newsTab === 'draft' ? 'active' : '', onclick: () => { W.newsTab = 'draft'; App.renderView(); } }, 'Drafts (' + paperNews.filter(n => n.status === 'draft').length + ')'),
-        el('button.dash-btn', { onclick: () => this.newsEditor(null, paper.id) }, '✎ New Article'));
+        el('button.dash-btn', { onclick: () => this.newsEditor(null, paper.id) }, '✎ New Article'),
+        // Phase 25 QoL — once per turn, work your sources for a scoop the
+        // public record doesn't show; lands as a draft ready to edit.
+        el('button.dash-btn', {
+          title: 'Work your sources (once per turn)',
+          onclick: async (ev) => {
+            const b = ev.currentTarget; b.disabled = true;
+            try {
+              const r = await POST('/api/press/investigate');
+              this._newsBodies[r.article.id] = r.article.body || '';
+              W.newsTab = 'draft';
+              toast('Your sources deliver: “' + r.article.headline + '” — filed to drafts.');
+            } catch (err) { toast(err.message, true); b.disabled = false; }
+          }
+        }, '🔎 Investigate'));
       inner.appendChild(tabs);
     } else if ((perms().manageNews || isGmUser) && !isGmUser) {
       inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin:4px 0 10px;' },
@@ -2436,21 +2557,35 @@ const Views = {
     let list = paperNews.filter(n =>
       (canSeeDrafts ? n.status === W.newsTab : n.status === 'published') &&
       (W.newsCat === 'All' || n.category === W.newsCat) &&
-      (!q || n.headline.toLowerCase().includes(q) || (n.body || '').toLowerCase().includes(q)));
+      (!q || n.headline.toLowerCase().includes(q) || ((n.body !== undefined ? n.body : this._newsBodies[n.id]) || '').toLowerCase().includes(q)));
     list = [...list].reverse();
     if (!list.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:30px 0; text-align:center; font-family:var(--font-mono); font-size:11px; letter-spacing:.14em;' }, 'NOTHING ON FILE.'));
 
     list.forEach((n, i) => {
       const isLead = i === 0 && !q && W.newsCat === 'All';
       const art = el('div.news-article', { class: isLead ? 'lead' : '' });
-      art.appendChild(el('div.headline', { onclick: () => { art.querySelector('.body').classList.toggle('hidden'); } }, n.headline,
+      const bodyEl = el('div.body', { class: isLead ? '' : 'hidden' });
+      // Bodies are lazy (Phase 21 payload diet — state.news is metadata-only):
+      // the lead article loads its body immediately, the rest on first expand.
+      const fillBody = () => {
+        if (bodyEl._filled) return;
+        bodyEl._filled = true;
+        const paint = (text) => {
+          clear(bodyEl);
+          if (isLead && text) {
+            bodyEl.appendChild(el('span.drop', text[0]));
+            bodyEl.appendChild(document.createTextNode(text.slice(1)));
+          } else bodyEl.textContent = text || '';
+        };
+        const cached = n.body !== undefined ? n.body : this._newsBodies[n.id];
+        if (cached !== undefined) return paint(cached);
+        bodyEl.textContent = '…';
+        this.newsBody(n.id).then(paint).catch(() => { bodyEl.textContent = ''; bodyEl._filled = false; });
+      };
+      art.appendChild(el('div.headline', { onclick: () => { fillBody(); art.querySelector('.body').classList.toggle('hidden'); } }, n.headline,
         n.status === 'draft' ? el('span.status-stamp.draft', 'DRAFT') : null));
       art.appendChild(el('div.meta', `${n.category} · ${n.author} · ${fmtDate(n.simDate)} · TURN ${n.turn}`));
-      const bodyEl = el('div.body', { class: isLead ? '' : 'hidden' });
-      if (isLead && n.body) {
-        bodyEl.appendChild(el('span.drop', n.body[0]));
-        bodyEl.appendChild(document.createTextNode(n.body.slice(1)));
-      } else bodyEl.textContent = n.body || '';
+      if (isLead) fillBody();
       art.appendChild(bodyEl);
       if (canManage) {
         art.appendChild(el('div.btn-row',
@@ -2467,7 +2602,14 @@ const Views = {
     const isGmUser = isGM();
     const headline = el('input.text-input', { value: article ? article.headline : '', placeholder: 'HEADLINE' });
     const category = el('input.text-input', { value: article ? article.category : 'Politics', placeholder: 'Category' });
-    const body = el('textarea.text-input', { style: 'min-height:180px;' }, article ? article.body : '');
+    const body = el('textarea.text-input', { style: 'min-height:180px;' }, article ? (article.body || '') : '');
+    // body is lazy in state — pull the real text in before the writer edits
+    // a blank field and saves an accidental wipe
+    if (article && article.body === undefined) {
+      body.disabled = true; body.placeholder = 'Loading…';
+      this.newsBody(article.id).then(t => { body.value = t; body.disabled = false; body.placeholder = ''; })
+        .catch(() => { body.disabled = false; body.placeholder = 'Could not load body — retype or cancel.'; });
+    }
     const targetPaperId = article ? (article.paperId || 'paper_today') : (paperId || W.newsPaper || 'paper_today');
     // GM may retarget which paper an article runs in; journalists are locked
     // to their own masthead (the server enforces this regardless).
@@ -2484,15 +2626,16 @@ const Views = {
       {
         label: article ? 'Save' : 'Publish', onClick: async () => {
           const pid = isGmUser ? paperSel.value : targetPaperId;
-          if (article) await PATCH('/api/news/' + article.id, { headline: headline.value, category: category.value, body: body.value, paperId: pid });
-          else await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: true, paperId: pid });
+          if (article) { await PATCH('/api/news/' + article.id, { headline: headline.value, category: category.value, body: body.value, paperId: pid }); this._newsBodies[article.id] = body.value; }
+          else { const r = await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: true, paperId: pid }); if (r.article) this._newsBodies[r.article.id] = body.value; }
           toast('Filed.');
         }
       },
       !article ? {
         label: 'Save as Draft', cls: 'dash-btn', onClick: async () => {
           const pid = isGmUser ? paperSel.value : targetPaperId;
-          await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: false, paperId: pid });
+          const r = await POST('/api/news', { headline: headline.value, category: category.value, body: body.value, publish: false, paperId: pid });
+          if (r.article) this._newsBodies[r.article.id] = body.value;
           toast('Draft saved.');
         }
       } : null,

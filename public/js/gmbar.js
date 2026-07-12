@@ -48,7 +48,8 @@ const GMBar = {
         el('span.gmbar-label', 'Advance'),
         el('button.gmbar-btn', { onclick: () => this.advance(1) }, '+1'),
         el('button.gmbar-btn', { onclick: () => this.advance(7) }, '+7'),
-        el('button.gmbar-btn', { onclick: () => this.advance(30) }, '+30')
+        el('button.gmbar-btn', { onclick: () => this.advance(30) }, '+30'),
+        el('button.gmbar-btn', { title: 'Preview the next turn without committing it', onclick: () => this.previewTurn() }, '🔍')
       ),
       el('div.gmbar-group.gmbar-find-wrap',
         findInput,
@@ -75,6 +76,27 @@ const GMBar = {
   async advance(steps) {
     try { await POST('/api/gm/advance', { steps }); toast(steps === 1 ? 'One turn passes.' : `${steps} turns pass.`); }
     catch (e) { toast(e.message, true); }
+  },
+
+  // Turn preview (Phase 25 QoL) — dry-run the next turn server-side and show
+  // the diff (nothing is committed; see /api/gm/advance b.preview).
+  async previewTurn() {
+    let r;
+    try { r = await POST('/api/gm/advance', { steps: 1, preview: true }); }
+    catch (e) { return toast(e.message, true); }
+    const d = r.diff || {};
+    const rows = [];
+    const fmtV = (v) => typeof v === 'number' ? fmtNum(Math.round(v * 100) / 100) : String(v);
+    for (const g of (d.globalVars || []).slice(0, 14)) rows.push(el('div.var-row', el('span.var-label', g.key), el('span.var-value', fmtV(g.from) + ' → ' + fmtV(g.to))));
+    for (const p of (d.provinces || []).slice(0, 6)) {
+      rows.push(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin-top:8px;' }, p.name.toUpperCase()));
+      for (const c of p.changes.slice(0, 6)) rows.push(el('div.var-row', el('span.var-label', c.key), el('span.var-value', fmtV(c.from) + ' → ' + fmtV(c.to))));
+    }
+    if (d.moneyMoved) rows.push(el('div.var-row', el('span.var-label', 'Money moved'), el('span.var-value', fmtMoney(d.moneyMoved))));
+    for (const n of (d.news || []).slice(0, 5)) rows.push(el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:4px;' }, '¶ ' + n.headline));
+    if (r.error) rows.unshift(el('div', { style: 'color:var(--accent);' }, 'Preview error: ' + r.error));
+    if (!rows.length) rows.push(el('div', { style: 'color:var(--ink-faint);' }, 'The next turn changes nothing visible.'));
+    openModal('NEXT TURN — PREVIEW (not committed)', el('div', rows), [{ label: 'Close', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   /* ---------- Find: fuzzy search over users + entities ---------- */

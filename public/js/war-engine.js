@@ -51,6 +51,7 @@
   const ROAD_SPEED_MULT = 5;          // speed multiplier while following the road/rail transport graph
   const ROAD_JUNCTION_RANGE = 50;     // px — nodes from different polylines within this range are linked
   const CITY_CONTROL_PCT = 65;        // province-control % that satisfies control_province
+  const TOTAL_VICTORY_PCT = 97;       // per-province control % the attacker needs in EVERY province for total conquest (Phase 22)
   const MAX_TICKS_PER_CALL = 20;      // catch-up cap, same spirit as autoTick's 30
   const UNIT_RADIUS = 26;             // px — a unit's collider radius
   const COLLIDE_ENEMY = 40;           // px — a unit will not advance within this of a live enemy
@@ -224,6 +225,17 @@
     }
     return null;
   }
+  // Same point-in-polygon lookup over settings.map.countries — foreign
+  // nations' home soil (Phase 22: total war). Reuses cachedPolygonOf since
+  // country entries carry the same `shape` SVG-path field provinces do.
+  function countryAt(countries, pt) {
+    if (!pt || !Array.isArray(countries)) return null;
+    for (const c of countries) {
+      const poly = cachedPolygonOf(c);
+      if (poly && poly.length && pointInPolygon(pt, poly)) return c.id;
+    }
+    return null;
+  }
 
   // ---------- grid ----------
   function cellKey(cx, cy) { return cx + ',' + cy; }
@@ -232,6 +244,7 @@
     const provinceLandCells = {};
     const provinceCells = {};
     let totalLandCells = 0;
+    const provinceKeys = new Set();
     for (let cx = 0; cx < cols; cx++) {
       for (let cy = 0; cy < rows; cy++) {
         const centerX = (cx + 0.5) * CELL, centerY = (cy + 0.5) * CELL;
@@ -239,10 +252,94 @@
         if (!pid) continue;
         provinceLandCells[pid] = (provinceLandCells[pid] || 0) + 1;
         (provinceCells[pid] = provinceCells[pid] || []).push([cx, cy]);
+        provinceKeys.add(cellKey(cx, cy));
         totalLandCells++;
       }
     }
-    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells };
+    // Foreign-nation homelands (Phase 22: total war) — the same cell
+    // rasterisation over settings.map.countries, so defenders can capture
+    // attacker home soil and movement can refuse closed neutral borders.
+    // Province membership wins any polygon overlap (the Republic's own land
+    // is never someone's homeland).
+    const countries = ((db.settings || {}).map || {}).countries || [];
+    const countryLandCells = {};
+    const countryCells = {};
+    if (countries.length) {
+      for (let cx = 0; cx < cols; cx++) {
+        for (let cy = 0; cy < rows; cy++) {
+          if (provinceKeys.has(cellKey(cx, cy))) continue;
+          const cid = countryAt(countries, [(cx + 0.5) * CELL, (cy + 0.5) * CELL]);
+          if (!cid) continue;
+          countryLandCells[cid] = (countryLandCells[cid] || 0) + 1;
+          (countryCells[cid] = countryCells[cid] || []).push([cx, cy]);
+        }
+      }
+    }
+    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells, countryLandCells, countryCells };
+  }
+
+  // ---------- war zones: whose soil is whose (Phase 22: total war) ----------
+  // Derived, cheap, and re-derived deterministically on BOTH sides whenever
+  // the belligerent set changes (joinWar): grid.enemyCells maps a cell key to
+  // the ATT-side homeland country that owns it (defender units may capture
+  // these), grid.neutralCells to a non-belligerent country (no unit may enter
+  // — borders are closed). Entities link to a map country by explicit
+  // e.countryId when set, else by normalised name match.
+  function countryIdForEntity(db, entityId) {
+    const e = (db.entities || []).find(x => x.id === entityId);
+    if (!e) return null;
+    if (e.countryId) return e.countryId;
+    const countries = ((db.settings || {}).map || {}).countries || [];
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const hit = countries.find(c => norm(c.name) === norm(e.name) || norm(c.id) === norm(e.name));
+    return hit ? hit.id : null;
+  }
+  function belligerentKey(db, war) {
+    const attIds = [war.attackerId].concat((war.allies && war.allies.att) || []);
+    const defIds = ((war.allies && war.allies.def) || []).slice();
+    const attC = attIds.map(id => countryIdForEntity(db, id)).filter(Boolean).sort();
+    const defC = defIds.map(id => countryIdForEntity(db, id)).filter(Boolean).sort();
+    return attC.join('+') + '|' + defC.join('+');
+  }
+  function refreshWarZones(db, war) {
+    const grid = war.grid;
+    if (!grid || !grid.countryCells) return;
+    const key = belligerentKey(db, war);
+    if (war._zonesKey === key && grid.neutralCells && grid.enemyCells) return;
+    war._zonesKey = key;
+    const parts = key.split('|');
+    const attSet = new Set(parts[0] ? parts[0].split('+') : []);
+    const defSet = new Set(parts[1] ? parts[1].split('+') : []);
+    grid.neutralCells = {};
+    grid.enemyCells = {};
+    for (const cid in grid.countryCells) {
+      const enemy = attSet.has(cid);
+      const friendly = enemy || defSet.has(cid); // a def-ally homeland is open ground, just not capturable
+      for (const cell of grid.countryCells[cid]) {
+        const k = cellKey(cell[0], cell[1]);
+        if (enemy) grid.enemyCells[k] = cid;
+        else if (!friendly) grid.neutralCells[k] = cid;
+      }
+    }
+  }
+  // The neutral country a position is standing in, or null. Sea (no polygon)
+  // is always open water.
+  function neutralAt(war, pos) {
+    const g = war.grid;
+    if (!g || !g.neutralCells) return null;
+    return g.neutralCells[cellKey(Math.floor(pos[0] / g.cell), Math.floor(pos[1] / g.cell))] || null;
+  }
+
+  // ---------- equipment quality (Phase 23: weapons & fuel) ----------
+  // server/war.js computes war.equip = { att: {dmg,hp,morale,speed}, def: … }
+  // from each side's gun/fuel stocks before every authoritative tick; the
+  // engine only CONSUMES the stored multipliers. A predicting client (which
+  // cannot see inventories — filterState strips them) replays combat
+  // identically from the multipliers carried in war state.
+  function equipMul(war, side, stat) {
+    const e = war.equip && war.equip[side];
+    const v = e && Number(e[stat]);
+    return (Number.isFinite(v) && v > 0) ? v : 1;
   }
   // A land-cell centre inside a province, biased toward STILL-UNCAPTURED
   // cells (a handful of seeded draws) — see the pre-split commentary in
@@ -402,8 +499,26 @@
     const dx = dest[0] - u.pos[0], dy = dest[1] - u.pos[1];
     const d = Math.hypot(dx, dy);
     if (d < 1e-6) return;
-    const step = Math.min(speed, d);
-    u.pos = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
+    // Fuel stock scales mobility (Phase 23) — one choke point covers every
+    // movement mode: paths, straight lines, chases, retreats, sailing.
+    const step = Math.min(speed * equipMul(war, u.side, 'speed'), d);
+    let next = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
+    // Closed neutral borders (Phase 22): a step that would land on a
+    // non-belligerent nation's soil is refused. Greedy wall-follow instead:
+    // try ±45°/±90°/±135° in a FIXED order (determinism — client prediction
+    // replays this) and take the first open step; fully boxed in → hold this
+    // tick. A unit somehow ALREADY inside neutral ground (legacy doc, GM
+    // spawn) is allowed to move freely so it can walk out rather than freeze.
+    if (neutralAt(war, next) && !neutralAt(war, u.pos)) {
+      const base = Math.atan2(dy, dx);
+      let moved = false;
+      for (const dAng of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75]) {
+        const cand = clampToWorld(war, [u.pos[0] + Math.cos(base + dAng) * step, u.pos[1] + Math.sin(base + dAng) * step]);
+        if (!neutralAt(war, cand)) { next = cand; moved = true; break; }
+      }
+      if (!moved) return;
+    }
+    u.pos = next;
   }
 
   // ---------- events / notes ----------
@@ -443,8 +558,47 @@
     const wasPhase = war.ai.phase;
     if (attTotal <= consolidateAt) war.ai.phase = 'consolidate';
     else if (landingObj && landingObj.status !== 'done') war.ai.phase = 'landing';
+    else if (war.totalWar) war.ai.phase = 'total';
     else war.ai.phase = war.ai.phase === 'consolidate' ? 'consolidate' : (war.objectives.every(o => o.status === 'done') ? 'exploit' : 'breakout');
     if (war.ai.phase !== wasPhase) note(war, `Phase change: ${wasPhase} → ${war.ai.phase}`);
+
+    // Total war (Phase 22): objectives are history — hunt down every
+    // remaining defender, then sweep whatever ground is still uncontrolled.
+    // Chase orders reuse stepChase; the sweep reuses randomProvincePoint on
+    // the LEAST-controlled province, so the drive converges on 100%.
+    if (war.ai.phase === 'total') {
+      const defsLive = war.units.filter(x => x.side === 'def' && isLive(x));
+      let sweepPid = null;
+      if (!defsLive.length) {
+        const ctl = war.stats.provinceControl || {};
+        let low = 101;
+        for (const pid in war.grid.provinceLandCells) {
+          const c = ctl[pid] || 0;
+          if (c < TOTAL_VICTORY_PCT && c < low) { low = c; sweepPid = pid; }
+        }
+      }
+      let hunting = 0, sweeping = 0;
+      for (const u of war.units) {
+        if (u.side !== 'att' || !isLive(u) || u.state === 'routed' || u.state === 'embarked') continue;
+        if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
+        if (defsLive.length) {
+          let nearest = defsLive[0], nd = dist(u.pos, nearest.pos);
+          for (const d of defsLive) { const dd = dist(u.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
+          clearDest(u);
+          u.attackId = nearest.id;
+          u.objectiveId = null;
+          if (u.state !== 'fighting') u.state = 'moving';
+          hunting++;
+        } else if (sweepPid) {
+          u.attackId = null;
+          setDest(db, u, randomProvincePoint(war, sweepPid, rng) || u.pos.slice(), u.speed);
+          sweeping++;
+        }
+      }
+      if (defsLive.length) note(war, `Total war: ${hunting} unit(s) hunting the ${defsLive.length} defending formation(s) still in the field.`);
+      else if (sweepPid) note(war, `Total war: ${sweeping} unit(s) sweeping the last uncontrolled ground.`);
+      return;
+    }
 
     const target = primaryObjective(war);
     if (war.ai.phase === 'consolidate') {
@@ -652,13 +806,16 @@
       a.state = 'fighting'; if (d.state !== 'routed') d.state = 'fighting';
       const defStationary = d.garrison && !d.dest;
       const defBonus = defStationary ? 1.35 : 1;
-      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod;
-      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod;
+      // Equipment (Phase 23): your guns raise the damage you deal; the
+      // victim's guns/kit absorb some of what lands (hp); better small arms
+      // also slow morale drain (a unit that can shoot back holds longer).
+      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * equipMul(war, 'att', 'dmg') / equipMul(war, 'def', 'hp');
+      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * equipMul(war, 'def', 'dmg') / equipMul(war, 'att', 'hp');
       d.strength = Math.max(0, round1(d.strength - dmgToDef));
       a.strength = Math.max(0, round1(a.strength - dmgToAtt));
       war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
-      a.org = clamp(a.org - ORG_DRAIN, 0, 100);
-      d.org = clamp(d.org - ORG_DRAIN * 0.7, 0, 100);
+      a.org = clamp(a.org - ORG_DRAIN / equipMul(war, 'att', 'morale'), 0, 100);
+      d.org = clamp(d.org - ORG_DRAIN * 0.7 / equipMul(war, 'def', 'morale'), 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a
       // garrison's morale can still fully collapse, just at a much lower
@@ -743,9 +900,20 @@
           const centerX = (cx + 0.5) * cs, centerY = (cy + 0.5) * cs;
           if (Math.hypot(centerX - u.pos[0], centerY - u.pos[1]) / cs > CONTROL_RADIUS_CELLS) continue;
           const key = cellKey(cx, cy);
-          if (u.side === 'def') { if (war.cells[key]) delete war.cells[key]; continue; }
+          if (u.side === 'def') {
+            // liberate captured Republic ground…
+            const held = war.cells[key];
+            if (held && held.o === 'att') { delete war.cells[key]; continue; }
+            // …and OCCUPY attacker home soil (Phase 22: the defence can
+            // invade too — enemyCells maps att-side homeland cells).
+            if (!held && war.grid.enemyCells && war.grid.enemyCells[key]) {
+              war.cells[key] = { o: 'def', c: war.grid.enemyCells[key] };
+            }
+            continue;
+          }
           const existing = war.cells[key];
           if (existing && existing.o === 'att') continue;
+          if (existing && existing.o === 'def') { delete war.cells[key]; continue; } // attacker retakes its homeland
           const pid = provinceAt(db.provinces, [centerX, centerY]);
           if (!pid) continue;
           war.cells[key] = { o: 'att', p: 1, pid };
@@ -903,10 +1071,11 @@
 
   function recomputeProvinceControl(war) {
     const counts = {};
+    const enemyCounts = {};
     for (const key in war.cells) {
       const c = war.cells[key];
-      if (c.o !== 'att' || !c.pid) continue;
-      counts[c.pid] = (counts[c.pid] || 0) + 1;
+      if (c.o === 'att' && c.pid) counts[c.pid] = (counts[c.pid] || 0) + 1;
+      else if (c.o === 'def' && c.c) enemyCounts[c.c] = (enemyCounts[c.c] || 0) + 1; // defender-occupied attacker homeland (Phase 22)
     }
     const out = {};
     for (const pid in war.grid.provinceLandCells) {
@@ -914,16 +1083,52 @@
       out[pid] = total ? Math.round((counts[pid] || 0) / total * 100) : 0;
     }
     war.stats.provinceControl = out;
+    // % of each ATT-side homeland the defence has overrun — additive: absent
+    // for wars whose grid predates countryLandCells.
+    const enemyOut = {};
+    for (const cid in enemyCounts) {
+      const total = (war.grid.countryLandCells || {})[cid] || 0;
+      if (total) enemyOut[cid] = Math.round(enemyCounts[cid] / total * 100);
+    }
+    war.stats.enemyControl = enemyOut;
   }
 
+  // Total war (Phase 22): completing the scenario objectives no longer ends
+  // the war — it UNLOCKS the drive for total victory. From then on the war
+  // ends only when one side completely wins: the attacker holds effectively
+  // every province with no defender left standing, or the invasion force is
+  // annihilated outright (the AI's collapse rule remains the other defender
+  // win, unchanged — a shattered army IS a complete defeat).
   function checkVictory(db, war, ctx) {
     if (!war.active) return;
     const allDone = war.objectives.every(o => o.status === 'done');
-    if (allDone) {
+    if (allDone && !war.totalWar) {
+      war.totalWar = true;
+      if (war.ai) war.ai.phase = 'total';
+      const anchor = war.units.find(u => u.side === 'att' && isLive(u));
+      pushEvent(war, 'milestone', anchor ? anchor.pos.slice() : [1920, 1080], 'All objectives secured — the invader now drives for total conquest.');
+      ctx.log('event', 'The war enters its total phase', `${war.name}: every objective has fallen; nothing short of total victory ends this now.`, 'WAR ENGINE', [war.attackerId, war.defenderId]);
+      ctx.news('NO TERMS: WAR ENTERS ITS TOTAL PHASE', 'With every strategic objective fallen, the invading command has announced it will accept nothing short of total capitulation. The war goes on.');
+    }
+    const attAlive = war.units.some(u => u.side === 'att' && isLive(u));
+    if (!attAlive) {
       war.active = false;
-      war.result = { winner: 'att', endedAt: new Date().toISOString(), reason: 'All objectives secured' };
-      ctx.log('event', 'The invasion succeeds', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
-      ctx.news('THE REPUBLIC FALLS', 'All strategic objectives have been secured by the invading force. The government has fallen.');
+      war.result = { winner: 'def', endedAt: new Date().toISOString(), reason: 'Invasion force annihilated' };
+      ctx.log('event', 'The invasion is annihilated', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
+      ctx.news('THE INVADER IS DESTROYED', 'Not one invading formation remains in the field. The war is over.');
+      return;
+    }
+    if (war.totalWar) {
+      const ctl = war.stats.provinceControl || {};
+      const pids = Object.keys(war.grid.provinceLandCells || {});
+      const allProvinces = pids.length > 0 && pids.every(pid => (ctl[pid] || 0) >= TOTAL_VICTORY_PCT);
+      const defAlive = war.units.some(u => u.side === 'def' && isLive(u));
+      if (allProvinces && !defAlive) {
+        war.active = false;
+        war.result = { winner: 'att', endedAt: new Date().toISOString(), reason: 'Total conquest' };
+        ctx.log('event', 'Total victory for the invader', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
+        ctx.news('THE REPUBLIC FALLS', 'The last defending formation has been destroyed and the whole of the national territory is under occupation. The Republic has ceased to exist as a fighting power.');
+      }
     }
   }
 
@@ -977,6 +1182,10 @@
     ctx = normCtx(ctx);
     war.tick++;
     const rng = tickRng(war);
+    // Re-derive neutral/enemy soil when the belligerent set changed (joinWar)
+    // — no-op when the key matches, so this is a cheap per-tick guard that
+    // keeps server and predicting client in step without extra sync plumbing.
+    refreshWarZones(db, war);
     // AI runs only when war.ai is present: always on the server; on a
     // predicting client only for the GM (filterState strips ai for players).
     // A player client simply keeps units marching on their existing dests
@@ -1024,9 +1233,10 @@
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry
-    parseShape, polygonOf, pointInPolygon, provinceAt,
+    parseShape, polygonOf, pointInPolygon, provinceAt, countryAt,
     // grid / pathing / world bounds
     buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
+    countryIdForEntity, refreshWarZones, neutralAt, equipMul,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick

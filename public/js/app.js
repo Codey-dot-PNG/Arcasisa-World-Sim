@@ -206,6 +206,8 @@ const App = {
     // Phase 10 — reflect settings.music into the shared <audio> element +
     // top-bar widget on every state refresh / sync broadcast.
     if (typeof Music !== 'undefined') Music.apply();
+    // Phase 25 QoL — toast timeline entries touching the player's own chain
+    if (typeof Notify !== 'undefined') Notify.check();
     if (saved) restoreScroll(saved);
     lastRenderedView = W.view;
   }

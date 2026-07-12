@@ -879,7 +879,11 @@ function generateTradeOrders(db) {
       const retail = item.marketValue || 0;
       const mult = (p.priceMult && p.priceMult[iid] > 0) ? p.priceMult[iid]
         : (p.prices && p.prices[iid] > 0 && retail > 0 ? p.prices[iid] / retail : 1);
-      const base = retail * mult;
+      // Diplomacy (Phase 25): warm partners bid over the odds for our goods
+      // and undercut when selling to us; frosty ones do the reverse. ±10%
+      // across the whole 0-100 relations range — see relationsPriceMult.
+      const relMult = kind === 'demand' ? relationsPriceMult(db, p.entityId) : 1 / relationsPriceMult(db, p.entityId);
+      const base = retail * mult * relMult;
       if (!(base > 0)) return null;
       const lvl = ((kind === 'demand' ? p.demand : p.supply) || {})[iid] || 'Med';
       // demand level scales the ask/bid: eager buyers bid over the odds,
@@ -1129,6 +1133,86 @@ function recordTradeHistory(db) {
   if (trade.history.length > 180) trade.history.splice(0, trade.history.length - 180);
 }
 
+// ---------- foreign relations (Phase 25 — diplomacy) ----------
+// Every foreign power carries vars.relations (0-100, default 50). It moves
+// from OBSERVABLE acts, never GM whim alone: trading with the Republic warms
+// ties a little every turn it happens, tariffs aimed at a partner cool them,
+// and war shocks (invading, intervening) land as one-shots from server/war.js.
+// Relations feed straight back into trade pricing (relationsPriceMult above).
+function relationsOf(e) {
+  const v = e && e.vars && Number(e.vars.relations);
+  return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 50;
+}
+function relationsPriceMult(db, partnerId) {
+  const e = db.entities.find(x => x.id === partnerId);
+  return e ? 0.9 + relationsOf(e) / 500 : 1; // 0.9× at 0 … 1.1× at 100
+}
+function shiftRelations(db, entityId, delta, why, actor) {
+  const e = db.entities.find(x => x.id === entityId);
+  if (!e || e.type !== 'foreign') return;
+  e.vars = e.vars || {};
+  const before = relationsOf(e);
+  e.vars.relations = Math.round(Math.max(0, Math.min(100, before + delta)) * 100) / 100;
+  if (Math.abs(delta) >= 10) {
+    store.log('politics', `Relations with ${e.name} ${delta > 0 ? 'improve' : 'deteriorate'}`,
+      `${why || ''} (${Math.round(before)} → ${Math.round(e.vars.relations)})`, actor || 'ENGINE', [e.id]);
+  }
+}
+function runDiplomacy(db) {
+  const trade = db.settings.trade || {};
+  const tariffs = (trade.tariffs && trade.tariffs.byCountry) || {};
+  const tradedWith = new Set((trade.lastFlows || []).map(f => f.partnerId).filter(Boolean));
+  for (const e of db.entities) {
+    if (e.type !== 'foreign') continue;
+    e.vars = e.vars || {};
+    let r = relationsOf(e);
+    if (tradedWith.has(e.id)) r += 0.4;                       // commerce warms ties
+    const tf = tariffs[e.id];
+    if (tf && ((tf.import || 0) + (tf.export || 0)) > 0) r -= 0.5; // targeted tariffs cool them
+    if (!tradedWith.has(e.id) && !(tf && ((tf.import || 0) + (tf.export || 0)) > 0)) {
+      r += (50 - r) * 0.01;                                    // otherwise drift slowly back to neutral
+    }
+    e.vars.relations = Math.round(Math.max(0, Math.min(100, r)) * 100) / 100;
+  }
+}
+
+// ---------- war bonds (Phase 25) ----------
+// A bond is an ordinary Securities item carrying meta.bond = { faceValue,
+// maturityTurn, issuerId }. Certificates are sold/traded through the normal
+// item plumbing; at maturity every outstanding certificate redeems from the
+// issuer's primary account automatically — the engine's only special
+// knowledge of bonds is this per-turn sweep.
+function redeemMaturedBonds(db, actor) {
+  const turn = db.settings.time.turn;
+  const due = db.items.filter(i => i.meta && i.meta.bond && !i.meta.bond.redeemed && Number(i.meta.bond.maturityTurn) <= turn);
+  for (const bond of due) {
+    const face = Number(bond.meta.bond.faceValue) || 0;
+    const issuerId = bond.meta.bond.issuerId || 'ent_gov';
+    let redeemed = 0;
+    for (const e of db.entities) {
+      if (!Array.isArray(e.inventory)) continue;
+      const row = e.inventory.find(r => r.itemId === bond.id);
+      if (!row || !(row.qty > 0)) continue;
+      e.inventory = e.inventory.filter(r => r !== row);
+      if (e.id === issuerId) continue; // the issuer's own unsold stock just expires
+      const payout = Math.round(face * row.qty * 100) / 100;
+      if (payout > 0) {
+        txn(primaryAccount(issuerId, true).id, primaryAccount(e.id, true).id, payout,
+          `${bond.name} matured — ${row.qty} certificate${row.qty === 1 ? '' : 's'} at face value`, actor || 'ENGINE', 'transfer');
+        redeemed += row.qty;
+      }
+    }
+    bond.meta.bond.redeemed = true;
+    store.log('economy', `${bond.name} matures`,
+      redeemed ? `${redeemed} certificate(s) redeemed at ${db.settings.currency}${fmtNum(face)} face value.` : 'No certificates were outstanding.',
+      actor || 'ENGINE', [issuerId]);
+    if (redeemed) {
+      draftNews(`${bond.name.toUpperCase()} REACHES MATURITY`,
+        `The Treasury has begun honouring ${bond.name} at full face value. Holders are being paid out through the National Bank.`, 'Economy', true, 'State Financial Desk');
+    }
+  }
+}
+
 function advanceTurn(steps, actor) {
   const db = store.get();
   steps = Math.max(1, Math.min(60, steps || 1));
@@ -1187,6 +1271,9 @@ function advanceTurn(steps, actor) {
     try { generateTradeOrders(db); } catch (e) { console.error('generateTradeOrders failed:', e.message); }
     // demographics breathe with the economy (per-turn drift, monthly growth)
     try { runDemographics(db, monthBoundary); } catch (e) { console.error('runDemographics failed:', e.message); }
+    // matured war bonds pay out; foreign relations drift with trade/tariffs
+    try { redeemMaturedBonds(db, actor || 'ENGINE'); } catch (e) { console.error('redeemMaturedBonds failed:', e.message); }
+    try { runDiplomacy(db); } catch (e) { console.error('runDiplomacy failed:', e.message); }
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
   store.save();
@@ -1457,5 +1544,6 @@ module.exports = {
   runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
+  shiftRelations, relationsOf,
   findProv, findEnt, findItem
 };

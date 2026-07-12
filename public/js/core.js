@@ -612,6 +612,29 @@ function renderExplorer() {
   if (!body.children.length) body.appendChild(el('div', { style: 'padding:20px 16px; color:var(--ink-faint); font-family:var(--font-mono); font-size:10px; letter-spacing:.1em;' }, 'NOTHING IN THE FILES.'));
 }
 
+/* ---------- personal notifications (Phase 25 QoL) ---------- */
+// Toast timeline entries that touch YOUR ownership chain (money received,
+// shares moved, goods delivered…) as they arrive. Client-only: the timeline
+// is already permission-filtered server-side; this just remembers the newest
+// entry each operator has seen (localStorage) and toasts the delta. First
+// boot seeds the marker silently so history is never replayed.
+const Notify = {
+  _key() { return 'arc-notif-' + (W.me ? W.me.id : 'anon'); },
+  check() {
+    if (!W.me || !S()) return;
+    const mine = ownershipSetClient();
+    if (!mine.size) return;
+    const rows = (S().timeline || []).filter(t => t.refs && t.refs.some(r => mine.has(r)));
+    if (!rows.length) return;
+    const newest = rows[rows.length - 1].ts || 0;
+    const seen = Number(localStorage.getItem(this._key()));
+    if (!Number.isFinite(seen) || !seen) { localStorage.setItem(this._key(), String(newest || 1)); return; }
+    const fresh = rows.filter(t => (t.ts || 0) > seen && t.actor !== W.me.displayName);
+    for (const t of fresh.slice(-3)) toast('📣 ' + t.title);
+    if (newest > seen) localStorage.setItem(this._key(), String(newest));
+  }
+};
+
 /* ---------- ticker ---------- */
 const TICK_GLYPH = { economy: '₳', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
 function renderTicker() {

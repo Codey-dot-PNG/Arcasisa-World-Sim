@@ -37,6 +37,8 @@ const ITEM_TEMPLATES = [
   ['consumer', 'Consumer good'],
   ['industrial', 'Industrial good'],
   ['military', 'Military hardware'],
+  ['weapon', 'Weapon — small arms (war stats)'],
+  ['armyfuel', 'Army fuel (war mobility)'],
   ['reserve', 'Reserve / bullion']
 ];
 const ITEM_TEMPLATE_PATCH = {
@@ -44,6 +46,13 @@ const ITEM_TEMPLATE_PATCH = {
   consumer: { category: 'Goods', tradable: true, marketValue: 50, icon: 'G' },
   industrial: { category: 'Goods', tradable: true, marketValue: 200, icon: 'I' },
   military: { category: 'Military', tradable: false, marketValue: 5000, icon: 'M' },
+  // Phase 23 — meta.weapon feeds the war engine's per-side equipment
+  // multipliers (docs/WAR.md "Equipment quality"): dmg/hp/morale are
+  // per-armed-soldier bonuses for small arms; fuel's `speed` scales army
+  // mobility against settings.war.fuelPerStrength. originId (an entity id)
+  // records the nation of manufacture — informational + tradeable flavour.
+  weapon: { category: 'Military', tradable: true, marketValue: 300, icon: 'W', meta: { weapon: { kind: 'smallarms', dmg: 0.2, hp: 0.1, morale: 0.08 }, originId: null } },
+  armyfuel: { category: 'Commodities', tradable: true, marketValue: 40, icon: '🛢', meta: { weapon: { kind: 'fuel', speed: 0.5 } } },
   reserve: { category: 'Reserves', tradable: true, marketValue: 1000, icon: 'R' }
 };
 

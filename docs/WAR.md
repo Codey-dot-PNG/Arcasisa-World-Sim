@@ -35,18 +35,30 @@ comments; state fields are all additive/absent-safe):
   `refugeeStages` threshold (25/50/75/95%) moves `refugeeFrac` (5%) of the
   province's people inward to the 3 least-occupied provinces, demographics
   pro-rata, with news. `war.stats.civilianDeaths/refugees` accumulate.
-- **Equipment quality (Phase 23)** — items carrying `meta.weapon`
-  (`{kind:'smallarms', dmg, hp, morale}` or `{kind:'fuel', speed}`) in a
-  side's arsenal (attacker/defender entity + allies' inventories, plus
-  military-property depots for the defence) are folded into `war.equip =
-  {att:{dmg,hp,morale,speed}, def:{…}}` before every authoritative tick
-  (server/war.js computeEquip: troops armed best-gun-first, bonus × armed
-  fraction; fuel stock vs `settings.war.fuelPerStrength` scales speed). The
-  shared engine only CONSUMES the stored multipliers (`equipMul` in
-  stepCombat's damage/armour/morale drain and advanceToward's step), so
-  client prediction replays identically. Weapon items are seeded once by
-  store.migrate (`world._weaponsSeeded`); the GM mints more from the item
-  template "Weapon — small arms" and edits stats in the Metadata JSON.
+- **Equipment quality (Phase 23, per-unit since Phase 26)** — items carrying
+  `meta.weapon` (`{kind:'smallarms', dmg, hp, morale}` or `{kind:'fuel',
+  speed}`) arm the war. Every unit holds its OWN inventory (`u.inv`, the
+  entity-inventory row shape) and its combat multipliers `u.kit =
+  {dmg,hp,morale,speed}` are folded from THAT before every authoritative
+  tick (server/war.js resupplyUnits: the unit's soldiers armed
+  best-gun-first from its own packs, bonus × armed fraction; speed from the
+  best fuel grade carried × tank fullness, full tank = strength ×
+  `settings.war.fuelPerStrength`). Resupply is the drain on the item
+  economy: a unit inside its supply corridor tops up to one gun per soldier
+  and refills its tank OUT OF its own nation's stockpile — the entity
+  inventory of `u.nationId` (fallback: the side's principal belligerent;
+  Republic units also eat military-property depots). Casualties destroy
+  their guns, movement burns fuel (`settings.war.fuelBurnFrac` of a tank per
+  call), so national arsenals deplete tick by tick and an arms factory (see
+  `prop_arc_arms`, ARC's rifle line) is war infrastructure. The shared
+  engine only CONSUMES the stored multipliers (`unitMul` in stepCombat's
+  damage/armour/morale drain and advanceToward's step; falls back to the
+  side-wide `war.equip`, now the strength-weighted mean kit kept for the War
+  Room readout), so client prediction replays identically. Weapon items are
+  seeded once by store.migrate (`world._weaponsSeeded`; `world._arcArms`
+  renames the Republic rifle to the ARC M38 Bolt Action and builds the
+  factory); the GM mints more from the item template "Weapon — small arms"
+  and edits stats in the Metadata JSON.
 - **Homeland musters** — joinWar contingents from nations with a map homeland
   mobilise FROM that homeland (nearest home cell to where they're needed),
   as mobile infantry on either side (a def ally marches on the capital);
@@ -345,14 +357,21 @@ it tick-for-tick.
 
 - **Attacker corridor**: `war.supplyAnchor` is minted once at `startWar` —
   the landing objective's pos for a naval scenario, the staging-box centre
-  for a `land: true` one. Each tick, att-held cells within 2 cells
-  (Chebyshev) of the anchor seed an 8-neighbour BFS over att-held cells in
-  `war.cells`; an attacker unit is in supply iff its cell (or any
-  8-neighbour — see below) is in the reached set. Captured ground that got
-  pinched off from the beachhead by a defender recapture is out of supply
-  even though it's still att-held.
+  for a `land: true` one. Each tick, the anchor's own cell plus att-held
+  cells within 2 cells (Chebyshev) of it seed an 8-neighbour BFS over
+  attacker-held ground; an attacker unit is in supply iff its cell (or any
+  8-neighbour — see below) is in the reached set. "Attacker-held" for supply
+  (Phase 26 fix) means captured cells in `war.cells` PLUS the attacker's own
+  homeland (`grid.enemyCells`) where the defence hasn't captured — a
+  land-border invasion anchors in the homeland, which the old
+  war.cells-only predicate could never seed or traverse, so the whole force
+  read permanently CUT OFF. Captured ground that got pinched off from the
+  corridor by a defender recapture is out of supply even though it's still
+  att-held.
 - **Defender corridor**: defender-controlled land = every land cell (from
-  `grid.provinceCells`) NOT currently att-held; BFS from the capital's cell
+  `grid.provinceCells`) NOT currently att-held, PLUS enemy-homeland cells
+  the defence has captured (`{o:'def'}` — an invading defender column stays
+  supplied through the ground it took); BFS from the capital's cell
   (fallback: first city; no cities at all → all defenders supplied). A
   defender inside the attacker's zone or in a cut-off pocket is unsupplied.
 - **Neighbour tolerance**: a unit counts as supplied when its own cell OR

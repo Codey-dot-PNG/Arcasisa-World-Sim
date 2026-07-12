@@ -851,6 +851,58 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 26 — the Republic's arms industry + national fuel reserves ---
+  // One-shot (flag-gated), additive; sits AFTER the schema<3 production
+  // conversion so the factory's per-turn prodMode figures are never
+  // re-interpreted as old monthly ones.
+  //   · The seeded Arcasian service rifle becomes the ARC M38 Bolt Action —
+  //     an older, humbler pattern (the GM tunes exact stats from the item
+  //     Metadata editor whenever it likes).
+  //   · ARC (the state corporation) gets an arms factory that PRODUCES the
+  //     rifle every turn. Its keepPct slice accrues in the site inventory,
+  //     and because the site is type 'military' that depot both garrisons in
+  //     wartime and feeds the per-unit resupply pass (server/war.js
+  //     nationPools) — bomb the factory and the army's rifle supply dies
+  //     with it.
+  //   · Every armed foreign power gets a fuel reserve, so its expeditionary
+  //     units drain their OWN national stockpile exactly like the Republic's
+  //     do (the Republic's reserve shipped with the weapons seed above).
+  if (!world._arcArms && Array.isArray(world.items) && Array.isArray(world.properties)) {
+    const rifle = world.items.find(i => i.id === 'item_gun_arc_m58');
+    if (rifle) {
+      rifle.name = 'ARC M38 Bolt Action';
+      rifle.description = 'ARC-pattern bolt-action service rifle, model of 1938. Slow, honest, everywhere.';
+      rifle.marketValue = 170;
+      if (rifle.meta && rifle.meta.weapon) Object.assign(rifle.meta.weapon, { dmg: 0.12, hp: 0.08, morale: 0.05 });
+    }
+    if (!world.properties.some(p => p.id === 'prop_arc_arms')) {
+      world.properties.push({
+        id: 'prop_arc_arms', name: 'ARC Arms Works', type: 'military', kind: 'factory',
+        provinceId: 'prov_mezdov', pos: [412, 356], ownerId: 'ent_arc',
+        value: 20000000, employees: 1400, income: 0, expenses: 4500,
+        prodMode: 'goods', produces: [{ itemId: 'item_gun_arc_m58', perTurn: 40 }], cashPerTurn: 0,
+        description: 'State arsenal of the Republic — ARC-run production line for the M38 service rifle. Its yard depot feeds the army in wartime.',
+        inventory: [], vars: {}
+      });
+    }
+    // A keep-in-stock slice of production accrues on-site (sim.js runEconomy
+    // reads the owning company's keepPct); ARC's other holdings produce no
+    // goods, so this only shapes the arsenal.
+    const arc = (world.entities || []).find(e => e.id === 'ent_arc');
+    if (arc && !(arc.keepPct > 0)) arc.keepPct = 50;
+    if (world.items.some(i => i.id === 'item_fuel')) {
+      const fuelFor = ['for_sarom', 'for_madrosia', 'for_valksland', 'for_delcasia', 'for_qinal', 'for_karaznia', 'for_estal'];
+      for (const fid of fuelFor) {
+        const e = (world.entities || []).find(x => x.id === fid);
+        if (!e) continue;
+        e.inventory = e.inventory || [];
+        if (!e.inventory.some(r => r.itemId === 'item_fuel')) e.inventory.push({ itemId: 'item_fuel', qty: 600 });
+      }
+    }
+    world._arcArms = true;
+    changed = true;
+  }
+
   return changed;
 }
 

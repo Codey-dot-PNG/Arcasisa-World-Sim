@@ -583,17 +583,6 @@ const Views = {
     wrap.appendChild(el('div.insp-sub', subBits.join(' · ')));
     if (e.description) wrap.appendChild(el('div.insp-desc', e.description));
 
-    // Diplomacy (Phase 25) — the measured relations score behind the stance
-    // label: moved by trade, tariffs and war acts; feeds trade pricing ±10%.
-    if (e.type === 'foreign' && e.vars && e.vars.relations !== undefined) {
-      const r = Math.max(0, Math.min(100, Number(e.vars.relations) || 0));
-      const tone = r >= 65 ? 'var(--good)' : r <= 35 ? 'var(--accent)' : 'var(--ink-soft)';
-      wrap.appendChild(this.secLabel('Foreign Relations'));
-      wrap.appendChild(this.barRow('Standing with the Republic', r, tone, fmtNum(r, 0) + '/100'));
-      wrap.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-top:2px;' },
-        r >= 65 ? 'Warm — their buyers pay a premium for Arcasian goods.' : r <= 35 ? 'Hostile — expect lowball offers and hard bargaining.' : 'Correct but cool — strictly business.'));
-    }
-
     if (e.type === 'company') {
       wrap.appendChild(this.secLabel('Corporate Record'));
       wrap.appendChild(this.kv('Controlled by', this.ownerLink(e.ownerId)));

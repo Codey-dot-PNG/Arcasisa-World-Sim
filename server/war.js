@@ -37,7 +37,13 @@ const DEVASTATION_DEFAULTS = {
   refugeeFrac: 0.05,       // fraction of a province's remaining population fleeing per wave
   civNewsEvery: 15000      // wire piece every N cumulative civilian deaths
 };
-function warCfg(db) { return Object.assign({}, DEVASTATION_DEFAULTS, (db.settings && db.settings.war) || {}); }
+// Equipment/resupply knobs (Phase 26) — same override rule as devastation:
+// settings.war wins over any of these.
+const EQUIP_DEFAULTS = {
+  fuelPerStrength: 0.01,   // fuel units a unit's full tank holds per point of strength
+  fuelBurnFrac: 0.02       // fraction of a full tank burned per authoritative call while moving/fighting
+};
+function warCfg(db) { return Object.assign({}, DEVASTATION_DEFAULTS, EQUIP_DEFAULTS, (db.settings && db.settings.war) || {}); }
 
 // Population changes always move vars.population AND demographics together
 // (pro-rata), so the election model sees the same world the map does.
@@ -127,73 +133,170 @@ function applyDevastation(db) {
   }
 }
 
-// ---------- equipment quality (Phase 23: weapons & fuel) ----------
-// An army fights with what its nation actually stocks. Guns and fuel are
-// ordinary tradable items carrying meta.weapon — the GM mints new models
-// from a template and edits their stats; quantities move through the normal
-// trade/production plumbing, which is what makes an arms industry matter.
-//   Small arms (kind != 'fuel'): troops are armed best-gun-first; the bonus
-//   contributed by each model is its stats × the fraction of troops it arms.
-//   Fuel (kind 'fuel'): mobility scales with stock vs. need
-//   (settings.war.fuelPerStrength × total strength).
-// The result is written to war.equip each authoritative tick; the shared
-// engine only consumes it (see equipMul), so prediction stays deterministic.
-function sideArsenalPools(db, war, side) {
-  const ids = side === 'att'
-    ? [war.attackerId].concat((war.allies && war.allies.att) || [])
-    : [war.defenderId].concat((war.allies && war.allies.def) || []);
-  const pools = [];
-  for (const id of ids) {
-    const e = db.entities.find(x => x.id === id);
-    if (e && Array.isArray(e.inventory)) pools.push(e.inventory);
+// ---------- equipment & resupply (Phase 26: per-unit kit) ----------
+// An army fights with what each COLUMN actually carries, not with a national
+// average. Guns and fuel are ordinary tradable items with meta.weapon stats
+// (the GM mints new models from the item template and edits stats freely);
+// every unit holds its own inventory (u.inv — the same {itemId, qty} row
+// shape as entity inventories) and its combat multipliers (u.kit) are folded
+// from THAT before every authoritative tick:
+//   Small arms (kind != 'smallarms' is fuel): the unit's soldiers are armed
+//   best-gun-first from its own packs; each model contributes its stats ×
+//   the fraction of THIS unit it arms.
+//   Fuel: mobility scales with how full the unit's tank is (full tank =
+//   strength × settings.war.fuelPerStrength) × the best fuel grade carried.
+// Resupply is the physical link to the item economy: a unit inside its
+// side's supply corridor (u.supplied — the engine's stepSupply verdict from
+// last tick) tops up to one gun per soldier and refills its tank, DRAWN DOWN
+// from its own nation's stockpile — the entity inventory of u.nationId
+// (falling back to the side's principal belligerent); Republic units also
+// eat from military-property depots. Casualties destroy their weapons and
+// movement burns fuel, so a long war drains national arsenals tick by tick —
+// which is exactly what makes an arms factory (or an ally's shipments) war
+// infrastructure.
+// AUTHORITY-ONLY, like applyDevastation: stockpiles live outside db.war, so
+// a predicting client never runs this — it replays the u.kit multipliers
+// carried in war state (see war-engine.js unitMul).
+function weaponCatalog(db) {
+  const guns = [], fuels = [];
+  for (const it of db.items) {
+    if (!(it.meta && it.meta.weapon)) continue;
+    if ((it.meta.weapon.kind || 'smallarms') === 'fuel') fuels.push(it); else guns.push(it);
   }
-  // the defence also draws on its military depots
-  if (side === 'def') {
+  guns.sort((a, b) => (Number(b.meta.weapon.dmg) || 0) - (Number(a.meta.weapon.dmg) || 0));
+  fuels.sort((a, b) => (Number(b.meta.weapon.speed) || 0) - (Number(a.meta.weapon.speed) || 0));
+  return { guns, fuels };
+}
+function invGet(inv, itemId) { return inv.find(r => r.itemId === itemId); }
+function invAdd(inv, itemId, qty) {
+  if (!(qty > 0)) return;
+  const row = invGet(inv, itemId);
+  if (row) row.qty = (row.qty || 0) + qty; else inv.push({ itemId, qty });
+}
+// Take up to qty of itemId out of inv; returns how much actually came out.
+function invTake(inv, itemId, qty) {
+  const row = invGet(inv, itemId);
+  if (!row || !(row.qty > 0) || !(qty > 0)) return 0;
+  const take = Math.min(row.qty, qty);
+  row.qty -= take;
+  if (row.qty <= 0) inv.splice(inv.indexOf(row), 1);
+  return take;
+}
+function nationPools(db, war, nationId) {
+  const pools = [];
+  const e = db.entities.find(x => x.id === nationId);
+  if (e) { e.inventory = e.inventory || []; pools.push(e.inventory); }
+  // the defending nation also draws on its military depots
+  if (nationId === war.defenderId) {
     for (const p of db.properties) if (p.type === 'military' && Array.isArray(p.inventory)) pools.push(p.inventory);
   }
   return pools;
 }
-function computeEquip(db, war) {
+function drawFromPools(pools, itemId, qty) {
+  let got = 0;
+  for (const pool of pools) {
+    if (got >= qty) break;
+    got += invTake(pool, itemId, qty - got);
+  }
+  return got;
+}
+const r3 = (v) => Math.round(v * 1000) / 1000;
+function resupplyUnits(db, war) {
   const cfg = warCfg(db);
   const fuelPerStrength = Number(cfg.fuelPerStrength) || 0.01;
-  const weaponsById = {};
-  for (const it of db.items) if (it.meta && it.meta.weapon) weaponsById[it.id] = it;
+  const burnFrac = Number(cfg.fuelBurnFrac) || 0;
+  const { guns, fuels } = weaponCatalog(db);
+  const gunIds = new Set(guns.map(g => g.id));
+  const fuelIds = new Set(fuels.map(f => f.id));
+  const fuelSpeedOf = {};
+  for (const f of fuels) fuelSpeedOf[f.id] = Number(f.meta.weapon.speed) || 0;
+  const poolCache = {};
+  // strength-weighted side means, kept as war.equip for the War Room arsenal
+  // readout and as the engine's fallback for any kit-less legacy unit
+  const agg = { att: { dmg: 0, hp: 0, morale: 0, speed: 0 }, def: { dmg: 0, hp: 0, morale: 0, speed: 0 } };
+  const aggW = { att: 0, def: 0 };
+
+  for (const u of war.units) {
+    if (!isLive(u)) continue;
+    u.inv = Array.isArray(u.inv) ? u.inv : [];
+    const troops = Math.max(1, Math.ceil(u.strength || 0));
+    const tank = (u.strength || 0) * fuelPerStrength;
+
+    // 1. Attrition — the dead take their rifles with them: carry at most one
+    //    gun per remaining soldier, shedding the WORST models first.
+    let carried = 0;
+    for (const r of u.inv) if (gunIds.has(r.itemId)) carried += (r.qty || 0);
+    let excess = carried - troops;
+    for (let i = guns.length - 1; i >= 0 && excess > 0; i--) excess -= invTake(u.inv, guns[i].id, excess);
+
+    // 2. Fuel burn — moving or fighting eats into the tank (holding still or
+    //    riding the fleet doesn't).
+    if (burnFrac > 0 && u.state !== 'holding' && u.state !== 'embarked') {
+      let burn = tank * burnFrac;
+      for (const f of fuels) { if (burn <= 0) break; burn -= invTake(u.inv, f.id, burn); }
+    }
+
+    // 3. Resupply — only inside the supply corridor, only out of the unit's
+    //    own nation's stockpile. Embarked invaders load out at sea (supplied
+    //    by the fleet), so nobody hits the beach empty-handed. Draws are kept
+    //    integral so national inventories never go fractional.
+    if (u.supplied !== false) {
+      const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
+      const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
+      let carriedNow = 0;
+      for (const r of u.inv) if (gunIds.has(r.itemId)) carriedNow += (r.qty || 0);
+      let gunNeed = troops - carriedNow;
+      for (const g of guns) {
+        if (gunNeed <= 0) break;
+        const got = drawFromPools(pools, g.id, gunNeed);
+        if (got > 0) { invAdd(u.inv, g.id, got); gunNeed -= got; }
+      }
+      let fuelNow = 0;
+      for (const r of u.inv) if (fuelIds.has(r.itemId)) fuelNow += (r.qty || 0);
+      let fuelNeed = Math.floor(tank - fuelNow);
+      for (const f of fuels) {
+        if (fuelNeed <= 0) break;
+        const got = drawFromPools(pools, f.id, fuelNeed);
+        if (got > 0) { invAdd(u.inv, f.id, got); fuelNeed -= got; }
+      }
+    }
+
+    // 4. Fold the unit's own packs into its combat kit (consumed by the
+    //    engine's unitMul).
+    const kit = { dmg: 1, hp: 1, morale: 1, speed: 1 };
+    let unarmed = troops;
+    for (const g of guns) {
+      if (unarmed <= 0) break;
+      const row = invGet(u.inv, g.id);
+      if (!row || !(row.qty > 0)) continue;
+      const armed = Math.min(unarmed, row.qty);
+      const frac = armed / troops;
+      const wpn = g.meta.weapon;
+      kit.dmg += frac * (Number(wpn.dmg) || 0);
+      kit.hp += frac * (Number(wpn.hp) || 0);
+      kit.morale += frac * (Number(wpn.morale) || 0);
+      unarmed -= armed;
+    }
+    let fuelQty = 0, fuelBonus = 0;
+    for (const r of u.inv) {
+      if (!fuelIds.has(r.itemId)) continue;
+      fuelQty += (r.qty || 0);
+      fuelBonus = Math.max(fuelBonus, fuelSpeedOf[r.itemId] || 0);
+    }
+    if (fuelBonus > 0 && tank > 0) kit.speed += fuelBonus * Math.min(1, fuelQty / tank);
+    for (const k in kit) kit[k] = r3(kit[k]);
+    u.kit = kit;
+
+    const w = u.strength || 0;
+    for (const k in kit) agg[u.side][k] += kit[k] * w;
+    aggW[u.side] += w;
+  }
   const out = {};
   for (const side of ['att', 'def']) {
-    const troops = war.units.filter(u => u.side === side && isLive(u)).reduce((s, u) => s + (u.strength || 0), 0);
-    const stock = {};
-    for (const inv of sideArsenalPools(db, war, side)) {
-      for (const row of inv) if (weaponsById[row.itemId]) stock[row.itemId] = (stock[row.itemId] || 0) + (row.qty || 0);
-    }
-    const mul = { dmg: 1, hp: 1, morale: 1, speed: 1 };
-    if (troops > 0) {
-      const guns = Object.keys(stock)
-        .map(id => weaponsById[id])
-        .filter(it => ((it.meta.weapon.kind || 'smallarms') !== 'fuel'))
-        .sort((a, b) => (Number(b.meta.weapon.dmg) || 0) - (Number(a.meta.weapon.dmg) || 0));
-      let unarmed = troops;
-      for (const gun of guns) {
-        if (unarmed <= 0) break;
-        const armed = Math.min(unarmed, stock[gun.id]);
-        const frac = armed / troops;
-        const wpn = gun.meta.weapon;
-        mul.dmg += frac * (Number(wpn.dmg) || 0);
-        mul.hp += frac * (Number(wpn.hp) || 0);
-        mul.morale += frac * (Number(wpn.morale) || 0);
-        unarmed -= armed;
-      }
-      let fuel = 0, fuelBonus = 0;
-      for (const id in stock) {
-        const wpn = weaponsById[id].meta.weapon;
-        if ((wpn.kind || 'smallarms') !== 'fuel') continue;
-        fuel += stock[id];
-        fuelBonus = Math.max(fuelBonus, Number(wpn.speed) || 0);
-      }
-      const need = troops * fuelPerStrength;
-      if (fuelBonus > 0 && need > 0) mul.speed += fuelBonus * Math.min(1, fuel / need);
-    }
-    for (const k in mul) mul[k] = Math.round(mul[k] * 1000) / 1000;
-    out[side] = mul;
+    const a = agg[side], w = aggW[side];
+    out[side] = w > 0
+      ? { dmg: r3(a.dmg / w), hp: r3(a.hp / w), morale: r3(a.morale / w), speed: r3(a.speed / w) }
+      : { dmg: 1, hp: 1, morale: 1, speed: 1 };
   }
   war.equip = out;
 }
@@ -861,18 +964,22 @@ function ctxFor(db) {
     onAirstrike: (war, strike) => applyAirstrikeGroundEffects(db, war, strike)
   };
 }
+// resupplyUnits runs only when a real tick actually happened (its stockpile
+// draws/fuel burn MUTATE the world — the old pure computeEquip could safely
+// run on every heartbeat call, this can't): it consumes the tick's fresh
+// u.supplied verdicts and writes the u.kit the NEXT tick(s) fight with.
+// maybeWarTick can burn through several catch-up ticks per call — resupply
+// applies once per call, same accepted coarseness as applyDevastation.
 function warTick(db) {
   ensureWarGrid(db);
-  if (db.war && db.war.active) computeEquip(db, db.war);
   const ticked = engine.warTick(db, ctxFor(db));
-  if (ticked) applyDevastation(db);
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); }
   return ticked;
 }
 function maybeWarTick(db) {
   ensureWarGrid(db);
-  if (db.war && db.war.active && !db.war.paused) computeEquip(db, db.war);
   const ticked = engine.maybeWarTick(db, ctxFor(db));
-  if (ticked) applyDevastation(db);
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); }
   return ticked;
 }
 

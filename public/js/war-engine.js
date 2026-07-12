@@ -341,6 +341,21 @@
     const v = e && Number(e[stat]);
     return (Number.isFinite(v) && v > 0) ? v : 1;
   }
+  // Per-unit kit (Phase 26): every unit carries its OWN inventory (u.inv —
+  // guns and fuel rows), and the authority folds THAT into u.kit before each
+  // real tick (server/war.js resupplyUnits). A unit fights with what's in its
+  // packs, not with the national average: a fresh column with rifles for
+  // every soldier outfights a cut-off pocket that ran dry ticks ago. The
+  // engine only consumes the stored multipliers, so a predicting client
+  // (which cannot see stockpiles) replays combat identically from the kit
+  // carried in war state. Units predating kits (legacy doc) fall back to the
+  // side-wide war.equip multiplier, then 1×.
+  function unitMul(war, u, stat) {
+    const k = u && u.kit;
+    const v = k && Number(k[stat]);
+    if (Number.isFinite(v) && v > 0) return v;
+    return equipMul(war, u ? u.side : 'att', stat);
+  }
   // A land-cell centre inside a province, biased toward STILL-UNCAPTURED
   // cells (a handful of seeded draws) — see the pre-split commentary in
   // docs/WAR.md. All draws come from the tick's rng for determinism.
@@ -499,9 +514,10 @@
     const dx = dest[0] - u.pos[0], dy = dest[1] - u.pos[1];
     const d = Math.hypot(dx, dy);
     if (d < 1e-6) return;
-    // Fuel stock scales mobility (Phase 23) — one choke point covers every
-    // movement mode: paths, straight lines, chases, retreats, sailing.
-    const step = Math.min(speed * equipMul(war, u.side, 'speed'), d);
+    // Fuel carried by THIS unit scales its mobility (Phase 26) — one choke
+    // point covers every movement mode: paths, straight lines, chases,
+    // retreats, sailing.
+    const step = Math.min(speed * unitMul(war, u, 'speed'), d);
     let next = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
     // Closed neutral borders (Phase 22): a step that would land on a
     // non-belligerent nation's soil is refused. Greedy wall-follow instead:
@@ -806,16 +822,17 @@
       a.state = 'fighting'; if (d.state !== 'routed') d.state = 'fighting';
       const defStationary = d.garrison && !d.dest;
       const defBonus = defStationary ? 1.35 : 1;
-      // Equipment (Phase 23): your guns raise the damage you deal; the
-      // victim's guns/kit absorb some of what lands (hp); better small arms
-      // also slow morale drain (a unit that can shoot back holds longer).
-      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * equipMul(war, 'att', 'dmg') / equipMul(war, 'def', 'hp');
-      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * equipMul(war, 'def', 'dmg') / equipMul(war, 'att', 'hp');
+      // Equipment (Phase 26, per-unit): the guns THIS unit carries raise the
+      // damage it deals; the victim's own kit absorbs some of what lands
+      // (hp); better small arms also slow morale drain (a unit that can
+      // shoot back holds longer).
+      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp');
+      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp');
       d.strength = Math.max(0, round1(d.strength - dmgToDef));
       a.strength = Math.max(0, round1(a.strength - dmgToAtt));
       war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
-      a.org = clamp(a.org - ORG_DRAIN / equipMul(war, 'att', 'morale'), 0, 100);
-      d.org = clamp(d.org - ORG_DRAIN * 0.7 / equipMul(war, 'def', 'morale'), 0, 100);
+      a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
+      d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a
       // garrison's morale can still fully collapse, just at a much lower
@@ -970,12 +987,25 @@
   function stepSupply(db, war) {
     const cs = war.grid.cell;
 
-    // Attacker: seed with every att-held cell within 2 cells (Chebyshev) of
-    // the anchor cell, flood-fill outward staying on att-held cells.
+    // Attacker: seed with the anchor cell itself plus every att-held cell
+    // within 2 cells (Chebyshev) of it, flood-fill outward staying on
+    // attacker-held ground. "Held" for SUPPLY purposes (Phase 26 fix) means
+    // captured Republic cells AND the attacker's own homeland
+    // (grid.enemyCells) wherever the defence hasn't planted its flag — a
+    // land-border invasion anchors its supply in the homeland itself, which
+    // lives in neither war.cells nor the old predicate, so the fill started
+    // EMPTY and every attacker read permanently CUT OFF. Seeding the anchor
+    // unconditionally also covers the first ticks of a naval landing before
+    // any beach cell is formally captured.
     let attSupply = null;
     const anchorCell = attackerSupplyAnchorCell(war);
     if (anchorCell) {
-      const seeds = [];
+      const attHeld = (k) => {
+        const c = war.cells[k];
+        if (c) return c.o === 'att';
+        return !!(war.grid.enemyCells && war.grid.enemyCells[k]);
+      };
+      const seeds = [cellKey(anchorCell[0], anchorCell[1])];
       for (const key in war.cells) {
         const c = war.cells[key];
         if (c.o !== 'att') continue;
@@ -983,7 +1013,7 @@
         const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
         if (Math.max(Math.abs(cx - anchorCell[0]), Math.abs(cy - anchorCell[1])) <= 2) seeds.push(key);
       }
-      attSupply = floodFillCells(seeds, (k) => { const c = war.cells[k]; return !!c && c.o === 'att'; });
+      attSupply = floodFillCells(seeds, attHeld);
     }
 
     // Defender: every LAND cell (built fresh each call — a few thousand
@@ -998,7 +1028,11 @@
       for (const pid in war.grid.provinceCells) {
         for (const cell of war.grid.provinceCells[pid]) landCells.add(cellKey(cell[0], cell[1]));
       }
-      const defHeld = (k) => landCells.has(k) && (!war.cells[k] || war.cells[k].o !== 'att');
+      // Symmetric to attHeld above (Phase 26): enemy-homeland cells the
+      // defence has captured (o:'def') carry defender supply too, so an
+      // invading defender column stays supplied through the ground it took.
+      const defHeld = (k) => (landCells.has(k) && (!war.cells[k] || war.cells[k].o !== 'att')) ||
+        (!!war.cells[k] && war.cells[k].o === 'def');
       const capCell = cellKey(Math.floor(capital.pos[0] / cs), Math.floor(capital.pos[1] / cs));
       defSupply = floodFillCells([capCell], defHeld);
     }
@@ -1236,7 +1270,7 @@
     parseShape, polygonOf, pointInPolygon, provinceAt, countryAt,
     // grid / pathing / world bounds
     buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
-    countryIdForEntity, refreshWarZones, neutralAt, equipMul,
+    countryIdForEntity, refreshWarZones, neutralAt, equipMul, unitMul,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick

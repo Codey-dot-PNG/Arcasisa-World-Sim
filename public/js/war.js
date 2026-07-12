@@ -1600,6 +1600,18 @@ const War = {
         { class: orgPct < WAR_ROUT_ORG ? 'danger' : '', style: `width:${orgPct}%;` })));
       card.appendChild(el('div.war-card-row', `State: ${u.state}${u.garrison ? ' · garrison' : ''}`));
       card.appendChild(el('div.war-card-row', `Speed: ${u.speed} · Atk: ${u.atk}`));
+      // Per-unit kit (Phase 26): what THIS unit carries and what it's worth
+      // in the field — u.inv/u.kit are written by the server's resupply pass.
+      if (u.kit) {
+        card.appendChild(el('div.war-card-row',
+          `Kit: dmg ${u.kit.dmg}× · armour ${u.kit.hp}× · morale ${u.kit.morale}× · speed ${u.kit.speed}×`));
+        const rows = (u.inv || []).filter(r => r.qty >= 0.5).map(r => {
+          const it = itemById(r.itemId);
+          return `${fmtNum(Math.round(r.qty))}× ${it ? it.name : r.itemId}`;
+        });
+        card.appendChild(el('div.war-card-row',
+          rows.length ? 'Carrying: ' + rows.join(' · ') : 'Carrying: nothing — awaiting resupply'));
+      }
       card.appendChild(el('div.war-card-row',
         u.supplied === false ? el('span.war-card-cutoff', '⚠ CUT OFF') : 'In supply'));
     }
@@ -1639,8 +1651,9 @@ const War = {
       ['Speed', war.speed + '×']
     ]));
 
-    // Equipment quality (Phase 23) — what each army's arsenal is worth in the
-    // field. Multipliers come from war.equip (guns/fuel stocks, server-computed).
+    // Equipment quality (Phase 26) — the strength-weighted average of every
+    // unit's own kit (war.equip, server-computed): a fleet-wide readout of
+    // what each army's packs are worth. Per-unit detail lives on the unit card.
     if (war.equip && (war.equip.att || war.equip.def)) {
       const fmtEq = (e) => e ? `dmg ${e.dmg}× · armour ${e.hp}× · morale ${e.morale}× · speed ${e.speed}×` : '—';
       inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); margin:4px 0 8px; letter-spacing:.04em;' },

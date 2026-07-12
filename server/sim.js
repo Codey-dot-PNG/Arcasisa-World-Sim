@@ -576,7 +576,16 @@ function updateDerived() {
   const n = db.provinces.length || 1;
   g.avgHappiness = Math.round(db.provinces.reduce((s, p) => s + (p.vars.happiness || 0), 0) / n * 10) / 10;
   g.avgApproval = Math.round(db.provinces.reduce((s, p) => s + (p.vars.approval || 0), 0) / n * 10) / 10;
-  g.moneySupply = Math.round(db.accounts.reduce((s, a) => s + a.balance, 0));
+  // Domestic money supply only — a handful of accounts belong to foreign
+  // powers/trade blocs (e.g. acct_markasia) and must not inflate the national
+  // aggregate charts. Foreign per-turn military production (runForeignMilitary)
+  // is off-books materiel with no cash leg, so this is a static/defensive
+  // exclusion rather than a fix for an active leak.
+  g.moneySupply = Math.round(db.accounts.reduce((s, a) => {
+    const owner = db.entities.find(e => e.id === a.ownerId);
+    if (owner && (owner.type === 'foreign' || owner.type === 'org')) return s;
+    return s + a.balance;
+  }, 0));
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || db.accounts.find(a => { const e = db.entities.find(x => x.id === a.ownerId); return e && e.type === 'government'; });
   g.treasury = treasury ? Math.round(treasury.balance) : 0;
   // Economic confidence is written live by the Day Market; keep the derived
@@ -787,6 +796,29 @@ function runEconomy(db, actor) {
     netTotal += netAbstract;
   }
 
+  // War overhaul — companies with ZERO properties (lost to war, sold off,
+  // whatever) must not keep coasting on a stale pre-war vars.revenue/profit:
+  // only owners that appeared in perOwner above (i.e. own ≥1 property) were
+  // just settled. Everyone else earns nothing this turn, still pays a small
+  // corporate-overhead drag (Phase 27 migration sets vars.overheadPerTurn from
+  // the company's pre-rebalance expense footprint) and its paper valuation
+  // decays toward the zero property-backed value it can actually justify.
+  for (const co of db.entities) {
+    if (co.type !== 'company' || perOwner[co.id]) continue;
+    co.vars = co.vars || {};
+    co.vars.revenue = 0;
+    const overhead = co.vars.overheadPerTurn || 0;
+    if (overhead > 0) {
+      const acct = primaryAccount(co.id, true);
+      const draw = Math.min(overhead, Math.max(0, acct.balance));
+      if (draw > 0) ledgerTxn(acct.id, null, draw, 'Corporate overhead (no producing assets)', actor, 'withdraw');
+      co.vars.profit = Math.round(-overhead * 365 * 100) / 100;
+    } else {
+      co.vars.profit = 0;
+    }
+    co.vars.valuation = Math.max(0, Math.round((co.vars.valuation || 0) * 0.995 * 100) / 100);
+  }
+
   // GDP: province output × calibration scale (global gdp summed by updateDerived)
   for (const p of db.provinces) {
     p.vars.gdp = Math.round((provGross[p.id] || 0) * scale * 100) / 100;
@@ -813,6 +845,11 @@ function runEconomy(db, actor) {
     if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval + cShift * 0.6) * 100) / 100, 0, 100);
   }
 
+  // War overhaul — a live war depresses civilian mood: occupied provinces take
+  // a per-turn hit scaled by how much of them is under enemy control, plus a
+  // smaller nationwide malus everywhere while any war is active at all.
+  applyWarHappinessImpact(db);
+
   // advance the Day Market one step per turn too, so speculation keeps moving in
   // deployments without the long-lived 5s ticker (e.g. serverless).
   try { require('./market').dayMarketTick(db); } catch (e) { /* market optional at early boot */ }
@@ -828,6 +865,108 @@ function runEconomy(db, actor) {
   if (settledOwners) {
     store.log('economy', `Daily economy settled`,
       `${settledOwners} operators · net ${db.settings.currency}${fmtNum(netTotal)}${taxTotal ? ' · tax ' + db.settings.currency + fmtNum(taxTotal) : ''}`, actor || 'ENGINE', []);
+  }
+}
+
+// War overhaul — civilian mood under fire. `war.stats.provinceControl` maps
+// provinceId -> attacker occupation % (0-100); any province with a nonzero
+// figure takes a happiness/approval hit that scales with how occupied it is,
+// on top of a small national malus that applies everywhere the moment a war
+// goes active (people worry about a war on the far side of the country too).
+// Generic: reads only db.war/db.provinces, no scenario-specific knowledge.
+function applyWarHappinessImpact(db) {
+  const war = db.war;
+  if (!war || !war.active) return;
+  const ctl = (war.stats && war.stats.provinceControl) || {};
+  const NATIONWIDE = 0.05; // happiness/turn everywhere, any active war
+  for (const p of db.provinces) {
+    const occ = clamp01(Number(ctl[p.id]) || 0, 0, 100);
+    const occHit = (occ / 100) * 0.6; // up to ~0.6 happiness/turn at full occupation
+    const hit = occHit + NATIONWIDE;
+    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness - hit) * 100) / 100, 0, 100);
+    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval - hit * 0.6) * 100) / 100, 0, 100);
+  }
+}
+
+// ---------- foreign military production (Phase 27) -------------------------
+// Every foreign power with an authored entity.meta.military profile slowly
+// accrues off-books materiel into its OWN inventory each turn — no money
+// changes hands, this is not trade, just the world quietly re-arming itself
+// in the background. Entirely data-driven (profile + item.meta.originId), so
+// the engine carries no per-nation special cases; the roster lives in the
+// seed/migration data (server/store.js), per docs/CONVENTIONS.md.
+const MIL_SIZE_MULT = { tiny: 0.4, small: 0.7, medium: 1, big: 1.8 };
+const MIL_STRENGTH_MULT = { none: 0, weak: 0.5, medium: 1, strong: 1.8 };
+const MIL_FUEL_BASE = 1.5;   // barrels/turn at size=medium, strength=1
+const MIL_GUN_BASE = 10;     // rifles/turn at size=medium, army=1
+const MIL_TANK_BASE = 0.03;  // tanks/turn at size=medium, army=1 (strong/quality only)
+const MIL_SHIP_BASE = 0.015; // hulls/turn at size=medium, navy=1 (strong only)
+function runForeignMilitary(db, actor) {
+  const items = db.items || [];
+  const findByOrigin = (kind, originId) => items.find(i => i.meta && i.meta.weapon && i.meta.weapon.kind === kind && i.meta.originId === originId);
+  const findAnyHeld = (holder, kind) => {
+    const inv = holder.inventory || [];
+    for (const row of inv) {
+      if (!(row.qty > 0)) continue;
+      const it = items.find(i => i.id === row.itemId);
+      if (it && it.meta && it.meta.weapon && it.meta.weapon.kind === kind) return it;
+    }
+    return null;
+  };
+  for (const e of db.entities) {
+    if (e.type !== 'foreign') continue; // Arcasia's own arms come from properties (ARC Arms Works, Kradon Shipyards)
+    const mil = e.meta && e.meta.military;
+    if (!mil) continue;
+    const sizeMult = MIL_SIZE_MULT[mil.size] !== undefined ? MIL_SIZE_MULT[mil.size] : 1;
+    const armyMult = MIL_STRENGTH_MULT[mil.army] !== undefined ? MIL_STRENGTH_MULT[mil.army] : 0;
+    const navyMult = MIL_STRENGTH_MULT[mil.navy] !== undefined ? MIL_STRENGTH_MULT[mil.navy] : 0;
+    if (!armyMult && !navyMult) continue; // 'none'/'none' fields no armed forces at all
+    e.vars = e.vars || {};
+    const acc = e.vars.milAccum = e.vars.milAccum || { fuel: 0, guns: 0, tanks: 0, ships: 0 };
+
+    // fuel — every armed power keeps a reserve moving
+    acc.fuel += MIL_FUEL_BASE * sizeMult * ((armyMult + navyMult) / 2);
+    if (acc.fuel >= 1) { const q = Math.floor(acc.fuel); acc.fuel -= q; addInventory(e, 'item_fuel', q); }
+
+    // small arms — a nation with importsFrom buys the exporter's national
+    // pattern instead of fielding its own; otherwise it re-arms with whatever
+    // model it already owns (complements existing stock, never a second type).
+    if (armyMult > 0) {
+      let gunItem = findByOrigin('smallarms', e.id);
+      if (!gunItem && Array.isArray(mil.importsFrom)) {
+        for (const srcId of mil.importsFrom) { gunItem = findByOrigin('smallarms', srcId); if (gunItem) break; }
+      }
+      if (!gunItem) gunItem = findAnyHeld(e, 'smallarms');
+      if (gunItem) {
+        acc.guns += MIL_GUN_BASE * sizeMult * armyMult;
+        if (acc.guns >= 1) { const q = Math.floor(acc.guns); acc.guns -= q; addInventory(e, gunItem.id, q); }
+      }
+    }
+
+    // tanks — strong armies (or quality-focused, medium-and-up) fielding an
+    // owned or imported tank pattern
+    const wantsTanks = mil.army === 'strong' || (mil.focus === 'quality' && armyMult >= MIL_STRENGTH_MULT.medium);
+    if (wantsTanks) {
+      let tankItem = findByOrigin('tank', e.id);
+      if (!tankItem && Array.isArray(mil.importsFrom)) {
+        for (const srcId of mil.importsFrom) { tankItem = findByOrigin('tank', srcId); if (tankItem) break; }
+      }
+      if (!tankItem) tankItem = findAnyHeld(e, 'tank');
+      if (tankItem) {
+        acc.tanks += MIL_TANK_BASE * sizeMult * armyMult;
+        if (acc.tanks >= 1) { const q = Math.floor(acc.tanks); acc.tanks -= q; addInventory(e, tankItem.id, q); }
+      }
+    }
+
+    // warships — strong navies only, fielding an owned pattern (no import path
+    // is authored for hulls the way there is for rifles)
+    if (mil.navy === 'strong') {
+      let shipItem = findByOrigin('warship', e.id) || findAnyHeld(e, 'warship');
+      if (shipItem) {
+        acc.ships += MIL_SHIP_BASE * sizeMult * navyMult;
+        if (acc.ships >= 1) { const q = Math.floor(acc.ships); acc.ships -= q; addInventory(e, shipItem.id, q); }
+      }
+    }
   }
 }
 
@@ -995,6 +1134,10 @@ function executeTrade(side, orderId, holderId, qty, actor) {
     const net = Math.round((value - tariff) * 100) / 100;
     ledgerTxn(null, acct.id, net, `Export of ${item.name} to ${partnerName}${tariff ? ` (net of ${tariffRate}% duty)` : ''}`, actor, 'deposit');
     if (treasury && tariff > 0) ledgerTxn(null, treasury.id, tariff, `Export duty (${tariffRate}%) — ${holder.name} → ${partnerName}`, 'TREASURY', 'deposit');
+    // the buying partner actually receives the goods — mirrors the import
+    // side below, which already lands purchases in the holder's inventory
+    const partner = db.entities.find(en => en.id === order.partnerId);
+    if (partner) addInventory(partner, order.itemId, qty);
     db.globalVars.lastExportIncome = Math.round(((db.globalVars.lastExportIncome || 0) + value) * 100) / 100;
     trade.lastFlows = trade.lastFlows || [];
     trade.lastFlows.push({ itemId: order.itemId, partnerId: order.partnerId, qty, value, tariff });
@@ -1242,6 +1385,9 @@ function advanceTurn(steps, actor) {
     // recompute province GDP, reprice shares; then the government exports its
     // stockpile abroad.
     try { runEconomy(db, actor || 'ENGINE'); } catch (e) { console.error('runEconomy failed:', e.message); }
+    // Foreign powers quietly re-arm off-books, in proportion to their authored
+    // military profile (Phase 27) — no money involved, just materiel.
+    try { runForeignMilitary(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignMilitary failed:', e.message); }
     // Bank solvency check → economy-wide crash while its reserve is underwater.
     try { runBankCrisis(db, actor || 'ENGINE'); } catch (e) { console.error('runBankCrisis failed:', e.message); }
 

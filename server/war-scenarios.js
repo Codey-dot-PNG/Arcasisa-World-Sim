@@ -35,7 +35,17 @@ const UNIT_DEFAULTS = {
   marine:   { strength: 1300, speed: 5.2, atk: 1.0 },
   infantry: { strength: 2100, speed: 3.2, atk: 1.0 },
   armored:  { strength: 2800, speed: 4.6, atk: 1.25 },
-  reserve:  { strength: 2400, speed: 3.2, atk: 1.0 }
+  reserve:  { strength: 2400, speed: 3.2, atk: 1.0 },
+  // Transport ships & Boats / Warships feature — naval-only kinds (see
+  // war-engine.js's NAVAL_KINDS). `boat` is light, fast and only able to
+  // fight while afloat (a beached boat can't deal damage — canFight in the
+  // engine). `warship` is the naval-only, RANGED (WARSHIP_RANGE, 180px)
+  // heavy hitter that hunts transports/boats — its stats are normally
+  // overridden per-spawn from the warship item's meta.weapon (see
+  // server/war.js's startWar deployment), these are just the UNIT_DEFAULTS
+  // fallback for a GM manual spawn or a legacy/undersupplied item.
+  boat:     { strength: 900,  speed: 6.5, atk: 0.8 },
+  warship:  { strength: 3600, speed: 3.0, atk: 1.6 }
 };
 
 const valksland_invasion = {
@@ -130,6 +140,17 @@ const qinal_invasion = {
   name: 'The Kradon Landings',
   attackerId: 'for_qinal',
   defenderId: 'ent_gov',
+  // Qinal has no map homeland polygon (a distant power — see the comment
+  // above), so war.js's dynamic staging (Task 5) can't derive a bearing from
+  // a country shape; `bearingHint` is the generic escape hatch for exactly
+  // this case — any off-map scenario can supply a compass side ('east',
+  // 'west', 'north', 'south') and war.js walks outward from the defender's
+  // landmass centroid along that bearing to find open sea, same as it would
+  // from a real homeland centroid. Qinal approaches from the EAST (the
+  // Antacean ocean side); the old static `staging` box below is now only a
+  // last-resort fallback if the dynamic walk fails for any reason (e.g. a
+  // future map edit boxes the coast in).
+  bearingHint: 'east',
   staging: { x0: 850, y0: 330, x1: 1050, y1: 520 },
   objectives: [
     { kind: 'landing', ref: 'city_kradon', priority: 1 },

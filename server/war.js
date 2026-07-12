@@ -140,6 +140,55 @@ function applyDevastation(db) {
   }
 }
 
+// ---------- occupation ownership (Task 2: occupation transfers property) ----------
+// AUTHORITY-ONLY, like applyDevastation — property ownership lives outside
+// db.war, so a predicting client never runs this. Throttled (every
+// OCCUPATION_CHECK_TICKS ticks) since it walks every property in the world;
+// combined with the deed choke point (deeds.transfer) this is what makes an
+// occupied factory/farm/depot change hands mid-war and stay changed after the
+// war ends — the "companies losing these properties" devastation another
+// agent tied profits to.
+const OCCUPATION_CHECK_TICKS = 5;
+function applyOccupationTransfers(db) {
+  const war = db.war;
+  if (!war || !war.active || !war.grid) return;
+  if (war.tick % OCCUPATION_CHECK_TICKS !== 0) return;
+  const deedsMod = require('./deeds');
+  const cs = war.grid.cell;
+  let seized = 0, restored = 0;
+  for (const prop of db.properties) {
+    if (!prop.pos) continue;
+    const key = engine.cellKey(Math.floor(prop.pos[0] / cs), Math.floor(prop.pos[1] / cs));
+    const cell = war.cells[key];
+    const attHeld = !!(cell && cell.o === 'att');
+    prop.vars = prop.vars || {};
+    const wasStashed = Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId');
+    if (attHeld) {
+      if (prop.ownerId !== war.attackerId) {
+        if (!wasStashed) prop.vars._preWarOwnerId = prop.ownerId;
+        try { deedsMod.transfer(prop.id, prop.ownerId, war.attackerId, 'WAR ENGINE'); seized++; }
+        catch (e) { /* unowned/malformed deed — skip, keep the stash for a later retry */ }
+      }
+    } else if (wasStashed) {
+      // Recaptured — no longer attacker-held. Restore to the pre-occupation
+      // owner and clear the stash so a later re-occupation stashes fresh.
+      const orig = prop.vars._preWarOwnerId;
+      if (orig && prop.ownerId !== orig) {
+        try { deedsMod.transfer(prop.id, prop.ownerId, orig, 'WAR ENGINE'); restored++; delete prop.vars._preWarOwnerId; }
+        catch (e) { /* leave the stash in place — try again next sweep */ }
+      } else {
+        delete prop.vars._preWarOwnerId;
+      }
+    }
+  }
+  if (seized || restored) {
+    store.log('event', 'Occupation changes property ownership',
+      `${seized} propert${seized === 1 ? 'y' : 'ies'} seized by the occupying force` +
+      (restored ? `, ${restored} restored to their former owner${restored === 1 ? '' : 's'}` : '') + '.',
+      'WAR ENGINE', []);
+  }
+}
+
 // ---------- equipment & resupply (Phase 26: per-unit kit) ----------
 // An army fights with what each COLUMN actually carries, not with a national
 // average. Guns and fuel are ordinary tradable items with meta.weapon stats
@@ -328,6 +377,15 @@ function ensureWarGrid(db) {
     war.grid.countryLandCells = fresh.countryLandCells;
     war._zonesKey = null; // force refreshWarZones to derive enemy/neutral sets next tick
   }
+  // Transport ships & Boats / Warships feature — a war started before this
+  // change lacks the merged land lookup buildGrid now computes; upgrade in
+  // place so isWaterAt (transport-state transitions, naval land-refusal)
+  // works on an in-progress war too, same additive spirit as countryCells
+  // above.
+  if (!war.grid.landCells) {
+    const fresh = engine.buildGrid(db);
+    war.grid.landCells = fresh.landCells;
+  }
 }
 
 // Interactive-layer tunables that stay server-side (bombs mutate the world
@@ -384,6 +442,308 @@ function resolveObjectiveRef(db, obj) {
   return obj.ref;
 }
 
+// ---------- population-scaled defender roster (Task: population scaling) ----------
+// Baseline calibration: the 1962 seed world (data/baseline-world.json) has a
+// total province population of 39,060,001 and the OLD one-garrison-per-city-
+// or-military-property rule produces exactly 12 garrisons (9 cities + 3
+// military properties) — so POP_PER_GARRISON is hardcoded to that ratio,
+// which is exactly what makes "today's seed population" reproduce today's
+// exact roster (the calibration this feature was asked to preserve). A world
+// that has grown or shrunk since seed (turns, treaties, annexations) scales
+// the roster up or down from there.
+const POP_PER_GARRISON = 3255000;
+function totalPopulation(db) {
+  let pop = 0;
+  for (const p of (db.provinces || [])) pop += Number((p.vars || {}).population) || 0;
+  return pop;
+}
+// Distributes `count` garrisons across weighted `sites` (largest-remainder
+// method — deterministic, and the totals always sum to exactly `count`
+// rather than drifting from independent rounding per site).
+function distributeByWeight(count, sites) {
+  const totalWeight = sites.reduce((s, x) => s + x.weight, 0) || 1;
+  const raw = sites.map(s => count * s.weight / totalWeight);
+  const base = raw.map(Math.floor);
+  let assigned = base.reduce((a, b) => a + b, 0);
+  let remainder = count - assigned;
+  const order = raw.map((r, i) => ({ i, frac: r - base[i] })).sort((a, b) => b.frac - a.frac);
+  for (let k = 0; k < remainder && order.length; k++) base[order[k % order.length].i]++;
+  return base;
+}
+// Builds the defender garrison roster: one weighted site per city (weight =
+// city size) and one per type:'military' property (weight matched to a
+// size-2 city, since militaryPropertyStrength already sits between the
+// size-1/size-2 defaults) — same site set the old flat "one per site" rule
+// used, just with COUNT now scaled by national population instead of fixed
+// at 1. Per-unit strength is UNCHANGED (still sizeStrength[size] /
+// militaryPropertyStrength exactly as before); population growth adds MORE
+// garrisons of the same strength at busier sites, not stronger ones.
+function buildGarrisonUnits(db, scenarioDefense) {
+  const def = scenarioDefense || {};
+  const sizeStrength = def.citySizeStrength || { 1: 1300, 2: 2200, 3: 3800 };
+  const militaryStrength = def.militaryPropertyStrength || 2600;
+  const sites = [];
+  for (const c of db.cities) {
+    if (!c.pos) continue;
+    sites.push({ kind: 'city', name: c.name, pos: c.pos, weight: Math.max(1, c.size || 1), strength: sizeStrength[c.size] || sizeStrength[1] || 1300 });
+  }
+  for (const p of db.properties) {
+    if (p.type !== 'military' || !p.pos) continue;
+    sites.push({ kind: 'military', name: p.name, pos: p.pos, weight: 2, strength: militaryStrength });
+  }
+  if (!sites.length) return [];
+  const pop = totalPopulation(db);
+  // Never below the site count (a defenceless world would be game-breaking);
+  // never above a sane multiple of the historical baseline either, so a
+  // wildly inflated population doesn't spawn thousands of garrison units.
+  const target = engine.clamp(Math.round(pop / POP_PER_GARRISON) || sites.length, sites.length, sites.length * 8);
+  const counts = distributeByWeight(target, sites);
+  const units = [];
+  for (let i = 0; i < sites.length; i++) {
+    const site = sites[i];
+    const n = counts[i];
+    for (let k = 0; k < n; k++) {
+      units.push({
+        id: store.uid('warunit'), side: 'def',
+        name: n > 1 ? `${site.name} Garrison ${toRoman(k + 1)}` : `${site.name} Garrison`,
+        kind: 'garrison', pos: [site.pos[0], site.pos[1]], dest: null,
+        strength: site.strength, maxStrength: site.strength, org: 100,
+        speed: 0, atk: 1, state: 'holding', objectiveId: null, garrison: true
+      });
+    }
+  }
+  return units;
+}
+
+// ---------- tank & warship deployment at war start (Task: armour/navy) ----------
+// The defender's national arsenal (the defending entity's own inventory —
+// conventionally ent_gov, the Republic's stockpile) is walked for weapon
+// items carrying meta.weapon.kind === 'tank' / 'warship', mirroring the
+// gun/fuel arsenal-walk shape resupplyUnits already uses (weaponCatalog/
+// nationPools above), and turned into fresh defender units at war start.
+// Entirely defensive: a world with no such items seeded yet (this feature
+// ships ahead of the parallel item-seeding work) simply deploys nothing here
+// — the existing per-city/military-property garrisons still stand.
+function arsenalWeaponsOf(db, entity, kind) {
+  const inv = (entity && Array.isArray(entity.inventory)) ? entity.inventory : [];
+  const out = [];
+  for (const row of inv) {
+    if (!(row && row.qty > 0)) continue;
+    const item = (db.items || []).find(it => it.id === row.itemId);
+    if (!item || !(item.meta && item.meta.weapon) || item.meta.weapon.kind !== kind) continue;
+    out.push({ item, qty: row.qty });
+  }
+  return out;
+}
+// Combat stats for a tank unit grouped from `count` tanks of one model.
+// Normalises around the existing UNIT_DEFAULTS.armored (a "full", 25-tank
+// unit) so a unit of the best tank model reads markedly stronger than one of
+// the worst, purely from the model's own meta.weapon numbers — no hardcoded
+// per-model table, so any new tank item the GM mints slots in automatically.
+function tankUnitStats(wpn, count) {
+  const dmg = Number(wpn.dmg) || 3;
+  const hp = Number(wpn.hp) || 150;
+  const armor = Number(wpn.armor) || 100;
+  const speed = Number(wpn.speed) || 3;
+  const frac = Math.max(0.06, Math.min(1, count / 25));
+  const qualityHp = Math.max(0.25, (hp + armor * 1.5) / 300); // ~1 for a "typical" mid-war tank
+  const qualityAtk = Math.max(0.25, dmg / 90); // ~1 for a ~90mm-class gun
+  return {
+    strength: Math.max(200, Math.round(2800 * frac * qualityHp)),
+    atk: Math.max(0.3, Math.min(4, round1(1.25 * qualityAtk))),
+    speed: Math.max(1, Math.min(8, speed || 3))
+  };
+}
+// Combat stats for a single warship, from its item's meta.weapon.
+function warshipUnitStats(wpn) {
+  const dmg = Number(wpn.dmg) || 4;
+  const hp = Number(wpn.hp) || 400;
+  const speed = Number(wpn.speed) || 3;
+  return {
+    strength: Math.max(500, Math.round(hp * 9)),
+    atk: Math.max(0.5, Math.min(5, round1(dmg / 50))),
+    speed: Math.max(1, Math.min(6, speed || 3))
+  };
+}
+// toRoman is defined once, further down (foreign-intervention naming) — JS
+// hoists function declarations within a scope regardless of source order, so
+// it's available here too.
+// The nearest coastline point to `from`: a LAND cell adjacent to at least one
+// WATER cell, searched outward from `from`'s own cell. Used when there's no
+// seeded port property to anchor a warship spawn on.
+function nearestCoastlinePoint(grid, from) {
+  if (!grid || !grid.landCells) return null;
+  const cs = grid.cell;
+  const fx = Math.floor(from[0] / cs), fy = Math.floor(from[1] / cs);
+  const R = 70;
+  let best = null, bd = Infinity;
+  for (let dx = -R; dx <= R; dx++) {
+    for (let dy = -R; dy <= R; dy++) {
+      const cx = fx + dx, cy = fy + dy;
+      if (cx < 0 || cy < 0 || cx >= grid.cols || cy >= grid.rows) continue;
+      if (!grid.landCells[engine.cellKey(cx, cy)]) continue;
+      let coastal = false;
+      for (const off of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (!grid.landCells[engine.cellKey(cx + off[0], cy + off[1])]) { coastal = true; break; }
+      }
+      if (!coastal) continue;
+      const p = [(cx + 0.5) * cs, (cy + 0.5) * cs];
+      const d = dist(p, from);
+      if (d < bd) { bd = d; best = p; }
+    }
+  }
+  return best;
+}
+function findPortPos(db, grid, capitalPos) {
+  const port = (db.properties || []).find(p => p.pos && (p.kind === 'port' || /\bport\b|harbou?r/i.test(p.name || '')));
+  if (port) return port.pos.slice();
+  return nearestCoastlinePoint(grid, capitalPos) || capitalPos;
+}
+// Groups the defender's tank/warship arsenal into fresh war units at the
+// capital (armour) and the nearest port (navy). Called once, at startWar,
+// AFTER db.war exists (so engine.setDest/clampToWorld etc. can see the grid)
+// — units are pushed straight onto war.units.
+function deployArsenalUnits(db, war, defender) {
+  const capital = db.cities.find(c => c.id === 'city_lachevan') || db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
+  const capitalPos = capital ? capital.pos : [war.grid.cols * war.grid.cell / 2, war.grid.rows * war.grid.cell / 2];
+  const portPos = findPortPos(db, war.grid, capitalPos);
+
+  const tanks = arsenalWeaponsOf(db, defender, 'tank');
+  let armouredIdx = 0;
+  for (const { item, qty } of tanks) {
+    const numUnits = Math.ceil(qty / 25);
+    for (let i = 0; i < numUnits; i++) {
+      const count = Math.min(25, qty - i * 25);
+      if (count <= 0) continue;
+      armouredIdx++;
+      const stats = tankUnitStats(item.meta.weapon, count);
+      const spawnPos = engine.clampToWorld(war, [capitalPos[0] + rand(-40, 40), capitalPos[1] + rand(-40, 40)]);
+      war.units.push({
+        id: store.uid('warunit'), side: 'def',
+        name: `${toRoman(armouredIdx)} Armored — ${item.name}${numUnits > 1 ? ` (${i + 1}/${numUnits})` : ''}`,
+        kind: 'armored', pos: spawnPos, dest: null,
+        strength: stats.strength, maxStrength: stats.strength, org: 100,
+        speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null
+      });
+    }
+  }
+
+  const warships = arsenalWeaponsOf(db, defender, 'warship');
+  for (const { item } of warships) {
+    const stats = warshipUnitStats(item.meta.weapon);
+    const spawnPos = engine.clampToWorld(war, [portPos[0] + rand(-30, 30), portPos[1] + rand(-30, 30)]);
+    war.units.push({
+      id: store.uid('warunit'), side: 'def',
+      name: `Warship — ${item.name}`,
+      kind: 'warship', pos: spawnPos, dest: null,
+      strength: stats.strength, maxStrength: stats.strength, org: 100,
+      speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null
+    });
+  }
+}
+
+// ---------- dynamic attacker staging (Task: correct-border staging) ----------
+// Centroid of every LAND cell in the defender's own provinces (from the
+// grid's provinceCells, already rasterised by buildGrid).
+function defenderLandCentroid(grid) {
+  let sx = 0, sy = 0, n = 0;
+  const cs = grid.cell;
+  for (const pid in (grid.provinceCells || {})) {
+    for (const c of grid.provinceCells[pid]) { sx += (c[0] + 0.5) * cs; sy += (c[1] + 0.5) * cs; n++; }
+  }
+  return n ? [sx / n, sy / n] : null;
+}
+// Centroid of a country polygon's primary (largest) subpath.
+function countryCentroid(shape) {
+  let polys;
+  try { polys = engine.parseShape(shape); } catch (e) { return null; }
+  if (!polys || !polys.length) return null;
+  let best = polys[0];
+  for (const p of polys) if (p.length > best.length) best = p;
+  if (!best || !best.length) return null;
+  let sx = 0, sy = 0;
+  for (const p of best) { sx += p[0]; sy += p[1]; }
+  return [sx / best.length, sy / best.length];
+}
+const BEARING_DIRS = { east: [1, 0], west: [-1, 0], north: [0, -1], south: [0, 1] };
+// Walk outward from `from` along [dirX,dirY] one grid cell at a time until
+// hitting open sea (not land, not a third nation's neutral soil) — the
+// staging box's centre. Returns null if the walk runs off the map or never
+// clears land/neutral ground.
+function walkToOpenSea(grid, from, dir, neutral) {
+  const cs = grid.cell;
+  const maxSteps = Math.max(grid.cols, grid.rows) + 4;
+  for (let step = 1; step <= maxSteps; step++) {
+    const px = from[0] + dir[0] * step * cs, py = from[1] + dir[1] * step * cs;
+    const cx = Math.floor(px / cs), cy = Math.floor(py / cs);
+    if (cx < 0 || cy < 0 || cx >= grid.cols || cy >= grid.rows) return null;
+    const key = engine.cellKey(cx, cy);
+    if (grid.landCells && grid.landCells[key]) continue;
+    if (neutral && neutral[key]) continue;
+    return [px, py];
+  }
+  return null;
+}
+// Every cell belonging to a foreign homeland OTHER than the attacker's own —
+// closed-border soil no staging box may sit on (mirrors engine.refreshWarZones'
+// neutralCells, computed directly here since war.allies doesn't exist yet at
+// startWar time — the attacker has no allies on turn zero).
+function neutralCellsExcept(grid, attackerCountryId) {
+  const neutral = {};
+  for (const cid in (grid.countryCells || {})) {
+    if (cid === attackerCountryId) continue;
+    for (const cell of grid.countryCells[cid]) neutral[engine.cellKey(cell[0], cell[1])] = cid;
+  }
+  return neutral;
+}
+// Computes a fresh staging box for the attacker from CURRENT map data
+// (province/country shapes — so ceded provinces or map edits are picked up
+// automatically), or returns null to fall back to scenario.staging. Two
+// shapes: a land-neighbour stages just inside its own territory nearest the
+// campaign's first objective; a naval attacker stages in open sea along the
+// bearing from the defender's landmass to its own homeland (or, for an
+// off-map power with no homeland polygon, along scenario.bearingHint — see
+// war-scenarios.js's qinal_invasion for why that escape hatch exists).
+function computeDynamicStaging(db, grid, scenario, attacker, firstObjPos) {
+  const cid = engine.countryIdForEntity(db, attacker.id);
+  const country = cid && ((((db.settings || {}).map || {}).countries) || []).find(c => c.id === cid);
+  const defCentroid = defenderLandCentroid(grid);
+  if (!defCentroid) return null;
+
+  if (scenario.land) {
+    if (!country || !grid.countryCells || !grid.countryCells[cid] || !grid.countryCells[cid].length) return null;
+    const cs = grid.cell;
+    const target = firstObjPos || defCentroid;
+    let best = null, bd = Infinity;
+    for (const cell of grid.countryCells[cid]) {
+      const p = [(cell[0] + 0.5) * cs, (cell[1] + 0.5) * cs];
+      const d = dist(p, target);
+      if (d < bd) { bd = d; best = p; }
+    }
+    if (!best) return null;
+    const size = 130;
+    return { x0: best[0] - size, y0: best[1] - size, x1: best[0] + size, y1: best[1] + size };
+  }
+
+  let dir = null;
+  if (country) {
+    const homeCentroid = countryCentroid(country.shape);
+    if (homeCentroid) {
+      const dx = homeCentroid[0] - defCentroid[0], dy = homeCentroid[1] - defCentroid[1];
+      const m = Math.hypot(dx, dy) || 1;
+      dir = [dx / m, dy / m];
+    }
+  }
+  if (!dir && scenario.bearingHint && BEARING_DIRS[scenario.bearingHint]) dir = BEARING_DIRS[scenario.bearingHint];
+  if (!dir) return null;
+
+  const neutral = neutralCellsExcept(grid, cid);
+  const found = walkToOpenSea(grid, defCentroid, dir, neutral);
+  if (!found) return null;
+  const size = 100;
+  return { x0: found[0] - size, y0: found[1] - size, x1: found[0] + size, y1: found[1] + size };
+}
+
 // ---------- start / end ----------
 function startWar(db, scenario) {
   if (!scenario) throw new Error('Unknown scenario');
@@ -406,7 +766,13 @@ function startWar(db, scenario) {
   }));
 
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
-  const stage = scenario.staging;
+  // Dynamic attacker staging (Task 5): computed fresh from CURRENT map data
+  // (so ceded provinces/annexations are picked up automatically) — falls
+  // back to the scenario's static `staging` box if the dynamic walk can't
+  // resolve a homeland/bearing or a safe patch of open sea/border ground.
+  const firstObj = objectives.slice().sort((a, b) => a.priority - b.priority)[0];
+  const dynamicStage = computeDynamicStaging(db, grid, scenario, attacker, firstObj ? firstObj.pos : null);
+  const stage = dynamicStage || scenario.staging;
   // Land invasions (`scenario.land: true`) spawn troops already on their own
   // soil, marching cross-border on tick one — no sea transit, no `landing`
   // objective (the scenario simply omits one). The engine only special-cases
@@ -433,28 +799,10 @@ function startWar(db, scenario) {
     };
   });
 
-  // Defender garrisons: one per city (by size) and one per military property —
-  // fully generic, no ids named here (scenario.defense only supplies numbers).
-  const def = scenario.defense || {};
-  const sizeStrength = def.citySizeStrength || { 1: 1300, 2: 2200, 3: 3800 }; // ×10 fallback, consistent with the scenario-data tuning
-  for (const c of db.cities) {
-    if (!c.pos) continue;
-    const strength = sizeStrength[c.size] || sizeStrength[1] || 1300;
-    units.push({
-      id: store.uid('warunit'), side: 'def', name: c.name + ' Garrison', kind: 'garrison',
-      pos: [c.pos[0], c.pos[1]], dest: null, strength, maxStrength: strength, org: 100,
-      speed: 0, atk: 1, state: 'holding', objectiveId: null, garrison: true
-    });
-  }
-  for (const p of db.properties) {
-    if (p.type !== 'military' || !p.pos) continue;
-    const strength = def.militaryPropertyStrength || 2600;
-    units.push({
-      id: store.uid('warunit'), side: 'def', name: p.name + ' Garrison', kind: 'garrison',
-      pos: [p.pos[0], p.pos[1]], dest: null, strength, maxStrength: strength, org: 100,
-      speed: 0, atk: 1, state: 'holding', objectiveId: null, garrison: true
-    });
-  }
+  // Defender garrisons: population-scaled (Task 4) across the same site set
+  // as before — one weighted site per city (by size) and one per
+  // type:'military' property — see buildGarrisonUnits above.
+  for (const gu of buildGarrisonUnits(db, scenario.defense)) units.push(gu);
 
   const attackerTotal = units.filter(u => u.side === 'att').reduce((s, u) => s + u.strength, 0);
 
@@ -496,6 +844,17 @@ function startWar(db, scenario) {
     allies: { att: [], def: [] },
     result: null
   };
+  // Tank & warship deployment (Task 3): defender's national arsenal
+  // (defender.inventory — conventionally ent_gov's stockpile) is walked for
+  // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
+  // naval units. No-op on a world where those items haven't been seeded yet.
+  deployArsenalUnits(db, db.war, defender);
+  // Alliance-aware wars (Task 3): nations allied with the attacker/defender
+  // (entity.meta.military.allies) auto-join via the existing joinWar
+  // mechanics — contingent size from their military profile, mustering from
+  // their own homeland when they have one. scenario.allies:false opts a
+  // scenario out; scenario.coAttackers force-joins specific entities.
+  autoJoinAllies(db, db.war, scenario, attacker, defender, 'WAR ENGINE');
   if (scenario.land) {
     engine.pushEvent(db.war, 'battle', units[0].pos, `${attacker.name} forces cross the border — invasion begins.`);
     SERVER_CTX.news(`WAR: ${attacker.name} FORCES CROSS THE BORDER`,
@@ -516,6 +875,12 @@ function endWar(db, actor, reason) {
   if (!war) return null;
   war.active = false;
   if (!war.result) war.result = { winner: null, endedAt: new Date().toISOString(), reason: reason || 'Ended by the Gamemaster' };
+  // Task 2: occupied properties stay with their occupier permanently — this
+  // does NOT touch property.ownerId, only clears the stash so a FUTURE war
+  // re-stashes fresh original owners instead of reaching back through this one.
+  for (const prop of (db.properties || [])) {
+    if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+  }
   store.log('event', 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   return war;
 }
@@ -688,6 +1053,64 @@ function joinWar(db, opts, actor) {
   return { ok: true, unitIds: spawned };
 }
 
+// ---------- alliance-aware wars (Task 3) ----------
+// Two entities are allied if either lists the other in
+// entity.meta.military.allies — the seeded profiles (server/store.js
+// migrate()) are mutual (e.g. for_valksland.allies includes for_qinal AND
+// for_qinal.allies includes for_valksland), but reading either direction
+// keeps this correct even for a hand-edited, one-sided allies array.
+function alliedWith(entities, aId, bId) {
+  const a = (entities || []).find(e => e.id === aId);
+  const b = (entities || []).find(e => e.id === bId);
+  const aAllies = (a && a.meta && a.meta.military && a.meta.military.allies) || [];
+  const bAllies = (b && b.meta && b.meta.military && b.meta.military.allies) || [];
+  return aAllies.includes(bId) || bAllies.includes(aId);
+}
+// Contingent size from a military profile: tiny-weak reads 1, big-strong
+// reads 6 — see docs comment on the task. army:'none' (Iceland) always
+// contributes ZERO units, even if allied, per the task spec — the caller
+// skips joinWar entirely and logs a flavour line instead. A joining nation
+// with no profile at all (hand-authored scenario.coAttackers naming an
+// entity the seed never gave a military.* to) falls back to the ordinary
+// JOIN_DEFAULT_COUNT.
+const ALLY_SIZE_BASE = { tiny: 1, small: 2, medium: 3, big: 4 };
+const ALLY_ARMY_BONUS = { none: -99, weak: 0, medium: 1, strong: 2 };
+function allyContingentSize(mil) {
+  if (!mil) return JOIN_DEFAULT_COUNT;
+  if (mil.army === 'none') return 0;
+  const base = ALLY_SIZE_BASE[mil.size] || 2;
+  const bonus = ALLY_ARMY_BONUS[mil.army] || 0;
+  return engine.clamp(base + bonus, JOIN_MIN_COUNT, JOIN_MAX_COUNT);
+}
+// Auto-joins every foreign entity allied with the attacker onto the att side
+// and every entity allied with the defender onto the def side, reusing
+// joinWar's existing homeland-muster/contingent-spawn/news-wire pathway so
+// these read exactly like a manually-triggered "<NATION> ENTERS THE WAR"
+// intervention. scenario.allies: false disables this entirely (default on);
+// scenario.coAttackers force-joins specific entities on the attacker's side
+// regardless of their profile (hand-authored joint invasions). An entity
+// that would qualify for BOTH sides (contradictory hand-edited data) joins
+// the attacker — the invasion is the thing that just happened.
+function autoJoinAllies(db, war, scenario, attacker, defender, actor) {
+  if (scenario.allies === false) return;
+  const coAttackers = new Set(scenario.coAttackers || []);
+  const foreign = (db.entities || []).filter(e => e.type === 'foreign' && e.id !== attacker.id && e.id !== defender.id);
+  for (const e of foreign) {
+    const isCoAttacker = coAttackers.has(e.id);
+    const isAttAlly = isCoAttacker || alliedWith(db.entities, attacker.id, e.id);
+    const isDefAlly = !isAttAlly && alliedWith(db.entities, defender.id, e.id);
+    if (!isAttAlly && !isDefAlly) continue;
+    const mil = e.meta && e.meta.military;
+    const count = allyContingentSize(mil);
+    if (count <= 0) {
+      engine.pushEvent(war, 'milestone', joinEntryPoint(db, war, isAttAlly ? 'att' : 'def', e.id),
+        `${e.name} is allied but has no forces to commit to the war.`);
+      continue;
+    }
+    joinWar(db, { side: isAttAlly ? 'att' : 'def', entityId: e.id, count }, actor);
+  }
+}
+
 // ---------- GM global tuning (Feature: war.mods) ----------
 // Combat/bomb damage multipliers are read defensively straight off war.mods
 // by the engine (server/war.js's bomb path too, above) — this function's only
@@ -770,6 +1193,7 @@ function cedeProvince(db, provinceId, toEntityId, actor, applied) {
   db.settings.map.countries.push({
     id: 'ceded_' + prov.id,
     name: recipient.name,
+    entityId: recipient.id,
     fill: (recipientCountry && recipientCountry.fill) || recipient.color || '#8a8474',
     shape: prov.shape
   });
@@ -989,13 +1413,13 @@ function ctxFor(db) {
 function warTick(db) {
   ensureWarGrid(db);
   const ticked = engine.warTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); applyOccupationTransfers(db); }
   return ticked;
 }
 function maybeWarTick(db) {
   ensureWarGrid(db);
   const ticked = engine.maybeWarTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); applyOccupationTransfers(db); }
   return ticked;
 }
 

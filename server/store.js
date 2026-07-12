@@ -903,6 +903,29 @@ function migrate(world) {
     changed = true;
   }
 
+  // Move ARC Arms Works from Mezdov to Lachevan. One-shot flag-gated.
+  // v2: positions in a LIVE world are on the 3840×2160 master grid (applyMap
+  // rescales seed coords), so hardcoded seed-space coords put the factory in
+  // the wrong province — derive the spot from the capital city's CURRENT pos
+  // instead, and fall back to the city's own provinceId if point-in-polygon
+  // can't resolve.
+  if (!world._armsWorksMoved2 && Array.isArray(world.properties)) {
+    const armsWorks = world.properties.find(p => p.id === 'prop_arc_arms');
+    const capital = (world.cities || []).find(c => c.id === 'city_lachevan') ||
+                    (world.cities || []).find(c => c.isCapital);
+    if (armsWorks && capital && Array.isArray(capital.pos)) {
+      armsWorks.pos = [capital.pos[0] + 66, capital.pos[1] + 130]; // industrial fringe just south-east of the capital
+      try {
+        const geometry = require('./geometry');
+        const pid = geometry.provinceAt(world.provinces || [], armsWorks.pos);
+        armsWorks.provinceId = pid || capital.provinceId || armsWorks.provinceId;
+      } catch (e) { armsWorks.provinceId = capital.provinceId || armsWorks.provinceId; }
+      changed = true;
+    }
+    world._armsWorksMoved = true; // keep the legacy v1 flag set so the old block never fires on old worlds
+    world._armsWorksMoved2 = true;
+  }
+
   // ---- Phase 26 — retire the generic "Weapons (crate)" trade good ---------
   // Real gun models with meta.weapon stats ARE the military economy now
   // (national stockpiles arm units directly); a stats-less catch-all crate
@@ -936,6 +959,176 @@ function migrate(world) {
       }
     }
     world._weaponsCrateRetired = true;
+    changed = true;
+  }
+
+  // ---- Phase 27 — war overhaul: company profit tied strictly to properties -
+  // Before this, a company that lost every property to war (or never had one
+  // settled through runEconomy) just kept whatever vars.revenue/profit it was
+  // last authored with — runEconomy only touches owners that own ≥1 property.
+  // sim.js now zeroes revenue and bleeds cash for zero-property companies every
+  // turn; this one-shot migration is the other half — it rebalances each
+  // company's EXISTING properties (produces perTurn / cashPerTurn / employees /
+  // expenses, scaled together so the ratio of revenue to cost is preserved) so
+  // the property-derived annual revenue matches the company's authored
+  // vars.revenue at the moment of migration. Without this, flipping runEconomy
+  // to be property-only would have silently slashed every company's income to
+  // whatever its (uncalibrated) properties happened to produce. Skips companies
+  // with zero properties outright (nothing to scale) and companies whose
+  // authored revenue is already ~0.
+  if (!world._companyProfitRebalance && Array.isArray(world.entities) && Array.isArray(world.properties)) {
+    const items = world.items || [];
+    const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
+    for (const co of (world.entities || [])) {
+      if (co.type !== 'company') continue;
+      co.vars = co.vars || {};
+      const props = world.properties.filter(p => p.ownerId === co.id);
+      if (!props.length) continue; // nothing to rebalance — sim.js's zero-property pass takes over
+      let propRevenuePerTurn = 0, propExpensePerTurn = 0;
+      for (const pr of props) {
+        if (pr.prodMode === 'goods') propRevenuePerTurn += (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0);
+        else if (pr.prodMode === 'cash') propRevenuePerTurn += pr.cashPerTurn || 0;
+        propExpensePerTurn += pr.expenses || 0;
+      }
+      const targetRevenue = co.vars.revenue || 0;
+      const propRevenueAnnual = propRevenuePerTurn * 365;
+      if (targetRevenue > 0 && propRevenueAnnual > 0) {
+        const scale = targetRevenue / propRevenueAnnual;
+        if (scale > 1.02 || scale < 0.98) {
+          for (const pr of props) {
+            if (pr.prodMode === 'goods') pr.produces = (pr.produces || []).map(e => ({ ...e, perTurn: Math.max(0.01, Math.round(e.perTurn * scale * 100) / 100) }));
+            else if (pr.prodMode === 'cash') pr.cashPerTurn = Math.round((pr.cashPerTurn || 0) * scale * 100) / 100;
+            pr.expenses = Math.max(0, Math.round((pr.expenses || 0) * scale));
+            pr.employees = Math.max(0, Math.round((pr.employees || 0) * scale));
+          }
+          propExpensePerTurn *= scale;
+        }
+      }
+      // Corporate overhead — a small admin-cost baseline independent of any one
+      // property (HQ upkeep, executive salaries…), charged even with zero
+      // properties left so a war that strips a company bare actually hurts its
+      // cash, not just its income. Calibrated as a modest slice of its
+      // pre-rebalance property expense footprint.
+      co.vars.overheadPerTurn = Math.round(propExpensePerTurn * 0.12 * 100) / 100;
+    }
+    world._companyProfitRebalance = true;
+    changed = true;
+  }
+
+  // ---- Phase 27 — war overhaul: armour & sea power items ------------------
+  // Tank and warship items, following the Phase 23 gun template (meta.weapon,
+  // meta.originId). Stats deliberately vary a great deal between models —
+  // these feed the war engine's combat math (server/war-engine.js), which
+  // this migration has no knowledge of. One-shot, flag-gated, additive.
+  if (!world._armorNavySeeded && Array.isArray(world.items)) {
+    const mkVeh = (id, name, kind, originId, stats, value, desc) => ({
+      id, icon: kind === 'tank' ? 'V' : 'N', name, category: 'Military', tradable: true, marketValue: value,
+      meta: { weapon: { kind, ...stats }, originId }, description: desc
+    });
+    const vehicles = [
+      mkVeh('item_tank_m36griz', 'M36 "Griz" Tank', 'tank', null,
+        { model: 'M36 Griz', dmg: 0.22, hp: 0.30, armor: 0.25, speed: 0.30, fuelUse: 0.5 }, 4200,
+        'Arcasian heavy tank of 1936. A 76mm gun behind 100mm of frontal plate — cheap, simple, and thoroughly outclassed by 1962.'),
+      mkVeh('item_tank_satrom42e', '"Muhit" Satrom Model \'42E Tank', 'tank', 'for_sarom',
+        { model: "Satrom '42E", dmg: 0.45, hp: 0.55, armor: 0.50, speed: 0.35, fuelUse: 0.9 }, 9500,
+        'Old Saromese export pattern. An 88mm cannon behind 180mm of frontal armour; the oil-hungry engine drinks fuel fast, but it is cheap and plentiful on the second-hand market.'),
+      mkVeh('item_tank_type50m', 'Type 50M Tank', 'tank', 'for_qinal',
+        { model: 'Type 50M', dmg: 0.78, hp: 0.85, armor: 0.70, speed: 0.40, fuelUse: 1.1 }, 32000,
+        'Modern Qinali export. A stabilised 120mm gun with electronic sights behind 200mm of armour — expensive, thirsty, and far ahead of anything else in the region.'),
+      mkVeh('item_warship_kradon', 'Kradon-class Cruiser', 'warship', null,
+        { model: 'Kradon-class', dmg: 0.30, hp: 0.40, range: 0.30, speed: 0.25 }, 60000,
+        'Very old Arcasian design out of the Kradon yards. Slow, lightly armed, and still the pride of the Eastern Fleet for lack of anything newer.'),
+      mkVeh('item_warship_madrosian', 'Madrosian Frigate', 'warship', 'for_madrosia',
+        { model: 'Madrosian Frigate', dmg: 0.50, hp: 0.60, range: 0.50, speed: 0.45 }, 95000,
+        'Fast, well-armed frigate of the Madrosian merchant marine\'s escort fleet — the backbone of a small nation with an outsized navy.'),
+      mkVeh('item_warship_valkslandic', 'Valkslandic Dreadnought', 'warship', 'for_valksland',
+        { model: 'Valkslandic Dreadnought', dmg: 0.85, hp: 0.90, range: 0.70, speed: 0.40 }, 220000,
+        'A capital ship of the Valksland fleet — heavily armoured, heavily gunned, and priced accordingly. Nothing in the region can match it hull-for-hull.')
+    ];
+    for (const v of vehicles) if (!world.items.some(i => i.id === v.id)) world.items.push(v);
+    world._armorNavySeeded = true;
+    changed = true;
+  }
+
+  // ---- Phase 27 — war overhaul: foreign military profiles ------------------
+  // entity.meta.military = { navy, army, size, focus, alliance, allies,
+  // importsFrom } drives BOTH the per-turn off-books production in sim.js
+  // (runForeignMilitary) and whatever the war engine reads for grand-strategy
+  // sizing. Purely data — skips gracefully if a nation isn't in this world.
+  if (!world._militaryProfilesSeeded && Array.isArray(world.entities)) {
+    const setMil = (id, mil) => {
+      const e = world.entities.find(x => x.id === id);
+      if (!e) return; // nation not present in this world — skip gracefully
+      e.meta = e.meta || {};
+      if (!e.meta.military) e.meta.military = mil;
+    };
+    setMil('ent_gov', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: null, allies: ['for_sarom'], importsFrom: [] });
+    setMil('for_madrosia', { navy: 'strong', army: 'weak', size: 'small', focus: 'size', alliance: null, allies: [], importsFrom: [] });
+    setMil('for_mazon', { navy: 'weak', army: 'weak', size: 'small', focus: 'size', alliance: null, allies: [], importsFrom: ['for_madrosia'] });
+    setMil('for_karaznia', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: 'GRACE', allies: ['for_aragonia', 'for_markasia'], importsFrom: [] });
+    setMil('for_aragonia', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: 'GRACE', allies: ['for_karaznia', 'for_markasia'], importsFrom: ['for_karaznia'] });
+    setMil('for_markasia', { navy: 'weak', army: 'weak', size: 'medium', focus: 'size', alliance: 'GRACE', allies: ['for_karaznia', 'for_aragonia'], importsFrom: ['for_karaznia'] });
+    setMil('for_valksland', { navy: 'strong', army: 'strong', size: 'big', focus: 'size', alliance: null, allies: ['for_qinal'], importsFrom: [] });
+    setMil('for_solme', { navy: 'weak', army: 'medium', size: 'small', focus: 'size', alliance: null, allies: ['for_qinal', 'for_valksland'], importsFrom: [] });
+    setMil('for_aldonesia', { navy: 'strong', army: 'strong', size: 'tiny', focus: 'quality', alliance: null, allies: ['for_sarom'], importsFrom: [] });
+    setMil('for_iceland', { navy: 'none', army: 'none', size: 'tiny', focus: 'size', alliance: null, allies: ['for_sarom'], importsFrom: [] });
+    // Not explicitly specced, but both nations own the tank export models
+    // above and are alliance anchors for others — without a profile of their
+    // own they would never actually produce the tanks their items imply.
+    setMil('for_qinal', { navy: 'medium', army: 'strong', size: 'big', focus: 'quality', alliance: null, allies: ['for_valksland', 'for_solme'], importsFrom: [] });
+    setMil('for_sarom', { navy: 'medium', army: 'strong', size: 'medium', focus: 'quality', alliance: null, allies: ['for_aldonesia', 'for_iceland'], importsFrom: [] });
+    world._militaryProfilesSeeded = true;
+    changed = true;
+  }
+
+  // ---- Phase 27 — war overhaul: manufacture at properties -------------------
+  // ARC Arms Works gains a slow tank line alongside its existing rifle line
+  // (fractional perTurn — runEconomy's Math.round(perTurn × outputFactor)
+  // already turns a 0.5/turn line into "about one every other turn" via the
+  // existing per-turn output wobble, same mechanism the rest of the economy
+  // uses). Kradon Shipyards switches from a flat cash office into a goods
+  // producer of the Kradon-class warship, VERY slowly.
+  if (!world._arcArmsTank && Array.isArray(world.properties)) {
+    const arms = world.properties.find(p => p.id === 'prop_arc_arms');
+    if (arms && world.items.some(i => i.id === 'item_tank_m36griz')) {
+      arms.produces = arms.produces || [];
+      if (!arms.produces.some(e => e.itemId === 'item_tank_m36griz')) {
+        arms.produces.push({ itemId: 'item_tank_m36griz', perTurn: 0.5 });
+      }
+      arms.prodMode = 'goods';
+    }
+    world._arcArmsTank = true;
+    changed = true;
+  }
+  if (!world._kradonShipyardWarship && Array.isArray(world.properties)) {
+    const yard = world.properties.find(p => p.id === 'prop_shipyards');
+    if (yard && world.items.some(i => i.id === 'item_warship_kradon')) {
+      yard.prodMode = 'goods';
+      yard.produces = [{ itemId: 'item_warship_kradon', perTurn: 0.02 }]; // ~1 hull every 50 turns
+      yard.cashPerTurn = 0;
+    }
+    world._kradonShipyardWarship = true;
+    changed = true;
+  }
+
+  // ---- Phase 27 — war overhaul: foreign tanks as an import option ----------
+  // The government can buy Satrom '42E tanks from Sarom and Type 50M tanks
+  // from Qinal through the same procedural order-book every other import
+  // flows through (settings.trade.partners[].imports/supply/priceMult — see
+  // generateTradeOrders in sim.js). Additive; skips a partner that isn't in
+  // this world's trade desk.
+  if (!world._tankTradeSeeded && world.settings && world.settings.trade && Array.isArray(world.settings.trade.partners)) {
+    const addImport = (entityId, itemId, supplyLevel, mult) => {
+      const p = world.settings.trade.partners.find(x => x.entityId === entityId);
+      if (!p || !world.items.some(i => i.id === itemId)) return;
+      p.imports = p.imports || [];
+      if (!p.imports.includes(itemId)) p.imports.push(itemId);
+      p.supply = p.supply || {}; if (p.supply[itemId] === undefined) p.supply[itemId] = supplyLevel;
+      p.priceMult = p.priceMult || {}; if (p.priceMult[itemId] === undefined) p.priceMult[itemId] = mult;
+    };
+    addImport('for_sarom', 'item_tank_satrom42e', 'Low', 1.1);
+    addImport('for_qinal', 'item_tank_type50m', 'Low', 1.25);
+    world._tankTradeSeeded = true;
     changed = true;
   }
 

@@ -32,13 +32,18 @@
    from-scratch DOM rebuilds because the interpolation state (_anim) lives
    in this module, not in the DOM. */
 
-const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰' };
+const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢' };
+// Transport ships & Boats feature: a land unit whose state reads 'transport'
+// (drifting/stranded over water — see war-engine.js's stepTransportState)
+// renders with this glyph instead of its normal kind glyph, so a column
+// crossing a strait visibly becomes a little ship for the duration.
+const WAR_TRANSPORT_GLYPH = '⛴';
 // Fallback shown for the one render before the real list arrives (or if the
 // fetch fails) — see War._ensureScenarioList / GET /api/gm/war/scenarios,
 // which is the source of truth so this file doesn't have to hardcode every
 // scenario id in server/war-scenarios.js.
 const WAR_SCENARIOS_FALLBACK = [{ id: 'valksland_invasion', name: 'The Valgos Crisis', attackerName: 'Valksland', defenderName: 'the Republic' }];
-const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['marine', 'Marine'], ['garrison', 'Garrison']];
+const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['marine', 'Marine'], ['garrison', 'Garrison'], ['boat', 'Boat'], ['warship', 'Warship']];
 // Above this map zoom, unit markers render at a CONSTANT WORLD scale (scale 1
 // — a fixed 40×28 world-unit symbol whose on-screen size grows as you zoom,
 // exactly matching the server's 40px collision/combat range, so "what touches
@@ -810,6 +815,7 @@ const War = {
     if (war.active) {
       this.renderMoveArrows(map, mk, NS, war);
       this.renderAttackArrows(map, mk, NS, war);
+      this.renderWarshipFire(map, mk, NS, war);
       this.renderUnits(map, mk, NS, war);
     } else {
       // Drop any lingering per-unit animation/selection state so a re-render
@@ -992,6 +998,37 @@ const War = {
     }
   },
 
+  // Warships feature (cosmetic only — the server/engine already resolved the
+  // ranged pass; this just draws a subtle line/flash toward whatever a live
+  // warship in 'fighting' state would be engaging, derived fresh from state
+  // exactly like the client re-derives everything else). Since the engine
+  // doesn't persist "who a warship is currently shooting" on the unit, this
+  // re-runs the SAME nearest-live-enemy-in-range search stepWarshipFire uses,
+  // purely for the line's endpoint — no gameplay effect either way.
+  renderWarshipFire(map, mk, NS, war) {
+    const range = (window.WarEngine && WarEngine.WARSHIP_RANGE) || 180;
+    for (const w of war.units) {
+      if (w.kind !== 'warship' || w.dead || w.state !== 'fighting' || !(w.strength > 0)) continue;
+      let nearest = null, nd = Infinity;
+      for (const e of war.units) {
+        if (e.side === w.side || e.dead || e.state === 'dead' || !(e.strength > 0) || e.state === 'embarked') continue;
+        const dx = e.pos[0] - w.pos[0], dy = e.pos[1] - w.pos[1];
+        const d = Math.hypot(dx, dy);
+        if (d < nd) { nd = d; nearest = e; }
+      }
+      if (!nearest || nd > range) continue;
+      const anim = this._anim[w.id];
+      const from = anim && anim.curPos ? anim.curPos : w.pos;
+      const tAnim = this._anim[nearest.id];
+      const to = tAnim && tAnim.curPos ? tAnim.curPos : nearest.pos;
+      const line = document.createElementNS(NS, 'line');
+      line.setAttribute('x1', from[0]); line.setAttribute('y1', from[1]);
+      line.setAttribute('x2', to[0]); line.setAttribute('y2', to[1]);
+      line.setAttribute('class', 'war-warship-fire');
+      map.warLayer.appendChild(line);
+    }
+  },
+
   // NATO-ish rectangle markers, one per live unit. Position is animated by
   // the shared rAF loop (ensureLoop) — here we only decide the tween's `from`
   // (the last known interpolated position, so a mid-tween re-render never
@@ -1159,7 +1196,12 @@ const War = {
       const glyph = document.createElementNS(NS, 'text');
       glyph.setAttribute('class', 'war-unit-glyph');
       glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
-      glyph.textContent = WAR_KIND_GLYPH[u.kind] || '?';
+      // Transport ships & Boats feature: a land unit currently in 'transport'
+      // state (drifting/stranded over water — see war-engine.js's
+      // stepTransportState) draws the small transport-ship glyph instead of
+      // its normal kind glyph, regardless of kind — it's the SAME unit, just
+      // temporarily afloat.
+      glyph.textContent = u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?');
       inner.appendChild(glyph);
 
       // Task 6: supply cut-off glyph, top-right corner of the symbol.
@@ -1597,7 +1639,7 @@ const War = {
       return;
     }
     const isDead = u.dead || u.state === 'dead';
-    const glyph = WAR_KIND_GLYPH[u.kind] || '?';
+    const glyph = u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?');
     const kindLabel = (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
     card.appendChild(el('div.war-card-title', `${glyph} ${u.name}`));
     card.appendChild(el('div.war-card-sub',
@@ -1657,6 +1699,16 @@ const War = {
     const mm = Math.floor(elapsed / 60), ss = elapsed % 60;
     const statusText = war.result ? (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED') : (war.paused ? 'PAUSED' : (war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS'));
     inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${mm}m ${ss}s elapsed · ${statusText}`));
+
+    // Alliance-aware wars (Task 4): list allied belligerents on each side,
+    // whether they auto-joined at startWar (Task 3) or intervened mid-war via
+    // the existing joinWar flow — both land in war.allies the same way.
+    const allyLists = war.allies || { att: [], def: [] };
+    if ((allyLists.att || []).length || (allyLists.def || []).length) {
+      const sideLine = (label, ids) => ids && ids.length ? `${label}: ${ids.map(entName).join(', ')}` : null;
+      const lines = [sideLine('Also attacking', allyLists.att), sideLine('Also defending', allyLists.def)].filter(Boolean);
+      if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
+    }
 
     inner.appendChild(Views.statStrip([
       ['Attacker Losses', fmtNum(Math.round(war.stats.attLosses))],

@@ -66,6 +66,12 @@
   const AIRSTRIKE_PRUNE_TICKS = 30;   // a done strike is dropped from war.airstrikes this many ticks after impact
   const SUPPLY_HEAL_FRAC = 0.004;     // fraction of maxStrength healed per tick for a unit reached by its side's supply flood-fill
   const GARRISON_ROUT_ORG = 5;        // org threshold below which even a dug-in GARRISON routs (non-garrison defenders/attackers still use ROUT_ORG)
+  const WARSHIP_RANGE = 180;          // px — warships engage in a separate RANGED pass at this reach, instead of the 40px collision range
+  const WARSHIP_TRANSPORT_BONUS = 3;  // dmg multiplier a warship deals to a 'transport'-state unit or a 'boat' — warships hunt transports
+  // Naval-only unit kinds (Transport ships & Boats feature): these never fight
+  // via the normal 40px collision pass and refuse to advance onto land cells
+  // (advanceToward below), mirroring how neutralCells are refused.
+  const NAVAL_KINDS = { boat: true, warship: true };
 
   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -275,7 +281,27 @@
         }
       }
     }
-    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells, countryLandCells, countryCells };
+    // Merged land lookup (Transport ships & Boats / Warships feature): every
+    // land cell, Republic province OR foreign homeland, in one flat set keyed
+    // by cellKey — a cheap O(1) "is this cell land or sea" test the engine
+    // can run every tick for every unit without touching db/point-in-polygon
+    // (which needs `db`, not just `war`). Built once here alongside the rest
+    // of the grid so it's part of war state and replays identically on a
+    // predicting client.
+    const landCells = {};
+    for (const pid in provinceCells) for (const cell of provinceCells[pid]) landCells[cellKey(cell[0], cell[1])] = true;
+    for (const cid in countryCells) for (const cell of countryCells[cid]) landCells[cellKey(cell[0], cell[1])] = true;
+    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells, countryLandCells, countryCells, landCells };
+  }
+  // Water test used by transport-state transitions (land units over water)
+  // and naval movement (boats/warships refusing land) — a legacy war.grid
+  // without landCells (pre-feature doc) reads as "no restriction" (false),
+  // same permissive-default spirit as neutralAt.
+  function isWaterAt(war, pos) {
+    const g = war && war.grid;
+    if (!g || !g.landCells) return false;
+    const cs = g.cell;
+    return !g.landCells[cellKey(Math.floor(pos[0] / cs), Math.floor(pos[1] / cs))];
   }
 
   // ---------- war zones: whose soil is whose (Phase 22: total war) ----------
@@ -328,6 +354,35 @@
     const g = war.grid;
     if (!g || !g.neutralCells) return null;
     return g.neutralCells[cellKey(Math.floor(pos[0] / g.cell), Math.floor(pos[1] / g.cell))] || null;
+  }
+  // Neutral-territory hardening: the nearest non-neutral cell CENTRE to `pos`,
+  // used to clamp player orders (setDest/setManualPath) and path termini
+  // (computePath) away from closed borders BEFORE movement ever starts —
+  // advanceToward's wall-follow only stops a unit that's already mid-step
+  // into neutral soil; this stops an order from ever aiming one there in the
+  // first place. Deterministic ring search (dx outer, dy inner, ring radius
+  // ascending) so server and a predicting client agree on the exact same
+  // substitute point. A position that isn't neutral is returned unchanged; a
+  // war with no grid/neutralCells at all (legacy doc, pre-belligerent-set)
+  // is permissive, same spirit as neutralAt above.
+  function nearestNonNeutralPoint(war, pos) {
+    const g = war && war.grid;
+    if (!g || !neutralAt(war, pos)) return pos;
+    const cs = g.cell;
+    const cx0 = Math.floor(pos[0] / cs), cy0 = Math.floor(pos[1] / cs);
+    for (let r = 1; r <= 60; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue; // ring only — interior already checked at smaller r
+          const cx = cx0 + dx, cy = cy0 + dy;
+          if (cx < 0 || cy < 0 || cx >= g.cols || cy >= g.rows) continue;
+          const key = cellKey(cx, cy);
+          if (g.neutralCells && g.neutralCells[key]) continue;
+          return clampToWorld(war, [(cx + 0.5) * cs, (cy + 0.5) * cs]);
+        }
+      }
+    }
+    return pos; // fully boxed in by neutral soil out to the search radius — give up rather than loop forever
   }
 
   // ---------- equipment quality (Phase 23: weapons & fuel) ----------
@@ -426,7 +481,12 @@
     }
     return { idx: best, dist: bd };
   }
-  function dijkstra(graph, startIdx) {
+  // `blocked(idx)` (optional) marks a graph node as impassable — never
+  // visited, never relaxed into — used by computePath below to keep the
+  // road/rail router off neutral-territory nodes (Neutral-territory
+  // hardening) without needing a war-specific graph cache (the graph itself
+  // stays keyed only on road/rail content; the blocklist is applied per call).
+  function dijkstra(graph, startIdx, blocked) {
     const n = graph.nodes.length;
     const distArr = new Array(n).fill(Infinity);
     const prev = new Array(n).fill(-1);
@@ -439,10 +499,21 @@
       visited[u] = true;
       for (const edge of graph.adj[u]) {
         const v = edge[0], w = edge[1];
+        if (blocked && blocked(v)) continue;
         if (distArr[u] + w < distArr[v]) { distArr[v] = distArr[u] + w; prev[v] = u; }
       }
     }
     return { dist: distArr, prev };
+  }
+  // Node → neutral-cell test, built fresh per call from db.war.grid.neutralCells
+  // (absent-safe: no grid/neutralCells at all returns null — permissive,
+  // same as neutralAt). Kept out of the cached graph itself since the
+  // belligerent set (and therefore neutralCells) can change mid-war.
+  function neutralNodeTest(war, graph) {
+    const g = war && war.grid;
+    if (!g || !g.neutralCells) return null;
+    const cs = g.cell;
+    return (idx) => !!g.neutralCells[cellKey(Math.floor(graph.nodes[idx][0] / cs), Math.floor(graph.nodes[idx][1] / cs))];
   }
   function computePath(db, from, to, baseSpeed) {
     const graph = getTransportGraph(db);
@@ -450,7 +521,12 @@
     const entry = nearestNode(graph, from);
     const exit = nearestNode(graph, to);
     if (entry.idx < 0 || exit.idx < 0 || entry.idx === exit.idx) return null;
-    const { dist: distArr, prev } = dijkstra(graph, entry.idx);
+    const blocked = neutralNodeTest(db.war, graph);
+    // A terminus that sits ON neutral soil never routes through the graph at
+    // all — fall through to the direct-line move, which advanceToward's own
+    // wall-follow then handles at the border itself.
+    if (blocked && (blocked(entry.idx) || blocked(exit.idx))) return null;
+    const { dist: distArr, prev } = dijkstra(graph, entry.idx, blocked);
     const graphDist = distArr[exit.idx];
     if (!Number.isFinite(graphDist)) return null;
     const routeDist = entry.dist + graphDist + exit.dist;
@@ -467,7 +543,10 @@
   }
   function setDest(db, u, dest, baseSpeed) {
     const war = db.war;
-    u.dest = clampToWorld(war, dest);
+    // Neutral-territory hardening: a dest that lands on closed-border soil is
+    // clamped to the nearest open ground BEFORE anything else (routing,
+    // movement) ever sees it — see nearestNonNeutralPoint.
+    u.dest = nearestNonNeutralPoint(war, clampToWorld(war, dest));
     u.manualPath = false; // a normal order always restores road/rail routing over any earlier freehand path
     u.attackId = null; // a plain move order cancels any in-progress chase (Feature: explicit attack orders)
     const path = computePath(db, u.pos, u.dest, baseSpeed || u.speed || 1);
@@ -480,8 +559,12 @@
   // speed (stepAlongPath below checks the flag).
   function setManualPath(db, u, waypoints) {
     const war = db.war;
+    // Neutral-territory hardening: every hand-drawn waypoint is clamped off
+    // closed-border soil too — a freehand path never consults the transport
+    // graph, so this is the only gate a manual order passes through before
+    // stepAlongPath walks it point-to-point.
     const pts = (waypoints || []).slice(0, MAX_MANUAL_PATH_POINTS)
-      .map(p => clampToWorld(war, [Number(p[0]), Number(p[1])]))
+      .map(p => nearestNonNeutralPoint(war, clampToWorld(war, [Number(p[0]), Number(p[1])])))
       .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
     if (pts.length < 1) return;
     u.path = pts;
@@ -531,6 +614,20 @@
       for (const dAng of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75]) {
         const cand = clampToWorld(war, [u.pos[0] + Math.cos(base + dAng) * step, u.pos[1] + Math.sin(base + dAng) * step]);
         if (!neutralAt(war, cand)) { next = cand; moved = true; break; }
+      }
+      if (!moved) return;
+    }
+    // Naval kinds (boats/warships) never step onto land — same wall-follow
+    // pattern as the neutral-border refusal above, just against grid.landCells
+    // instead of grid.neutralCells. A unit that's somehow ALREADY beached
+    // (legacy doc, GM spawn, a boat run aground) is allowed to move freely so
+    // it can crawl back into the water rather than freeze forever.
+    if (NAVAL_KINDS[u.kind] && isWaterAt(war, u.pos) && !isWaterAt(war, next)) {
+      const base = Math.atan2(dy, dx);
+      let moved = false;
+      for (const dAng of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75]) {
+        const cand = clampToWorld(war, [u.pos[0] + Math.cos(base + dAng) * step, u.pos[1] + Math.sin(base + dAng) * step]);
+        if (isWaterAt(war, cand)) { next = cand; moved = true; break; }
       }
       if (!moved) return;
     }
@@ -786,9 +883,43 @@
         if (d > 0 && d < FRIENDLY_SEP) {
           const push = (FRIENDLY_SEP - d) / 2;
           const nx = dx / d, ny = dy / d;
-          a.pos = clampToWorld(war, [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5]);
-          b.pos = clampToWorld(war, [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5]);
+          // Neutral-territory hardening: the separation nudge must not shove
+          // a friendly onto closed-border soil — only apply it when the
+          // candidate spot isn't neutral (or the unit was already standing in
+          // neutral ground, same "already there, let it move" exception used
+          // throughout advanceToward).
+          const aNext = clampToWorld(war, [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5]);
+          const bNext = clampToWorld(war, [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5]);
+          if (!neutralAt(war, aNext) || neutralAt(war, a.pos)) a.pos = aNext;
+          if (!neutralAt(war, bNext) || neutralAt(war, b.pos)) b.pos = bNext;
         }
+      }
+    }
+  }
+
+  // ---------- transport state (Transport ships & Boats feature) ----------
+  // A LAND unit (any kind that isn't a naval kind — boat/warship handle water
+  // natively) whose position drifts over open sea (embarked→landing handoff
+  // aside — this covers everything else: a road/rail route that briefly
+  // crosses a strait, a unit pushed off a captured beach, etc.) becomes state
+  // 'transport' — rendered client-side as a small transport-ship silhouette —
+  // until it's back over land. A transport-state unit cannot INITIATE combat
+  // (see stepCombat's aFights/dFights gating below) but can still be damaged
+  // (e.g. by a warship's ranged pass). The unit's pre-transition state is
+  // remembered so it resumes exactly what it was doing (moving/holding) the
+  // moment it makes landfall again, rather than snapping to a fixed state.
+  function stepTransportState(war) {
+    for (const u of war.units) {
+      if (!isLive(u)) continue;
+      if (u.state === 'embarked' || u.state === 'dead' || u.state === 'routed') continue;
+      if (NAVAL_KINDS[u.kind]) continue; // boats/warships are naval-native — not "transport"
+      const water = isWaterAt(war, u.pos);
+      if (water && u.state !== 'transport') {
+        u._preTransportState = u.state;
+        u.state = 'transport';
+      } else if (!water && u.state === 'transport') {
+        u.state = u._preTransportState || 'moving';
+        u._preTransportState = null;
       }
     }
   }
@@ -805,9 +936,18 @@
   function pruneCorpses(war) {
     war.units = war.units.filter(u => !u.dead || (war.tick - (u.deadAt || 0)) < CORPSE_MAX_AGE_TICKS);
   }
+  // A unit stranded on land in transport state, or a boat sitting on land,
+  // cannot initiate/deal damage in a fight — see stepTransportState and the
+  // "boat kind" doc above. Warships never appear here at all (they fight
+  // exclusively via stepWarshipFire's ranged pass below).
+  function canFight(war, u) {
+    if (u.state === 'transport') return false;
+    if (u.kind === 'boat' && !isWaterAt(war, u.pos)) return false;
+    return true;
+  }
   function stepCombat(db, war, ctx, rng) {
-    const atts = war.units.filter(u => u.side === 'att' && isLive(u) && u.state !== 'embarked');
-    const defs = war.units.filter(u => u.side === 'def' && isLive(u));
+    const atts = war.units.filter(u => u.side === 'att' && isLive(u) && u.state !== 'embarked' && u.kind !== 'warship');
+    const defs = war.units.filter(u => u.side === 'def' && isLive(u) && u.kind !== 'warship');
     // GM global tuning (Feature 3) — read defensively so a war doc without
     // `mods` (every war predating this change) falls back to 1× exactly.
     const dmgMod = (war.mods && war.mods.dmg) || 1;
@@ -816,23 +956,31 @@
     for (const a of atts) {
       let nearest = null, nd = Infinity;
       for (const d of defs) { const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
-      if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed') a.state = a.dest ? 'moving' : 'holding'; continue; }
+      if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed' && a.state !== 'transport') a.state = a.dest ? 'moving' : 'holding'; continue; }
       const d = nearest;
       anyFight = true;
-      a.state = 'fighting'; if (d.state !== 'routed') d.state = 'fighting';
+      // Transport ships & Boats feature: a transport-state land unit (or a
+      // beached boat) cannot DEAL damage but can still be damaged — each
+      // side's dealt-damage term is independently zeroed by canFight, and
+      // neither combatant's state is stomped to 'fighting' if it can't fight
+      // (so a transport ship keeps rendering as a transport ship even while
+      // under fire).
+      const aFights = canFight(war, a), dFights = canFight(war, d);
+      if (aFights) a.state = 'fighting';
+      if (d.state !== 'routed' && dFights) d.state = 'fighting';
       const defStationary = d.garrison && !d.dest;
       const defBonus = defStationary ? 1.35 : 1;
       // Equipment (Phase 26, per-unit): the guns THIS unit carries raise the
       // damage it deals; the victim's own kit absorbs some of what lands
       // (hp); better small arms also slow morale drain (a unit that can
       // shoot back holds longer).
-      const dmgToDef = K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp');
-      const dmgToAtt = K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp');
+      const dmgToDef = aFights ? K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp') : 0;
+      const dmgToAtt = dFights ? K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp') : 0;
       d.strength = Math.max(0, round1(d.strength - dmgToDef));
       a.strength = Math.max(0, round1(a.strength - dmgToAtt));
       war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
-      a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
-      d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
+      if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
+      if (dFights) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a
       // garrison's morale can still fully collapse, just at a much lower
@@ -854,6 +1002,7 @@
     for (const d of defs) {
       if (isLive(d) && d.state === 'fighting' && !engagedDefs.has(d.id)) d.state = d.dest ? 'moving' : 'holding';
     }
+    stepWarshipFire(war, ctx, rng, dmgMod);
     pruneCorpses(war);
     if (!anyFight) {
       // Both sides recover morale while the whole front is quiet — the regen
@@ -861,6 +1010,39 @@
       // parked at low org forever (and, with garrison routs now possible,
       // one org-drain away from breaking on the next engagement).
       for (const u of war.units) if (isLive(u) && u.state !== 'routed') u.org = clamp(u.org + ORG_REGEN, 0, 100);
+    }
+  }
+
+  // ---------- warship ranged fire (Warships feature) ----------
+  // Naval-only, ranged: a warship engages ANY live enemy (naval or land)
+  // within WARSHIP_RANGE (180px, far beyond the 40px collision range other
+  // kinds fight at) in a separate one-directional pass — the target doesn't
+  // automatically shoot back here (it gets its own turn in this same pass, or
+  // in the normal collision pass, if it's in range/adjacent). Warships deal a
+  // heavy bonus to 'transport'-state units and 'boat' units — their whole
+  // job is hunting transports and light naval craft.
+  function stepWarshipFire(war, ctx, rng, dmgMod) {
+    const warships = war.units.filter(u => u.kind === 'warship' && isLive(u) && u.state !== 'embarked');
+    if (!warships.length) return;
+    for (const w of warships) {
+      let nearest = null, nd = Infinity;
+      for (const e of war.units) {
+        if (e.side === w.side || !isLive(e) || e.state === 'embarked') continue;
+        if (e.kind === 'boat' && !isWaterAt(war, e.pos) && e.state !== 'transport') continue; // a beached boat isn't a naval target
+        const d = dist(w.pos, e.pos);
+        if (d < nd) { nd = d; nearest = e; }
+      }
+      if (!nearest || nd > WARSHIP_RANGE) { if (w.state !== 'routed') w.state = w.dest ? 'moving' : 'holding'; continue; }
+      const target = nearest;
+      w.state = 'fighting';
+      const bonus = (target.state === 'transport' || target.kind === 'boat') ? WARSHIP_TRANSPORT_BONUS : 1;
+      const dmg = K_COMBAT * w.strength * (0.7 + 0.6 * rng()) * (w.atk || 1) * dmgMod * unitMul(war, w, 'dmg') / unitMul(war, target, 'hp') * bonus;
+      target.strength = Math.max(0, round1(target.strength - dmg));
+      if (target.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
+      const routOrg = target.garrison ? GARRISON_ROUT_ORG : ROUT_ORG;
+      target.org = clamp(target.org - ORG_DRAIN * 0.5 / unitMul(war, target, 'morale'), 0, 100);
+      if (target.org < routOrg && target.state !== 'routed') { target.state = 'routed'; pushEvent(war, 'battle', target.pos.slice(), `${target.name} breaks and routs.`); }
+      if (target.strength <= 0) killUnit(war, target);
     }
   }
 
@@ -1233,6 +1415,7 @@
       if (!war.active) return true; // AI declared a collapse-defeat this tick
     }
     stepMovement(db, war, ctx, rng);
+    stepTransportState(war);
     stepCombat(db, war, ctx, rng);
     stepAirstrikes(db, war, ctx);
     stepTerritory(db, war);
@@ -1276,14 +1459,14 @@
     // constants other modules need
     CELL, COMBAT_RANGE, CAPTURE_RANGE, DEF_MOVE_SPEED, PLAYER_HOLD_TICKS,
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
-    BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS,
+    BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS, WARSHIP_RANGE, WARSHIP_TRANSPORT_BONUS, NAVAL_KINDS,
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry
     parseShape, polygonOf, pointInPolygon, provinceAt, countryAt,
     // grid / pathing / world bounds
     buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
-    countryIdForEntity, refreshWarZones, neutralAt, equipMul, unitMul,
+    countryIdForEntity, refreshWarZones, neutralAt, nearestNonNeutralPoint, equipMul, unitMul, isWaterAt,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick

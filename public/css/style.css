@@ -463,6 +463,21 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   0%{r:16; opacity:.95;}
   100%{r:34; opacity:0;}
 }
+/* Transport ships & Boats / Warships feature — a land unit currently
+   'transport'-state (drifting/stranded over water) gets a lighter,
+   dashed-outline box so it reads as a vessel rather than its normal kind,
+   even though the glyph swap (War._glyphFor) already carries most of the
+   visual weight; boats/warships get no special box treatment beyond their
+   own kind glyph. The warship ranged-fire line is a thin, fading tracer —
+   deliberately subtler than the attack-chase arrow above (this is passive
+   fire-support flavour, not a command the player gave). */
+.war-state-transport .war-unit-box{fill-opacity:.55; stroke-dasharray:3 2;}
+.war-warship-fire{stroke:#8fb6c9; stroke-width:1.6; opacity:.75; pointer-events:none; animation:war-warship-fire-fade .5s ease-out infinite;}
+@keyframes war-warship-fire-fade{
+  0%{opacity:.9;}
+  60%{opacity:.35;}
+  100%{opacity:.9;}
+}
 .war-flash{fill:none; stroke-width:3; pointer-events:none;}
 /* battle flashes are no longer drawn (see War.renderFlashes) — only the
    rarer capture/landing/milestone events keep their fading ring */

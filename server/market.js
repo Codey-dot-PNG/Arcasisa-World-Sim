@@ -116,11 +116,50 @@ function recomputeEconConfidence(db) {
 // confidence. Returns true if any company was ticked.
 const DAY_REVERT = 0.03;  // per-tick pull of the day quote toward fundamental
 const CONF_REVERT = 0.04; // per-tick pull of confidence toward its fair target
+
+// War overhaul — how badly is the war going for the home front? 0 (no war /
+// war going nowhere) to 1 (most of the country occupied and most cities in
+// enemy hands). Blends province occupation with cities lost; purely generic —
+// reads only db.war/db.provinces/db.cities, no scenario-specific knowledge.
+function warSeverity(db) {
+  const war = db.war;
+  if (!war || !war.active) return 0;
+  const ctl = (war.stats && war.stats.provinceControl) || {};
+  const provIds = Object.keys(ctl);
+  const occFrac = provIds.length
+    ? clamp(provIds.reduce((s, k) => s + (ctl[k] || 0), 0) / (provIds.length * 100), 0, 1)
+    : 0;
+  const totalCities = (db.cities || []).length || 1;
+  const cityFrac = clamp(((war.stats && war.stats.citiesHeld) || []).length / totalCities, 0, 1);
+  return clamp(occFrac * 0.6 + cityFrac * 0.4, 0, 1);
+}
+
+// One-off confidence shock the moment the war doc's "shape" changes (war
+// starts/ends, or a city changes hands) — cheaply detected by comparing a
+// fingerprint stashed on the db doc, so it fires exactly once per change and
+// stays serverless-safe (all state lives on the world doc, no timers).
+function checkWarShock(db) {
+  const war = db.war;
+  const mark = war ? `${war.active ? 1 : 0}:${((war.stats && war.stats.citiesHeld) || []).length}` : '0:0';
+  if (db._warMarketMark === undefined) { db._warMarketMark = mark; return; } // first observation — no shock on boot
+  if (db._warMarketMark === mark) return;
+  db._warMarketMark = mark;
+  for (const co of db.entities) {
+    if (co.type !== 'company' || co.sharePrice === undefined) continue;
+    co.confidence = clamp((co.confidence === undefined ? 50 : co.confidence) - 12, 0, 100);
+  }
+  db.globalVars = db.globalVars || {};
+  db.globalVars.econConfidence = clamp((db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence) - 8, 0, 100);
+}
+
 function dayMarketTick(db) {
   db = db || store.get();
   db.globalVars = db.globalVars || {};
+  checkWarShock(db);
   const conf = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
   const confBias = (conf - 50) / 50 * 0.006; // ±0.6%/tick at the extremes
+  const sev = warSeverity(db);
+  const warBias = -0.012 * sev; // up to ~-1.2%/tick bearish drift at maximum war severity
   let any = false;
   for (const co of db.entities) {
     if (co.type !== 'company' || co.sharePrice === undefined) continue;
@@ -135,7 +174,7 @@ function dayMarketTick(db) {
     // no longer death-spirals to the circuit-breaker floor. Order flow (trades,
     // offerings) still shoves the quote around freely via applyDayImpact.
     let next = co.dayPrice + (fv - co.dayPrice) * DAY_REVERT;
-    next = next * (1 + confBias + noise);
+    next = next * (1 + confBias + warBias + noise);
     co.dayPrice = Math.max(0.01, round2(softBand(co, next)));
     nudgeConfidence(co, (co.dayPrice - prev) / (prev || 1));
     // pull confidence toward the level the valuation implies (self-anchoring)
@@ -148,7 +187,10 @@ function dayMarketTick(db) {
     const it = shareItemFor(co.id);
     if (it) it.marketValue = co.dayPrice;
   }
-  if (any) recomputeEconConfidence(db);
+  if (any) {
+    recomputeEconConfidence(db);
+    if (sev > 0) db.globalVars.econConfidence = Math.max(0, Math.round((db.globalVars.econConfidence - sev * 0.8) * 10) / 10);
+  }
   return any;
 }
 

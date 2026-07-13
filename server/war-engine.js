@@ -50,6 +50,13 @@
   const PURSUE_R = 220;               // px — spearhead units run down broken/weak defenders inside this
   const PURSUE_WEAK_FRAC = 0.35;      // a defender below this fraction of max strength is worth finishing off
   const INTERDICT_FRAC = 0.45;        // supply-cut post sits this far from the defender capital toward the objective
+  // ---- refugee columns (Phase 28) — see stepRefugees ----
+  const REFUGEE_SPEED = 7;            // px/tick — a column on the roads (faster than infantry: they drop everything)
+  const REFUGEE_ARRIVE_R = 30;        // px — close enough to the destination to disperse into it
+  const REFUGEE_FADE_TICKS = 4;       // ticks an arrived/annihilated column lingers so the client can fade it out
+  const REFUGEE_MAX = 24;             // hard cap on simultaneous columns (perf — spawner settles overflow instantly)
+  const REFUGEE_CROSSFIRE_R = 70;     // px — a column this close to a FIGHTING unit takes losses
+  const REFUGEE_CROSSFIRE_FRAC = 0.02;// fraction of the column killed per fighting neighbour per tick
   const K_COMBAT = 0.0035;            // per-tick strength loss ~ k × enemy strength
   const ORG_DRAIN = 3.5;              // per-tick org loss while fighting
   const ORG_REGEN = 0.6;              // per-tick org recovery while not fighting
@@ -1719,6 +1726,29 @@
         if (u.strength <= 0) killUnit(war, u);
       }
       pruneCorpses(war);
+      // Refugee columns caught in the blast die by the same falloff curve —
+      // count-scaled rather than strength-scaled (they have no armour, no
+      // kit; a direct hit annihilates the column outright). Deaths land in
+      // stats.civilianDeaths; the authority layer settles the survivors'
+      // population on arrival (see server/war.js settleRefugees), so people
+      // killed on the road never reach the destination province's books.
+      if (Array.isArray(war.refugees)) {
+        for (const r of war.refugees) {
+          if (r.count <= 0 || r.arrived != null) continue;
+          const rd = dist(r.pos, strike.pos);
+          if (rd > BOMB_RADIUS) continue;
+          const killed = Math.min(r.count, Math.round(r.count * airstrikeFalloff(rd)));
+          if (!killed) continue;
+          r.count -= killed;
+          war.stats.civilianDeaths = (war.stats.civilianDeaths || 0) + killed;
+          if (r.count <= 0) {
+            r.deadTick = war.tick;
+            pushEvent(war, 'battle', r.pos.slice(), `A refugee column from ${r.fromName || r.from} is wiped out in the blast.`);
+          } else {
+            pushEvent(war, 'battle', r.pos.slice(), `${killed.toLocaleString('en-US')} refugees from ${r.fromName || r.from} are killed in the blast.`);
+          }
+        }
+      }
       war.craters = war.craters || [];
       war.craters.push({ pos: strike.pos.slice(), t: Date.now(), side: strike.side });
       if (war.craters.length > 40) war.craters.shift();
@@ -1733,6 +1763,66 @@
     // the client keeps its plane/FX animation going for a few seconds past
     // impact (see public/js/war.js), well inside this window.
     war.airstrikes = war.airstrikes.filter(s => !s.done || (war.tick - s.strikeTick) < AIRSTRIKE_PRUNE_TICKS);
+  }
+
+  // ---------- refugee columns (Phase 28) ----------
+  // war.refugees: [{ id, from, fromName, to, toName, count, startCount,
+  //   pos:[x,y], dest:[x,y], spawnedTick, arrived: tick|null, deadTick:
+  //   tick|null, _settled? }] — spawned AUTHORITY-side by server/war.js's
+  //   refugee waves (a predicting client only ever sees them via snapshots,
+  //   like airstrikes), but MOVED here in the shared engine so prediction
+  //   walks them tick-for-tick between heartbeats. Deliberately NOT units:
+  //   they never enter combat rosters, AI pools, territory projection or the
+  //   friendly-separation O(n²) pass — a capped array (REFUGEE_MAX) walked
+  //   once per tick, so the perf cost is a handful of dist() calls.
+  //   Deterministic: array order iteration, no rng draws (crossfire losses
+  //   are a fixed fraction), so the per-tick PRNG stream is untouched.
+  function stepRefugees(war) {
+    const list = war.refugees;
+    if (!Array.isArray(list) || !list.length) return;
+    for (const r of list) {
+      if (r.count <= 0 || r.arrived != null) continue;
+      // Crossfire: a column hugging an active firefight bleeds people. No
+      // targeting, no orders — proximity to any FIGHTING unit is enough.
+      let fire = 0;
+      for (const u of war.units) {
+        if (!isLive(u) || u.state !== 'fighting') continue;
+        if (dist(u.pos, r.pos) <= REFUGEE_CROSSFIRE_R) fire++;
+      }
+      if (fire) {
+        const killed = Math.min(r.count, Math.max(20, Math.round(r.count * REFUGEE_CROSSFIRE_FRAC * fire)));
+        r.count -= killed;
+        war.stats.civilianDeaths = (war.stats.civilianDeaths || 0) + killed;
+        if (r.count <= 0) {
+          r.deadTick = war.tick;
+          pushEvent(war, 'battle', r.pos.slice(), `A refugee column from ${r.fromName || r.from} is caught in the crossfire and destroyed.`);
+          continue;
+        }
+      }
+      // March toward the destination. The shim borrows advanceToward's
+      // ROUTED branch on purpose: a routed land unit refuses to step into
+      // the sea and wall-follows the coastline — exactly how a column of
+      // civilians on foot should behave (the neutral-border refusal and the
+      // world clamp apply the same way).
+      const shim = { pos: r.pos, state: 'routed', kind: 'civilian' };
+      advanceToward(war, shim, r.dest, REFUGEE_SPEED);
+      r.pos = shim.pos;
+      if (dist(r.pos, r.dest) <= REFUGEE_ARRIVE_R) r.arrived = war.tick;
+    }
+    // Prune columns whose fade-out window has passed. An ARRIVED column is
+    // only dropped once the authority layer has settled its survivors into
+    // the destination province (`_settled`, server/war.js settleRefugees) —
+    // a burst catch-up (maybeWarTick can run many engine ticks before the
+    // authority pass gets its turn) must never prune people who haven't
+    // been credited yet. A predicting client never sets _settled, so its
+    // arrived columns linger invisibly (opacity 0 after the fade) until the
+    // next rebase delivers the server's settled/pruned truth — harmless.
+    // Annihilated columns (count 0) have nothing to settle and prune freely.
+    war.refugees = list.filter(r => {
+      if (r.arrived != null) return !(r._settled && (war.tick - r.arrived) >= REFUGEE_FADE_TICKS);
+      if (r.count <= 0) return (war.tick - (r.deadTick || war.tick)) < REFUGEE_FADE_TICKS;
+      return true;
+    });
   }
 
   // ---------- territory fracture ----------
@@ -1837,6 +1927,46 @@
         return !!(war.grid.enemyCells && war.grid.enemyCells[k]);
       };
       const seeds = [cellKey(anchorCell[0], anchorCell[1])];
+      // Phase 28 supply rework — the corridor is no longer rooted ONLY at
+      // the original landing/staging anchor:
+      //  · HOMELAND ROOT (every attacker): the attacker's own soil
+      //    (grid.enemyCells, minus anything the defence has captured) seeds
+      //    the fill wholesale — occupied territory that CONNECTS back to the
+      //    friendly border is supplied through it, and troops standing
+      //    inside the homeland itself always are. (attHeld already treated
+      //    homeland as traversable; it just could never be a ROOT, so a
+      //    corridor pinched off from the anchor read cut even while it
+      //    touched the border.)
+      //  · COASTAL ROOT (naval invaders only — scenarios with a `landing`
+      //    objective): every att-held captured cell adjacent to open sea is
+      //    a beach the fleet can supply over, so a pocket that reaches ANY
+      //    coastline is fed even if the corridor to the original beachhead
+      //    is cut. Land-border invaders (`land: true`, no landing objective)
+      //    get no sea lift. Needs grid.landCells to tell sea from land — a
+      //    legacy grid without it skips coastal roots (permissive elsewhere,
+      //    conservative here).
+      const isNaval = war.objectives.some(o => o.kind === 'landing');
+      if (war.grid.enemyCells) {
+        for (const key in war.grid.enemyCells) {
+          const c = war.cells[key];
+          if (!c || c.o !== 'def') seeds.push(key);
+        }
+      }
+      if (isNaval && war.grid.landCells) {
+        for (const key in war.cells) {
+          if (war.cells[key].o !== 'att') continue;
+          const comma = key.indexOf(',');
+          const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
+          const coastal =
+            (cx > 0 && !war.grid.landCells[cellKey(cx - 1, cy)]) ||
+            (cx < war.grid.cols - 1 && !war.grid.landCells[cellKey(cx + 1, cy)]) ||
+            (cy > 0 && !war.grid.landCells[cellKey(cx, cy - 1)]) ||
+            (cy < war.grid.rows - 1 && !war.grid.landCells[cellKey(cx, cy + 1)]);
+          if (coastal) seeds.push(key);
+        }
+      }
+      // Original near-anchor seeding kept: covers the first ticks of a
+      // landing before any beach cell is formally captured.
       for (const key in war.cells) {
         const c = war.cells[key];
         if (c.o !== 'att') continue;
@@ -2112,6 +2242,7 @@
     stepTransportState(war);
     stepCombat(db, war, ctx, rng);
     stepAirstrikes(db, war, ctx);
+    stepRefugees(war);
     stepTerritory(db, war);
     recomputeProvinceControl(war);
     stepSupply(db, war);
@@ -2154,6 +2285,7 @@
     CELL, COMBAT_RANGE, CAPTURE_RANGE, DEF_MOVE_SPEED, PLAYER_HOLD_TICKS,
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
     BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS, WARSHIP_RANGE, WARSHIP_TRANSPORT_BONUS, NAVAL_KINDS,
+    REFUGEE_MAX, REFUGEE_FADE_TICKS, REFUGEE_SPEED,
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry

@@ -183,6 +183,7 @@ war: {
   supplyAnchor: [x,y],                       // attacker supply source, minted once at startWar (landing objective pos, or the
                                              // staging centre for land:true) — additive/absent-safe, see "Supply corridors" below
   craters: [ { pos:[x,y], t: <epoch ms>, side } ],  // cap 40, client scorch marks
+  refugees: [ { id, from, to, count, pos, dest, spawnedTick, arrived, deadTick } ], // Phase 28 — visible civilian columns, cap REFUGEE_MAX; see "Refugee columns"
   mods: { dmg: 1, bombDmg: 1, hp: 1 },       // GM global tuning multipliers — additive/absent-safe, see "GM global tuning" below
   allies: { att: [entityId, …], def: [entityId, …] }, // foreign entities that joined via joinWar — additive/absent-safe, see "Foreign intervention" below
   result: null | { winner:'att'|'def'|null, endedAt, reason }
@@ -424,17 +425,27 @@ it tick-for-tick.
 
 - **Attacker corridor**: `war.supplyAnchor` is minted once at `startWar` —
   the landing objective's pos for a naval scenario, the staging-box centre
-  for a `land: true` one. Each tick, the anchor's own cell plus att-held
-  cells within 2 cells (Chebyshev) of it seed an 8-neighbour BFS over
+  for a `land: true` one. Each tick an 8-neighbour BFS runs over
   attacker-held ground; an attacker unit is in supply iff its cell (or any
   8-neighbour — see below) is in the reached set. "Attacker-held" for supply
   (Phase 26 fix) means captured cells in `war.cells` PLUS the attacker's own
-  homeland (`grid.enemyCells`) where the defence hasn't captured — a
-  land-border invasion anchors in the homeland, which the old
-  war.cells-only predicate could never seed or traverse, so the whole force
-  read permanently CUT OFF. Captured ground that got pinched off from the
-  corridor by a defender recapture is out of supply even though it's still
-  att-held.
+  homeland (`grid.enemyCells`) where the defence hasn't captured. **Phase 28
+  rework — the fill is rooted at three kinds of seed, not just the anchor:**
+  - the anchor's own cell plus att-held cells within 2 cells (Chebyshev) of
+    it (the original root — still covers the first ticks of a landing before
+    any beach cell is formally captured);
+  - **the homeland itself** (every `grid.enemyCells` cell the defence hasn't
+    captured) — occupied territory that CONNECTS back to the friendly border
+    is supplied through it, and troops standing inside their own homeland
+    always are (Del' Casia's columns feed over the land border they crossed);
+  - **any held coastline — naval invaders only** (scenarios with a `landing`
+    objective): every att-held captured cell 4-adjacent to open sea (via
+    `grid.landCells`; a legacy grid without it skips this root) is a beach
+    the fleet supplies over — hold Cape Valgos and a connected corridor
+    inland, and the whole corridor is fed through the port even if the
+    original beachhead is lost. `land: true` invaders get no sea lift.
+  Captured ground pinched off from ALL of these roots by a defender
+  recapture is out of supply even though it's still att-held.
 - **Defender corridor**: defender-controlled land = every land cell (from
   `grid.provinceCells`) NOT currently att-held, PLUS enemy-homeland cells
   the defence has captured (`{o:'def'}` — an invading defender column stays
@@ -457,6 +468,41 @@ it tick-for-tick.
   is additive — no migration needed.
 - **Client**: cut-off units get a dashed amber outline, a "⚠" corner glyph,
   a "CUT OFF" line in the tooltip and the unit info card.
+
+## Refugee columns (Phase 28)
+
+Refugee waves (see "Occupation devastation") are no longer an instant
+population teleport — each wave's shares travel the map as VISIBLE columns:
+
+- **State**: `war.refugees: [{ id, from, fromName, to, toName, count,
+  startCount, pos, dest, spawnedTick, arrived, deadTick, _settled? }]` —
+  additive/absent-safe (engine treats a missing array as none), capped at
+  `REFUGEE_MAX` (24; overflow shares settle instantly, the old behaviour).
+- **Lifecycle split across the usual boundary**: `moveRefugees`
+  (server/war.js, authority) debits the source province immediately and
+  spawns a column per destination (province `labelPos` → `labelPos`). The
+  ENGINE's `stepRefugees` walks them at `REFUGEE_SPEED` (7 px/tick) —
+  borrowing `advanceToward`'s routed branch so they wall-follow coastlines
+  and closed borders instead of swimming — and stamps `arrived` within
+  `REFUGEE_ARRIVE_R`. `settleRefugees` (authority, after every real tick)
+  credits the SURVIVORS to the destination province exactly once
+  (`_settled`), and `endWar` settles anything still on the road. Deaths en
+  route therefore never reach the destination's books.
+- **Killable**: an airstrike kills by the same falloff curve
+  (count-scaled — a direct hit wipes the column), and a column within
+  `REFUGEE_CROSSFIRE_R` (70px) of any FIGHTING unit bleeds
+  `REFUGEE_CROSSFIRE_FRAC` per fighting neighbour per tick. All deaths land
+  in `stats.civilianDeaths` with a war event. No player order can target
+  them — they die only to the engine.
+- **Determinism/perf**: array-order iteration, no rng draws (the per-tick
+  PRNG stream is untouched), never in combat rosters/AI pools/territory or
+  the O(n²) separation pass — a predicting client walks them tick-for-tick.
+- **Client**: neutral ivory pill markers (🚶 + "≈12k" head count) under the
+  unit layer, tweened by the shared rAF loop with a per-frame fade (in over
+  ~1.5 ticks from `spawnedTick`, out over `REFUGEE_FADE_TICKS` after
+  `arrived`/`deadTick`). Clickable → the unit info card shows head count,
+  losses on the way, route and status; Esc/ground-click/unit-click clears
+  the inspection. Not selectable, not commandable.
 
 ## Naval kinds — boats & warships (Phase 27)
 
@@ -758,8 +804,10 @@ atk, speed }, actor)`:
   in-fiction event).
 
 **UI** (`public/js/war.js`'s `renderSpawner`, War Room GM section): side
-toggle, kind select (`infantry`/`armored`/`marine`/`garrison`), and
-count/HP/damage/speed sliders (`Forms.sliderNum`) bound to
+toggle, kind select (`infantry`/`armored`/`marine`/`garrison`), an optional
+**Division name** text field (multi-unit spawns are numbered "`<name>
+1..N`"; blank falls back to the generic GM-spawned label; the server caps it
+at 80 chars), and count/HP/damage/speed sliders (`Forms.sliderNum`) bound to
 `War._spawnDraft`. "Arm placement" sets `War._spawnArmed = true`; the next
 war-layer left-click calls `_doSpawn(pos)` (POSTs `/api/gm/war/spawn`) and
 disarms — mirrors the airstrike-arming flow exactly (`onMapPointerDown`

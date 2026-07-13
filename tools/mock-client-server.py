@@ -220,6 +220,16 @@ def make_war(gm):
             {"id": "strike_mock1", "side": "def", "pos": [2950, 500], "from": [2300, 520],
              "orderedTick": 4, "strikeTick": 9, "orderedAt": 0, "done": False, "groundApplied": False},
         ],
+        # Refugee columns (Phase 28) — one mid-flight (fade-in + march driven by
+        # the client's local prediction) and one just-arrived (fade-out path).
+        "refugees": [
+            {"id": "ref_mock1", "from": "prov_lachevan", "fromName": "Lachevan", "to": "prov_kordi",
+             "toName": "Kordi", "count": 21500, "startCount": 23000, "pos": [2250, 560],
+             "dest": [1700, 1200], "spawnedTick": 4, "arrived": None, "deadTick": None},
+            {"id": "ref_mock2", "from": "prov_lachevan", "fromName": "Lachevan", "to": "prov_grazi",
+             "toName": "Grazi", "count": 7600, "startCount": 7600, "pos": [1500, 700],
+             "dest": [1500, 705], "spawnedTick": 2, "arrived": 5, "deadTick": None},
+        ],
     }
     if gm:
         war["ai"] = {"phase": "breakout", "lastPlanTick": 0, "notes": [],

@@ -73,8 +73,25 @@ function killCivilians(db, war, provId, amount) {
   war.stats.civilianDeaths = (war.stats.civilianDeaths || 0) + loss;
   return loss;
 }
+// Credit n arrivals to a destination province (population + demographics
+// pro-rata) — the deferred half of a refugee wave (see moveRefugees below).
+function creditRefugees(db, provId, n) {
+  if (!(n > 0)) return;
+  const d = db.provinces.find(p => p.id === provId);
+  if (!d) return;
+  const dPop = Math.max(0, Math.round(Number(d.vars.population) || 0));
+  d.vars.population = dPop + n;
+  scalePopulation(d, dPop ? (dPop + n) / dPop : 1);
+}
 // A flight wave: frac of the source province's people move "inward" — split
 // across the up-to-3 LEAST-occupied other provinces, weighted equally.
+// Phase 28: the source is debited NOW, but each share travels as a VISIBLE
+// refugee column (war.refugees — walked by the engine's stepRefugees,
+// killable by airstrikes/crossfire) and is only credited to its destination
+// when it actually arrives (settleRefugees). Past the column cap, or when a
+// province has no usable position, the share settles instantly instead —
+// the old teleport behaviour, kept as the overflow path so the array stays
+// small (perf) and no wave is ever lost.
 function moveRefugees(db, war, sourceProv, frac) {
   if (!sourceProv) return 0;
   const pop = Math.max(0, Math.round(Number(sourceProv.vars.population) || 0));
@@ -89,13 +106,40 @@ function moveRefugees(db, war, sourceProv, frac) {
   sourceProv.vars.population = pop - moving;
   scalePopulation(sourceProv, (pop - moving) / (pop || 1));
   const share = Math.floor(moving / dests.length);
-  for (const d of dests) {
-    const dPop = Math.max(0, Math.round(Number(d.vars.population) || 0));
-    d.vars.population = dPop + share;
-    scalePopulation(d, dPop ? (dPop + share) / dPop : 1);
+  if (!Array.isArray(war.refugees)) war.refugees = [];
+  for (let i = 0; i < dests.length; i++) {
+    const d = dests[i];
+    const canWalk = war.refugees.length < engine.REFUGEE_MAX &&
+      Array.isArray(sourceProv.labelPos) && Array.isArray(d.labelPos);
+    if (!canWalk) { creditRefugees(db, d.id, share); continue; }
+    war.refugees.push({
+      id: store.uid('warref'),
+      from: sourceProv.id, fromName: sourceProv.name,
+      to: d.id, toName: d.name,
+      count: share, startCount: share,
+      // fan the wave's columns out a little so three simultaneous departures
+      // from the same province don't spawn stacked on one point
+      pos: engine.clampToWorld(war, [sourceProv.labelPos[0] + (i - 1) * 42, sourceProv.labelPos[1] + (i - 1) * 18]),
+      dest: engine.clampToWorld(war, d.labelPos.slice()),
+      spawnedTick: war.tick, arrived: null, deadTick: null
+    });
   }
   war.stats.refugees = (war.stats.refugees || 0) + moving;
   return moving;
+}
+// AUTHORITY-ONLY, the closing half of the column lifecycle: survivors of a
+// column that reached its destination are credited to that province exactly
+// once (`_settled` — also what licenses the engine to prune the entry, see
+// stepRefugees). People killed on the road (engine-side airstrike falloff /
+// crossfire, already in stats.civilianDeaths) simply never arrive.
+function settleRefugees(db) {
+  const war = db.war;
+  if (!war || !Array.isArray(war.refugees)) return;
+  for (const r of war.refugees) {
+    if (r._settled || r.arrived == null) continue;
+    creditRefugees(db, r.to, r.count);
+    r._settled = true;
+  }
 }
 function applyDevastation(db) {
   const war = db.war;
@@ -984,6 +1028,10 @@ function startWar(db, scenario) {
       consolidateFrac: (scenario.tuning || {}).consolidateFrac || 0.35,
       collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12 },
     events: [],
+    // Visible refugee columns (Phase 28) — spawned by moveRefugees' waves,
+    // walked by the engine's stepRefugees, settled by settleRefugees below.
+    // Additive/absent-safe: the engine treats a missing array as none.
+    refugees: [],
     stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [], civilianDeaths: 0, refugees: 0, enemyControl: {} },
     bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } },
     craters: [],
@@ -1028,6 +1076,15 @@ function endWar(db, actor, reason) {
   if (!war) return null;
   war.active = false;
   if (!war.result) war.result = { winner: null, endedAt: new Date().toISOString(), reason: reason || 'Ended by the Gamemaster' };
+  // Columns still on the road when the guns stop settle where they were
+  // headed — the tick loop that would have walked them home is about to
+  // stop, and people must never evaporate from the world's books.
+  if (Array.isArray(war.refugees)) {
+    for (const r of war.refugees) {
+      if (!r._settled && r.count > 0) { creditRefugees(db, r.to, r.count); r._settled = true; }
+    }
+    war.refugees = [];
+  }
   // Task 2: occupied properties stay with their occupier permanently — this
   // does NOT touch property.ownerId, only clears the stash so a FUTURE war
   // re-stashes fresh original owners instead of reaching back through this one.
@@ -1570,13 +1627,13 @@ function ctxFor(db) {
 function warTick(db) {
   ensureWarGrid(db);
   const ticked = engine.warTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); applyOccupationTransfers(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
   return ticked;
 }
 function maybeWarTick(db) {
   ensureWarGrid(db);
   const ticked = engine.maybeWarTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); applyOccupationTransfers(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
   return ticked;
 }
 

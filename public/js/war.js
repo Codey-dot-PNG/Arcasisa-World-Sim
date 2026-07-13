@@ -74,6 +74,11 @@ const War = {
   _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, dur, curPos:[x,y], node }
   _arrowAnim: {},    // unitId -> { node, tail:'x,y x,y …' } — the marker end of each move arrow chases the tweened position every frame
   _flashAnim: {},    // synthetic flash id -> { node, t0, life }
+  // Refugee columns (Phase 28) — own registry, NOT _anim: renderUnits prunes
+  // _anim against its unit ids every pass and would drop these. Same tween
+  // shape plus the per-frame fade opacity (see renderRefugees/_refOpacity).
+  _refAnim: {},      // refugeeId -> { from, to, t0, dur, curPos, node, r, war }
+  _inspectRef: null, // refugee column id under inspection (unit info card)
   _raf: null,
 
   // ---- cinematic airstrikes (Feature: two-phase bombing) ----
@@ -523,6 +528,7 @@ const War = {
     let changed = false;
     if (this._sel.size) { this._sel.clear(); changed = true; }
     if (this._inspect) { this._inspect = null; changed = true; } // Feature: unit info card — ground click clears inspection too
+    if (this._inspectRef) { this._inspectRef = null; changed = true; } // refugee columns clear the same way
     if (changed && GameMap.render) GameMap.render();
   },
 
@@ -532,6 +538,7 @@ const War = {
     if (!this.commandable()) return;
     if (e.shiftKey) { if (!this._sel.delete(unitId)) this._sel.add(unitId); }
     else { this._sel.clear(); this._sel.add(unitId); }
+    this._inspectRef = null; // picking a unit supersedes a refugee inspection
     if (GameMap.render) GameMap.render();
   },
 
@@ -542,8 +549,8 @@ const War = {
     this._keysBound = true;
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || W.layer !== 'war') return;
-      const had = this._sel.size || this._bombArmed || this._spawnArmed || this._inspect;
-      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null; this._inspect = null;
+      const had = this._sel.size || this._bombArmed || this._spawnArmed || this._inspect || this._inspectRef;
+      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null; this._inspect = null; this._inspectRef = null;
       if (had) { if (GameMap.render) GameMap.render(); this.renderToolbar(); }
     });
   },
@@ -777,6 +784,20 @@ const War = {
         if (age > f.life) { delete this._flashAnim[id]; continue; }
         f.node.style.opacity = String(1 - age / f.life);
       }
+      // Refugee columns — same linear tween as units, plus a per-frame fade
+      // opacity (fade-in after spawn, fade-out after arrival/annihilation)
+      // computed from the predicted tick clock, so the fades run smoothly
+      // between the ~per-tick war-layer rebuilds.
+      for (const id in this._refAnim) {
+        const e = this._refAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._refAnim[id]; continue; }
+        any = true;
+        const k = Math.min(1, (now - e.t0) / (e.dur || 900));
+        e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
+        const scale = warMarkerScale(GameMap.view ? GameMap.view.k : 1);
+        e.node.setAttribute('transform', `translate(${e.curPos[0]},${e.curPos[1]}) scale(${scale})`);
+        e.node.style.opacity = String(this._refOpacity(e.war, e.r));
+      }
       // Airstrike planes — position is a pure function of predicted tick, so
       // every frame just recomputes it from the entry's captured timing/strike
       // rather than interpolating toward a stored target.
@@ -813,6 +834,7 @@ const War = {
     if (!war) {
       this._anim = {}; this._flashAnim = {};
       this._airstrikeAnim = {}; this._explosionAnim = {}; this._strikeImpactAt = {};
+      this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {};
       this._removeToolbar(); this._removeUnitCard(); this._inspect = null;
       this._stopRealtime(); this._pred = null; return;
@@ -831,11 +853,13 @@ const War = {
       this.renderMoveArrows(map, mk, NS, war);
       this.renderAttackArrows(map, mk, NS, war);
       this.renderWarshipFire(map, mk, NS, war);
+      this.renderRefugees(map, mk, NS, war); // under the unit markers — a column never occludes a formation
       this.renderUnits(map, mk, NS, war);
     } else {
       // Drop any lingering per-unit animation/selection state so a re-render
       // (or a later war) doesn't try to tween ghosts of the departed units.
       this._anim = {}; this._flashAnim = {}; this._arrowAnim = {};
+      this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {}; this._sel.clear();
     }
     this._checkAirstrikeLandings(war);
@@ -1051,6 +1075,84 @@ const War = {
   // Commandable-side live markers are also the CLICK TARGETS for select /
   // shift-toggle (the group is the hitbox, so in fixed-world mode the hitbox
   // equals the visual symbol exactly); enemy and dead units get no handlers.
+  // Refugee-column fade: opacity as a pure function of the predicted tick
+  // clock (fade in over ~1.5 ticks after spawn; fade out over the engine's
+  // REFUGEE_FADE_TICKS window after arrival or annihilation) — recomputed
+  // per frame in ensureLoop, so it's smooth regardless of render cadence and
+  // survives the war layer's per-render DOM rebuild without extra state.
+  _refOpacity(war, r) {
+    const interval = Math.max(200, (war.tickMs || 2000) / (war.speed || 1));
+    const frac = Math.max(0, Math.min(1, (Date.now() - (war._lastTick || Date.now())) / interval));
+    const tickF = (war.tick || 0) + frac;
+    const fadeTicks = (window.WarEngine && WarEngine.REFUGEE_FADE_TICKS) || 4;
+    let o = Math.min(1, Math.max(0, (tickF - (r.spawnedTick || 0)) / 1.5));
+    const endTick = r.arrived != null ? r.arrived : (r.count <= 0 ? r.deadTick : null);
+    if (endTick != null) o = Math.min(o, Math.max(0, 1 - (tickF - endTick) / Math.max(1, fadeTicks - 1)));
+    return Math.max(0, Math.min(0.92, o));
+  },
+  // Refugee columns (Phase 28) — civilian flight made visible: one small
+  // neutral marker per war.refugees entry, walking from its emptying province
+  // toward shelter (the engine's stepRefugees moves them; the authority layer
+  // settles their population on arrival). Clickable — the unit info card
+  // shows the head count and route — but never selectable or commandable,
+  // and there is deliberately NO player order that targets them: they die
+  // only to the engine's airstrike falloff and crossfire. Perf: a capped
+  // array (REFUGEE_MAX, 24) drawn as one <g> each, tweened via the existing
+  // rAF loop — no combat rosters, no O(n²) passes.
+  renderRefugees(map, mk, NS, war) {
+    const list = war.refugees;
+    const liveIds = new Set();
+    if (Array.isArray(list) && list.length) {
+      const scaleNow = warMarkerScale(map.view ? map.view.k : 1);
+      for (const r of list) {
+        liveIds.add(r.id);
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('class', 'war-refugee' + (this._inspectRef === r.id ? ' war-refugee-sel' : ''));
+        const prevAnim = this._refAnim[r.id];
+        const sameLeg = prevAnim && prevAnim.to &&
+          Math.abs(prevAnim.to[0] - r.pos[0]) < 0.5 && Math.abs(prevAnim.to[1] - r.pos[1]) < 0.5;
+        const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : r.pos;
+        g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
+        g.style.opacity = String(this._refOpacity(war, r));
+        const box = document.createElementNS(NS, 'rect');
+        box.setAttribute('x', -16); box.setAttribute('y', -10); box.setAttribute('width', 32); box.setAttribute('height', 20);
+        box.setAttribute('rx', 9);
+        box.setAttribute('class', 'war-refugee-box');
+        g.appendChild(box);
+        const glyph = document.createElementNS(NS, 'text');
+        glyph.setAttribute('class', 'war-refugee-glyph');
+        glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 4);
+        glyph.textContent = '🚶';
+        g.appendChild(glyph);
+        const label = document.createElementNS(NS, 'text');
+        label.setAttribute('class', 'war-refugee-count');
+        label.setAttribute('text-anchor', 'middle'); label.setAttribute('y', 20);
+        const n = Math.max(0, Math.round(r.count || 0));
+        label.textContent = '≈' + (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n));
+        g.appendChild(label);
+        const title = document.createElementNS(NS, 'title');
+        title.textContent = `Refugee column — ≈${n.toLocaleString('en-US')} civilians fleeing ${r.fromName || r.from} for ${r.toName || r.to}`;
+        g.appendChild(title);
+        // Left-click inspects — pointerup only (same rationale as enemy-unit
+        // inspection: a left-drag starting over the marker still pans), and
+        // it falls through while a bomb/spawn placement is armed so the armed
+        // click lands on the map point underneath.
+        g.addEventListener('pointerup', (e) => {
+          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+          e.stopPropagation();
+          this._inspectRef = r.id;
+          this._inspect = null;
+          if (GameMap.render) GameMap.render();
+        });
+        map.warLayer.appendChild(g);
+        if (sameLeg) { prevAnim.node = g; prevAnim.r = r; prevAnim.war = war; }
+        else this._refAnim[r.id] = { from: from.slice(), to: r.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g, r, war };
+      }
+    }
+    for (const id in this._refAnim) if (!liveIds.has(id)) delete this._refAnim[id];
+    if (this._inspectRef && !liveIds.has(this._inspectRef)) this._inspectRef = null;
+  },
+
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
     const seenIds = new Set(); // every unit id this pass, dead or alive — drives _lastStrength/_hitAt pruning
@@ -1639,6 +1741,30 @@ const War = {
     if (old && old.parentNode) old.parentNode.removeChild(old);
     const war = (window.WarEngine && this.predictedWar()) || S().war;
     if (!war) return;
+    // Refugee column under inspection — its own compact card (checked first:
+    // it's the most recent click; selecting a unit clears it again).
+    if (this._inspectRef) {
+      const r = (war.refugees || []).find(x => x.id === this._inspectRef);
+      const wrap0 = document.getElementById('map-wrap');
+      if (!wrap0) return;
+      const card0 = el('div#war-unit-card.war-unit-card');
+      if (!r) {
+        this._inspectRef = null;
+      } else {
+        const n = Math.max(0, Math.round(r.count || 0));
+        const lost = Math.max(0, Math.round((r.startCount || n) - n));
+        card0.appendChild(el('div.war-card-title', `🚶 Refugee Column`));
+        card0.appendChild(el('div.war-card-sub', `Civilians fleeing ${r.fromName || r.from}`));
+        card0.appendChild(el('div.war-card-row', `≈${n.toLocaleString('en-US')} people on the road`));
+        if (lost > 0) card0.appendChild(el('div.war-card-row', el('span.war-card-cutoff', `${lost.toLocaleString('en-US')} lost on the way`)));
+        card0.appendChild(el('div.war-card-row', `Heading for ${r.toName || r.to}`));
+        card0.appendChild(el('div.war-card-row',
+          r.count <= 0 ? 'Status: the column was destroyed' :
+          r.arrived != null ? 'Status: dispersing into shelter' : 'Status: on the road'));
+        wrap0.appendChild(card0);
+        return;
+      }
+    }
     let unitId = null;
     if (this._sel.size === 1) unitId = [...this._sel][0];
     else if (this._inspect) unitId = this._inspect;

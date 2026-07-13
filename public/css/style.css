@@ -493,6 +493,15 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
    a whole new marker style (see War.renderUnits' nationId check). */
 .war-unit-ally .war-unit-box{stroke:#e0a458; stroke-width:2.2;}
 .war-sel-ring{fill:none; stroke:#e0c34a; stroke-width:2.5; opacity:.95;}
+/* Refugee columns (Phase 28) — neutral ivory pills walking the roads out of
+   an occupied province. Clickable (info card: head count + route); opacity
+   is driven per-frame from JS (fade in on spawn, fade out on arrival), so no
+   CSS animation here. */
+.war-refugee{pointer-events:auto; cursor:help;}
+.war-refugee-box{fill:#d8cfb8; stroke:#6b6250; stroke-width:1.4;}
+.war-refugee-sel .war-refugee-box{stroke:#e0c34a; stroke-width:2.2;}
+.war-refugee-glyph{font-size:11px;}
+.war-refugee-count{font-family:var(--font-mono); font-size:8.5px; font-weight:700; fill:#4a4436; paint-order:stroke; stroke:#e9e1cd; stroke-width:2px;}
 .war-crater{fill:#1a1410; opacity:.3; pointer-events:none; stroke:#0c0906; stroke-width:1; stroke-dasharray:6 4;}
 .war-marquee{fill:rgba(224,164,88,.12); stroke:#e0a458; stroke-width:1.5; stroke-dasharray:5 3; pointer-events:none;}
 .war-formation-line{stroke:#e0a458; stroke-width:2; stroke-dasharray:8 4; pointer-events:none;}

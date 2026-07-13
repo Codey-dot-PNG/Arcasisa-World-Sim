@@ -990,20 +990,18 @@ function migrate(world) {
         else if (pr.prodMode === 'cash') propRevenuePerTurn += pr.cashPerTurn || 0;
         propExpensePerTurn += pr.expenses || 0;
       }
-      const targetRevenue = co.vars.revenue || 0;
-      const propRevenueAnnual = propRevenuePerTurn * 365;
-      if (targetRevenue > 0 && propRevenueAnnual > 0) {
-        const scale = targetRevenue / propRevenueAnnual;
-        if (scale > 1.02 || scale < 0.98) {
-          for (const pr of props) {
-            if (pr.prodMode === 'goods') pr.produces = (pr.produces || []).map(e => ({ ...e, perTurn: Math.max(0.01, Math.round(e.perTurn * scale * 100) / 100) }));
-            else if (pr.prodMode === 'cash') pr.cashPerTurn = Math.round((pr.cashPerTurn || 0) * scale * 100) / 100;
-            pr.expenses = Math.max(0, Math.round((pr.expenses || 0) * scale));
-            pr.employees = Math.max(0, Math.round((pr.employees || 0) * scale));
-          }
-          propExpensePerTurn *= scale;
-        }
-      }
+      // NOTE (production-inflation fix): the earlier version of this block
+      // scaled every property's physical produces/cashPerTurn UP so that
+      // property output valued at wholesale `marketValue` matched the
+      // company's annualised, RETAIL-priced vars.revenue. That compared two
+      // different price bases and over-corrected 5–7×, which pumped Arcasian
+      // oil output to absurd levels (a refinery minting ~15k barrels/turn) and
+      // dragged national GDP from its authored ~13B up to ~68B (GDP is derived
+      // from production). Physical output is now left at its schema<3 seed
+      // calibration; profit is tied to properties purely through runEconomy
+      // (a company that loses properties loses the revenue those properties
+      // booked), and GDP is re-pinned to its authored target by the
+      // `_gdpTargetRecal` block below. Only the overhead baseline is kept here.
       // Corporate overhead — a small admin-cost baseline independent of any one
       // property (HQ upkeep, executive salaries…), charged even with zero
       // properties left so a war that strips a company bare actually hurts its
@@ -1050,6 +1048,24 @@ function migrate(world) {
     changed = true;
   }
 
+  // Republic standing arsenal — a modest peacetime stock of home-built armour
+  // and hulls so that armour and warships actually take the field when a war
+  // starts (the ARC Arms Works and Kradon Shipyards produce these only a
+  // fraction at a time, so on a fresh 1962 world the national stockpile would
+  // otherwise hold zero and deployArsenalUnits would field nothing). One-shot,
+  // additive: only grants what isn't already there, and only if the items exist.
+  if (!world._republicArsenalSeeded && Array.isArray(world.entities)) {
+    const gov = world.entities.find(e => e.id === 'ent_gov');
+    if (gov && world.items.some(i => i.id === 'item_tank_m36griz') && world.items.some(i => i.id === 'item_warship_kradon')) {
+      gov.inventory = gov.inventory || [];
+      const grant = (itemId, qty) => { const r = gov.inventory.find(x => x.itemId === itemId); if (r) r.qty = Math.max(r.qty || 0, qty); else gov.inventory.push({ itemId, qty }); };
+      grant('item_tank_m36griz', 80);   // ~3 M36 "Griz" armoured divisions' worth (25 tanks each), the ageing home-built fleet
+      grant('item_warship_kradon', 3);  // three Kradon-class cruisers — "the pride of the Eastern Fleet for lack of anything newer"
+      world._republicArsenalSeeded = true;
+      changed = true;
+    }
+  }
+
   // ---- Phase 27 — war overhaul: foreign military profiles ------------------
   // entity.meta.military = { navy, army, size, focus, alliance, allies,
   // importsFrom } drives BOTH the per-turn off-books production in sim.js
@@ -1062,7 +1078,7 @@ function migrate(world) {
       e.meta = e.meta || {};
       if (!e.meta.military) e.meta.military = mil;
     };
-    setMil('ent_gov', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: null, allies: ['for_sarom'], importsFrom: [] });
+    setMil('ent_gov', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: null, allies: [], importsFrom: [] }); // Arcasia is independent — no standing alliances
     setMil('for_madrosia', { navy: 'strong', army: 'weak', size: 'small', focus: 'size', alliance: null, allies: [], importsFrom: [] });
     setMil('for_mazon', { navy: 'weak', army: 'weak', size: 'small', focus: 'size', alliance: null, allies: [], importsFrom: ['for_madrosia'] });
     setMil('for_karaznia', { navy: 'weak', army: 'medium', size: 'medium', focus: 'size', alliance: 'GRACE', allies: ['for_aragonia', 'for_markasia'], importsFrom: [] });
@@ -1078,6 +1094,59 @@ function migrate(world) {
     setMil('for_qinal', { navy: 'medium', army: 'strong', size: 'big', focus: 'quality', alliance: null, allies: ['for_valksland', 'for_solme'], importsFrom: [] });
     setMil('for_sarom', { navy: 'medium', army: 'strong', size: 'medium', focus: 'quality', alliance: null, allies: ['for_aldonesia', 'for_iceland'], importsFrom: [] });
     world._militaryProfilesSeeded = true;
+    changed = true;
+  }
+
+  // Foreign starting arsenals — every foreign power with a military profile
+  // begins with a peacetime stockpile matching its profile (feature: "starting
+  // weapons profile"; and it keeps war units — including scenario attacker
+  // armour — equipped from turn zero, now that units draw guns/tanks from the
+  // national stockpile as supply). Quantities scale by size × army/navy; a
+  // nation with `importsFrom` stocks the exporter's rifle/tank pattern; a
+  // nation that already owns a pattern complements THAT rather than adding a
+  // second type. MUST run AFTER the military-profile block above, since it
+  // reads e.meta.military. One-shot, additive.
+  if (!world._foreignArsenalsSeeded && Array.isArray(world.entities)) {
+    const SIZE = { tiny: 0.4, small: 0.7, medium: 1, big: 1.8 };
+    const STR = { none: 0, weak: 0.5, medium: 1, strong: 1.8 };
+    const wpnOf = (kind, originId) => (world.items || []).find(i => i.meta && i.meta.weapon && i.meta.weapon.kind === kind && i.meta.originId === originId);
+    const heldOf = (e, kind) => (e.inventory || []).map(r => (world.items || []).find(i => i.id === r.itemId)).find(i => i && i.meta && i.meta.weapon && i.meta.weapon.kind === kind);
+    const genericGun = (world.items || []).find(i => i.meta && i.meta.weapon && (i.meta.weapon.kind || 'smallarms') === 'smallarms');
+    for (const e of world.entities) {
+      if (e.type !== 'foreign') continue;
+      const mil = e.meta && e.meta.military; if (!mil) continue;
+      const sm = SIZE[mil.size] !== undefined ? SIZE[mil.size] : 1;
+      const army = STR[mil.army] !== undefined ? STR[mil.army] : 0;
+      const navy = STR[mil.navy] !== undefined ? STR[mil.navy] : 0;
+      if (!army && !navy) continue; // no armed forces (e.g. Iceland)
+      e.inventory = e.inventory || [];
+      const grant = (itemId, qty) => { if (!itemId || !(qty > 0)) return; const r = e.inventory.find(x => x.itemId === itemId); if (r) r.qty = (r.qty || 0) + Math.round(qty); else e.inventory.push({ itemId, qty: Math.round(qty) }); };
+      // fuel
+      grant('item_fuel', 400 * sm * ((army + navy) / 2 || 0.5));
+      // rifles — own pattern, else imported, else the generic model; complement existing stock
+      if (army > 0) {
+        let gun = heldOf(e, 'smallarms') || wpnOf('smallarms', e.id);
+        if (!gun && Array.isArray(mil.importsFrom)) for (const s of mil.importsFrom) { gun = wpnOf('smallarms', s); if (gun) break; }
+        grant((gun || genericGun || {}).id, 900 * sm * army);
+      }
+      // tanks — strong armies / quality-focused mediums, own or imported
+      // pattern, falling back to a generic export tank (the Satrom '42E is
+      // literally "designated for export", else any tank in the catalogue) so a
+      // tank-fielding power without its own model still puts armour in the field.
+      const wantsTanks = mil.army === 'strong' || (mil.focus === 'quality' && army >= STR.medium);
+      if (wantsTanks) {
+        let tank = heldOf(e, 'tank') || wpnOf('tank', e.id);
+        if (!tank && Array.isArray(mil.importsFrom)) for (const s of mil.importsFrom) { tank = wpnOf('tank', s); if (tank) break; }
+        if (!tank) tank = (world.items || []).find(i => i.id === 'item_tank_satrom42e') || (world.items || []).find(i => i.meta && i.meta.weapon && i.meta.weapon.kind === 'tank');
+        grant((tank || {}).id, 60 * sm * army);
+      }
+      // warships — strong navies, own pattern
+      if (mil.navy === 'strong') {
+        const ship = heldOf(e, 'warship') || wpnOf('warship', e.id);
+        grant((ship || {}).id, Math.max(2, Math.round(3 * sm * navy)));
+      }
+    }
+    world._foreignArsenalsSeeded = true;
     changed = true;
   }
 
@@ -1130,6 +1199,52 @@ function migrate(world) {
     addImport('for_qinal', 'item_tank_type50m', 'Low', 1.25);
     world._tankTradeSeeded = true;
     changed = true;
+  }
+
+  // ---- GDP re-pin ----------------------------------------------------------
+  // globalVars.gdpScale converts per-turn production gross into national GDP
+  // (sim.js updateDerived/runEconomy). It was calibrated ONCE at the schema<3
+  // block above against the seed's production — but later migrations (the
+  // company-profit rebalance, the ARC/Kradon military production lines, the
+  // arms/tank items) all changed total production WITHOUT re-deriving the
+  // scale, so GDP drifted far from its authored figure (it had ballooned to
+  // ~68B against a ~13B seed target). This block re-pins gdpScale so the
+  // recomputed GDP lands on GDP_TARGET again, then writes the matching
+  // province gdp vars + globalVars.gdp so the value is correct on load without
+  // waiting for the first turn. Idempotent: it recomputes from CURRENT
+  // production every run and converges (re-running with production unchanged
+  // reproduces the same scale). Runs LAST so every other production-touching
+  // migration has already settled.
+  {
+    const GDP_TARGET = 13000; // authored seed GDP (₳13B; see the pre-1962 history seed, ~13k at turn 0)
+    const items = world.items || [];
+    const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
+    const propGross = (pr) => {
+      if (pr.prodMode === 'goods') return (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0);
+      if (pr.prodMode === 'cash') return pr.cashPerTurn || 0;
+      return pr.expenses || 0;
+    };
+    if (Array.isArray(world.properties) && world.properties.length) {
+      world.globalVars = world.globalVars || {};
+      const nationalGross = world.properties.reduce((s, pr) => s + propGross(pr), 0);
+      const newScale = nationalGross > 0 ? Math.round((GDP_TARGET / nationalGross) * 1e6) / 1e6 : (world.globalVars.gdpScale || 1);
+      // Only rewrite when it actually moved (keeps `changed` honest and avoids
+      // a save every boot once it has converged).
+      if (Math.abs((world.globalVars.gdpScale || 0) - newScale) > 1e-6) {
+        world.globalVars.gdpScale = newScale;
+        // Re-derive each province's gdp var from the production sited in it,
+        // then the national total — mirrors sim.js's per-turn computation so
+        // the charts read right immediately.
+        if (Array.isArray(world.provinces)) {
+          const grossByProv = {};
+          for (const pr of world.properties) { const pid = pr.provinceId; if (!pid) continue; grossByProv[pid] = (grossByProv[pid] || 0) + propGross(pr); }
+          let total = 0;
+          for (const p of world.provinces) { p.vars = p.vars || {}; p.vars.gdp = Math.round((grossByProv[p.id] || 0) * newScale * 100) / 100; total += p.vars.gdp; }
+          world.globalVars.gdp = Math.round(total * 100) / 100;
+        }
+        changed = true;
+      }
+    }
   }
 
   return changed;

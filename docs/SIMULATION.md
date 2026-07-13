@@ -9,15 +9,20 @@ Per step, in order:
 3. **Events** whose trigger is due run (`every_turn`, `interval` n, `weekly`/`monthly`
    boundary crossings, `date` reached). Conditions checked against `globalVars`; each effect
    applied with per-effect error isolation (a failed effect logs and continues).
-4. **`runEconomy`** — the per-turn production economy (below)
-5. **`runForeignTrade`** — exports/imports from the national stockpile
+4. **`runEconomy`** — the per-turn production economy (below), ending with the war's
+   civilian-mood hit (`applyWarHappinessImpact`, Phase 27 — see "War → happiness" below)
+5. **`runForeignMilitary`** — foreign powers quietly re-arm off-books (Phase 27, below)
 6. **`runBankCrisis`** — bank-reserve solvency check → economy-wide crash while underwater
 7. `updateDerived()` — recompute globalVars (population, gdp, avgHappiness, avgApproval,
-   moneySupply, treasury, econConfidence)
+   moneySupply, treasury, econConfidence). Since Phase 27 `moneySupply` sums DOMESTIC
+   accounts only — accounts owned by `foreign`/`org` entities (e.g. `acct_markasia`) are
+   excluded so they can't inflate the national aggregate charts.
 8. On month boundary: `gdpGrowth` updated, Statistical Bureau news auto-published
 9. Lottery draws due this turn (`casino.drawDueLotteries`)
 10. `recordHistory()` (chart time-series; polling sampled weekly) + `recordTradeHistory()`
-11. `store.log('time', …)`
+11. `generateTradeOrders()` — opens the next turn's foreign-trade order book (below), then
+    `runDemographics`, `redeemMaturedBonds`, `runDiplomacy`
+12. `store.log('time', …)`
 
 Then one `store.save()` + `broadcast('sync')` for the whole batch.
 
@@ -77,16 +82,72 @@ province happiness/employment; confidence shifts happiness/approval
 (`happinessConfK`, default 1.6 — a major driver). Province GDP = production gross ×
 `globalVars.gdpScale` (calibrated once at migration).
 
-## Foreign trade — `runForeignTrade`
+**Zero-property companies bleed (Phase 27, war overhaul):** company profit is now tied
+STRICTLY to properties. A company that owns no property at all this turn (lost them to war
+occupation, sold them off) no longer coasts on a stale authored `vars.revenue/profit`:
+runEconomy zeroes its `vars.revenue`, charges a per-turn **corporate overhead**
+(`vars.overheadPerTurn` — HQ upkeep/admin baseline, drawn from its account down to zero,
+set by the Phase 27 migration at 12% of the company's pre-rebalance property expense
+footprint), sets `vars.profit` to the annualised overhead loss, and decays `vars.valuation`
+0.5%/turn toward the zero property-backed value it can actually justify. The other half is
+the migration's one-shot **company profit rebalance** (`world._companyProfitRebalance`):
+each company's existing properties were scaled (produces `perTurn` / `cashPerTurn` /
+`employees` / `expenses` together) so their property-derived annual revenue matches the
+company's authored `vars.revenue` — without it, flipping to property-only income would have
+silently slashed every company's earnings. The wartime mechanism that actually strips
+properties from companies is documented in docs/WAR.md "Occupation property transfers".
 
-Works off `settings.trade`. **Exports:** every Commodities/Goods/Military item in the national
-stockpile is offered at `retail × trade.exports[item].mult` (per-country overrides; `off`
-parks an item). Partners whose authored price meets the ask buy up to their demand capacity
-(`High/Med/Low` → 2500/750/250, or explicit `partner.capacity[item]`), **highest bidder
-first**; money → treasury. **Imports:** standing orders (`trade.imports`) buy from the
-cheapest qualifying supplier under `retail × maxMult`, never overdrawing the treasury; goods →
-stockpile. Flows land in `trade.lastFlows` / `lastExportFill` / `stockIn` and the per-turn
-`trade.history` for graphs.
+**War → happiness (`applyWarHappinessImpact`, Phase 27):** called at the end of runEconomy
+while a war is active. Every province takes a flat nationwide −0.05 happiness/turn (people
+worry about a distant war too), plus an occupation hit scaling with
+`war.stats.provinceControl[provId]` — up to −0.6 happiness/turn at full occupation; approval
+takes 0.6× of the same hit. Generic: reads only `db.war`/`db.provinces`, no
+scenario-specific knowledge. (The market-side war effects live in server/market.js — see
+"War → market" below.)
+
+## Foreign trade — the order book (`generateTradeOrders` / `executeTrade`)
+
+Nothing settles automatically. Each turn `generateTradeOrders` resets the per-turn
+accumulators and posts procedural ORDERS per partner from `settings.trade.partners[]`
+authored data: **buy orders** (goods the partner wants from Arcasia — our exports, from
+`partner.exports`/`demand`) and **sell orders** (goods it offers us — our imports, from
+`partner.imports`/`supply`). Price = the item's global retail `marketValue` × the partner's
+per-item `priceMult`, shaded by relations (±10%, Phase 25), demand/supply level
+(High/Med/Low) and a small random drift. Players fill orders by hand via `executeTrade`
+(the President from the national stockpile, CEOs from company stock): the more of an order
+you fill, the worse your effective price (`TRADE_IMPACT` 35% at a full fill), tariffs go to
+the treasury, and — since Phase 27 — an **export's goods actually land in the buying
+partner's own inventory** (`addInventory(partner, …)`, mirroring how imports have always
+landed in the holder's), so foreign arsenals genuinely accumulate what they buy (tanks
+included — the Phase 27 migration authors Satrom '42E and Type 50M tank imports onto the
+Sarom/Qinal trade desks). Flows land in `trade.lastFlows` and the per-turn `trade.history`
+for graphs.
+
+## Foreign military production — `runForeignMilitary` (Phase 27)
+
+Every foreign power with an authored `entity.meta.military` profile (`{ navy, army, size,
+focus, alliance, allies, importsFrom }` — seeded by store.migrate, see docs/WORLD-DATA.md)
+slowly accrues **off-books materiel into its own inventory** each turn. No money changes
+hands — this is not trade, just the world quietly re-arming itself in the background.
+Runs right after runEconomy in the turn loop; Arcasia itself is skipped (`type:'foreign'`
+only — the Republic's arms come from properties: ARC Arms Works rifles/tanks, Kradon
+Shipyards hulls).
+
+Per power, fractional per-turn accruals build up in `e.vars.milAccum = {fuel, guns, tanks,
+ships}` and pay out whole units into inventory when they cross 1. Rates = a base × a size
+multiplier (tiny 0.4 … big 1.8) × a strength multiplier (none 0 … strong 1.8):
+
+- **fuel** (`MIL_FUEL_BASE` 1.5/turn at medium) — every armed power;
+- **small arms** (`MIL_GUN_BASE` 10/turn) — the power's own national pattern
+  (`item.meta.originId === entity id`), else its `importsFrom` exporter's pattern, else
+  whatever model it already holds (complements existing stock, never a second type);
+- **tanks** (`MIL_TANK_BASE` 0.03/turn) — only strong armies, or quality-focused
+  medium-and-up ones, with an owned/imported tank pattern;
+- **warships** (`MIL_SHIP_BASE` 0.015/turn) — strong navies only, owned pattern only.
+
+Entirely data-driven (profile + `item.meta.originId`) — the engine carries no per-nation
+special cases. These inventories are exactly what docs/WAR.md's arsenal deployment and
+per-unit resupply draw on when that nation ends up in a war.
 
 ## Stock market — server/market.js
 
@@ -99,6 +160,19 @@ stockpile. Flows land in `trade.lastFlows` / `lastExportFill` / `stockIn` and th
   it via `applyDayImpact` (impact = `depth × qty/sharesOutstanding`, capped ±25 % per trade).
   Between ticks clients and server compute the identical live wiggle from `dayAnchor` via the
   shared **pricepath** function.
+
+**War → market (Phase 27):** two mechanisms in `dayMarketTick`, both generic (they read
+only `db.war`/`db.provinces`/`db.cities`):
+- **`warSeverity(db)`** — 0 (no war / war going nowhere) to 1 (country mostly occupied,
+  cities in enemy hands): 0.6 × mean province occupation (`war.stats.provinceControl`) +
+  0.4 × fraction of cities lost (`war.stats.citiesHeld`). Applied per tick as a bearish
+  day-price drift (`warBias`, up to −1.2%/tick at severity 1, alongside the confidence
+  bias) and as a direct `econConfidence` bleed (−`sev × 0.8` per tick).
+- **`checkWarShock(db)`** — a ONE-OFF confidence shock the moment the war doc's "shape"
+  changes (war starts/ends, a city changes hands), detected by comparing a cheap
+  fingerprint stashed on `db._warMarketMark` — fires exactly once per change, serverless-
+  safe (no timers). Every company's `confidence` takes −12 and `econConfidence` −8; the
+  first observation after boot sets the mark without shocking.
 
 **Ticking without a process:** `maybeDayTick(db)` is wall-clock-gated on `db._lastDayTick`
 (default 5000ms, `economy.dayTickMs`); ridden by `GET /api/state` and the local 5s timer, plus

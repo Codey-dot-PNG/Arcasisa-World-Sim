@@ -41,7 +41,9 @@ const DEVASTATION_DEFAULTS = {
 // settings.war wins over any of these.
 const EQUIP_DEFAULTS = {
   fuelPerStrength: 0.01,   // fuel units a unit's full tank holds per point of strength
-  fuelBurnFrac: 0.02,      // fraction of a full tank burned per authoritative call while moving/fighting
+  fuelBurnFrac: 0.09,      // fraction of a full tank burned per authoritative call while moving/fighting (raised — war fuel drain was far too slow to matter)
+  weaponBurnFrac: 0.03,    // fraction of a FIGHTING unit's carried weapons (guns/tanks) expended/lost per tick — makes arsenals drain visibly during battle, not just through casualties
+  tankCapacity: 25,        // tanks that fill one armoured unit (best-quality-first, stats average across the complement; a partial fill fights worse)
   // What the UNARMED fraction of a unit is worth (fists vs rifles): each
   // soldier without a gun contributes these factors to the unit's kit
   // instead of the armed 1×(+weapon stats). A fully unarmed division deals a
@@ -213,16 +215,30 @@ function applyOccupationTransfers(db) {
 // AUTHORITY-ONLY, like applyDevastation: stockpiles live outside db.war, so
 // a predicting client never runs this — it replays the u.kit multipliers
 // carried in war state (see war-engine.js unitMul).
+// Quality score used to rank weapons "best first" for both attrition-shedding
+// (worst goes first) and resupply (best drawn first) — a unit always carries
+// the highest-quality kit it can (feature: "always prioritise the highest
+// quality supply first").
+function gunQuality(w) { return (Number(w.dmg) || 0) + (Number(w.hp) || 0) + (Number(w.morale) || 0); }
+function tankQuality(w) { return (Number(w.dmg) || 0) + (Number(w.hp) || 0) + (Number(w.armor) || 0); }
 function weaponCatalog(db) {
-  const guns = [], fuels = [];
+  const guns = [], fuels = [], tanks = [];
   for (const it of db.items) {
     if (!(it.meta && it.meta.weapon)) continue;
-    if ((it.meta.weapon.kind || 'smallarms') === 'fuel') fuels.push(it); else guns.push(it);
+    const k = it.meta.weapon.kind || 'smallarms';
+    if (k === 'fuel') fuels.push(it);
+    else if (k === 'tank') tanks.push(it);
+    else if (k === 'warship') { /* warships are whole units, not a supply pool */ }
+    else guns.push(it);
   }
-  guns.sort((a, b) => (Number(b.meta.weapon.dmg) || 0) - (Number(a.meta.weapon.dmg) || 0));
+  guns.sort((a, b) => gunQuality(b.meta.weapon) - gunQuality(a.meta.weapon));
+  tanks.sort((a, b) => tankQuality(b.meta.weapon) - tankQuality(a.meta.weapon));
   fuels.sort((a, b) => (Number(b.meta.weapon.speed) || 0) - (Number(a.meta.weapon.speed) || 0));
-  return { guns, fuels };
+  return { guns, fuels, tanks };
 }
+// Morale a full tank complement lends its crews (tanks are frightening and
+// steady the line) — folded into the armoured-unit kit below.
+const TANK_MORALE_BONUS = 0.6;
 function invGet(inv, itemId) { return inv.find(r => r.itemId === itemId); }
 function invAdd(inv, itemId, qty) {
   if (!(qty > 0)) return;
@@ -257,12 +273,26 @@ function drawFromPools(pools, itemId, qty) {
   return got;
 }
 const r3 = (v) => Math.round(v * 1000) / 1000;
+// The primary weapon pool for a unit: armoured units run on TANKS (feature:
+// "tanks use the same supply system infantry use for guns"), a fixed capacity
+// of tankCapacity (25) per unit regardless of strength; every other land kind
+// runs on small arms, one per soldier. Naval kinds carry no primary weapon
+// (their strength IS the ship). Returns null for those.
+function primaryWeaponSpec(u, catalog, troops, tankCapacity) {
+  if (u.kind === 'warship' || u.kind === 'boat') return null;
+  if (u.kind === 'armored') return { list: catalog.tanks, ids: catalog.tankIds, capacity: tankCapacity, isTank: true };
+  return { list: catalog.guns, ids: catalog.gunIds, capacity: troops, isTank: false };
+}
 function resupplyUnits(db, war) {
   const cfg = warCfg(db);
   const fuelPerStrength = Number(cfg.fuelPerStrength) || 0.01;
   const burnFrac = Number(cfg.fuelBurnFrac) || 0;
-  const { guns, fuels } = weaponCatalog(db);
-  const gunIds = new Set(guns.map(g => g.id));
+  const weaponBurnFrac = Number(cfg.weaponBurnFrac) || 0;
+  const tankCapacity = Math.max(1, Number(cfg.tankCapacity) || 25);
+  const catalog = weaponCatalog(db);
+  const { guns, fuels, tanks } = catalog;
+  catalog.gunIds = new Set(guns.map(g => g.id));
+  catalog.tankIds = new Set(tanks.map(t => t.id));
   const fuelIds = new Set(fuels.map(f => f.id));
   const fuelSpeedOf = {};
   for (const f of fuels) fuelSpeedOf[f.id] = Number(f.meta.weapon.speed) || 0;
@@ -276,40 +306,62 @@ function resupplyUnits(db, war) {
     if (!isLive(u)) continue;
     u.inv = Array.isArray(u.inv) ? u.inv : [];
     const troops = Math.max(1, Math.ceil(u.strength || 0));
-    const tank = (u.strength || 0) * fuelPerStrength;
+    const spec = primaryWeaponSpec(u, catalog, troops, tankCapacity);
+    // Oil-hungry armour (feature): a unit's fuel tank grows with the average
+    // fuelUse of the tanks it carries — a Type 50M column drinks far more than
+    // an M36 Griz one. Non-armour uses the flat strength-based tank.
+    let fuelUseMul = 1;
+    if (spec && spec.isTank) {
+      let fu = 0, fn = 0;
+      for (const t of tanks) { const row = invGet(u.inv, t.id); if (row && row.qty > 0) { fu += (Number(t.meta.weapon.fuelUse) || 0.5) * row.qty; fn += row.qty; } }
+      if (fn > 0) fuelUseMul = 0.5 + fu / fn; // ~1 for a mid tank, up to ~1.6 for the thirstiest
+    }
+    const tankSize = (u.strength || 0) * fuelPerStrength * fuelUseMul;
 
-    // 1. Attrition — the dead take their rifles with them: carry at most one
-    //    gun per remaining soldier, shedding the WORST models first.
-    let carried = 0;
-    for (const r of u.inv) if (gunIds.has(r.itemId)) carried += (r.qty || 0);
-    let excess = carried - troops;
-    for (let i = guns.length - 1; i >= 0 && excess > 0; i--) excess -= invTake(u.inv, guns[i].id, excess);
+    if (spec) {
+      const fighting = u.state === 'fighting';
+      // 1. Attrition + expenditure — casualties take their weapons with them
+      //    (carry at most `capacity`), and a FIGHTING unit additionally burns
+      //    through weaponBurnFrac of what it carries each tick (losses, wear,
+      //    ammunition). Worst-quality models are shed first, so a unit always
+      //    keeps its best kit. Both drain the national arsenal via resupply
+      //    below (feature: "weapon drain is too slow" — now it drains in
+      //    combat, not only on death).
+      let carried = 0;
+      for (const r of u.inv) if (spec.ids.has(r.itemId)) carried += (r.qty || 0);
+      let excess = carried - spec.capacity;
+      if (fighting && weaponBurnFrac > 0) excess += carried * weaponBurnFrac;
+      for (let i = spec.list.length - 1; i >= 0 && excess > 0; i--) excess -= invTake(u.inv, spec.list[i].id, excess);
+    }
 
     // 2. Fuel burn — moving or fighting eats into the tank (holding still or
-    //    riding the fleet doesn't).
+    //    riding the fleet doesn't). Naval kinds burn too (they move under power).
     if (burnFrac > 0 && u.state !== 'holding' && u.state !== 'embarked') {
-      let burn = tank * burnFrac;
+      let burn = tankSize * burnFrac;
       for (const f of fuels) { if (burn <= 0) break; burn -= invTake(u.inv, f.id, burn); }
     }
 
     // 3. Resupply — only inside the supply corridor, only out of the unit's
     //    own nation's stockpile. Embarked invaders load out at sea (supplied
-    //    by the fleet), so nobody hits the beach empty-handed. Draws are kept
-    //    integral so national inventories never go fractional.
+    //    by the fleet), so nobody hits the beach empty-handed. BEST QUALITY is
+    //    drawn first (spec.list is quality-sorted), so a unit re-arms with the
+    //    finest weapons its nation still has in stock.
     if (u.supplied !== false) {
       const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
       const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
-      let carriedNow = 0;
-      for (const r of u.inv) if (gunIds.has(r.itemId)) carriedNow += (r.qty || 0);
-      let gunNeed = troops - carriedNow;
-      for (const g of guns) {
-        if (gunNeed <= 0) break;
-        const got = drawFromPools(pools, g.id, gunNeed);
-        if (got > 0) { invAdd(u.inv, g.id, got); gunNeed -= got; }
+      if (spec) {
+        let carriedNow = 0;
+        for (const r of u.inv) if (spec.ids.has(r.itemId)) carriedNow += (r.qty || 0);
+        let need = spec.capacity - carriedNow;
+        for (const g of spec.list) {
+          if (need <= 0) break;
+          const got = drawFromPools(pools, g.id, need);
+          if (got > 0) { invAdd(u.inv, g.id, got); need -= got; }
+        }
       }
       let fuelNow = 0;
       for (const r of u.inv) if (fuelIds.has(r.itemId)) fuelNow += (r.qty || 0);
-      let fuelNeed = Math.floor(tank - fuelNow);
+      let fuelNeed = Math.floor(tankSize - fuelNow);
       for (const f of fuels) {
         if (fuelNeed <= 0) break;
         const got = drawFromPools(pools, f.id, fuelNeed);
@@ -318,29 +370,43 @@ function resupplyUnits(db, war) {
     }
 
     // 4. Fold the unit's own packs into its combat kit (consumed by the
-    //    engine's unitMul). Each ARMED soldier contributes the 1× baseline
-    //    plus his weapon's stats; each UNARMED one contributes the (savage)
-    //    settings.war.unarmed* factors instead — a division with empty racks
-    //    is fighting with fists, and its dmg/hp/morale collapse accordingly.
+    //    engine's unitMul). Each ARMED slot contributes the 1× baseline plus
+    //    its weapon's stats (AVERAGED across a mixed complement — different
+    //    models just average out); each EMPTY slot contributes the (savage)
+    //    settings.war.unarmed* factors — an under-strength unit (fewer weapons
+    //    than its capacity) is correspondingly weaker. A tank contributes its
+    //    armour to hp and a steadying morale bonus; a rifle its own stats.
     const kit = { dmg: 0, hp: 0, morale: 0, speed: 1 };
-    let unarmed = troops;
-    for (const g of guns) {
-      if (unarmed <= 0) break;
-      const row = invGet(u.inv, g.id);
-      if (!row || !(row.qty > 0)) continue;
-      const armed = Math.min(unarmed, row.qty);
-      const frac = armed / troops;
-      const wpn = g.meta.weapon;
-      kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
-      kit.hp += frac * (1 + (Number(wpn.hp) || 0));
-      kit.morale += frac * (1 + (Number(wpn.morale) || 0));
-      unarmed -= armed;
-    }
-    const unarmedFrac = Math.max(0, unarmed) / troops;
-    if (unarmedFrac > 0) {
-      kit.dmg += unarmedFrac * (Number(cfg.unarmedDmg) || 0.25);
-      kit.hp += unarmedFrac * (Number(cfg.unarmedHp) || 0.5);
-      kit.morale += unarmedFrac * (Number(cfg.unarmedMorale) || 0.3);
+    if (spec) {
+      const cap = spec.capacity;
+      let filled = 0;
+      for (const g of spec.list) {
+        if (filled >= cap) break;
+        const row = invGet(u.inv, g.id);
+        if (!row || !(row.qty > 0)) continue;
+        const n = Math.min(cap - filled, row.qty);
+        const frac = n / cap;
+        const wpn = g.meta.weapon;
+        if (spec.isTank) {
+          kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
+          kit.hp += frac * (1 + (Number(wpn.hp) || 0) + (Number(wpn.armor) || 0));
+          kit.morale += frac * (1 + TANK_MORALE_BONUS);
+        } else {
+          kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
+          kit.hp += frac * (1 + (Number(wpn.hp) || 0));
+          kit.morale += frac * (1 + (Number(wpn.morale) || 0));
+        }
+        filled += n;
+      }
+      const emptyFrac = Math.max(0, cap - filled) / cap;
+      if (emptyFrac > 0) {
+        kit.dmg += emptyFrac * (Number(cfg.unarmedDmg) || 0.25);
+        kit.hp += emptyFrac * (Number(cfg.unarmedHp) || 0.5);
+        kit.morale += emptyFrac * (Number(cfg.unarmedMorale) || 0.3);
+      }
+    } else {
+      // Naval kinds have no supply pool — their built-in stats stand alone.
+      kit.dmg = 1; kit.hp = 1; kit.morale = 1;
     }
     let fuelQty = 0, fuelBonus = 0;
     for (const r of u.inv) {
@@ -348,7 +414,7 @@ function resupplyUnits(db, war) {
       fuelQty += (r.qty || 0);
       fuelBonus = Math.max(fuelBonus, fuelSpeedOf[r.itemId] || 0);
     }
-    if (fuelBonus > 0 && tank > 0) kit.speed += fuelBonus * Math.min(1, fuelQty / tank);
+    if (fuelBonus > 0 && tankSize > 0) kit.speed += fuelBonus * Math.min(1, fuelQty / tankSize);
     for (const k in kit) kit[k] = r3(kit[k]);
     u.kit = kit;
 
@@ -535,34 +601,19 @@ function arsenalWeaponsOf(db, entity, kind) {
   }
   return out;
 }
-// Combat stats for a tank unit grouped from `count` tanks of one model.
-// Normalises around the existing UNIT_DEFAULTS.armored (a "full", 25-tank
-// unit) so a unit of the best tank model reads markedly stronger than one of
-// the worst, purely from the model's own meta.weapon numbers — no hardcoded
-// per-model table, so any new tank item the GM mints slots in automatically.
-function tankUnitStats(wpn, count) {
-  const dmg = Number(wpn.dmg) || 3;
-  const hp = Number(wpn.hp) || 150;
-  const armor = Number(wpn.armor) || 100;
-  const speed = Number(wpn.speed) || 3;
-  const frac = Math.max(0.06, Math.min(1, count / 25));
-  const qualityHp = Math.max(0.25, (hp + armor * 1.5) / 300); // ~1 for a "typical" mid-war tank
-  const qualityAtk = Math.max(0.25, dmg / 90); // ~1 for a ~90mm-class gun
-  return {
-    strength: Math.max(200, Math.round(2800 * frac * qualityHp)),
-    atk: Math.max(0.3, Math.min(4, round1(1.25 * qualityAtk))),
-    speed: Math.max(1, Math.min(8, speed || 3))
-  };
-}
-// Combat stats for a single warship, from its item's meta.weapon.
+// Combat stats for a single warship, from its item's meta.weapon (dmg/hp/speed
+// on a 0–1 quality scale, same convention as the tank/gun items). Warships are
+// NOT supply-fed (they have no kit — their strength IS the hull), so the item
+// stats stand alone here. Greatly varying: a Kradon cruiser (hp 0.40) reads far
+// weaker than a Valkslandic dreadnought (hp 0.90).
 function warshipUnitStats(wpn) {
-  const dmg = Number(wpn.dmg) || 4;
-  const hp = Number(wpn.hp) || 400;
-  const speed = Number(wpn.speed) || 3;
+  const dmg = Number(wpn.dmg) || 0.3;
+  const hp = Number(wpn.hp) || 0.4;
+  const speed = Number(wpn.speed) || 0.3;
   return {
-    strength: Math.max(500, Math.round(hp * 9)),
-    atk: Math.max(0.5, Math.min(5, round1(dmg / 50))),
-    speed: Math.max(1, Math.min(6, speed || 3))
+    strength: Math.max(1500, Math.round(3000 * (1 + hp))),   // ~4200 (Kradon) … ~5700 (Dreadnought)
+    atk: Math.max(0.6, round1(1 + dmg * 3)),                  // ~1.9 … ~3.55
+    speed: Math.max(2, round1(2 + speed * 6))                 // ~3.5 … ~4.4
   };
 }
 // toRoman is defined once, further down (foreign-intervention naming) — JS
@@ -571,20 +622,25 @@ function warshipUnitStats(wpn) {
 // The nearest coastline point to `from`: a LAND cell adjacent to at least one
 // WATER cell, searched outward from `from`'s own cell. Used when there's no
 // seeded port property to anchor a warship spawn on.
-function nearestCoastlinePoint(grid, from) {
+// The nearest WATER cell adjacent to land (a harbour tile), searched outward
+// from `from`. Warships must spawn AFLOAT — the engine refuses to let a naval
+// kind step onto land, so a ship placed on a land coastline cell would be
+// beached and unable to move or fight (this was why warships "didn't spawn"
+// visibly: they deployed onto the port's land tile and sat inert).
+function nearestHarbourWater(grid, from) {
   if (!grid || !grid.landCells) return null;
   const cs = grid.cell;
   const fx = Math.floor(from[0] / cs), fy = Math.floor(from[1] / cs);
-  const R = 70;
+  const R = 90;
   let best = null, bd = Infinity;
   for (let dx = -R; dx <= R; dx++) {
     for (let dy = -R; dy <= R; dy++) {
       const cx = fx + dx, cy = fy + dy;
       if (cx < 0 || cy < 0 || cx >= grid.cols || cy >= grid.rows) continue;
-      if (!grid.landCells[engine.cellKey(cx, cy)]) continue;
+      if (grid.landCells[engine.cellKey(cx, cy)]) continue; // must be WATER
       let coastal = false;
       for (const off of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
-        if (!grid.landCells[engine.cellKey(cx + off[0], cy + off[1])]) { coastal = true; break; }
+        if (grid.landCells[engine.cellKey(cx + off[0], cy + off[1])]) { coastal = true; break; }
       }
       if (!coastal) continue;
       const p = [(cx + 0.5) * cs, (cy + 0.5) * cs];
@@ -594,10 +650,13 @@ function nearestCoastlinePoint(grid, from) {
   }
   return best;
 }
+// The water tile a warship spawns on: the harbour water nearest a seeded port
+// property (or, failing that, the capital). Always a WATER cell so the ship is
+// afloat and mobile from tick one.
 function findPortPos(db, grid, capitalPos) {
   const port = (db.properties || []).find(p => p.pos && (p.kind === 'port' || /\bport\b|harbou?r/i.test(p.name || '')));
-  if (port) return port.pos.slice();
-  return nearestCoastlinePoint(grid, capitalPos) || capitalPos;
+  const anchor = port ? port.pos : capitalPos;
+  return nearestHarbourWater(grid, anchor) || nearestHarbourWater(grid, capitalPos) || anchor;
 }
 // Groups the defender's tank/warship arsenal into fresh war units at the
 // capital (armour) and the nearest port (navy). Called once, at startWar,
@@ -606,39 +665,59 @@ function findPortPos(db, grid, capitalPos) {
 function deployArsenalUnits(db, war, defender) {
   const capital = db.cities.find(c => c.id === 'city_lachevan') || db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
   const capitalPos = capital ? capital.pos : [war.grid.cols * war.grid.cell / 2, war.grid.rows * war.grid.cell / 2];
-  const portPos = findPortPos(db, war.grid, capitalPos);
+  const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
+  const armDef = unitDefaults.armored || { strength: 2800, speed: 4.6, atk: 1.25 };
+  const cfg = warCfg(db);
+  const tankCapacity = Math.max(1, Number(cfg.tankCapacity) || 25);
+  const hpMod = (war.mods && war.mods.hp) || 1;
 
+  // --- armour: 25 tanks = 1 unit, but capped at 50% of the Republic's other
+  // formations (feature: "limit the republic's tanks to at most 50% of the
+  // regular units it has"). Tanks are LEFT in the national stockpile so the
+  // supply system (resupplyUnits) loads each armoured unit best-tank-first —
+  // its combat stats then come from the kit those tanks form, so a Type 50M
+  // column is far stronger than an M36 Griz one. Units get the standard
+  // armoured HP pool; the tank kit multiplies it.
   const tanks = arsenalWeaponsOf(db, defender, 'tank');
-  let armouredIdx = 0;
-  for (const { item, qty } of tanks) {
-    const numUnits = Math.ceil(qty / 25);
-    for (let i = 0; i < numUnits; i++) {
-      const count = Math.min(25, qty - i * 25);
-      if (count <= 0) continue;
-      armouredIdx++;
-      const stats = tankUnitStats(item.meta.weapon, count);
-      const spawnPos = engine.clampToWorld(war, [capitalPos[0] + rand(-40, 40), capitalPos[1] + rand(-40, 40)]);
-      war.units.push({
-        id: store.uid('warunit'), side: 'def',
-        name: `${toRoman(armouredIdx)} Armored — ${item.name}${numUnits > 1 ? ` (${i + 1}/${numUnits})` : ''}`,
-        kind: 'armored', pos: spawnPos, dest: null,
-        strength: stats.strength, maxStrength: stats.strength, org: 100,
-        speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null
-      });
-    }
-  }
-
-  const warships = arsenalWeaponsOf(db, defender, 'warship');
-  for (const { item } of warships) {
-    const stats = warshipUnitStats(item.meta.weapon);
-    const spawnPos = engine.clampToWorld(war, [portPos[0] + rand(-30, 30), portPos[1] + rand(-30, 30)]);
+  let totalTanks = 0;
+  for (const { qty } of tanks) totalTanks += qty;
+  const otherDefUnits = war.units.filter(u => u.side === 'def' && u.kind !== 'armored' && u.kind !== 'warship').length;
+  const wanted = Math.ceil(totalTanks / tankCapacity);
+  const cap = Math.floor(otherDefUnits * 0.5);
+  const numArmoured = Math.max(0, Math.min(wanted, cap));
+  const bestTankName = tanks.length ? tanks.slice().sort((a, b) => tankQuality(b.item.meta.weapon) - tankQuality(a.item.meta.weapon))[0].item.name : 'Armour';
+  for (let i = 0; i < numArmoured; i++) {
+    const s = Math.round(armDef.strength * hpMod);
+    const spawnPos = engine.clampToWorld(war, [capitalPos[0] + rand(-45, 45), capitalPos[1] + rand(-45, 45)]);
     war.units.push({
       id: store.uid('warunit'), side: 'def',
-      name: `Warship — ${item.name}`,
-      kind: 'warship', pos: spawnPos, dest: null,
-      strength: stats.strength, maxStrength: stats.strength, org: 100,
-      speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null
+      name: `${toRoman(i + 1)} Armoured Division`,
+      kind: 'armored', pos: spawnPos, dest: null,
+      strength: s, maxStrength: s, org: 100,
+      speed: armDef.speed, atk: armDef.atk, state: 'holding', objectiveId: null,
+      inv: [], spawned: true
     });
+  }
+
+  // --- navy: one unit per warship item (1 hull = 1 warship), spawned AFLOAT at
+  // the harbour water nearest a port. Stats derive from the hull's own quality.
+  const warships = arsenalWeaponsOf(db, defender, 'warship');
+  const portPos = findPortPos(db, war.grid, capitalPos);
+  for (const { item, qty } of warships) {
+    const n = Math.floor(qty);
+    for (let k = 0; k < n; k++) {
+      const stats = warshipUnitStats(item.meta.weapon);
+      const s = Math.round(stats.strength * hpMod);
+      let spawnPos = engine.clampToWorld(war, [portPos[0] + rand(-40, 40), portPos[1] + rand(-40, 40)]);
+      if (!engine.isWaterAt(war, spawnPos)) spawnPos = portPos.slice(); // keep it afloat
+      war.units.push({
+        id: store.uid('warunit'), side: 'def',
+        name: n > 1 ? `${item.name} ${toRoman(k + 1)}` : item.name,
+        kind: 'warship', pos: spawnPos, dest: null,
+        strength: s, maxStrength: s, org: 100,
+        speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null, spawned: true
+      });
+    }
   }
 }
 
@@ -837,7 +916,7 @@ function startWar(db, scenario) {
     // GM global tuning (Feature: war.mods) — defaults are also the engine's
     // fallback (`(war.mods && war.mods.dmg) || 1`), so a legacy war missing
     // this field behaves identically without needing a migration.
-    mods: { dmg: 1, bombDmg: 1, hp: 1 },
+    mods: { dmg: 3, bombDmg: 5, hp: 1 },
     // Foreign nations that joined an ongoing war via joinWar (Feature:
     // intervention) — additive/absent-safe, mirrors `mods` above: a war doc
     // predating this feature simply has no allies of either side.
@@ -1082,32 +1161,30 @@ function allyContingentSize(mil) {
   const bonus = ALLY_ARMY_BONUS[mil.army] || 0;
   return engine.clamp(base + bonus, JOIN_MIN_COUNT, JOIN_MAX_COUNT);
 }
-// Auto-joins every foreign entity allied with the attacker onto the att side
-// and every entity allied with the defender onto the def side, reusing
-// joinWar's existing homeland-muster/contingent-spawn/news-wire pathway so
-// these read exactly like a manually-triggered "<NATION> ENTERS THE WAR"
-// intervention. scenario.allies: false disables this entirely (default on);
-// scenario.coAttackers force-joins specific entities on the attacker's side
-// regardless of their profile (hand-authored joint invasions). An entity
-// that would qualify for BOTH sides (contradictory hand-edited data) joins
-// the attacker — the invasion is the thing that just happened.
+// Brings ONLY explicitly-invited belligerents into a war at start (feature
+// change: alliances no longer auto-drag nations in — Arcasia and everyone else
+// stay out unless invited). A scenario can hand-author joint operations with
+// `coAttackers: [entityId,…]` / `coDefenders: [entityId,…]`; a mid-war GM
+// invitation still works through joinWar directly, for ANY nation onto EITHER
+// side regardless of alliance. Contingent size comes from the invitee's
+// military profile (army:'none' commits nobody, with a flavour line). The
+// `alliedWith`/profile check is intentionally NOT consulted here anymore.
 function autoJoinAllies(db, war, scenario, attacker, defender, actor) {
   if (scenario.allies === false) return;
-  const coAttackers = new Set(scenario.coAttackers || []);
-  const foreign = (db.entities || []).filter(e => e.type === 'foreign' && e.id !== attacker.id && e.id !== defender.id);
-  for (const e of foreign) {
-    const isCoAttacker = coAttackers.has(e.id);
-    const isAttAlly = isCoAttacker || alliedWith(db.entities, attacker.id, e.id);
-    const isDefAlly = !isAttAlly && alliedWith(db.entities, defender.id, e.id);
-    if (!isAttAlly && !isDefAlly) continue;
+  const invited = [];
+  for (const id of (scenario.coAttackers || [])) invited.push({ id, side: 'att' });
+  for (const id of (scenario.coDefenders || [])) invited.push({ id, side: 'def' });
+  for (const { id, side } of invited) {
+    const e = (db.entities || []).find(x => x.id === id && x.type === 'foreign');
+    if (!e || e.id === attacker.id || e.id === defender.id) continue;
     const mil = e.meta && e.meta.military;
     const count = allyContingentSize(mil);
     if (count <= 0) {
-      engine.pushEvent(war, 'milestone', joinEntryPoint(db, war, isAttAlly ? 'att' : 'def', e.id),
-        `${e.name} is allied but has no forces to commit to the war.`);
+      engine.pushEvent(war, 'milestone', joinEntryPoint(db, war, side, e.id),
+        `${e.name} was called upon but has no forces to commit to the war.`);
       continue;
     }
-    joinWar(db, { side: isAttAlly ? 'att' : 'def', entityId: e.id, count }, actor);
+    joinWar(db, { side, entityId: e.id, count }, actor);
   }
 }
 

@@ -897,10 +897,16 @@ function applyWarHappinessImpact(db) {
 // seed/migration data (server/store.js), per docs/CONVENTIONS.md.
 const MIL_SIZE_MULT = { tiny: 0.4, small: 0.7, medium: 1, big: 1.8 };
 const MIL_STRENGTH_MULT = { none: 0, weak: 0.5, medium: 1, strong: 1.8 };
-const MIL_FUEL_BASE = 1.5;   // barrels/turn at size=medium, strength=1
-const MIL_GUN_BASE = 10;     // rifles/turn at size=medium, army=1
-const MIL_TANK_BASE = 0.03;  // tanks/turn at size=medium, army=1 (strong/quality only)
-const MIL_SHIP_BASE = 0.015; // hulls/turn at size=medium, navy=1 (strong only)
+// Per-turn off-books military production, base rates at size=medium /
+// strength=1 (scaled by MIL_SIZE_MULT × MIL_STRENGTH_MULT below). Raised an
+// order of magnitude over the original trickle so a genuine regional power
+// (Valksland: big×strong ⇒ ~52 fuel, ~145 rifles/turn) actually fields a
+// stockpile comparable to Arcasia's own arsenal, instead of sitting on a few
+// hundred barrels while the Republic's oil economy dwarfs it.
+const MIL_FUEL_BASE = 16;    // barrels/turn at size=medium, strength=1
+const MIL_GUN_BASE = 45;     // rifles/turn at size=medium, army=1
+const MIL_TANK_BASE = 0.15;  // tanks/turn at size=medium, army=1 (strong/quality only)
+const MIL_SHIP_BASE = 0.06;  // hulls/turn at size=medium, navy=1 (strong only)
 function runForeignMilitary(db, actor) {
   const items = db.items || [];
   const findByOrigin = (kind, originId) => items.find(i => i.meta && i.meta.weapon && i.meta.weapon.kind === kind && i.meta.originId === originId);

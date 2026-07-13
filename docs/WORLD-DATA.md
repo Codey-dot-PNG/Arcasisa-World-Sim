@@ -61,8 +61,22 @@ Common: `{ id, type, name, abbrev?, title?, color, logo?, description, vars: {},
 `govMix`, `govMixByItem?`, `govPriceMult`, `wage`, and engine outputs `fulfil`, `govFulfil`,
 `vars.profit/revenue/valuation`.
 
+**Company extras (Phase 27):** `vars.overheadPerTurn` — a per-turn corporate admin cost
+charged even when the company owns zero properties, so a war that strips it bare bleeds its
+cash (set by the Phase 27 profit-rebalance migration at 12% of its pre-rebalance property
+expense footprint; see docs/SIMULATION.md "Zero-property companies bleed").
+
 **Party extras:** `ideology {econ, soc}`, `leaderId`, `inGovernment`, `mpCount`,
 `support { provId: { all|group: bonus } }`.
+
+**Foreign-power extras (Phase 27):** `meta.military = { navy, army ('none'|'weak'|'medium'|
+'strong'), size ('tiny'|'small'|'medium'|'big'), focus ('size'|'quality'), alliance (e.g.
+'GRACE'|null), allies: [entityIds], importsFrom: [entityIds] }` — the authored military
+profile driving per-turn off-books production (`sim.runForeignMilitary`) and war-time
+alliance auto-join + contingent sizing (docs/WAR.md "Alliance-aware wars"). Seeded once by
+store.migrate (`world._militaryProfilesSeeded`) for every seed nation plus `ent_gov`;
+skips nations not present in a world. `vars.milAccum = {fuel, guns, tanks, ships}` holds
+the fractional production accumulators.
 
 **Government:** `ceoId` + `executives: [entityIds]` — maintained by `sim.syncPresidency()`
 from whoever holds the `president` role. Don't set these by hand.
@@ -85,6 +99,18 @@ office|bank|…), provinceId, pos [x,y on 3840×2160 grid], ownerId, value, empl
 produces: [{itemId, perTurn}], cashPerTurn, targetRevenue? }`.
 `type: 'military'` sites are hidden from operators without the `military` map layer.
 
+War-related notes (Phase 27): `prop_arc_arms` (ARC Arms Works, `type:'military'`) is seeded
+in the Republic and produces the M38 rifle plus a slow M36 "Griz" tank line (fractional
+`perTurn: 0.5` — runEconomy's per-turn rounding wobble turns that into "about one every
+other turn"); a flag-gated migration (`world._armsWorksMoved2`) relocates it to the
+capital's industrial fringe in Lachevan, deriving the spot from the capital city's CURRENT
+position (live worlds are on the 3840×2160 master grid — never hardcode seed-space coords
+in migrate). `prop_shipyards` (Kradon Shipyards) switches from a flat cash office to a
+goods producer of the Kradon-class warship at `perTurn: 0.02` (~1 hull every 50 turns;
+`world._kradonShipyardWarship`). During a war, `vars._preWarOwnerId` stashes a property's
+pre-occupation owner while the occupier holds it — see docs/WAR.md "Occupation property
+transfers"; `endWar` clears the stash, ownership stays wherever the war left it.
+
 ## Items
 
 `{ id, name, category, marketValue, tradable, description, meta? }`. Categories:
@@ -94,6 +120,20 @@ Two special mirror kinds — never edit their quantities directly:
   (`market.setHolding` / `syncAllCertificates`). `marketValue` tracks the day price.
 - **Property deeds:** `meta.propertyId` — qty-1 mirror of `property.ownerId`
   (`deeds.transfer` / `syncAllDeeds`).
+
+**Weapon items** carry `meta.weapon` stats that feed the war engine, plus `meta.originId`
+(which nation's national pattern this is — `null` for Arcasian designs; used by
+`runForeignMilitary` to pick what a power produces). Kinds:
+`{kind:'smallarms', dmg, hp, morale}`, `{kind:'fuel', speed}` (Phase 23), and since the
+Phase 27 war overhaul `{kind:'tank', model, dmg, hp, armor, speed, fuelUse}` and
+`{kind:'warship', model, dmg, hp, range, speed}`. Seeded once by store.migrate
+(`world._armorNavySeeded`), three tank models and three warship classes with deliberately
+wide stat spreads: `item_tank_m36griz` (M36 "Griz", old Arcasian), `item_tank_satrom42e`
+("Muhit" Satrom '42E, Saromese export), `item_tank_type50m` (Type 50M, modern Qinali
+export); `item_warship_kradon` (Kradon-class Cruiser, Arcasian), `item_warship_madrosian`
+(Madrosian Frigate), `item_warship_valkslandic` (Valkslandic Dreadnought). The GM can mint
+more from the item templates — the war engine derives unit stats from `meta.weapon`
+numbers alone (docs/WAR.md "Tank & warship arsenal deployment"), no hardcoded model table.
 
 ## Events
 
@@ -136,5 +176,12 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
   `settings.economy` seeded, old profit-generator events retired.
 - **< 4 (Phase 14):** `sellPct/govPct` → `keepPct/govMix/govPriceMult`, `trade.govBuy` /
   `trade.exports` / partner `demand/supply` levels, export pool folded into `gov.inventory`.
+- **Phase 27 (war overhaul, no schema bump — all one-shot flag-gated):**
+  `_companyProfitRebalance` (scale each company's properties so property-derived revenue
+  matches its authored `vars.revenue`; sets `vars.overheadPerTurn`), `_armorNavySeeded`
+  (3 tank + 3 warship items), `_militaryProfilesSeeded` (`entity.meta.military` roster),
+  `_arcArmsTank` / `_kradonShipyardWarship` (domestic tank/warship production lines),
+  `_tankTradeSeeded` (Satrom/Qinal tank imports on the trade desk), `_armsWorksMoved2`
+  (ARC Arms Works to Lachevan, derived from the capital's live position).
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino
   owner self-heal, certificate/deed reconciliation…). Follow the existing patterns when adding.

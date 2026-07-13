@@ -81,6 +81,50 @@ comments; state fields are all additive/absent-safe):
   +25 (defence) / −30 (invader) via `sim.shiftRelations` — see
   docs/SIMULATION.md "Foreign relations".
 
+**Phase 27 war-overhaul additions at a glance** (each has a full section
+below; state fields remain additive/absent-safe):
+
+- **Naval kinds** — two new unit kinds, `boat` and `warship` (`NAVAL_KINDS`):
+  water-only movers (they wall-follow around land the way every unit already
+  wall-follows around neutral borders). Warships never fight in the 40px
+  collision pass at all — they fire in a separate RANGED pass at
+  `WARSHIP_RANGE` (180px) with a `WARSHIP_TRANSPORT_BONUS` (3×) against
+  transports and boats. See "Naval kinds — boats & warships".
+- **Transport state** — a LAND unit whose position ends up over open sea
+  becomes `state: 'transport'` (rendered as a little transport ship): it
+  cannot deal damage but can still be hit, and resumes its previous state on
+  landfall. Backed by a new merged `grid.landCells` land/sea lookup. See
+  "Transport state".
+- **Arsenal deployment at war start** — `startWar` walks the defender's own
+  inventory for `meta.weapon.kind: 'tank'/'warship'` items: every 25 tanks of
+  a model become one armoured unit at the capital, every warship item becomes
+  one warship unit at the nearest port. See "Tank & warship arsenal
+  deployment".
+- **Population-scaled garrisons** — the defender roster is no longer a flat
+  one-garrison-per-site rule; the garrison COUNT scales with national
+  population (`POP_PER_GARRISON`), distributed across the same city/military-
+  property sites by weight. See "Population-scaled garrisons".
+- **Dynamic attacker staging** — the staging box is computed fresh from
+  current map data (homeland bearing for naval attackers, nearest own soil
+  for land ones; `scenario.bearingHint` covers off-map powers), falling back
+  to the static `scenario.staging`. See "Dynamic attacker staging".
+- **Neutral-territory hardening** — orders and transport-graph routes are
+  kept off closed-border soil BEFORE movement starts (`nearestNonNeutralPoint`
+  dest/waypoint clamping, blocked Dijkstra nodes), not just refused mid-step.
+  See "Neutral-territory hardening".
+- **Occupation transfers property** — a property sitting on attacker-held
+  ground changes owner via the deed choke point (`applyOccupationTransfers`,
+  authority-only), reverts if recaptured, and stays with the occupier after
+  the war ends. See "Occupation property transfers".
+- **Alliance auto-join** — nations allied with a belligerent
+  (`entity.meta.military.allies`, seeded by store.migrate) auto-join at
+  `startWar` through the existing joinWar pathway; `scenario.allies: false`
+  opts out, `scenario.coAttackers` force-joins. See "Alliance-aware wars".
+- The wider Phase 27 economy half — foreign per-turn military production,
+  property-tied company profits, war→market/happiness effects, the tank and
+  warship items themselves — lives in docs/SIMULATION.md and
+  docs/WORLD-DATA.md.
+
 **Module split (Phase 18):**
 
 - `server/war-engine.js` — the deterministic, dependency-free SIMULATION
@@ -120,7 +164,11 @@ war: {
     cell: 48, cols, rows,                    // 48px cells over the 3840×2160 master grid
     provinceLandCells: { provId: count },    // total LAND cells per province (computed once at startWar)
     provinceCells: { provId: [[cx,cy], …] }, // that province's land-cell indices (patrol/sweep waypoints)
-    totalLandCells
+    totalLandCells,
+    landCells: { "cx,cy": true }             // Phase 27 — merged land lookup (province + foreign-homeland
+                                             // cells); absent key = sea. Built by buildGrid; ensureWarGrid
+                                             // backfills it onto an in-progress pre-Phase-27 war. Powers
+                                             // isWaterAt (transport state, naval land-refusal).
   },
   cells: { "cx,cy": { o:'att', p:1, pid: provId } }, // SPARSE — only attacker-held/contested cells; absent key = defender-held (if it's land at all)
   units: [ { id, side:'att'|'def', name, kind, pos:[x,y], dest:[x,y]|null,
@@ -154,12 +202,16 @@ unit is chasing under an explicit attack order — see "Explicit attack orders"
 below) and `supplied` (recomputed every tick by `stepSupply`; `false` means
 the unit is cut off from its side's supply corridor — see "Supply corridors &
 resupply" below; absent on pre-Phase-20 docs, which every reader treats as
-supplied).
+supplied). Phase 27 adds `_preTransportState` (the state a land unit was in
+before drifting over water — see "Transport state" below).
 
 Unit `kind` is free-form scenario data (`marine`, `infantry`, `armored`,
-`reserve` for the attacker; every defender is spawned as `garrison`). Unit
-`state` is one of `embarked` (attacker only, still at sea), `moving`,
-`fighting`, `holding`, `routed`.
+`reserve` for the attacker; defenders spawn as `garrison`, plus `armored`/
+`warship` units deployed from the national arsenal — see "Tank & warship
+arsenal deployment" below). Phase 27 adds the naval-only kinds `boat` and
+`warship` (see "Naval kinds" below). Unit `state` is one of `embarked`
+(attacker only, still at sea), `moving`, `fighting`, `holding`, `routed`,
+plus `transport` (Phase 27 — a land unit currently over water).
 
 A unit gets `spawned: true` when it was created outside `startWar`'s scenario
 roster — GM `spawnUnits` or `joinWar` reinforcements (see "GM unit spawner"
@@ -185,42 +237,54 @@ One tick does, in order:
    network waypoints, or in a straight line at base `speed` px/tick when no
    route beat the direct line (see "Transport-graph pathing" below); routed
    units retreat from the nearest live enemy and regenerate organisation.
-3. **Combat** (`stepCombat`) — opposing units within `COMBAT_RANGE` (40px —
+   Naval kinds refuse land steps (see "Naval kinds" below).
+3. **Transport-state transitions** (`stepTransportState`, Phase 27) — land
+   units over water flip to `state:'transport'`, and back on landfall — see
+   "Transport state" below.
+4. **Combat** (`stepCombat`) — opposing units within `COMBAT_RANGE` (40px —
    exactly the 40-world-unit symbol width, so units fight when their symbols
    touch) fight every tick: Lanchester-ish loss = `K_COMBAT × enemyStrength ×
    (0.7 + 0.6×rand()) × atk`. Garrisons (defenders sitting on a city/military
    property) get a 1.35× defend bonus and drain organisation more slowly. Org
    drops below 25 → rout; strength ≤ 0 → destroyed (killUnit, with a `battle`
-   event).
-4. **Airstrikes** (`stepAirstrikes`) — any `war.airstrikes` entry with
+   event). Warships are excluded from this pass entirely; it ends with the
+   warship ranged pass (`stepWarshipFire` — see "Naval kinds" below).
+   Transport-state units and beached boats can be hit here but deal no
+   damage (`canFight`).
+5. **Airstrikes** (`stepAirstrikes`) — any `war.airstrikes` entry with
    `!done && war.tick >= strikeTick` detonates: every live unit within
    `BOMB_RADIUS` takes falloff damage (same shape as the old instant bomb),
    a crater and a `battle` event are pushed, and the strike is flipped
    `done: true` — see "Airstrikes" below for the full order→impact design.
    Processed in array order for determinism; resolved strikes older than
    `AIRSTRIKE_PRUNE_TICKS` (30) are dropped from the array afterward.
-5. **Territory fracture** (`stepTerritory`) — every non-embarked, living unit
+6. **Territory fracture** (`stepTerritory`) — every non-embarked, living unit
    projects control ~1.5 cells out; attacker cells whose CENTRE falls inside
    a province polygon (`geometry.provinceAt`) are marked captured, defender
    units in range recapture (delete the cell). Sea cells are never
    capturable (no province contains them).
-6. **`recomputeProvinceControl`** — captured-cell count ÷ that province's
+7. **`recomputeProvinceControl`** — captured-cell count ÷ that province's
    total land-cell count, per province, from the sparse `cells` map (cheap:
    proportional to cells actually captured, not the whole grid).
-7. **Supply** (`stepSupply`) — flood-fills each side's supply corridor and
+8. **Supply** (`stepSupply`) — flood-fills each side's supply corridor and
    stamps `u.supplied` on every live unit; supplied units out of combat heal
    `SUPPLY_HEAL_FRAC` (0.4%) of `maxStrength` per tick — see "Supply
    corridors & resupply" below.
-8. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
+9. **Objectives/milestones** (`stepObjectives`) — a `seize_city`/
    `seize_capital` objective completes once an attacker unit has held within
    60px of the city for `CAPTURE_HOLD_TICKS` (3) consecutive ticks with no
    defender unit in range; a `control_province` objective completes once its
    privince crosses `CITY_CONTROL_PCT` (65%). Each completion logs a
    `store.log('event', …)` entry and publishes a news article via
    `sim.draftNews` (the same mechanism `sim.js`'s `news` effect uses).
-9. **`checkVictory`** — all objectives done → attacker wins, war ends.
-   (Defender victory is decided inside the AI step below, since it hinges on
-   the attacker's total strength, not an objective.)
+10. **`checkVictory`** — all objectives done → attacker wins, war ends.
+    (Defender victory is decided inside the AI step below, since it hinges on
+    the attacker's total strength, not an objective.)
+
+After each REAL (authoritative) tick, `server/war.js`'s `warTick`/
+`maybeWarTick` also run the authority-only layer: `resupplyUnits`,
+`applyDevastation`, and (Phase 27) `applyOccupationTransfers` — see
+"Occupation property transfers" below.
 
 ## Transport-graph pathing — roads AND rails, 5× on-network speed
 
@@ -394,6 +458,215 @@ it tick-for-tick.
 - **Client**: cut-off units get a dashed amber outline, a "⚠" corner glyph,
   a "CUT OFF" line in the tooltip and the unit info card.
 
+## Naval kinds — boats & warships (Phase 27)
+
+Two new unit kinds, gathered in the engine's `NAVAL_KINDS` set:
+
+- **`boat`** (UNIT_DEFAULTS: strength 900, speed 6.5, atk 0.8) — light, fast,
+  fights in the normal 40px collision pass, but ONLY while afloat: a beached
+  boat cannot deal damage (`canFight`), though it can still be hit.
+- **`warship`** (UNIT_DEFAULTS: strength 3600, speed 3.0, atk 1.6) — never
+  appears in the collision pass at all (both `stepCombat` rosters filter
+  `kind !== 'warship'`). It fights exclusively via **`stepWarshipFire`**, a
+  separate ranged pass run at the end of `stepCombat`: each live,
+  non-embarked warship engages the nearest live enemy (naval OR land, either
+  side) within `WARSHIP_RANGE` (180px — far beyond the 40px collision range),
+  dealing the usual Lanchester-ish damage one-directionally (the target
+  doesn't automatically shoot back here; it gets its own turn in this same
+  pass or the collision pass if it qualifies). Against a `'transport'`-state
+  unit or a `boat` the damage is multiplied by `WARSHIP_TRANSPORT_BONUS` (3×)
+  — warships hunt transports. Targets drain org at half the normal combat
+  rate (garrisons rout at `GARRISON_ROUT_ORG` as usual); a beached boat not
+  in transport state isn't a valid naval target. UNIT_DEFAULTS are the
+  fallback for GM manual spawns — an arsenal-deployed warship's stats come
+  from its item's `meta.weapon` instead (see "Tank & warship arsenal
+  deployment" below).
+
+**Movement**: naval kinds refuse to step onto land — `advanceToward` checks
+`isWaterAt` (backed by the merged `grid.landCells` lookup buildGrid now
+computes: every land cell, Republic province or foreign homeland, in one flat
+set) and wall-follows ±45°/±90°/±135° around the coastline, exactly the
+pattern already used for neutral borders. A unit that is somehow ALREADY
+beached (legacy doc, GM spawn, run aground) may move freely so it can crawl
+back to water rather than freeze forever. A legacy `war.grid` without
+`landCells` reads as "no restriction" (permissive, same spirit as
+`neutralAt`); `ensureWarGrid` backfills `landCells` onto an in-progress war.
+
+**Client**: glyphs ⛵ (boat) and 🚢 (warship); both kinds are in the GM
+spawner's kind list. A warship in `fighting` state draws a thin fading
+tracer line (`.war-warship-fire`) to its target — cosmetic only, the client
+re-runs the same nearest-in-range search purely for the line's endpoint.
+
+## Transport state (Phase 27)
+
+A LAND unit (any non-naval kind) whose position drifts over open sea — a
+route that crosses a strait, a unit pushed off a captured beach — becomes
+`state: 'transport'` until it's back over land (`stepTransportState`, run
+between movement and combat; embarked/dead/routed units are skipped). While
+in transport state the unit **cannot initiate combat or deal damage**
+(`canFight` zeroes its dealt-damage term in `stepCombat`) but can still be
+damaged — notably by a warship's 3× ranged bonus. Its pre-transition state
+is stashed on `u._preTransportState` and restored on landfall, so it resumes
+exactly what it was doing rather than snapping to a fixed state. The client
+renders a transport-state unit with a ⛴ glyph (regardless of kind) and a
+lighter dashed-outline box (`.war-state-transport`), and its state is never
+stomped to `'fighting'` while under fire, so it keeps reading as a vessel.
+
+## Tank & warship arsenal deployment (Phase 27)
+
+At `startWar`, after `db.war` exists, `deployArsenalUnits` walks the
+DEFENDER entity's own inventory (conventionally `ent_gov`, the national
+stockpile — the same arsenal resupply already draws guns and fuel from) for
+items carrying `meta.weapon.kind: 'tank'` or `'warship'` and turns them into
+fresh defender units:
+
+- **Tanks** — every 25 tanks of one model form one `kind:'armored'` unit
+  spawned scattered near the capital (`city_lachevan`, falling back to any
+  `isCapital` city), named `"<roman> Armored — <item name>"`. Stats come
+  from `tankUnitStats(item.meta.weapon, count)`: normalised around
+  `UNIT_DEFAULTS.armored` as a "full 25-tank unit", with strength scaled by
+  the model's hp+armour, atk by its gun damage, so a unit of the best model
+  reads markedly stronger than one of the worst purely from the item's own
+  numbers — no hardcoded per-model table, so a GM-minted tank item slots in
+  automatically. A partial batch (<25) forms a proportionally weaker unit.
+- **Warships** — every warship item becomes ONE `kind:'warship'` unit
+  (`warshipUnitStats`: strength ≈ hp×9, atk ≈ dmg/50), spawned at the
+  nearest port: a `kind:'port'` property (or one named like a port/harbour),
+  else the nearest coastline cell to the capital (`nearestCoastlinePoint` —
+  a land cell adjacent to a sea cell, via `grid.landCells`).
+
+Entirely defensive: a world where the tank/warship items haven't been seeded
+yet deploys nothing extra — the garrisons below still stand. The items
+themselves (three tank models, three warship classes) are seeded by
+store.migrate — see docs/WORLD-DATA.md "Items".
+
+## Population-scaled garrisons (Phase 27)
+
+The defender roster is built by `buildGarrisonUnits` instead of the old flat
+one-garrison-per-city/military-property rule. Same SITE set (one weighted
+site per city, weight = city size; one per `type:'military'` property,
+weight 2) and the same per-unit strengths (`citySizeStrength` /
+`militaryPropertyStrength`, unchanged) — only the COUNT now scales with
+national population: `target = round(totalPopulation / POP_PER_GARRISON)`,
+clamped between the site count (a defenceless world would be game-breaking)
+and 8× the site count (a wildly inflated population doesn't spawn thousands
+of units). `POP_PER_GARRISON` (3,255,000) is calibrated so the 1962 baseline
+seed (39,060,001 people, 12 sites) reproduces exactly the old 12-garrison
+roster. Garrisons are distributed across sites by largest-remainder
+(`distributeByWeight` — deterministic, sums exactly to the target), so a
+busier city gets extra garrisons of the SAME strength (named "`<site>
+Garrison II/III…`"), never stronger ones.
+
+## Dynamic attacker staging (Phase 27)
+
+`startWar` computes a fresh staging box from CURRENT map data
+(`computeDynamicStaging`) — so ceded provinces, annexations and map edits
+are picked up automatically — and only falls back to the scenario's static
+`staging` box when the dynamic walk can't resolve. Two shapes:
+
+- **Land scenario** (`scenario.land: true`) — the box (130px half-size)
+  centres on the attacker's own homeland cell nearest the campaign's first
+  objective (from `grid.countryCells`), so troops muster just inside their
+  own border pointed the right way.
+- **Naval scenario** — the bearing from the defender's landmass centroid
+  (`defenderLandCentroid`, from `grid.provinceCells`) toward the attacker's
+  homeland centroid (`countryCentroid` of its country polygon's largest
+  subpath) is walked outward one grid cell at a time (`walkToOpenSea`) until
+  it hits open sea — not land, and not a third nation's closed-border soil
+  (`neutralCellsExcept`; computed directly since `war.allies` doesn't exist
+  yet at startWar). The box (100px half-size) centres there. An OFF-MAP
+  power with no homeland polygon (e.g. Qinal) can't yield a bearing — the
+  scenario supplies **`scenario.bearingHint`** (`'east'|'west'|'north'|
+  'south'`) as the generic escape hatch, and the walk proceeds from the
+  defender's centroid along that compass side (`qinal_invasion` uses
+  `'east'`, the Antacean ocean side).
+
+The walk returning null (runs off the map, never clears land/neutral ground)
+falls back to `scenario.staging` — the static boxes are now last-resort
+data, not the primary mechanism.
+
+## Neutral-territory hardening (Phase 27)
+
+`advanceToward`'s wall-follow (Phase 22) only stops a unit already mid-step
+into neutral soil; Phase 27 stops orders and routes from ever AIMING there:
+
+- **`nearestNonNeutralPoint(war, pos)`** — the nearest non-neutral cell
+  centre to `pos`, found by a deterministic ring search (radius ascending to
+  60 cells; fixed dx-outer/dy-inner order so server and predicting client
+  substitute the exact same point). A non-neutral `pos` returns unchanged; a
+  legacy war doc with no grid/neutralCells is permissive, same as
+  `neutralAt`. `setDest` clamps every dest through it, and `setManualPath`
+  clamps every hand-drawn waypoint (the only gate a freehand path passes,
+  since it never consults the transport graph).
+- **Blocked graph nodes** — `dijkstra` takes an optional `blocked(idx)`
+  predicate; `computePath` builds it per call from the war's `neutralCells`
+  (`neutralNodeTest` — kept out of the cached graph because the belligerent
+  set, and therefore neutralCells, can change mid-war), so road/rail routes
+  never relax into a node on closed-border soil. A route whose entry or
+  exit node sits ON neutral soil returns null outright — the unit falls back
+  to the direct-line move and the wall-follow handles the border itself.
+- **Friendly separation** — the per-tick separation nudge no longer shoves a
+  friendly unit onto neutral ground (the candidate position is checked, with
+  the usual "already standing in neutral soil, let it move" exception).
+
+## Occupation property transfers (Phase 27)
+
+AUTHORITY-ONLY, like `applyDevastation` — property ownership lives outside
+`db.war`, so a predicting client never runs it. `applyOccupationTransfers`
+(server/war.js) runs after every real tick, throttled to every
+`OCCUPATION_CHECK_TICKS` (5) ticks since it walks every property:
+
+- A property whose grid cell is attacker-held (`war.cells[key].o === 'att'`)
+  and not already attacker-owned is transferred to the attacker through the
+  deed choke point (`deeds.transfer` — the same single path every other
+  ownership change uses, so the deed item mirror stays consistent). The
+  original owner is stashed first in `prop.vars._preWarOwnerId` (only if not
+  already stashed, so a mid-war chain of recaptures remembers the TRUE
+  pre-war owner). A failed transfer (unowned/malformed deed) keeps the stash
+  for a retry on a later sweep.
+- A stashed property whose cell is no longer attacker-held (recaptured) is
+  restored to the pre-war owner and the stash cleared.
+- **Post-war**: `endWar` deletes every `_preWarOwnerId` stash WITHOUT
+  touching `ownerId` — whatever the occupier holds at the ceasefire stays
+  theirs permanently (a future war re-stashes fresh owners instead of
+  reaching back through this one). This is the mechanism that makes "a
+  company stripped of its factories by war" real — the economy side
+  (zero-property overhead bleed) is documented in docs/SIMULATION.md.
+
+Each sweep that changed anything logs one timeline entry ("Occupation
+changes property ownership — N seized, M restored").
+
+## Alliance-aware wars — auto-join (Phase 27)
+
+Foreign powers carry an authored military profile at
+`entity.meta.military = { navy, army, size, focus, alliance, allies,
+importsFrom }` (seeded by store.migrate — see docs/WORLD-DATA.md). At
+`startWar`, after arsenal deployment, `autoJoinAllies` walks every OTHER
+`type:'foreign'` entity:
+
+- **Allied with the attacker** (either side's `meta.military.allies` lists
+  the other — `alliedWith` reads both directions so a hand-edited one-sided
+  array still works) → joins the `att` side. Allied with the defender →
+  `def`. An entity qualifying for both (contradictory data) joins the
+  attacker — the invasion is the thing that just happened.
+- **Contingent size** from the profile (`allyContingentSize`): base by
+  `size` (tiny 1 … big 4) plus an `army` bonus (weak 0, medium +1, strong
+  +2), clamped to joinWar's own min/max. `army: 'none'` (e.g. Iceland)
+  contributes ZERO units — joinWar is skipped and a flavour milestone is
+  pushed instead ("allied but has no forces to commit"). A joining entity
+  with no profile at all falls back to `JOIN_DEFAULT_COUNT`.
+- The join itself reuses the existing `joinWar` pathway wholesale — homeland
+  muster, `war.allies` bookkeeping, "`<NATION> ENTERS THE WAR`" news — so an
+  auto-join reads exactly like a manually-triggered intervention.
+- **Scenario overrides**: `scenario.allies: false` disables auto-join
+  entirely (default on); `scenario.coAttackers: [entityId, …]` force-joins
+  specific entities on the attacker's side regardless of their profile
+  (hand-authored joint invasions).
+
+The client's War Room header lists allied belligerents per side ("Also
+attacking: … · Also defending: …") whether they auto-joined or intervened
+mid-war — both land in `war.allies` the same way.
+
 ## GM global tuning (Phase 19) — `war.mods`
 
 Three GM-adjustable multipliers, additive/absent-safe (`war.mods` may be
@@ -463,7 +736,8 @@ from.
 
 A GM can bring an existing `type:'foreign'` entity into an ongoing war on
 either side — `server/war.js`'s `joinWar(db, { entityId, side, count? },
-actor)`:
+actor)`. Since Phase 27 the same pathway is also driven automatically at
+`startWar` by alliance auto-join (see "Alliance-aware wars" above):
 
 - Validates the war is active, `side` is `att`/`def`, `entityId` resolves to
   a `foreign` entity that isn't already the attacker/defender or a prior
@@ -491,9 +765,10 @@ button that POSTs `/api/gm/war/join`.
 
 ## AI grand strategy — attacker only
 
-Defenders never move: every defender unit is a static garrison spawned at a
-city or a `type:'military'` property, generic to any scenario (see below).
-Only the attacker plans.
+Defenders have no AI: garrisons spawn static at cities and `type:'military'`
+properties (population-scaled since Phase 27 — see above), and the arsenal's
+armoured/warship units spawn `'holding'` — none of them move until a player
+orders them. Only the attacker plans.
 
 Every `AI_INTERVAL` ticks, `runAI`:
 
@@ -530,15 +805,23 @@ Pure data, no engine logic (mirrors the `seed.js`/`sim.js` split). Exports
 scenario = {
   id, name, attackerId, defenderId,        // entity ids — attackerId must resolve to a 'foreign' entity
   land: true,                              // OPTIONAL — see "Land invasions" below; omit/false for the default naval-embark flow
-  staging: { x0, y0, x1, y1 },              // sea box (or, when land:true, a land box in the attacker's own territory);
-                                            // units spawn at random points inside it
+  staging: { x0, y0, x1, y1 },              // FALLBACK sea box (or, when land:true, a land box in the attacker's
+                                            // own territory) — since Phase 27 the primary staging box is computed
+                                            // dynamically from map data (see "Dynamic attacker staging" above);
+                                            // this static box is only used when that walk fails
+  bearingHint: 'east',                      // OPTIONAL (Phase 27) — compass side ('east'|'west'|'north'|'south')
+                                            // for an OFF-MAP attacker with no homeland polygon to derive a
+                                            // staging bearing from (see qinal_invasion)
+  allies: false,                            // OPTIONAL (Phase 27) — opt this scenario out of alliance auto-join
+  coAttackers: [entityId, …],               // OPTIONAL (Phase 27) — force-join these entities on the attacker's side
   objectives: [ { kind, ref?, priority } ], // ref is a city/province id. 'seize_capital' may omit ref —
                                             // war.js resolves whichever city has isCapital:true, so the
                                             // scenario never has to name the capital twice. A land:true
                                             // scenario simply omits any 'landing' objective (see below).
   units: [ { name, kind } ],                // kind indexes UNIT_DEFAULTS for strength/speed/atk unless overridden per-unit
-  defense: { citySizeStrength: {1,2,3}, militaryPropertyStrength }, // war.js spawns one garrison per city (by size)
-                                            // and one per type:'military' property — no ids named here
+  defense: { citySizeStrength: {1,2,3}, militaryPropertyStrength }, // per-garrison strengths; the garrison COUNT
+                                            // is population-scaled since Phase 27 (see "Population-scaled
+                                            // garrisons" above) — still no ids named here
   tuning: { consolidateFrac, collapseFrac } // fractions of the attacker's OWN starting strength
 }
 ```
@@ -569,10 +852,12 @@ Six more scenarios ship alongside it:
   of Kordi province. A smaller, land-only campaign — 7 units, no sea transit.
 - **`qinal_invasion`** ("The Kradon Landings") — the People's Republic of
   Qinal (`for_qinal`, a distant hostile power with no shared border) runs the
-  standard embarked/landing flow like Valksland, but stages in the strait
-  north of Port Kradon (between the Mazon coast and Arcasia's north-west) and
-  drives inland through Grazi province (`city_kradon` → `city_kradesh` →
-  control `prov_grazi`) instead of toward the capital.
+  standard embarked/landing flow like Valksland and drives inland through
+  Grazi province (`city_kradon` → `city_kradesh` → control `prov_grazi`)
+  instead of toward the capital. Qinal has no map homeland polygon, so it's
+  the scenario that carries `bearingHint: 'east'` (see "Dynamic attacker
+  staging" above); its old static staging box in the strait north of Port
+  Kradon is now the last-resort fallback.
 - **`madrosia_invasion`** ("The Mezdov Landings") — Madrosia
   (`for_madrosia`) lands a 12-unit amphibious force on Mezdov province's
   western seaboard (staging box verified open sea against the

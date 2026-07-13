@@ -50,6 +50,8 @@
   const RALLY_ORG = 45;               // org a routed unit needs to rejoin the line
   const ROAD_SPEED_MULT = 5;          // speed multiplier while following the road/rail transport graph
   const ROAD_JUNCTION_RANGE = 50;     // px — nodes from different polylines within this range are linked
+  const ROAD_PROXIMITY_MULT = 1.6;    // speed bonus for ANY movement whose cell is near a road/rail (grid.roadCells) — distinct from the 5× on-network follow bonus
+  const ROAD_PROXIMITY_CELLS = 1;     // Chebyshev radius (in grid cells) around a road/rail point that counts as "near a road"
   const CITY_CONTROL_PCT = 65;        // province-control % that satisfies control_province
   const TOTAL_VICTORY_PCT = 97;       // per-province control % the attacker needs in EVERY province for total conquest (Phase 22)
   const MAX_TICKS_PER_CALL = 20;      // catch-up cap, same spirit as autoTick's 30
@@ -291,7 +293,28 @@
     const landCells = {};
     for (const pid in provinceCells) for (const cell of provinceCells[pid]) landCells[cellKey(cell[0], cell[1])] = true;
     for (const cid in countryCells) for (const cell of countryCells[cid]) landCells[cellKey(cell[0], cell[1])] = true;
-    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells, countryLandCells, countryCells, landCells };
+    // Road/rail proximity (feature: "near a road speeds units up"): every cell
+    // within ROAD_PROXIMITY_CELLS of a road/rail polyline point. Distinct from
+    // the transport GRAPH (which gives the 5× on-network follow bonus): this is
+    // a cheap flat "am I near a road" flag any movement mode can read in O(1),
+    // so a unit crossing near a road at all moves faster even if it isn't
+    // formally following the network. Part of war state, so it replays on a
+    // predicting client identically.
+    const roadCells = {};
+    const map = (db.settings || {}).map || {};
+    const lines = [].concat(map.roads || [], map.rails || []);
+    for (const line of lines) {
+      const pts = (line && line.pts) || [];
+      if (!Array.isArray(pts)) continue;
+      for (const pt of pts) {
+        if (!pt || pt.length < 2) continue;
+        const bx = Math.floor(pt[0] / CELL), by = Math.floor(pt[1] / CELL);
+        for (let dx = -ROAD_PROXIMITY_CELLS; dx <= ROAD_PROXIMITY_CELLS; dx++)
+          for (let dy = -ROAD_PROXIMITY_CELLS; dy <= ROAD_PROXIMITY_CELLS; dy++)
+            roadCells[cellKey(bx + dx, by + dy)] = true;
+      }
+    }
+    return { cell: CELL, cols, rows, provinceLandCells, provinceCells, totalLandCells, countryLandCells, countryCells, landCells, roadCells };
   }
   // Water test used by transport-state transitions (land units over water)
   // and naval movement (boats/warships refusing land) — a legacy war.grid
@@ -302,6 +325,14 @@
     if (!g || !g.landCells) return false;
     const cs = g.cell;
     return !g.landCells[cellKey(Math.floor(pos[0] / cs), Math.floor(pos[1] / cs))];
+  }
+  // Speed multiplier from road/rail proximity (grid.roadCells). Legacy war docs
+  // (no roadCells) read as no bonus (1×), same permissive default as isWaterAt.
+  function roadProximityMul(war, pos) {
+    const g = war && war.grid;
+    if (!g || !g.roadCells) return 1;
+    const cs = g.cell;
+    return g.roadCells[cellKey(Math.floor(pos[0] / cs), Math.floor(pos[1] / cs))] ? ROAD_PROXIMITY_MULT : 1;
   }
 
   // ---------- war zones: whose soil is whose (Phase 22: total war) ----------
@@ -600,8 +631,28 @@
     // Fuel carried by THIS unit scales its mobility (Phase 26) — one choke
     // point covers every movement mode: paths, straight lines, chases,
     // retreats, sailing.
-    const step = Math.min(speed * unitMul(war, u, 'speed'), d);
+    // Road/rail proximity bonus (feature: near a road → faster): a flat
+    // multiplier when the unit currently sits in a grid.roadCells cell. Cheap
+    // O(1) flag, applies to EVERY movement mode (unlike the transport graph's
+    // 5× which only applies while formally following the network). Naval kinds
+    // don't get it (roads are on land).
+    let spd = speed * unitMul(war, u, 'speed');
+    if (!NAVAL_KINDS[u.kind]) spd *= roadProximityMul(war, u.pos);
+    const step = Math.min(spd, d);
     let next = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
+    // Routed land units must never flee into open water (feature: "never route
+    // into the sea"). Same wall-follow refusal the naval-vs-land / neutral
+    // checks use — a routed unit already at sea (a transport caught mid-strait)
+    // is let through so it can reach land rather than freeze.
+    if (u.state === 'routed' && !NAVAL_KINDS[u.kind] && isWaterAt(war, next) && !isWaterAt(war, u.pos)) {
+      const base = Math.atan2(dy, dx);
+      let moved = false;
+      for (const dAng of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75]) {
+        const cand = clampToWorld(war, [u.pos[0] + Math.cos(base + dAng) * step, u.pos[1] + Math.sin(base + dAng) * step]);
+        if (!isWaterAt(war, cand)) { next = cand; moved = true; break; }
+      }
+      if (!moved) return;
+    }
     // Closed neutral borders (Phase 22): a step that would land on a
     // non-belligerent nation's soil is refused. Greedy wall-follow instead:
     // try ±45°/±90°/±135° in a FIXED order (determinism — client prediction
@@ -759,6 +810,38 @@
     }
     return { unit: nearest, dist: nd };
   }
+  // Where a routed unit runs TO (feature: "route towards their friendly
+  // lines"): the strength-weighted centroid of its side's other live,
+  // non-routed formations — i.e. the cohesive part of its own army it's trying
+  // to fall back onto. Falls back to the side's supply anchor (attacker) and
+  // finally to a point straight AWAY from the nearest enemy (the old blind
+  // flee) when it's the last unit standing. The result is a direction target;
+  // advanceToward clamps it in-bounds, refuses water (routed land units) and
+  // refuses neutral soil, so this only chooses the heading.
+  function retreatTarget(war, u) {
+    let sx = 0, sy = 0, w = 0;
+    for (const f of war.units) {
+      if (f === u || f.side !== u.side || !isLive(f)) continue;
+      if (f.state === 'routed' || f.state === 'embarked') continue;
+      const s = f.strength || 1;
+      sx += f.pos[0] * s; sy += f.pos[1] * s; w += s;
+    }
+    if (w > 0) {
+      const c = [sx / w, sy / w];
+      // Only rally toward friends if they're not essentially on top of us;
+      // otherwise fall through to the away-from-enemy heading so we still peel
+      // off the firing line rather than standing in it.
+      if (dist(u.pos, c) > UNIT_RADIUS) return c;
+    }
+    if (u.side === 'att' && Array.isArray(war.supplyAnchor)) return war.supplyAnchor.slice();
+    const near = nearestLiveEnemy(war, u);
+    if (near.unit) {
+      const dx = u.pos[0] - near.unit.pos[0], dy = u.pos[1] - near.unit.pos[1];
+      const m = Math.hypot(dx, dy) || 1;
+      return [u.pos[0] + dx / m * 120, u.pos[1] + dy / m * 120];
+    }
+    return u.pos.slice();
+  }
   // ---------- explicit attack (chase) orders ----------
   // Straight-line chase toward a specific enemy unit rather than a fixed
   // point. No per-tick Dijkstra re-plan toward the target's CURRENT position
@@ -799,14 +882,11 @@
         // still soaking and dealing damage, and never regain organisation
         // (the attacker-side org regen in stepCombat doesn't cover it).
         if (u.state === 'routed') {
-          const near = nearestLiveEnemy(war, u);
-          if (near.unit) {
-            const dx = u.pos[0] - near.unit.pos[0], dy = u.pos[1] - near.unit.pos[1];
-            const m = Math.hypot(dx, dy) || 1;
-            // Garrisons spawn speed 0 — a broken one still scatters at the
-            // ordered-defender pace rather than standing in the fire.
-            advanceToward(war, u, [u.pos[0] + dx / m * 100, u.pos[1] + dy / m * 100], (u.speed || DEF_MOVE_SPEED) * 0.8);
-          }
+          // Fall back toward friendly lines (not just blindly away from the
+          // enemy), never into the sea — advanceToward enforces both. Garrisons
+          // spawn speed 0, so a broken one still scatters at the ordered-defender
+          // pace rather than standing in the fire.
+          advanceToward(war, u, retreatTarget(war, u), (u.speed || DEF_MOVE_SPEED) * 0.8);
           u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
           if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
           continue;
@@ -842,16 +922,9 @@
         continue;
       }
       if (u.state === 'routed') {
-        const enemies = war.units.filter(e => e.side !== u.side && isLive(e));
-        let away = u.pos;
-        if (enemies.length) {
-          let nearest = enemies[0], nd = dist(u.pos, nearest.pos);
-          for (const e of enemies) { const d = dist(u.pos, e.pos); if (d < nd) { nd = d; nearest = e; } }
-          const dx = u.pos[0] - nearest.pos[0], dy = u.pos[1] - nearest.pos[1];
-          const m = Math.hypot(dx, dy) || 1;
-          away = [u.pos[0] + dx / m * 100, u.pos[1] + dy / m * 100];
-        }
-        advanceToward(war, u, away, u.speed * 0.8);
+        // Retreat toward friendly lines, never into the water (advanceToward
+        // enforces both) — replaces the old blind flee-from-enemy heading.
+        advanceToward(war, u, retreatTarget(war, u), u.speed * 0.8);
         u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
         continue;
@@ -1315,8 +1388,42 @@
   // every province with no defender left standing, or the invasion force is
   // annihilated outright (the AI's collapse rule remains the other defender
   // win, unchanged — a shattered army IS a complete defeat).
+  // Can this objective still be completed against the CURRENT world? A treaty
+  // that cedes a province turns it into a foreign country (its cities leave
+  // db.cities, the province leaves db.provinces and the war grid) — an
+  // objective pointing at that ground can never resolve. Landing objectives
+  // are always considered reachable (they resolve on the beach, not a city).
+  function objectiveReachable(db, war, o) {
+    if (o.kind === 'landing') return true;
+    if (o.kind === 'control_province') {
+      const prov = (db.provinces || []).find(p => p.id === o.ref);
+      return !!prov && (war.grid.provinceLandCells[o.ref] || 0) > 0;
+    }
+    // seize_city / seize_capital
+    const ref = (o.kind === 'seize_capital' && !o.ref)
+      ? ((db.cities || []).find(c => c.isCapital) || {}).id
+      : o.ref;
+    return !!ref && (db.cities || []).some(c => c.id === ref);
+  }
   function checkVictory(db, war, ctx) {
     if (!war.active) return;
+    // Ceded-objective fallback: a still-pending objective whose city/province
+    // has been ceded away can never complete, and the AI would march forever at
+    // a stale point (a real regression when a new scenario's target was ceded
+    // to another nation). Drop straight into total war — its hunt-the-defenders
+    // + sweep-the-least-controlled-province drive works off whatever territory
+    // and formations actually remain, so the campaign can still be won.
+    if (!war.totalWar) {
+      const stuck = war.objectives.some(o => o.status !== 'done' && !objectiveReachable(db, war, o));
+      if (stuck) {
+        war.totalWar = true;
+        if (war.ai) war.ai.phase = 'total';
+        const anchor = war.units.find(u => u.side === 'att' && isLive(u));
+        pushEvent(war, 'milestone', anchor ? anchor.pos.slice() : [1920, 1080], 'An objective is no longer reachable — the invader drives for total conquest instead.');
+        ctx.log('event', 'The war enters its total phase', `${war.name}: a strategic objective has been ceded away; the invasion presses on for total victory.`, 'WAR ENGINE', [war.attackerId, war.defenderId]);
+        ctx.news('NO TERMS: WAR ENTERS ITS TOTAL PHASE', 'With a strategic objective now beyond reach, the invading command has announced it will accept nothing short of total capitulation. The war goes on.');
+      }
+    }
     const allDone = war.objectives.every(o => o.status === 'done');
     if (allDone && !war.totalWar) {
       war.totalWar = true;

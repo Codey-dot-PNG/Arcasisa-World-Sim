@@ -40,12 +40,13 @@ const UNIT_DEFAULTS = {
   // war-engine.js's NAVAL_KINDS). `boat` is light, fast and only able to
   // fight while afloat (a beached boat can't deal damage — canFight in the
   // engine). `warship` is the naval-only, RANGED (WARSHIP_RANGE, 180px)
-  // heavy hitter that hunts transports/boats — its stats are normally
-  // overridden per-spawn from the warship item's meta.weapon (see
-  // server/war.js's startWar deployment), these are just the UNIT_DEFAULTS
-  // fallback for a GM manual spawn or a legacy/undersupplied item.
+  // heavy hitter that hunts transports/boats. These are the BASE stats of a
+  // warship SQUADRON (server/war.js's deployArsenalUnits forms one unit per
+  // shipCapacity hulls in the national arsenal); the hulls a squadron actually
+  // carries multiply its effectiveness through the same per-unit kit system
+  // tanks use (resupplyUnits), so an empty squadron fights far below these.
   boat:     { strength: 900,  speed: 6.5, atk: 0.8 },
-  warship:  { strength: 3600, speed: 3.0, atk: 1.6 }
+  warship:  { strength: 3600, speed: 5.0, atk: 1.6 }
 };
 
 const valksland_invasion = {
@@ -88,7 +89,7 @@ const valksland_invasion = {
   },
   tuning: {
     consolidateFrac: 0.35, // AI digs in and stops pushing below this fraction of its starting strength
-    collapseFrac: 0.12     // below this, the defender is declared the winner and the war ends
+    collapseFrac: 0.12     // below this the invasion is REPELLED — the war turns total; the remnants fight to the last
   }
 };
 

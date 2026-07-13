@@ -465,7 +465,7 @@ Two new unit kinds, gathered in the engine's `NAVAL_KINDS` set:
 - **`boat`** (UNIT_DEFAULTS: strength 900, speed 6.5, atk 0.8) — light, fast,
   fights in the normal 40px collision pass, but ONLY while afloat: a beached
   boat cannot deal damage (`canFight`), though it can still be hit.
-- **`warship`** (UNIT_DEFAULTS: strength 3600, speed 3.0, atk 1.6) — never
+- **`warship`** (UNIT_DEFAULTS: strength 3600, speed 5.0, atk 1.6) — never
   appears in the collision pass at all (both `stepCombat` rosters filter
   `kind !== 'warship'`). It fights exclusively via **`stepWarshipFire`**, a
   separate ranged pass run at the end of `stepCombat`: each live,
@@ -477,31 +477,42 @@ Two new unit kinds, gathered in the engine's `NAVAL_KINDS` set:
   unit or a `boat` the damage is multiplied by `WARSHIP_TRANSPORT_BONUS` (3×)
   — warships hunt transports. Targets drain org at half the normal combat
   rate (garrisons rout at `GARRISON_ROUT_ORG` as usual); a beached boat not
-  in transport state isn't a valid naval target. UNIT_DEFAULTS are the
-  fallback for GM manual spawns — an arsenal-deployed warship's stats come
-  from its item's `meta.weapon` instead (see "Tank & warship arsenal
-  deployment" below).
+  in transport state isn't a valid naval target. UNIT_DEFAULTS are every
+  warship squadron's BASE stats; the hulls the squadron carries as kit
+  multiply them (see "Tank & warship arsenal deployment" below). Land units
+  never chase a warship — the AI's total-war hunt skips warship targets for
+  land kinds and `stepChase` drops any land-on-warship attack order (a
+  transport swimming into WARSHIP_RANGE fire is suicide).
 
-**Movement**: naval kinds route and step over WATER ONLY, on four layers
-(warship land-crossing fix):
+**Movement**: naval kinds route and step over WATER ONLY, against the EXACT
+drawn borders (fine naval grid), on four layers:
 
-- **Water routing** — `setDest` for a naval kind computes a
-  `computeWaterPath`: BFS over the grid's water cells (fixed neighbour order,
-  no diagonal squeeze past a land corner — deterministic, so a predicting
-  client replays the identical route), then greedy line-of-sight
-  string-pulling (`waterLineClear`, which samples the segment every third of
-  a cell rather than endpoint-only). Returns null when the direct line is
-  already clear, either end isn't a water cell, or no water route exists —
+- **Fine coastline grid** — `ensureNavalGrid(db)` rasterises a 24px grid
+  straight from the authoritative border polygons (every province shape +
+  every country shape — the same borders the map renders); a fine cell is
+  water only if its centre and four inset corners all fall outside every
+  land polygon (conservative). Module-cached by a shape fingerprint; a pure
+  function of the world's polygons, so server and predicting client derive
+  the identical grid independently (nothing extra is synced). Rebuilt/
+  reused every `warTick`, every naval order, and at `startWar`.
+  `navalWaterAt` is the fidelity-aware water test (fine grid when built,
+  coarse `war.grid` as legacy fallback) the layers below share.
+- **Water routing** — `setDest` for a naval kind clamps the dest to water
+  (`nearestWaterPoint`, fine-grid-aware) and computes `navalPath`: A* over
+  the fine grid's water cells (binary heap ordered by (f, cell index), fixed
+  neighbour order, no diagonal squeeze past a land corner — deterministic,
+  so a predicting client replays the identical route), then greedy
+  line-of-sight string-pulling sampled every 6px at the same fidelity.
+  Returns null when the trip stays in one cell or no water route exists —
   those fall back to the straight-line move below. Water paths never get the
   transport graph's 5× on-network bonus (`stepAlongPath` special-cases naval
   kinds to base speed).
-- **Step refusal** — `advanceToward` refuses any step whose SEGMENT crosses
-  land (`waterLineClear`, not just the endpoint) and wall-follows
-  ±45°/±90°/±135° around the coastline, the pattern already used for neutral
-  borders.
-- **Shove refusal** — the friendly-separation nudge (`stepSeparation`) never
-  pushes an afloat naval unit onto a land cell (this shove is how ships used
-  to get beached, after which the old un-beach exception let them drive
+- **Step refusal** — `advanceToward` refuses any step onto land at
+  `navalWaterAt` fidelity and wall-follows ±45°/±90°/±135° around the
+  coastline, the pattern already used for neutral borders.
+- **Shove refusal** — the friendly-separation nudge never pushes an afloat
+  naval unit onto land (`navalWaterAt` again; this shove is how ships used
+  to get beached, after which the un-beach exception let them drive
   cross-country).
 - **Un-beaching** — a naval unit that is somehow ALREADY beached (GM land
   spawn, legacy doc) steers for the NEAREST water cell instead of its ordered
@@ -538,26 +549,28 @@ stomped to `'fighting'` while under fire, so it keeps reading as a vessel.
 
 ## Tank & warship arsenal deployment (Phase 27)
 
-At `startWar`, after `db.war` exists, `deployArsenalUnits` walks the
-DEFENDER entity's own inventory (conventionally `ent_gov`, the national
-stockpile — the same arsenal resupply already draws guns and fuel from) for
-items carrying `meta.weapon.kind: 'tank'` or `'warship'` and turns them into
-fresh defender units:
+At `startWar`, after `db.war` exists, `deployArsenalUnits` walks BOTH
+belligerents' own inventories (conventionally `ent_gov` for the defender —
+the same arsenals resupply already draws guns and fuel from) for items
+carrying `meta.weapon.kind: 'tank'` or `'warship'` and turns them into fresh
+units:
 
-- **Tanks** — every 25 tanks of one model form one `kind:'armored'` unit
-  spawned scattered near the capital (`city_lachevan`, falling back to any
-  `isCapital` city), named `"<roman> Armored — <item name>"`. Stats come
-  from `tankUnitStats(item.meta.weapon, count)`: normalised around
-  `UNIT_DEFAULTS.armored` as a "full 25-tank unit", with strength scaled by
-  the model's hp+armour, atk by its gun damage, so a unit of the best model
-  reads markedly stronger than one of the worst purely from the item's own
-  numbers — no hardcoded per-model table, so a GM-minted tank item slots in
-  automatically. A partial batch (<25) forms a proportionally weaker unit.
-- **Warships** — every warship item becomes ONE `kind:'warship'` unit
-  (`warshipUnitStats`: strength ≈ hp×9, atk ≈ dmg/50), spawned at the
-  nearest port: a `kind:'port'` property (or one named like a port/harbour),
-  else the nearest coastline cell to the capital (`nearestCoastlinePoint` —
-  a land cell adjacent to a sea cell, via `grid.landCells`).
+- **Tanks** — `ceil(totalTanks / tankCapacity)` `kind:'armored'` defender
+  units (capped at 50% of the defender's other formations), spawned
+  scattered near the capital. The tanks themselves STAY in the national
+  stockpile: `resupplyUnits` loads each armoured unit best-tank-first as its
+  kit, so its combat stats come from the models it actually carries.
+- **Warships** — hulls form SQUADRONS by the same rule as tanks:
+  `ceil(totalHulls / shipCapacity)` (`settings.war.shipCapacity`, default
+  25) `kind:'warship'` units per fleet — 25 dreadnoughts = 1 squadron, 26 =
+  2, 51 = 3. Hulls stay in the stockpile and load as the squadron's kit
+  (best-hull-first, `shipQuality = dmg+hp+range`), so an under-filled
+  squadron fights far below par and combat power scales with the hulls it
+  carries. Base stats are `UNIT_DEFAULTS.warship`. The DEFENDER's fleet
+  spawns afloat at the harbour water nearest its principal port; the
+  ATTACKER's fleet spawns with the invasion force — around the staging box
+  for a sea assault, or in the harbour water nearest the staging ground for
+  a land start.
 
 Entirely defensive: a world where the tank/warship items haven't been seeded
 yet deploys nothing extra — the garrisons below still stand. The items
@@ -797,7 +810,14 @@ orders them. Only the attacker plans.
 Every `AI_INTERVAL` ticks, `runAI`:
 
 - Computes attacker total strength. Below `collapseFrac` × starting strength
-  → the invasion is declared destroyed, the defender wins, the war ends.
+  → the invasion is REPELLED: the war does NOT end — it turns `totalWar`
+  (one-shot) and the remnants fight to the last. The defender's win now
+  comes from checkVictory's annihilation path (no live attacker units).
+- `totalWar` set (by the repel above, all objectives done, or an objective
+  becoming unreachable) → phase `total`, outranking everything else — a
+  total-phase force never consolidates, it hunts. Land units only hunt LAND
+  targets (never enemy warships — see stepChase's matching refusal); if only
+  enemy hulls remain afloat, the ground forces sweep territory instead.
 - Below `consolidateFrac` × starting strength → phase `consolidate`: every
   committed unit's `dest` is cleared and it holds its ground. No further
   pushes are ordered until (if ever) that changes.

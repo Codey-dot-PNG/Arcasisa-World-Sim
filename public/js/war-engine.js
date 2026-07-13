@@ -442,42 +442,163 @@
   // Same deterministic ring search; a pos already on water is returned as-is; a
   // legacy war with no landCells is permissive.
   function nearestWaterPoint(war, pos) {
-    const g = war && war.grid;
-    if (!g || !g.landCells || isWaterAt(war, pos)) return pos;
+    // Prefer the fine naval grid (exact polygon coastlines — see
+    // ensureNavalGrid below) when it has been built; the coarse war.grid is
+    // the legacy fallback. Ring radius scales so both cover the same ~3840px.
+    const fg = _navalCache.grid;
+    const g = fg || (war && war.grid);
+    if (!g) return pos;
+    const landMap = fg ? fg.land : g.landCells;
+    if (!landMap) return pos;
     const cs = g.cell;
+    if (!landMap[cellKey(Math.floor(pos[0] / cs), Math.floor(pos[1] / cs))]) return pos; // already water
+    const maxR = Math.ceil(3840 / cs);
     const cx0 = Math.floor(pos[0] / cs), cy0 = Math.floor(pos[1] / cs);
-    for (let r = 1; r <= 80; r++) {
+    for (let r = 1; r <= maxR; r++) {
       for (let dx = -r; dx <= r; dx++) {
         for (let dy = -r; dy <= r; dy++) {
           if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
           const cx = cx0 + dx, cy = cy0 + dy;
           if (cx < 0 || cy < 0 || cx >= g.cols || cy >= g.rows) continue;
-          if (g.landCells[cellKey(cx, cy)]) continue; // want water
+          if (landMap[cellKey(cx, cy)]) continue; // want water
           return clampToWorld(war, [(cx + 0.5) * cs, (cy + 0.5) * cs]);
         }
       }
     }
     return pos;
   }
+  // ---------- fine naval grid (feature: exact coastlines for ships) ----------
+  // The 48px war grid marks a whole cell land/water from its CENTRE, which let
+  // ships clip real coastline slivers (a half-covered coastal cell reads as
+  // open water). Naval movement instead rasterises its OWN finer grid straight
+  // from the authoritative border polygons — every province shape plus every
+  // country shape, the same "perfectly on point" borders the map renders — so
+  // the coastline ships respect IS the drawn coastline. A fine cell is water
+  // only if its centre AND four inset corners all fall outside every land
+  // polygon (conservative: partial coverage counts as land). Cached at module
+  // level keyed on a cheap shape fingerprint; the content is a pure function
+  // of the world's polygons, so server and predicting client derive the exact
+  // same grid independently (nothing extra is synced). Legacy fallbacks: when
+  // no polygons are loadable the coarse war.grid keeps working as before.
+  const NAVAL_CELL = 24;
+  let _navalCache = { key: '', grid: null };
+  function navalFingerprint(db) {
+    const provs = (db && db.provinces) || [];
+    const countries = (((db || {}).settings || {}).map || {}).countries || [];
+    let len = 0;
+    for (const p of provs) len += String(p.shape || '').length;
+    for (const c of countries) len += String(c.shape || '').length;
+    return provs.length + ':' + countries.length + ':' + len;
+  }
+  // Every land polygon in the world (province + country subpaths), with
+  // bounding boxes so point tests can reject cheaply.
+  function collectLandPolys(db) {
+    const out = [];
+    const push = (shape) => {
+      let polys;
+      try { polys = parseShape(shape); } catch (e) { return; }
+      for (const poly of polys || []) {
+        if (!poly || poly.length < 3) continue;
+        let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+        for (const p of poly) {
+          if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0];
+          if (p[1] < y0) y0 = p[1]; if (p[1] > y1) y1 = p[1];
+        }
+        out.push({ poly, x0, y0, x1, y1 });
+      }
+    };
+    for (const p of ((db && db.provinces) || [])) if (p.shape) push(p.shape);
+    for (const c of ((((db || {}).settings || {}).map || {}).countries || [])) if (c.shape) push(c.shape);
+    return out;
+  }
+  function polyLandAt(polys, x, y) {
+    for (const e of polys) {
+      if (x < e.x0 || x > e.x1 || y < e.y0 || y > e.y1) continue;
+      if (pointInPolygon([x, y], e.poly)) return true;
+    }
+    return false;
+  }
+  function ensureNavalGrid(db) {
+    if (!db) return _navalCache.grid;
+    const key = navalFingerprint(db);
+    if (_navalCache.key === key) return _navalCache.grid;
+    const polys = collectLandPolys(db);
+    if (!polys.length) { _navalCache = { key, grid: null }; return null; }
+    const cols = Math.ceil(3840 / NAVAL_CELL), rows = Math.ceil(2160 / NAVAL_CELL);
+    const land = {};
+    const inset = NAVAL_CELL * 0.25;
+    for (let cx = 0; cx < cols; cx++) {
+      for (let cy = 0; cy < rows; cy++) {
+        const x = cx * NAVAL_CELL, y = cy * NAVAL_CELL;
+        if (polyLandAt(polys, x + NAVAL_CELL / 2, y + NAVAL_CELL / 2)
+          || polyLandAt(polys, x + inset, y + inset)
+          || polyLandAt(polys, x + NAVAL_CELL - inset, y + inset)
+          || polyLandAt(polys, x + inset, y + NAVAL_CELL - inset)
+          || polyLandAt(polys, x + NAVAL_CELL - inset, y + NAVAL_CELL - inset)) {
+          land[cellKey(cx, cy)] = true;
+        }
+      }
+    }
+    _navalCache = { key, grid: { cell: NAVAL_CELL, cols, rows, land, polys } };
+    return _navalCache.grid;
+  }
+  // Water test at NAVAL fidelity — the fine grid when built (warTick and every
+  // order path build it), else the coarse war.grid as legacy fallback. This is
+  // what advanceToward's naval land-refusal and the path string-pulling use,
+  // so even a straight-line fallback sail can no longer cross a real coastline.
+  function navalWaterAt(war, pos) {
+    const fg = _navalCache.grid;
+    if (fg) return !fg.land[cellKey(Math.floor(pos[0] / fg.cell), Math.floor(pos[1] / fg.cell))];
+    return isWaterAt(war, pos);
+  }
+
   // ---------- naval pathfinding (feature: warships follow the coast) ----------
-  // A* over the war grid's WATER cells, so an ordered boat/warship sails AROUND
-  // land instead of aiming a straight line through it (the old behaviour left
-  // ships wall-following the coast wherever the straight line hit a landmass,
-  // or stuck entirely in concave bays). Fully deterministic — fixed neighbour
-  // order, lowest-f-then-lowest-cell-index pop — because the predicting client
-  // replays orders through this exact function (both war-engine.js copies stay
-  // byte-identical). The grid is small (80×45 at CELL 48 on the master map) so
-  // a plain array open-set is cheap. Diagonal steps never cut a land corner
-  // (both orthogonal neighbours must be water). Returns a SIMPLIFIED waypoint
-  // list (greedy water-only line-of-sight string-pulling) ending exactly on
-  // `to`, or null when no all-water route exists / the straight sail is already
-  // a single cell — callers then fall back to the legacy straight-line move,
-  // whose advanceToward land-refusal still applies as the last line of defence.
-  function navalPath(war, from, to) {
+  // A* over WATER cells of the fine naval grid (coarse war.grid when polygons
+  // are unavailable), so an ordered boat/warship sails AROUND land instead of
+  // aiming a straight line through it. Fully deterministic — fixed neighbour
+  // order, binary heap ordered by (f, cell index) — because the predicting
+  // client replays orders through this exact function (both war-engine.js
+  // copies stay byte-identical). Diagonal steps never cut a land corner (both
+  // orthogonal neighbours must be water). Returns a SIMPLIFIED waypoint list
+  // (greedy water-only line-of-sight string-pulling, sampled at 6px against
+  // the SAME fidelity used for search) ending exactly on `to`, or null when no
+  // all-water route exists / the trip stays in one cell — callers then fall
+  // back to the straight-line move, where advanceToward's land-refusal (also
+  // fine-grid-backed now) still applies as the last line of defence.
+  function heapLess(a, b) { return a[0] < b[0] - 1e-9 || (a[0] - b[0] <= 1e-9 && a[1] < b[1]); }
+  function heapPush(h, node) {
+    h.push(node);
+    let i = h.length - 1;
+    while (i > 0) {
+      const p = (i - 1) >> 1;
+      if (heapLess(h[i], h[p])) { const t = h[i]; h[i] = h[p]; h[p] = t; i = p; } else break;
+    }
+  }
+  function heapPop(h) {
+    const top = h[0];
+    const last = h.pop();
+    if (h.length) {
+      h[0] = last;
+      let i = 0;
+      for (;;) {
+        const l = 2 * i + 1, r = l + 1;
+        let m = i;
+        if (l < h.length && heapLess(h[l], h[m])) m = l;
+        if (r < h.length && heapLess(h[r], h[m])) m = r;
+        if (m === i) break;
+        const t = h[i]; h[i] = h[m]; h[m] = t; i = m;
+      }
+    }
+    return top;
+  }
+  function navalPath(db, war, from, to) {
+    const fg = ensureNavalGrid(db);
     const g = war && war.grid;
-    if (!g || !g.landCells) return null;
-    const cs = g.cell, cols = g.cols, rows = g.rows;
-    const water = (cx, cy) => cx >= 0 && cy >= 0 && cx < cols && cy < rows && !g.landCells[cellKey(cx, cy)];
+    if (!fg && (!g || !g.landCells)) return null;
+    const cs = fg ? fg.cell : g.cell;
+    const cols = fg ? fg.cols : g.cols, rows = fg ? fg.rows : g.rows;
+    const landMap = fg ? fg.land : g.landCells;
+    const water = (cx, cy) => cx >= 0 && cy >= 0 && cx < cols && cy < rows && !landMap[cellKey(cx, cy)];
     let sx = Math.floor(from[0] / cs), sy = Math.floor(from[1] / cs);
     const tx = Math.floor(to[0] / cs), ty = Math.floor(to[1] / cs);
     if (!water(tx, ty)) return null;
@@ -485,8 +606,9 @@
       // beached start (legacy doc, GM spawn) — route from the nearest water
       // cell; advanceToward already lets an on-land naval unit move freely, so
       // it can crawl to the path's first waypoint.
+      const maxR = Math.ceil(480 / cs);
       let found = null;
-      for (let r = 1; r <= 6 && !found; r++) {
+      for (let r = 1; r <= maxR && !found; r++) {
         for (let dx = -r; dx <= r && !found; dx++) {
           for (let dy = -r; dy <= r && !found; dy++) {
             if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
@@ -509,17 +631,13 @@
       [1, 1, 1.41421356], [1, -1, 1.41421356], [-1, 1, 1.41421356], [-1, -1, 1.41421356]];
     const gScore = {}; const cameFrom = {}; const closed = {};
     gScore[startIdx] = 0;
-    const open = [[hOf(sx, sy), sx, sy]]; // [f, cx, cy]
+    const open = [];
+    heapPush(open, [hOf(sx, sy), startIdx, sx, sy]); // [f, cellIdx, cx, cy]
     let found = false;
     let guard = cols * rows * 8; // hard cap — the open set never legitimately outlives this
     while (open.length && guard-- > 0) {
-      let bi = 0;
-      for (let i = 1; i < open.length; i++) {
-        const df = open[i][0] - open[bi][0];
-        if (df < -1e-9 || (df <= 1e-9 && idxOf(open[i][1], open[i][2]) < idxOf(open[bi][1], open[bi][2]))) bi = i;
-      }
-      const cur = open.splice(bi, 1)[0];
-      const cx = cur[1], cy = cur[2], ci = idxOf(cx, cy);
+      const cur = heapPop(open);
+      const ci = cur[1], cx = cur[2], cy = cur[3];
       if (closed[ci]) continue;
       closed[ci] = true;
       if (ci === goalIdx) { found = true; break; }
@@ -533,7 +651,7 @@
         const ng = gc + d[2];
         if (gScore[ni] !== undefined && gScore[ni] <= ng) continue;
         gScore[ni] = ng; cameFrom[ni] = ci;
-        open.push([ng + hOf(nx, ny), nx, ny]);
+        heapPush(open, [ng + hOf(nx, ny), ni, nx, ny]);
       }
     }
     if (!found) return null;
@@ -542,13 +660,14 @@
     while (cur !== undefined) { cellsPath.unshift(cur); if (cur === startIdx) break; cur = cameFrom[cur]; }
     const pts = cellsPath.map(i => [((i % cols) + 0.5) * cs, (Math.floor(i / cols) + 0.5) * cs]);
     pts[pts.length - 1] = [to[0], to[1]]; // sail to the exact ordered point, not its cell centre
-    // Greedy string-pulling: keep only waypoints needed to stay over water —
-    // sampled every 8px so even a corner-clip of a 48px land cell is caught.
+    // Greedy string-pulling at the same fidelity the search used — 6px samples
+    // so no simplified segment can clip a coastline sliver the cells caught.
     const clearWater = (a, b) => {
       const d = dist(a, b);
-      const steps = Math.max(1, Math.ceil(d / 8));
+      const steps = Math.max(1, Math.ceil(d / 6));
       for (let i = 1; i <= steps; i++) {
-        if (!isWaterAt(war, [a[0] + (b[0] - a[0]) * i / steps, a[1] + (b[1] - a[1]) * i / steps])) return false;
+        const px = a[0] + (b[0] - a[0]) * i / steps, py = a[1] + (b[1] - a[1]) * i / steps;
+        if (landMap[cellKey(Math.floor(px / cs), Math.floor(py / cs))]) return false;
       }
       return true;
     };
@@ -772,8 +891,9 @@
     // one cell) do they fall back to the legacy straight line, where
     // advanceToward's land-refusal still wall-follows as a last resort.
     if (NAVAL_KINDS[u.kind]) {
+      ensureNavalGrid(db); // fine coastline grid backs the clamp + the route
       u.dest = nearestWaterPoint(war, clampToWorld(war, dest));
-      const np = navalPath(war, u.pos, u.dest);
+      const np = navalPath(db, war, u.pos, u.dest);
       if (np && np.length) { u.path = np; u.pathIdx = 0; }
       else { u.path = null; u.pathIdx = 0; }
       return;
@@ -798,6 +918,7 @@
     // stepAlongPath walks it point-to-point. Naval kinds clamp each waypoint
     // to WATER instead (the naval counterpart — a drawn point on shore would
     // otherwise beach-block the whole path).
+    if (NAVAL_KINDS[u.kind]) ensureNavalGrid(db); // waypoint clamp reads the fine coastline grid
     const clampPt = NAVAL_KINDS[u.kind]
       ? (p) => nearestWaterPoint(war, clampToWorld(war, p))
       : (p) => nearestNonNeutralPoint(war, clampToWorld(war, p));
@@ -878,16 +999,19 @@
       if (!moved) return;
     }
     // Naval kinds (boats/warships) never step onto land — same wall-follow
-    // pattern as the neutral-border refusal above, just against grid.landCells
-    // instead of grid.neutralCells. A unit that's somehow ALREADY beached
-    // (legacy doc, GM spawn, a boat run aground) is allowed to move freely so
-    // it can crawl back into the water rather than freeze forever.
-    if (NAVAL_KINDS[u.kind] && isWaterAt(war, u.pos) && !isWaterAt(war, next)) {
+    // pattern as the neutral-border refusal above, but at NAVAL fidelity:
+    // navalWaterAt reads the fine polygon-derived coastline grid when built
+    // (warTick builds it every tick), so even a straight-line fallback sail
+    // stops at the real drawn border instead of a coarse 48px cell's centre
+    // verdict. A unit that's somehow ALREADY beached (legacy doc, GM spawn, a
+    // boat run aground) is allowed to move freely so it can crawl back into
+    // the water rather than freeze forever.
+    if (NAVAL_KINDS[u.kind] && navalWaterAt(war, u.pos) && !navalWaterAt(war, next)) {
       const base = Math.atan2(dy, dx);
       let moved = false;
       for (const dAng of [Math.PI / 4, -Math.PI / 4, Math.PI / 2, -Math.PI / 2, Math.PI * 0.75, -Math.PI * 0.75]) {
         const cand = clampToWorld(war, [u.pos[0] + Math.cos(base + dAng) * step, u.pos[1] + Math.sin(base + dAng) * step]);
-        if (isWaterAt(war, cand)) { next = cand; moved = true; break; }
+        if (navalWaterAt(war, cand)) { next = cand; moved = true; break; }
       }
       if (!moved) return;
     }
@@ -916,22 +1040,27 @@
     const collapseAt = war.ai.attackerStartStrength * war.ai.collapseFrac;
     const consolidateAt = war.ai.attackerStartStrength * war.ai.consolidateFrac;
 
-    if (attTotal <= collapseAt) {
-      if (war.active) {
-        war.active = false;
-        war.result = { winner: 'def', endedAt: new Date().toISOString(), reason: 'Invasion force destroyed' };
-        note(war, `Attacking force collapsed (${Math.round(attTotal)} strength remaining) — the defence holds.`);
-        ctx.log('event', 'The invasion has been repelled', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
-        ctx.news('THE INVASION IS REPELLED', 'The invading expeditionary force has been shattered. What remains is falling back to the coast.');
-      }
-      return;
+    if (attTotal <= collapseAt && !war.totalWar) {
+      // A repelled invasion no longer ends the war on a negotiated collapse —
+      // it goes TOTAL instead (feature: "repelled → total phase"): the
+      // shattered invader refuses terms and its remnants fight to the last,
+      // so the defence must destroy every remaining formation. checkVictory's
+      // annihilation path (no live attacker units → winner 'def') is what
+      // finally ends the war. One-shot: totalWar gates re-entry.
+      war.totalWar = true;
+      war.ai.phase = 'total';
+      note(war, `Attacking force collapsed (${Math.round(attTotal)} strength remaining) — no terms; the remnants fight to the last.`);
+      ctx.log('event', 'The invasion is repelled — the war turns total', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
+      ctx.news('THE INVASION IS REPELLED', 'The invading expeditionary force has been shattered — yet its commanders refuse all terms. What remains digs in to fight to the last. The war enters its total phase.');
     }
 
     const landingObj = war.objectives.find(o => o.kind === 'landing');
     const wasPhase = war.ai.phase;
-    if (attTotal <= consolidateAt) war.ai.phase = 'consolidate';
+    // totalWar outranks consolidation: a total-phase force never digs in, it
+    // hunts (that is also what keeps a collapsed-but-unbeaten remnant fighting).
+    if (war.totalWar) war.ai.phase = 'total';
+    else if (attTotal <= consolidateAt) war.ai.phase = 'consolidate';
     else if (landingObj && landingObj.status !== 'done') war.ai.phase = 'landing';
-    else if (war.totalWar) war.ai.phase = 'total';
     else war.ai.phase = war.ai.phase === 'consolidate' ? 'consolidate' : (war.objectives.every(o => o.status === 'done') ? 'exploit' : 'breakout');
     if (war.ai.phase !== wasPhase) note(war, `Phase change: ${wasPhase} → ${war.ai.phase}`);
 
@@ -941,28 +1070,30 @@
     // the LEAST-controlled province, so the drive converges on 100%.
     if (war.ai.phase === 'total') {
       const defsLive = war.units.filter(x => x.side === 'def' && isLive(x));
-      let sweepPid = null;
-      if (!defsLive.length) {
-        const ctl = war.stats.provinceControl || {};
-        let low = 101;
-        for (const pid in war.grid.provinceLandCells) {
-          const c = ctl[pid] || 0;
-          if (c < TOTAL_VICTORY_PCT && c < low) { low = c; sweepPid = pid; }
-        }
+      const ctl = war.stats.provinceControl || {};
+      let sweepPid = null, low = 101;
+      for (const pid in war.grid.provinceLandCells) {
+        const c = ctl[pid] || 0;
+        if (c < TOTAL_VICTORY_PCT && c < low) { low = c; sweepPid = pid; }
       }
       let hunting = 0, sweeping = 0;
       for (const u of war.units) {
         if (u.side !== 'att' || !isLive(u) || u.state === 'routed' || u.state === 'embarked') continue;
         if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
-        if (defsLive.length) {
-          let nearest = defsLive[0], nd = dist(u.pos, nearest.pos);
-          for (const d of defsLive) { const dd = dist(u.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
+        // A LAND unit only hunts land targets — sending infantry swimming
+        // after a warship is suicide (see stepChase's matching refusal). If
+        // only enemy warships remain afloat, the ground forces sweep territory
+        // instead and leave the hulls to friendly boats/warships.
+        const targets = NAVAL_KINDS[u.kind] ? defsLive : defsLive.filter(d => d.kind !== 'warship');
+        if (targets.length) {
+          let nearest = targets[0], nd = dist(u.pos, nearest.pos);
+          for (const d of targets) { const dd = dist(u.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
           clearDest(u);
           u.attackId = nearest.id;
           u.objectiveId = null;
           if (u.state !== 'fighting') u.state = 'moving';
           hunting++;
-        } else if (sweepPid) {
+        } else if (sweepPid && !NAVAL_KINDS[u.kind]) {
           u.attackId = null;
           setDest(db, u, randomProvincePoint(war, sweepPid, rng) || u.pos.slice(), u.speed);
           sweeping++;
@@ -1071,6 +1202,12 @@
     if (u.state === 'routed') return false; // a broken unit ignores its attack order until it rallies (the order survives on the unit)
     const target = war.units.find(x => x.id === u.attackId);
     if (!target || !isLive(target)) { u.attackId = null; u.state = 'holding'; return false; }
+    // A LAND unit never chases a warship (feature: "transports don't go after
+    // warships"): it would have to swim out as a defenceless transport into
+    // WARSHIP_RANGE fire it cannot return — suicide, whether the order came
+    // from the AI's hunt or a player click. Break the chase off cleanly; the
+    // unit falls back to normal dest handling. Boats/warships still may.
+    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { u.attackId = null; u.state = 'holding'; return false; }
     // Same collision rule as normal dest movement: ANY live enemy inside
     // COLLIDE_ENEMY stops the advance and starts the fight — otherwise a
     // chase could walk straight through a different enemy standing between
@@ -1169,11 +1306,18 @@
           // a friendly onto closed-border soil — only apply it when the
           // candidate spot isn't neutral (or the unit was already standing in
           // neutral ground, same "already there, let it move" exception used
-          // throughout advanceToward).
+          // throughout advanceToward). Naval hardening, same shape: the nudge
+          // must never shove an AFLOAT naval unit onto land (this shove was
+          // how ships got beached, after which the un-beach exception let
+          // them drive cross-country) — checked at navalWaterAt fidelity, the
+          // exact polygon coastline when the fine grid is built.
           const aNext = clampToWorld(war, [a.pos[0] - nx * push * 0.5, a.pos[1] - ny * push * 0.5]);
           const bNext = clampToWorld(war, [b.pos[0] + nx * push * 0.5, b.pos[1] + ny * push * 0.5]);
-          if (!neutralAt(war, aNext) || neutralAt(war, a.pos)) a.pos = aNext;
-          if (!neutralAt(war, bNext) || neutralAt(war, b.pos)) b.pos = bNext;
+          const shoveOk = (u, next) =>
+            (!neutralAt(war, next) || neutralAt(war, u.pos)) &&
+            (!NAVAL_KINDS[u.kind] || navalWaterAt(war, next) || !navalWaterAt(war, u.pos));
+          if (shoveOk(a, aNext)) a.pos = aNext;
+          if (shoveOk(b, bNext)) b.pos = bNext;
         }
       }
     }
@@ -1514,6 +1658,13 @@
     for (const u of war.units) {
       if (!isLive(u)) continue;
       if (u.state === 'embarked') { u.supplied = true; continue; }
+      // Naval kinds AFLOAT are supplied by the fleet train, same rule as
+      // embarked troops above — open sea belongs to neither side's cell set,
+      // so without this a warship squadron (whose hulls load as supply, like
+      // tanks — see server/war.js resupplyUnits) would read permanently cut
+      // off the moment it left harbour and never take on its ships. A beached
+      // boat gets no such grace.
+      if (NAVAL_KINDS[u.kind] && navalWaterAt(war, u.pos)) { u.supplied = true; continue; }
       const cx = Math.floor(u.pos[0] / cs), cy = Math.floor(u.pos[1] / cs);
       if (u.side === 'att') {
         // Membership in attSupply already implies att-held (seeds and every
@@ -1714,6 +1865,10 @@
     ctx = normCtx(ctx);
     war.tick++;
     const rng = tickRng(war);
+    // Fine naval coastline grid (exact borders) — built/refreshed here so BOTH
+    // the server and every predicting client have it before any movement runs
+    // this tick (advanceToward's naval refusal reads it via module cache).
+    ensureNavalGrid(db);
     // Re-derive neutral/enemy soil when the belligerent set changed (joinWar)
     // — no-op when the key matches, so this is a cheap per-tick guard that
     // keeps server and predicting client in step without extra sync plumbing.
@@ -1783,7 +1938,7 @@
     // grid / pathing / world bounds
     buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
     countryIdForEntity, refreshWarZones, neutralAt, nearestNonNeutralPoint, equipMul, unitMul, isWaterAt,
-    nearestWaterPoint, navalPath,
+    nearestWaterPoint, navalPath, ensureNavalGrid, navalWaterAt,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick

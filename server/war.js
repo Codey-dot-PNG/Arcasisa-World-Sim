@@ -221,24 +221,28 @@ function applyOccupationTransfers(db) {
 // quality supply first").
 function gunQuality(w) { return (Number(w.dmg) || 0) + (Number(w.hp) || 0) + (Number(w.morale) || 0); }
 function tankQuality(w) { return (Number(w.dmg) || 0) + (Number(w.hp) || 0) + (Number(w.armor) || 0); }
+function shipQuality(w) { return (Number(w.dmg) || 0) + (Number(w.hp) || 0) + (Number(w.range) || 0); }
 function weaponCatalog(db) {
-  const guns = [], fuels = [], tanks = [];
+  const guns = [], fuels = [], tanks = [], ships = [];
   for (const it of db.items) {
     if (!(it.meta && it.meta.weapon)) continue;
     const k = it.meta.weapon.kind || 'smallarms';
     if (k === 'fuel') fuels.push(it);
     else if (k === 'tank') tanks.push(it);
-    else if (k === 'warship') { /* warships are whole units, not a supply pool */ }
+    else if (k === 'warship') ships.push(it); // hulls supply warship squadrons exactly like tanks supply armour
     else guns.push(it);
   }
   guns.sort((a, b) => gunQuality(b.meta.weapon) - gunQuality(a.meta.weapon));
   tanks.sort((a, b) => tankQuality(b.meta.weapon) - tankQuality(a.meta.weapon));
+  ships.sort((a, b) => shipQuality(b.meta.weapon) - shipQuality(a.meta.weapon));
   fuels.sort((a, b) => (Number(b.meta.weapon.speed) || 0) - (Number(a.meta.weapon.speed) || 0));
-  return { guns, fuels, tanks };
+  return { guns, fuels, tanks, ships };
 }
 // Morale a full tank complement lends its crews (tanks are frightening and
 // steady the line) — folded into the armoured-unit kit below.
 const TANK_MORALE_BONUS = 0.6;
+// Same idea for a full squadron of hulls under a warship crew's feet.
+const SHIP_MORALE_BONUS = 0.4;
 function invGet(inv, itemId) { return inv.find(r => r.itemId === itemId); }
 function invAdd(inv, itemId, qty) {
   if (!(qty > 0)) return;
@@ -274,12 +278,14 @@ function drawFromPools(pools, itemId, qty) {
 }
 const r3 = (v) => Math.round(v * 1000) / 1000;
 // The primary weapon pool for a unit: armoured units run on TANKS (feature:
-// "tanks use the same supply system infantry use for guns"), a fixed capacity
-// of tankCapacity (25) per unit regardless of strength; every other land kind
-// runs on small arms, one per soldier. Naval kinds carry no primary weapon
-// (their strength IS the ship). Returns null for those.
-function primaryWeaponSpec(u, catalog, troops, tankCapacity) {
-  if (u.kind === 'warship' || u.kind === 'boat') return null;
+// "tanks use the same supply system infantry use for guns") and warship
+// squadrons run on HULLS (feature: "ships take on supply the same way as
+// tanks") — both a fixed capacity (tankCapacity/shipCapacity, default 25) per
+// unit regardless of strength; every other land kind runs on small arms, one
+// per soldier. Boats carry no primary weapon (their strength IS the boat).
+function primaryWeaponSpec(u, catalog, troops, tankCapacity, shipCapacity) {
+  if (u.kind === 'warship') return { list: catalog.ships, ids: catalog.shipIds, capacity: shipCapacity, isShip: true };
+  if (u.kind === 'boat') return null;
   if (u.kind === 'armored') return { list: catalog.tanks, ids: catalog.tankIds, capacity: tankCapacity, isTank: true };
   return { list: catalog.guns, ids: catalog.gunIds, capacity: troops, isTank: false };
 }
@@ -289,10 +295,12 @@ function resupplyUnits(db, war) {
   const burnFrac = Number(cfg.fuelBurnFrac) || 0;
   const weaponBurnFrac = Number(cfg.weaponBurnFrac) || 0;
   const tankCapacity = Math.max(1, Number(cfg.tankCapacity) || 25);
+  const shipCapacity = Math.max(1, Number(cfg.shipCapacity) || 25);
   const catalog = weaponCatalog(db);
-  const { guns, fuels, tanks } = catalog;
+  const { guns, fuels, tanks, ships } = catalog;
   catalog.gunIds = new Set(guns.map(g => g.id));
   catalog.tankIds = new Set(tanks.map(t => t.id));
+  catalog.shipIds = new Set(ships.map(s => s.id));
   const fuelIds = new Set(fuels.map(f => f.id));
   const fuelSpeedOf = {};
   for (const f of fuels) fuelSpeedOf[f.id] = Number(f.meta.weapon.speed) || 0;
@@ -306,7 +314,7 @@ function resupplyUnits(db, war) {
     if (!isLive(u)) continue;
     u.inv = Array.isArray(u.inv) ? u.inv : [];
     const troops = Math.max(1, Math.ceil(u.strength || 0));
-    const spec = primaryWeaponSpec(u, catalog, troops, tankCapacity);
+    const spec = primaryWeaponSpec(u, catalog, troops, tankCapacity, shipCapacity);
     // Oil-hungry armour (feature): a unit's fuel tank grows with the average
     // fuelUse of the tanks it carries — a Type 50M column drinks far more than
     // an M36 Griz one. Non-armour uses the flat strength-based tank.
@@ -391,6 +399,13 @@ function resupplyUnits(db, war) {
           kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
           kit.hp += frac * (1 + (Number(wpn.hp) || 0) + (Number(wpn.armor) || 0));
           kit.morale += frac * (1 + TANK_MORALE_BONUS);
+        } else if (spec.isShip) {
+          // A hull contributes its guns to dmg, its armour + reach to hp
+          // (standoff range keeps the squadron alive), and steadies the crews
+          // — a Dreadnought squadron reads far above a Kradon-class one.
+          kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
+          kit.hp += frac * (1 + (Number(wpn.hp) || 0) + (Number(wpn.range) || 0) * 0.5);
+          kit.morale += frac * (1 + SHIP_MORALE_BONUS);
         } else {
           kit.dmg += frac * (1 + (Number(wpn.dmg) || 0));
           kit.hp += frac * (1 + (Number(wpn.hp) || 0));
@@ -405,7 +420,7 @@ function resupplyUnits(db, war) {
         kit.morale += emptyFrac * (Number(cfg.unarmedMorale) || 0.3);
       }
     } else {
-      // Naval kinds have no supply pool — their built-in stats stand alone.
+      // Boats have no supply pool — their built-in stats stand alone.
       kit.dmg = 1; kit.hp = 1; kit.morale = 1;
     }
     let fuelQty = 0, fuelBonus = 0;
@@ -601,21 +616,6 @@ function arsenalWeaponsOf(db, entity, kind) {
   }
   return out;
 }
-// Combat stats for a single warship, from its item's meta.weapon (dmg/hp/speed
-// on a 0–1 quality scale, same convention as the tank/gun items). Warships are
-// NOT supply-fed (they have no kit — their strength IS the hull), so the item
-// stats stand alone here. Greatly varying: a Kradon cruiser (hp 0.40) reads far
-// weaker than a Valkslandic dreadnought (hp 0.90).
-function warshipUnitStats(wpn) {
-  const dmg = Number(wpn.dmg) || 0.3;
-  const hp = Number(wpn.hp) || 0.4;
-  const speed = Number(wpn.speed) || 0.3;
-  return {
-    strength: Math.max(1500, Math.round(3000 * (1 + hp))),   // ~4200 (Kradon) … ~5700 (Dreadnought)
-    atk: Math.max(0.6, round1(1 + dmg * 3)),                  // ~1.9 … ~3.55
-    speed: Math.max(2, round1(2 + speed * 6))                 // ~3.5 … ~4.4
-  };
-}
 // toRoman is defined once, further down (foreign-intervention naming) — JS
 // hoists function declarations within a scope regardless of source order, so
 // it's available here too.
@@ -707,56 +707,49 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
     });
   }
 
-  // --- navy: one unit per warship item (1 hull = 1 warship), spawned AFLOAT at
-  // the harbour water nearest a port. Stats derive from the hull's own quality.
-  const warships = arsenalWeaponsOf(db, defender, 'warship');
-  const portPos = findPortPos(db, war.grid, capitalPos);
-  for (const { item, qty } of warships) {
-    const n = Math.floor(qty);
-    for (let k = 0; k < n; k++) {
-      const stats = warshipUnitStats(item.meta.weapon);
-      const s = Math.round(stats.strength * hpMod);
-      let spawnPos = engine.clampToWorld(war, [portPos[0] + rand(-40, 40), portPos[1] + rand(-40, 40)]);
-      if (!engine.isWaterAt(war, spawnPos)) spawnPos = portPos.slice(); // keep it afloat
+  // --- navies: hulls form SQUADRONS exactly like tanks form armoured units
+  // (feature: "ships take on supply the same way as tanks"). One warship unit
+  // per shipCapacity (25) hulls, rounded UP — 25 dreadnoughts = 1 squadron,
+  // 26 = 2, 51 = 3. Hulls are LEFT in the national stockpile so resupplyUnits
+  // loads each squadron best-hull-first as its kit; a squadron's combat power
+  // scales with how many hulls it actually carries (an under-filled one
+  // fights far below par). Base stats come from UNIT_DEFAULTS.warship; the
+  // kit multiplies them.
+  const navDef = unitDefaults.warship || { strength: 3600, speed: 5.0, atk: 1.6 };
+  const shipCapacity = Math.max(1, Number(cfg.shipCapacity) || 25);
+  const deployFleet = (entity, side, anchor, scatterR) => {
+    if (!entity || !anchor) return;
+    const hulls = arsenalWeaponsOf(db, entity, 'warship');
+    let totalHulls = 0;
+    for (const { qty } of hulls) totalHulls += Math.floor(qty);
+    if (!(totalHulls > 0)) return;
+    const numSquadrons = Math.ceil(totalHulls / shipCapacity);
+    const bestHullName = hulls.slice().sort((a, b) => shipQuality(b.item.meta.weapon) - shipQuality(a.item.meta.weapon))[0].item.name;
+    for (let i = 0; i < numSquadrons; i++) {
+      const s = Math.round(navDef.strength * hpMod);
+      const spawnPos = engine.nearestWaterPoint(war,
+        engine.clampToWorld(war, [anchor[0] + rand(-scatterR, scatterR), anchor[1] + rand(-scatterR, scatterR)]));
       war.units.push({
-        id: store.uid('warunit'), side: 'def',
-        name: n > 1 ? `${item.name} ${toRoman(k + 1)}` : item.name,
+        id: store.uid('warunit'), side,
+        name: `${bestHullName} Squadron ${toRoman(i + 1)}`,
         kind: 'warship', pos: spawnPos, dest: null,
         strength: s, maxStrength: s, org: 100,
-        speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null, spawned: true
+        speed: navDef.speed, atk: navDef.atk, state: 'holding', objectiveId: null,
+        inv: [], spawned: true
       });
     }
-  }
-
-  // --- attacker navy (feature: the invader's fleet actually shows up): the
-  // ATTACKER's warship arsenal deploys by the same 1 hull = 1 warship rule as
-  // the defender's above — afloat around the staging box for a sea assault,
-  // or in the harbour water nearest the staging ground when the force starts
-  // ashore (land scenario / ceded-territory staging). Before this, only the
-  // defender's arsenal was walked, so a naval power like Valksland invaded
-  // with no fleet at all despite a stockpile of dreadnought hulls.
+  };
+  // Defender fleet musters in the harbour water nearest its principal port.
+  deployFleet(defender, 'def', findPortPos(db, war.grid, capitalPos), 40);
+  // Attacker fleet sails with the invasion force (feature: the invader's
+  // fleet actually shows up — before this only the defender's arsenal was
+  // walked, so a naval power like Valksland invaded with no fleet at all):
+  // afloat around the staging box for a sea assault, or in the harbour water
+  // nearest the staging ground when the force starts ashore (land scenario /
+  // ceded-territory staging).
   if (attacker && stage) {
-    const attShips = arsenalWeaponsOf(db, attacker, 'warship');
-    if (attShips.length) {
-      const centre = [(stage.x0 + stage.x1) / 2, (stage.y0 + stage.y1) / 2];
-      const anchor = landStart ? (nearestHarbourWater(war.grid, centre) || centre) : centre;
-      for (const { item, qty } of attShips) {
-        const n = Math.floor(qty);
-        for (let k = 0; k < n; k++) {
-          const stats = warshipUnitStats(item.meta.weapon);
-          const s = Math.round(stats.strength * hpMod);
-          const spawnPos = engine.nearestWaterPoint(war,
-            engine.clampToWorld(war, [anchor[0] + rand(-60, 60), anchor[1] + rand(-60, 60)]));
-          war.units.push({
-            id: store.uid('warunit'), side: 'att',
-            name: n > 1 ? `${item.name} ${toRoman(k + 1)}` : item.name,
-            kind: 'warship', pos: spawnPos, dest: null,
-            strength: s, maxStrength: s, org: 100,
-            speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null, spawned: true
-          });
-        }
-      }
-    }
+    const centre = [(stage.x0 + stage.x1) / 2, (stage.y0 + stage.y1) / 2];
+    deployFleet(attacker, 'att', landStart ? (nearestHarbourWater(war.grid, centre) || centre) : centre, 60);
   }
 }
 
@@ -903,6 +896,7 @@ function startWar(db, scenario) {
   if (!defender) throw new Error('Unknown defender entity: ' + scenario.defenderId);
 
   const grid = buildGrid(db);
+  engine.ensureNavalGrid(db); // fine coastline grid — spawn/dest water clamps use exact borders
 
   const objectives = scenario.objectives.map(o => ({
     id: store.uid('warobj'),

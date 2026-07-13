@@ -968,6 +968,12 @@
     // don't get it (roads are on land).
     let spd = speed * unitMul(war, u, 'speed');
     if (!NAVAL_KINDS[u.kind]) spd *= roadProximityMul(war, u.pos);
+    // GM warship-speed slider (war.mods.warshipSpeed) — a live multiplier read
+    // fresh here, like mods.dmg/bombDmg, so it applies to EVERY warship
+    // regardless of when it spawned and needs no per-unit rescale. Absent on a
+    // legacy war doc → 1× (no change). Boats are deliberately excluded — the
+    // slider tunes the heavy hulls, not the light craft.
+    else if (u.kind === 'warship') spd *= (war.mods && war.mods.warshipSpeed) || 1;
     const step = Math.min(spd, d);
     let next = clampToWorld(war, [u.pos[0] + dx / d * step, u.pos[1] + dy / d * step]);
     // Routed land units must never flee into open water (feature: "never route

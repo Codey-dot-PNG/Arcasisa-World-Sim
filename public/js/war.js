@@ -1945,11 +1945,12 @@ const War = {
   _tuneTimers: {},
   renderTuning(inner, war) {
     inner.appendChild(Views.secLabel('Global Tuning'));
-    const mods = Object.assign({ dmg: 1, bombDmg: 1, hp: 1 }, war.mods || {});
+    const mods = Object.assign({ dmg: 1, bombDmg: 1, hp: 1, warshipSpeed: 1 }, war.mods || {});
     const box = el('div');
     box.appendChild(this._tuningRow('Combat damage ×', mods, 'dmg'));
     box.appendChild(this._tuningRow('Bomb damage ×', mods, 'bombDmg'));
     box.appendChild(this._tuningRow('Unit HP ×', mods, 'hp'));
+    box.appendChild(this._tuningRow('Warship speed ×', mods, 'warshipSpeed'));
     inner.appendChild(box);
   },
   _tuningRow(label, mods, key) {

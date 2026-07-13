@@ -1231,7 +1231,7 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         if (!db.war) return bad('No war is active.');
         const patch = {};
-        for (const k of ['dmg', 'bombDmg', 'hp']) {
+        for (const k of ['dmg', 'bombDmg', 'hp', 'warshipSpeed']) {
           if (b[k] === undefined) continue;
           const v = Number(b[k]);
           if (!Number.isFinite(v)) return bad(`Invalid ${k}.`);

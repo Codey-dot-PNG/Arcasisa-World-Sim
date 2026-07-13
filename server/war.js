@@ -990,7 +990,7 @@ function startWar(db, scenario) {
     // GM global tuning (Feature: war.mods) — defaults are also the engine's
     // fallback (`(war.mods && war.mods.dmg) || 1`), so a legacy war missing
     // this field behaves identically without needing a migration.
-    mods: { dmg: 3, bombDmg: 5, hp: 1 },
+    mods: { dmg: 3, bombDmg: 5, hp: 1, warshipSpeed: 1 },
     // Foreign nations that joined an ongoing war via joinWar (Feature:
     // intervention) — additive/absent-safe, mirrors `mods` above: a war doc
     // predating this feature simply has no allies of either side.
@@ -1283,6 +1283,12 @@ function setWarTuning(db, patch, actor) {
   if (patch.bombDmg !== undefined && Number.isFinite(Number(patch.bombDmg))) {
     war.mods.bombDmg = clampMod(patch.bombDmg);
     changes.push(`bombDmg=${war.mods.bombDmg}×`);
+  }
+  // Warship-speed multiplier — read fresh by the engine's advanceToward (like
+  // dmg/bombDmg), so no per-unit rescale is needed here; just clamp + store.
+  if (patch.warshipSpeed !== undefined && Number.isFinite(Number(patch.warshipSpeed))) {
+    war.mods.warshipSpeed = clampMod(patch.warshipSpeed);
+    changes.push(`warshipSpeed=${war.mods.warshipSpeed}×`);
   }
   if (patch.hp !== undefined && Number.isFinite(Number(patch.hp))) {
     const newHp = clampMod(patch.hp);

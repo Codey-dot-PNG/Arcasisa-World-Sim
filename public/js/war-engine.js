@@ -43,6 +43,13 @@
   const CAPTURE_RANGE = 60;           // px — how close to a city counts as "holding" it
   const CAPTURE_HOLD_TICKS = 3;       // consecutive uncontested ticks to flip a city
   const AI_INTERVAL = 10;             // ticks between grand-strategy replans
+  // ---- AI tactical planner (Phase 28) — see runAI's role assignment ----
+  const OBJ_THREAT_R = 260;           // px — defenders inside this of an objective count as its garrison when planning
+  const ENCIRCLE_R = 170;             // px — how wide the pincer arms swing around a defended objective
+  const GARRISON_THREAT_R = 300;      // px — a captured city with live defenders inside this needs a rear guard
+  const PURSUE_R = 220;               // px — spearhead units run down broken/weak defenders inside this
+  const PURSUE_WEAK_FRAC = 0.35;      // a defender below this fraction of max strength is worth finishing off
+  const INTERDICT_FRAC = 0.45;        // supply-cut post sits this far from the defender capital toward the objective
   const K_COMBAT = 0.0035;            // per-tick strength loss ~ k × enemy strength
   const ORG_DRAIN = 3.5;              // per-tick org loss while fighting
   const ORG_REGEN = 0.6;              // per-tick org recovery while not fighting
@@ -1041,6 +1048,43 @@
     pending.sort((a, b) => a.priority - b.priority);
     return pending[0] || null;
   }
+  // Sum of live defending strength within r of a point. Warships are
+  // excluded — shore bombardment can't be cleared by land manoeuvre, so a
+  // squadron offshore must not read as "the city is garrisoned".
+  function defStrengthNear(war, pos, r) {
+    let s = 0;
+    for (const u of war.units) {
+      if (u.side !== 'def' || !isLive(u) || u.kind === 'warship') continue;
+      if (dist(u.pos, pos) <= r) s += u.strength;
+    }
+    return s;
+  }
+  // Slide a planned point along the straight line toward `toward` until it
+  // sits on land — a pincer arm or supply-cut post computed in open water
+  // would send a land column swimming (transport state: can't fight, prime
+  // warship bait). Deterministic fixed-fraction march; `toward` itself is a
+  // city/capital position, so the walk always terminates on land.
+  function landward(war, point, toward) {
+    if (!isWaterAt(war, point)) return point;
+    const steps = Math.max(1, Math.ceil((dist(point, toward) || 1) / 16));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const cand = [point[0] + (toward[0] - point[0]) * t, point[1] + (toward[1] - point[1]) * t];
+      if (!isWaterAt(war, cand)) return cand;
+    }
+    return toward.slice();
+  }
+  // Remove and return the pool unit nearest to `pos`. Ties break by pool
+  // order, which follows war.units order — part of state, so the server and
+  // a predicting client pick the exact same unit.
+  function takeNearest(pool, pos) {
+    let bi = -1, bd = Infinity;
+    for (let i = 0; i < pool.length; i++) {
+      const d = dist(pool[i].pos, pos);
+      if (d < bd) { bd = d; bi = i; }
+    }
+    return bi >= 0 ? pool.splice(bi, 1)[0] : null;
+  }
   function runAI(db, war, ctx, rng) {
     const attTotal = war.units.filter(u => u.side === 'att' && isLive(u)).reduce((s, u) => s + u.strength, 0);
     const collapseAt = war.ai.attackerStartStrength * war.ai.collapseFrac;
@@ -1124,26 +1168,194 @@
 
     const sweepObj = !target ? war.objectives.find(o => o.status !== 'done' && o.kind === 'control_province') : null;
 
-    let assigned = 0, garrisoned = 0;
-    for (let i = 0; i < war.units.length; i++) {
-      const u = war.units[i];
+    /* ---- Role-based assault planner (Phase 28) ----
+       The old plan was a single blob: every committed unit marched straight
+       at the top objective, with a flat "every 4th unit sits on the last
+       city taken" rear guard. The replan below splits the committed force
+       into ROLES, each of which exploits a real engine mechanic rather than
+       being flavour:
+         · rear guard    — only where live defenders actually threaten a
+                           captured city, sized to the threat (stepTerritory
+                           recapture + city fall are what it protects);
+         · interdiction  — a detachment posted on the ground between the
+                           defender capital and the objective: the territory
+                           it takes pinches the capital-rooted supply
+                           flood-fill (stepSupply), so the objective's
+                           garrison stops healing — a mechanical siege;
+         · encirclement  — pincer arms swing wide around a DEFENDED
+                           objective to close behind it: routed garrisons
+                           retreating from the assault (retreatTarget) run
+                           straight into them, and the flanks feed the same
+                           supply pinch;
+         · pursuit       — spearheads run down routed/mauled defenders near
+                           the axis instead of marching past them (a routed
+                           unit left alone rallies at RALLY_ORG and comes
+                           straight back);
+         · spearhead     — everyone left masses on the objective, exactly
+                           the old behaviour.
+       Everything is deterministic: pools iterate in war.units order (state),
+       nearest-picks tie-break by pool order, and the only rng draws are the
+       sweep-sector samples below — so a predicting client replays the same
+       plan from the same snapshot. */
+
+    // Keep embarked units pointed at the landing; split everyone else.
+    const landForce = [], navalForce = [];
+    for (const u of war.units) {
       if (u.side !== 'att' || !isLive(u) || u.state === 'routed') continue;
       if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
       if (u.state === 'embarked') { u.objectiveId = landingObj ? landingObj.id : null; continue; }
-      const lastHeld = war.stats.citiesHeld.length ? war.stats.citiesHeld[war.stats.citiesHeld.length - 1] : null;
-      if (lastHeld && i % 4 === 3) {
-        const city = db.cities.find(c => c.id === lastHeld);
-        if (city) { clearDest(u); u.state = 'holding'; u.objectiveId = null; garrisoned++; continue; }
+      if (NAVAL_KINDS[u.kind]) navalForce.push(u); else landForce.push(u);
+    }
+
+    // Naval units: fire support. setDest clamps a naval dest to the nearest
+    // water, so "go to the city" reads as "take station off its coast" and
+    // stepWarshipFire does the rest — same effective behaviour the old
+    // single-blob assignment produced, now stated as an explicit role.
+    const navalAim = target || sweepObj;
+    for (const u of navalForce) {
+      if (navalAim) { setDest(db, u, navalAim.pos.slice(), u.speed); u.objectiveId = navalAim.id; }
+    }
+
+    if (!target && sweepObj) {
+      // Exploit phase: fan the force out across the province in deterministic
+      // SECTORS of its land-cell list instead of everyone sampling the same
+      // random point independently — the old sweep could pile half the army
+      // into one corner while the far side of the province stayed unswept
+      // for several replans (the documented "already dense" rough edge).
+      const cells = (war.grid.provinceCells || {})[sweepObj.ref] || [];
+      const cs = war.grid.cell;
+      let n = 0;
+      for (const u of landForce) {
+        let dest = null;
+        if (cells.length) {
+          const idx = Math.floor(((n + rng()) / Math.max(1, landForce.length)) * cells.length) % cells.length;
+          dest = [cells[idx][0] * cs + cs / 2, cells[idx][1] * cs + cs / 2];
+        }
+        setDest(db, u, dest || sweepObj.pos.slice(), u.speed);
+        u.objectiveId = sweepObj.id;
+        n++;
       }
-      if (target) { setDest(db, u, target.pos.slice(), u.speed); u.objectiveId = target.id; assigned++; }
-      else if (sweepObj) {
-        setDest(db, u, randomProvincePoint(war, sweepObj.ref, rng) || sweepObj.pos.slice(), u.speed);
-        u.objectiveId = sweepObj.id; assigned++;
+      const prov = (db.provinces || []).find(p => p.id === sweepObj.ref);
+      note(war, `Sweeping ${n} unit(s) through ${prov ? prov.name : sweepObj.ref} in spread sectors to raise territorial control.`);
+      return;
+    }
+    if (!target) { note(war, 'All objectives complete — mopping up.'); return; }
+
+    const pool = landForce.slice();
+    const cityById = (id) => (db.cities || []).find(c => c.id === id);
+
+    // 1. Rear guard — threat-aware. Walk captured cities most-recent-first;
+    //    only one with live defenders nearby gets a guard, 1–2 units by
+    //    threat strength, chosen by proximity. No threat anywhere → the
+    //    whole force stays forward (the old rule idled 25% of it always).
+    const guardedNames = [];
+    let guards = 0;
+    const maxGuards = Math.floor(pool.length / 4);
+    const heldIds = (war.stats.citiesHeld || []).slice().reverse();
+    for (const cid of heldIds) {
+      if (guards >= maxGuards) break;
+      const city = cityById(cid);
+      if (!city || !city.pos) continue;
+      const threat = defStrengthNear(war, city.pos, GARRISON_THREAT_R);
+      if (threat <= 0) continue;
+      const want = Math.min(2, Math.max(1, Math.round(threat / 3000)), maxGuards - guards);
+      let took = 0;
+      for (let i = 0; i < want; i++) {
+        const u = takeNearest(pool, city.pos);
+        if (!u) break;
+        clearDest(u);
+        u.state = 'holding';
+        u.objectiveId = null;
+        guards++; took++;
+      }
+      if (took) guardedNames.push(city.name);
+    }
+
+    // 2. Supply interdiction — post a detachment between the defender
+    //    capital (the root of stepSupply's defender flood-fill) and the
+    //    objective. Pointless when the objective IS the capital (there is
+    //    no line behind it to cut) or the force is too small to detach.
+    let interdictors = 0;
+    const capital = (db.cities || []).find(c => c.isCapital && c.pos);
+    const targetIsCapital = !!(capital && dist(capital.pos, target.pos) < 60);
+    if (capital && !targetIsCapital && pool.length >= 6) {
+      const cut = landward(war, clampToWorld(war, [
+        capital.pos[0] + (target.pos[0] - capital.pos[0]) * INTERDICT_FRAC,
+        capital.pos[1] + (target.pos[1] - capital.pos[1]) * INTERDICT_FRAC
+      ]), capital.pos);
+      const want = pool.length >= 10 ? 2 : 1;
+      for (let i = 0; i < want; i++) {
+        const u = takeNearest(pool, cut);
+        if (!u) break;
+        setDest(db, u, cut.slice(), u.speed);
+        u.objectiveId = target.id;
+        interdictors++;
       }
     }
-    if (target) note(war, `Committing ${assigned} unit(s) toward ${target.kind} (priority ${target.priority}); ${garrisoned} holding captured ground.`);
-    else if (sweepObj) note(war, `Sweeping ${assigned} unit(s) through ${sweepObj.kind} (priority ${sweepObj.priority}) to raise territorial control.`);
-    else note(war, 'All objectives complete — mopping up.');
+
+    // 3. Encirclement — only when the objective is actually defended. Pincer
+    //    arms aim ENCIRCLE_R to each flank, biased slightly PAST the city
+    //    along the approach axis so they close behind it, and landward-slid
+    //    so a coastal objective never sends a column into the sea.
+    let encirclers = 0;
+    const defAtObj = defStrengthNear(war, target.pos, OBJ_THREAT_R);
+    if (defAtObj > 0 && pool.length >= 4) {
+      let cx = 0, cy = 0;
+      for (const u of pool) { cx += u.pos[0]; cy += u.pos[1]; }
+      cx /= pool.length; cy /= pool.length;
+      let ax = target.pos[0] - cx, ay = target.pos[1] - cy;
+      const am = Math.hypot(ax, ay) || 1; ax /= am; ay /= am;
+      const arms = pool.length >= 8 ? 2 : 1;
+      for (let i = 0; i < arms; i++) {
+        const side = i === 0 ? 1 : -1;
+        const pt = landward(war, clampToWorld(war, [
+          target.pos[0] - ay * side * ENCIRCLE_R + ax * ENCIRCLE_R * 0.35,
+          target.pos[1] + ax * side * ENCIRCLE_R + ay * ENCIRCLE_R * 0.35
+        ]), target.pos);
+        const u = takeNearest(pool, pt);
+        if (!u) break;
+        setDest(db, u, pt, u.speed);
+        u.objectiveId = target.id;
+        encirclers++;
+      }
+    }
+
+    // 4. Pursuit — run down routed/mauled defenders within PURSUE_R of the
+    //    remaining force rather than marching past them. Chase orders reuse
+    //    stepChase; the next replan's setDest clears any stale attackId.
+    let pursuers = 0;
+    const maxPursuit = Math.ceil(pool.length / 3);
+    for (const d of war.units) {
+      if (pursuers >= maxPursuit || !pool.length) break;
+      if (d.side !== 'def' || !isLive(d) || d.kind === 'warship') continue;
+      if (!(d.state === 'routed' || d.strength < (d.maxStrength || d.strength) * PURSUE_WEAK_FRAC)) continue;
+      let bi = -1, bd = Infinity;
+      for (let i = 0; i < pool.length; i++) {
+        const dd = dist(pool[i].pos, d.pos);
+        if (dd <= PURSUE_R && dd < bd) { bd = dd; bi = i; }
+      }
+      if (bi < 0) continue;
+      const u = pool.splice(bi, 1)[0];
+      clearDest(u);
+      u.attackId = d.id;
+      u.objectiveId = null;
+      if (u.state !== 'fighting') u.state = 'moving';
+      pursuers++;
+    }
+
+    // 5. Main effort — everyone left masses on the objective.
+    for (const u of pool) {
+      setDest(db, u, target.pos.slice(), u.speed);
+      u.objectiveId = target.id;
+    }
+
+    const parts = [`${pool.length} on the assault`];
+    if (encirclers) parts.push(`${encirclers} swinging wide to encircle`);
+    if (interdictors) parts.push(`${interdictors} cutting the ${capital ? capital.name + ' ' : ''}supply line`);
+    if (pursuers) parts.push(`${pursuers} running down broken formations`);
+    if (guards) parts.push(`${guards} guarding ${guardedNames.join(', ')}`);
+    if (navalForce.length && navalAim) parts.push(`${navalForce.length} squadron(s) on fire support`);
+    note(war, `${target.kind} (priority ${target.priority}): ${parts.join('; ')}.`);
   }
 
   // ---------- movement ----------
@@ -1387,7 +1599,12 @@
     const engagedDefs = new Set(); // defenders an attacker actually fought this tick — the rest stand down below
     for (const a of atts) {
       let nearest = null, nd = Infinity;
-      for (const d of defs) { const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
+      // Re-check isLive here, NOT just in the tick-start `defs` snapshot: an
+      // earlier attacker in this same loop may have just killed a defender,
+      // and targeting the corpse both wasted this attacker's whole tick and
+      // re-ran the rout/kill bookkeeping on a dead unit (duplicate
+      // "destroyed" events, a corpse flipped back to state 'routed').
+      for (const d of defs) { if (!isLive(d)) continue; const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
       if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed' && a.state !== 'transport') a.state = a.dest ? 'moving' : 'holding'; continue; }
       const d = nearest;
       anyFight = true;

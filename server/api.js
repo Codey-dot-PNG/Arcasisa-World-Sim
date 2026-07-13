@@ -437,10 +437,14 @@ async function handle(req, res, pathname, method) {
       // real timer and skips this (riding both would double-advance).
       try { if (!sim.isLongLived()) sim.autoTick('AUTO'); } catch (e) { console.error('auto-turn tick failed:', e.message); }
       // Serverless-friendly Day Market advance: ride this fetch to tick the
-      // market on wall-clock cadence (gated, so at most once per window). On a
-      // real tick, persist + signal so every client refetches the new prices —
-      // this is what gives Vercel deployments a live ~5s market with no timer.
-      try { if (market.maybeDayTick(db)) { store.save(); broadcast('sync'); } } catch (e) { /* market optional */ }
+      // market on wall-clock cadence (gated, so at most once per window).
+      // Save WITHOUT broadcast — a per-tick broadcast forced every client
+      // (map-watching or not) into a full refetch every ~5s, the same global
+      // thrash per-tick war broadcasts caused. Clients actually LOOKING at
+      // the exchange keep themselves fresh: the live wiggle is client-side
+      // (pricepath) and views.js's startPriceTicker nudges a refetch once
+      // the committed tick is overdue (which also drives this very gate).
+      try { if (market.maybeDayTick(db)) { store.save(); } } catch (e) { /* market optional */ }
       // War ticks save (heartbeat pollers read the commit) but only broadcast
       // on milestones — per-tick broadcasts made every client refetch the full
       // world at tick rate during a war. See war.maybeWarTickSignal.

@@ -101,7 +101,10 @@ setInterval(() => { try { store.saveNow(); } catch (e) { /* disk hiccup; retry n
 setInterval(() => {
   try {
     const market = require('./server/market');
-    if (market.maybeDayTick(store.get())) { store.save(); api.broadcast('sync'); }
+    // Save without broadcast (same rule as the api.js call site): per-tick
+    // sync broadcasts made every client refetch the whole world every ~5s.
+    // Exchange watchers refresh via startPriceTicker's overdue nudge instead.
+    if (market.maybeDayTick(store.get())) { store.save(); }
   } catch (e) { /* transient; retry next tick */ }
 }, 5000).unref();
 

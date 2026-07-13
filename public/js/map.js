@@ -171,7 +171,18 @@ const GameMap = {
     // bind them exactly once against the GameMap singleton.
     if (!this._winPanBound) {
       const endFromWindow = (e) => {
-        if (window.War && War._input && War._input.active) { War.onMapPointerUp(e); return; }
+        if (window.War && War._input && War._input.active) {
+          War.onMapPointerUp(e);
+          // The war gesture is finished and _input is now null — the svg's
+          // own bubble-phase pointerup (below) fires next for this SAME
+          // event, can no longer tell a completed gesture from a plain
+          // click (map.js never tracked this drag, so lastDragMoved is
+          // stale), and would call War.onMapClick — clearing the selection
+          // a box-select just made. Flag it as a drag so the click logic
+          // stands down; the next pointerdown resets the flag as usual.
+          this.lastDragMoved = true;
+          return;
+        }
         // drop the lifted finger; end an active pinch once fewer than two remain
         if (this.pointers && e.pointerId !== undefined) this.pointers.delete(e.pointerId);
         if (this.pinch && (!this.pointers || this.pointers.size < 2)) this.pinch = null;

@@ -824,21 +824,52 @@ Every `AI_INTERVAL` ticks, `runAI`:
 - Otherwise phase is `landing` while the scenario's `landing` objective is
   still pending, else `breakout` (working through the objective list) or
   `exploit` once every objective is done.
-- Picks the highest-priority (lowest `priority` number) incomplete objective
-  that isn't `control_province` (`primaryObjective`) and assigns it as
-  `dest`/`objectiveId` to every committed unit — except every 4th committed
-  unit, which is held back to garrison the most recently captured city
-  instead (so captured ground doesn't immediately fall back into fog).
+- **Role-based assault planner (Phase 28)** — during `landing`/`breakout`,
+  the committed force is no longer a single blob marched at the top
+  objective. Each replan splits it into roles, every one of which exploits a
+  real engine mechanic rather than being flavour (all deterministic: pools
+  iterate in `war.units` order, nearest-picks tie-break by pool order, and
+  the only rng draws are the sweep-sector samples — a predicting client
+  replays the identical plan from the same snapshot):
+  - **Rear guard** — replaces the old flat "every 4th unit sits on the last
+    city taken": captured cities are walked most-recent-first and only one
+    with live defenders within `GARRISON_THREAT_R` (300px) gets a guard,
+    1–2 units by threat strength (chosen by proximity), capped at ¼ of the
+    force. No rear threat anywhere → the whole force stays forward.
+  - **Supply interdiction** — with ≥6 units in the pool and an objective
+    that isn't itself the capital, 1–2 units are posted `INTERDICT_FRAC`
+    (45%) of the way from the defender capital toward the objective. The
+    territory they capture pinches the capital-rooted defender supply
+    flood-fill (`stepSupply`), so the objective's garrison stops healing —
+    a mechanical siege, not flavour.
+  - **Encirclement** — when the objective is actually defended (live
+    defender strength within `OBJ_THREAT_R` 260px), pincer arms (2 with a
+    pool ≥8, else 1) aim `ENCIRCLE_R` (170px) to each flank of the
+    objective, biased 35% PAST it along the approach axis so they close
+    behind it: routed garrisons retreating from the assault (`retreatTarget`)
+    run straight into them, and the flank ground feeds the same supply
+    pinch. Planned points are slid landward along the line back to the city
+    (`landward`) so a coastal objective never sends a column into the sea.
+  - **Pursuit** — up to ⅓ of the remaining pool is detached onto routed or
+    badly mauled defenders (below `PURSUE_WEAK_FRAC` 35% strength) within
+    `PURSUE_R` (220px), via the same `attackId` chase orders players issue —
+    a routed unit left alone rallies at `RALLY_ORG` and comes straight back.
+  - **Spearhead** — everyone left masses on the objective (the old
+    behaviour). Naval units are an explicit fire-support role: their dest is
+    the objective, which `setDest` clamps to the nearest water — "take
+    station off its coast" — and `stepWarshipFire` does the rest.
 - Once every `landing`/`seize_*` objective is done but a `control_province`
   objective is still short of its threshold, there is nothing left to march
-  toward — units instead sweep to **random land cells inside that province**
-  (`randomProvincePoint`, drawn from `grid.provinceCells`), reassigned
-  immediately on arrival (in `stepMovement`, not gated on the next AI cycle)
-  so the captured footprint keeps growing between AI replans instead of
-  units idling on objectives they've already taken.
+  toward — the force fans out across **deterministic sectors of the
+  province's land-cell list** (unit *i* of *k* samples its own *i/k* slice
+  via the tick PRNG), so the sweep spreads instead of repeatedly piling into
+  one corner; arrivals are still reassigned immediately in `stepMovement`
+  (via `randomProvincePoint`), not gated on the next AI cycle.
 - Every decision writes a one-line reasoning string into `ai.notes` (capped
-  20) — this is the GM's window into what the AI is "thinking"; it is
-  stripped from the client payload for non-GM operators (see Fog of war).
+  20) — now narrating the full plan ("6 on the assault; 2 swinging wide to
+  encircle; 1 cutting the Capitalia supply line; …"). This is the GM's
+  window into what the AI is "thinking"; it is stripped from the client
+  payload for non-GM operators (see Fog of war).
 
 ## Scenario format — `server/war-scenarios.js`
 
@@ -1441,13 +1472,13 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
 
 ## Known rough edges
 
-- The AI's "garrison every 4th committed unit on the last city taken" rule
-  is a flat heuristic, not a real threat assessment — it can leave a
-  just-captured city under-defended if the defender still has a nearby
-  garrison it hasn't yet engaged.
-- `control_province`'s random-sweep fallback has no notion of "already dense
-  in this area" — units can (rarely) repeatedly sample nearby cells instead
-  of spreading out, slowing the last few percent of a control objective.
+- The AI's threat assessments are radius sums (`defStrengthNear`), not real
+  line-of-battle analysis — a rear guard sized by strength-within-300px can
+  still be outmatched by a defender column that happens to approach from
+  outside the radius between replans.
+- The interdiction post is a POINT on the capital→objective line, not a
+  drawn front — a defender corridor wide enough to route supply around the
+  detachment's captured footprint isn't actually cut.
 - Transport-graph routes are computed at order time and never re-planned: a
   road destroyed mid-traversal doesn't reroute a unit already following its
   waypoints (it finishes the remembered path at on-network speed), and a

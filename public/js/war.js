@@ -94,7 +94,7 @@ const War = {
 
   // ---- GM unit spawner (Feature: mid-war reinforcements) ----
   _spawnArmed: false,        // "arm placement" mode: next war-layer left-click places the spawn
-  _spawnDraft: { side: 'att', kind: 'infantry', count: 3, strength: 2000, atk: 1, speed: 3.5 },
+  _spawnDraft: { side: 'att', kind: 'infantry', name: '', count: 3, strength: 2000, atk: 1, speed: 3.5 },
   // ---- Foreign intervention (Feature: nation joins an ongoing war) ----
   _joinDraft: null,          // { entityId, side } — lazily seeded once a candidate nation list exists
   // ---- GM scenario picker (Feature: dynamic scenario list) ----
@@ -273,10 +273,23 @@ const War = {
   _stopRealtime() {
     if (this._rtTimer) { clearInterval(this._rtTimer); this._rtTimer = null; }
   },
+  // Is the player actually LOOKING at the war right now? The battlefield
+  // only renders on the map's ⚔ War layer, and the War Room panel is the
+  // only other reader of live tick data. Anywhere else, predicting ticks
+  // burns CPU on a simulation nobody can see and the per-tick heartbeat
+  // spams the network for state nothing renders — the war still advances
+  // server-side (any /api/state poll rides maybeWarTick's burst catch-up,
+  // and milestones still broadcast), and coming back to the layer rebases
+  // through the usual bounded fast-forward, so nothing is lost by pausing.
+  _watchingWar() {
+    if (typeof W === 'undefined') return false;
+    return W.view === 'war' || (W.view === 'map' && W.layer === 'war');
+  },
   _realtimeStep() {
     const auth = S() && S().war;
     if (!auth) { this._stopRealtime(); this._pred = null; return; }
     if (!auth.active || auth.paused || document.hidden) return;
+    if (!this._watchingWar()) return;
     // 1. local predicted tick(s) — but never run unboundedly ahead of the
     //    last authoritative tick (if heartbeats stall, divergence would grow
     //    and every eventual reconciliation would be a visible teleport).
@@ -328,9 +341,10 @@ const War = {
     // that is NOT a window property, so it must be referenced bare (a
     // `window.GameMap` guard is always undefined and silently no-ops).
     const map = typeof GameMap !== 'undefined' ? GameMap : null;
-    // Only redraw when the map is actually on screen — prediction and the
-    // heartbeat keep running on other views (so the war stays current and
-    // the server keeps ticking), but there's nothing to draw there.
+    // Only redraw when the map is actually on screen (prediction and the
+    // heartbeat are themselves gated on _watchingWar, but a straggler call
+    // — an in-flight heartbeat resolving after a view switch — still lands
+    // here with nothing to draw).
     if (!(map && map.svg && map.svg.isConnected && map.world && map.world.isConnected && map.mk)) return;
     if (window.MapEdit && MapEdit.dragging) return; // same guard as GameMap.render
     this._lastDraw = now;
@@ -705,11 +719,12 @@ const War = {
   async _doSpawn(pos) {
     const d = this._spawnDraft;
     try {
+      const name = (d.name || '').trim();
       await POST('/api/gm/war/spawn', {
-        side: d.side, pos: this._clamp(pos), kind: d.kind,
+        side: d.side, pos: this._clamp(pos), kind: d.kind, name: name || undefined,
         count: d.count, strength: d.strength, atk: d.atk, speed: d.speed
       });
-      toast(`${d.count} ${d.kind} unit${d.count === 1 ? '' : 's'} deployed.`);
+      toast(`${d.count} ${d.kind} unit${d.count === 1 ? '' : 's'} deployed${name ? ` as ${name}` : ''}.`);
     } catch (e) { toast(e.message, true); }
   },
 
@@ -1814,6 +1829,10 @@ const War = {
       el('button.dash-btn', { class: d.side === 'def' ? 'active' : '', onclick: () => { d.side = 'def'; this._reRenderPanel(); } }, 'Defender')
     )));
     box.appendChild(Forms.field('Kind', Forms.sel(d, 'kind', WAR_SPAWN_KINDS)));
+    // Division name — optional; the server numbers multi-unit spawns
+    // ("<name> 1..N") and falls back to its generic GM-spawned label when
+    // left blank (see server/war.js spawnUnits' namePrefix).
+    box.appendChild(Forms.field('Division name', Forms.text(d, 'name', 'e.g. 3rd Lachevan Rifles (optional)')));
     box.appendChild(Forms.field('Count', Forms.sliderNum(d, 'count', 1, 12, { step: 1 })));
     box.appendChild(Forms.field('HP (strength)', Forms.sliderNum(d, 'strength', 50, 20000, { step: 50 })));
     box.appendChild(Forms.field('Damage (atk ×)', Forms.sliderNum(d, 'atk', 0.2, 10, { step: 0.1 })));

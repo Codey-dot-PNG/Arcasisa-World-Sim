@@ -2097,11 +2097,13 @@ const Views = {
   startPriceTicker() {
     if (this._priceTicker) return;
     this._priceTicker = setInterval(() => {
-      // Serverless liveness: the server's Day Market only advances when a
-      // /api/state request rides in (market.maybeDayTick's gated tick), and
-      // broadcasts alone don't recur — so while the Exchange UI is on screen,
-      // nudge a refetch whenever the next committed tick is overdue. Locally
-      // (long-lived server timer) ticks land on time, so this never fires.
+      // Market liveness: day ticks no longer broadcast at all (a per-tick
+      // 'sync' forced EVERY client into a full refetch every ~5s, whatever
+      // page it was on) — so while the Exchange UI is on screen, nudge a
+      // refetch whenever the next committed tick is overdue. On serverless
+      // the refetch itself is also what drives the server's gated tick
+      // (market.maybeDayTick riding /api/state); locally the 5s timer ticks
+      // regardless and this just pulls the committed prices in.
       const dt = (S() || {}).dayTick;
       if (dt && dt.lastAt && document.getElementById('day-tick-countdown')) {
         const overdueMs = Date.now() - (dt.lastAt + (dt.intervalMs || 5000));

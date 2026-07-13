@@ -372,6 +372,13 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, *a): pass
 
+    # Static files ship with only Last-Modified, so the browser's heuristic
+    # cache can keep serving a stale public/js/*.js for days after an edit —
+    # exactly what this mock exists to verify. Force no-store on everything.
+    def end_headers(self):
+        self.send_header("Cache-Control", "no-store")
+        super().end_headers()
+
     def _role(self):
         q = parse_qs(urlparse(self.path).query)
         if "role" in q: return q["role"][0]
@@ -384,7 +391,6 @@ class Handler(SimpleHTTPRequestHandler):
         body = json.dumps(obj).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Cache-Control", "no-store")
         if set_role: self.send_header("Set-Cookie", "mockrole=%s; Path=/" % set_role)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()

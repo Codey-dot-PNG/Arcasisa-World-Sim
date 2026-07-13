@@ -176,7 +176,11 @@ only `db.war`/`db.provinces`/`db.cities`):
 
 **Ticking without a process:** `maybeDayTick(db)` is wall-clock-gated on `db._lastDayTick`
 (default 5000ms, `economy.dayTickMs`); ridden by `GET /api/state` and the local 5s timer, plus
-one tick per turn — the gate prevents double-ticking.
+one tick per turn — the gate prevents double-ticking. A day tick `store.save()`s but does
+**not** `broadcast('sync')` (same rule as war ticks): a per-tick broadcast forced every
+client, market-watching or not, into a full refetch every ~5s. Exchange watchers stay live
+on their own: the wiggle is client-side (pricepath), and `startPriceTicker`'s overdue nudge
+(below) refetches — and thereby drives the server gate — once the next committed tick is due.
 
 **Day Market client prediction** — the read-only half of the war layer's
 snapshot → local prediction → rebase pattern (see docs/WAR.md's "Client-side

@@ -1076,7 +1076,7 @@ function spawnUnits(db, opts, actor) {
   const speed = Number.isFinite(speedIn) ? engine.clamp(speedIn, SPAWN_MIN_SPD, SPAWN_MAX_SPD) : def.speed;
   const hpMod = (war.mods && war.mods.hp) || 1;
   const strength = round1(baseStrength * hpMod);
-  const namePrefix = (typeof opts.name === 'string' && opts.name.trim()) ||
+  const namePrefix = (typeof opts.name === 'string' && opts.name.trim().slice(0, 80)) ||
     `GM-spawned ${side === 'att' ? 'Attacker' : 'Defender'} ${kind[0].toUpperCase()}${kind.slice(1)}`;
 
   const spawned = [];

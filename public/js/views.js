@@ -2097,6 +2097,20 @@ const Views = {
   startPriceTicker() {
     if (this._priceTicker) return;
     this._priceTicker = setInterval(() => {
+      // Serverless liveness: the server's Day Market only advances when a
+      // /api/state request rides in (market.maybeDayTick's gated tick), and
+      // broadcasts alone don't recur — so while the Exchange UI is on screen,
+      // nudge a refetch whenever the next committed tick is overdue. Locally
+      // (long-lived server timer) ticks land on time, so this never fires.
+      const dt = (S() || {}).dayTick;
+      if (dt && dt.lastAt && document.getElementById('day-tick-countdown')) {
+        const overdueMs = Date.now() - (dt.lastAt + (dt.intervalMs || 5000));
+        if (overdueMs > 1200 && Date.now() - (this._lastDayPoll || 0) > 4000 && typeof scheduleRefresh === 'function') {
+          this._lastDayPoll = Date.now();
+          scheduleRefresh();
+        }
+      }
+
       const priceNodes = document.querySelectorAll('.live-price[data-co]');
       priceNodes.forEach(n => {
         const c = S().entities.find(e => e.id === n.getAttribute('data-co'));

@@ -351,12 +351,32 @@
     const hit = countries.find(c => norm(c.name) === norm(e.name) || norm(c.id) === norm(e.name));
     return hit ? hit.id : null;
   }
+  // EVERY map country an entity owns — its homeland plus any ceded_* pieces
+  // minted by a peace treaty (cedeProvince stamps entityId on those). The
+  // singular countryIdForEntity above returns only the first match, which
+  // made a belligerent's ceded territory read as NEUTRAL closed-border soil
+  // in refreshWarZones — units staged there froze against their own ground.
+  function countryIdsForEntity(db, entityId) {
+    const e = (db.entities || []).find(x => x.id === entityId);
+    if (!e) return [];
+    const countries = ((db.settings || {}).map || {}).countries || [];
+    const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const out = [];
+    for (const c of countries) {
+      if ((e.countryId && c.id === e.countryId) || c.entityId === e.id ||
+          norm(c.name) === norm(e.name) || norm(c.id) === norm(e.name)) out.push(c.id);
+    }
+    return out;
+  }
   function belligerentKey(db, war) {
     const attIds = [war.attackerId].concat((war.allies && war.allies.att) || []);
     const defIds = ((war.allies && war.allies.def) || []).slice();
-    const attC = attIds.map(id => countryIdForEntity(db, id)).filter(Boolean).sort();
-    const defC = defIds.map(id => countryIdForEntity(db, id)).filter(Boolean).sort();
-    return attC.join('+') + '|' + defC.join('+');
+    const collect = (ids) => {
+      const s = [];
+      for (const id of ids) for (const c of countryIdsForEntity(db, id)) if (s.indexOf(c) < 0) s.push(c);
+      return s.sort();
+    };
+    return collect(attIds).join('+') + '|' + collect(defIds).join('+');
   }
   function refreshWarZones(db, war) {
     const grid = war.grid;
@@ -439,6 +459,111 @@
     }
     return pos;
   }
+  // ---------- naval pathfinding (feature: warships follow the coast) ----------
+  // A* over the war grid's WATER cells, so an ordered boat/warship sails AROUND
+  // land instead of aiming a straight line through it (the old behaviour left
+  // ships wall-following the coast wherever the straight line hit a landmass,
+  // or stuck entirely in concave bays). Fully deterministic — fixed neighbour
+  // order, lowest-f-then-lowest-cell-index pop — because the predicting client
+  // replays orders through this exact function (both war-engine.js copies stay
+  // byte-identical). The grid is small (80×45 at CELL 48 on the master map) so
+  // a plain array open-set is cheap. Diagonal steps never cut a land corner
+  // (both orthogonal neighbours must be water). Returns a SIMPLIFIED waypoint
+  // list (greedy water-only line-of-sight string-pulling) ending exactly on
+  // `to`, or null when no all-water route exists / the straight sail is already
+  // a single cell — callers then fall back to the legacy straight-line move,
+  // whose advanceToward land-refusal still applies as the last line of defence.
+  function navalPath(war, from, to) {
+    const g = war && war.grid;
+    if (!g || !g.landCells) return null;
+    const cs = g.cell, cols = g.cols, rows = g.rows;
+    const water = (cx, cy) => cx >= 0 && cy >= 0 && cx < cols && cy < rows && !g.landCells[cellKey(cx, cy)];
+    let sx = Math.floor(from[0] / cs), sy = Math.floor(from[1] / cs);
+    const tx = Math.floor(to[0] / cs), ty = Math.floor(to[1] / cs);
+    if (!water(tx, ty)) return null;
+    if (!water(sx, sy)) {
+      // beached start (legacy doc, GM spawn) — route from the nearest water
+      // cell; advanceToward already lets an on-land naval unit move freely, so
+      // it can crawl to the path's first waypoint.
+      let found = null;
+      for (let r = 1; r <= 6 && !found; r++) {
+        for (let dx = -r; dx <= r && !found; dx++) {
+          for (let dy = -r; dy <= r && !found; dy++) {
+            if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+            if (water(sx + dx, sy + dy)) found = [sx + dx, sy + dy];
+          }
+        }
+      }
+      if (!found) return null;
+      sx = found[0]; sy = found[1];
+    }
+    if (sx === tx && sy === ty) return null; // same cell — the straight sail is fine
+    const idxOf = (cx, cy) => cy * cols + cx;
+    const startIdx = idxOf(sx, sy), goalIdx = idxOf(tx, ty);
+    // octile-distance heuristic in cell units (admissible for the 1/√2 costs)
+    const hOf = (cx, cy) => {
+      const dx = Math.abs(cx - tx), dy = Math.abs(cy - ty);
+      return Math.max(dx, dy) + 0.41421356 * Math.min(dx, dy);
+    };
+    const DIRS = [[1, 0, 1], [-1, 0, 1], [0, 1, 1], [0, -1, 1],
+      [1, 1, 1.41421356], [1, -1, 1.41421356], [-1, 1, 1.41421356], [-1, -1, 1.41421356]];
+    const gScore = {}; const cameFrom = {}; const closed = {};
+    gScore[startIdx] = 0;
+    const open = [[hOf(sx, sy), sx, sy]]; // [f, cx, cy]
+    let found = false;
+    let guard = cols * rows * 8; // hard cap — the open set never legitimately outlives this
+    while (open.length && guard-- > 0) {
+      let bi = 0;
+      for (let i = 1; i < open.length; i++) {
+        const df = open[i][0] - open[bi][0];
+        if (df < -1e-9 || (df <= 1e-9 && idxOf(open[i][1], open[i][2]) < idxOf(open[bi][1], open[bi][2]))) bi = i;
+      }
+      const cur = open.splice(bi, 1)[0];
+      const cx = cur[1], cy = cur[2], ci = idxOf(cx, cy);
+      if (closed[ci]) continue;
+      closed[ci] = true;
+      if (ci === goalIdx) { found = true; break; }
+      const gc = gScore[ci];
+      for (const d of DIRS) {
+        const nx = cx + d[0], ny = cy + d[1];
+        if (!water(nx, ny)) continue;
+        if (d[2] > 1 && (!water(cx + d[0], cy) || !water(cx, cy + d[1]))) continue; // no corner cutting past land
+        const ni = idxOf(nx, ny);
+        if (closed[ni]) continue;
+        const ng = gc + d[2];
+        if (gScore[ni] !== undefined && gScore[ni] <= ng) continue;
+        gScore[ni] = ng; cameFrom[ni] = ci;
+        open.push([ng + hOf(nx, ny), nx, ny]);
+      }
+    }
+    if (!found) return null;
+    const cellsPath = [];
+    let cur = goalIdx;
+    while (cur !== undefined) { cellsPath.unshift(cur); if (cur === startIdx) break; cur = cameFrom[cur]; }
+    const pts = cellsPath.map(i => [((i % cols) + 0.5) * cs, (Math.floor(i / cols) + 0.5) * cs]);
+    pts[pts.length - 1] = [to[0], to[1]]; // sail to the exact ordered point, not its cell centre
+    // Greedy string-pulling: keep only waypoints needed to stay over water —
+    // sampled every 8px so even a corner-clip of a 48px land cell is caught.
+    const clearWater = (a, b) => {
+      const d = dist(a, b);
+      const steps = Math.max(1, Math.ceil(d / 8));
+      for (let i = 1; i <= steps; i++) {
+        if (!isWaterAt(war, [a[0] + (b[0] - a[0]) * i / steps, a[1] + (b[1] - a[1]) * i / steps])) return false;
+      }
+      return true;
+    };
+    const out = [];
+    let anchor = [from[0], from[1]];
+    let i = 0;
+    while (i < pts.length) {
+      let j = pts.length - 1;
+      while (j > i && !clearWater(anchor, pts[j])) j--;
+      out.push(pts[j]);
+      anchor = pts[j];
+      i = j + 1;
+    }
+    return out.length ? out : null;
+  }
 
   // ---------- equipment quality (Phase 23: weapons & fuel) ----------
   // server/war.js computes war.equip = { att: {dmg,hp,morale,speed}, def: … }
@@ -505,11 +630,30 @@
     const adj = [];
     function addNode(pt) { nodes.push([pt[0], pt[1]]); adj.push([]); return nodes.length - 1; }
     function addEdge(i, j, w) { adj[i].push([j, w]); adj[j].push([i, w]); }
+    // Long polyline segments are SUBDIVIDED (~64px pieces) so the graph has
+    // nodes all along a road, not just at its authored vertices. This is what
+    // makes nearestNode entry/exit points honest (a unit standing beside the
+    // middle of a long straight highway used to "see" the road as hundreds of
+    // px away, making computePath's route-vs-direct comparison reject it) and
+    // what lets the junction pass below actually link two polylines that cross
+    // mid-segment with no vertex near the crossing.
+    const SUBDIV = 64;
     for (const r of lines) {
       const pts = r.pts || [];
       if (pts.length < 2) continue;
       let prevIdx = null;
-      for (const p of pts) {
+      for (let pi = 0; pi < pts.length; pi++) {
+        const p = pts[pi];
+        if (prevIdx !== null) {
+          const a = nodes[prevIdx];
+          const segLen = dist(a, p);
+          const pieces = Math.max(1, Math.ceil(segLen / SUBDIV));
+          for (let s = 1; s < pieces; s++) {
+            const mid = addNode([a[0] + (p[0] - a[0]) * s / pieces, a[1] + (p[1] - a[1]) * s / pieces]);
+            addEdge(prevIdx, mid, dist(nodes[prevIdx], nodes[mid]) / ROAD_SPEED_MULT);
+            prevIdx = mid;
+          }
+        }
         const idx = addNode(p);
         if (prevIdx !== null) addEdge(prevIdx, idx, dist(nodes[prevIdx], nodes[idx]) / ROAD_SPEED_MULT);
         prevIdx = idx;
@@ -518,7 +662,10 @@
     for (let i = 0; i < nodes.length; i++) {
       for (let j = i + 1; j < nodes.length; j++) {
         const d = dist(nodes[i], nodes[j]);
-        if (d > 0 && d <= ROAD_JUNCTION_RANGE) addEdge(i, j, d / ROAD_SPEED_MULT);
+        // d === 0 is allowed: two polylines whose subdivided nodes land on the
+        // exact same point (a perfect mid-segment crossing) still need the
+        // zero-cost link, or the two roads stay disconnected.
+        if (d <= ROAD_JUNCTION_RANGE) addEdge(i, j, d / ROAD_SPEED_MULT);
       }
     }
     return { nodes, adj };
@@ -528,9 +675,13 @@
     if (_graphCache.fingerprint !== fp) _graphCache = { fingerprint: fp, graph: buildTransportGraph(db) };
     return _graphCache.graph;
   }
-  function nearestNode(graph, pos) {
+  // `blocked(idx)` (optional) — skip impassable nodes, so a unit near a road
+  // whose closest node happens to sit on neutral soil still enters the network
+  // at the nearest OPEN node instead of abandoning road routing entirely.
+  function nearestNode(graph, pos, blocked) {
     let best = -1, bd = Infinity;
     for (let i = 0; i < graph.nodes.length; i++) {
+      if (blocked && blocked(i)) continue;
       const d = dist(graph.nodes[i], pos);
       if (d < bd) { bd = d; best = i; }
     }
@@ -573,14 +724,15 @@
   function computePath(db, from, to, baseSpeed) {
     const graph = getTransportGraph(db);
     if (!graph || graph.nodes.length < 2) return null;
-    const entry = nearestNode(graph, from);
-    const exit = nearestNode(graph, to);
-    if (entry.idx < 0 || exit.idx < 0 || entry.idx === exit.idx) return null;
+    // Neutral (closed-border) nodes are excluded from entry/exit selection AND
+    // from dijkstra's relaxation — the route uses the open part of the network
+    // or none of it, but a blocked node near a terminus no longer aborts
+    // routing outright (the old bail was why border-adjacent garrisons
+    // "sometimes" marched cross-country instead of taking the highway).
     const blocked = neutralNodeTest(db.war, graph);
-    // A terminus that sits ON neutral soil never routes through the graph at
-    // all — fall through to the direct-line move, which advanceToward's own
-    // wall-follow then handles at the border itself.
-    if (blocked && (blocked(entry.idx) || blocked(exit.idx))) return null;
+    const entry = nearestNode(graph, from, blocked);
+    const exit = nearestNode(graph, to, blocked);
+    if (entry.idx < 0 || exit.idx < 0 || entry.idx === exit.idx) return null;
     const { dist: distArr, prev } = dijkstra(graph, entry.idx, blocked);
     const graphDist = distArr[exit.idx];
     if (!Number.isFinite(graphDist)) return null;
@@ -594,7 +746,19 @@
       if (cur === entry.idx) break;
       cur = prev[cur];
     }
-    return path;
+    if (path.length < 3) return path;
+    // Collinear merge: subdivision (buildTransportGraph) yields a node every
+    // ~64px, but straight road stretches don't need the intermediate points —
+    // dropping them keeps unit path arrays (synced in war state) small.
+    // Triangle-inequality slack test, deterministic on both sides.
+    const out = [path[0]];
+    for (let i = 1; i < path.length - 1; i++) {
+      const a = out[out.length - 1], b = path[i], c = path[i + 1];
+      if (dist(a, b) + dist(b, c) - dist(a, c) < 0.5) continue; // b sits on the a→c line (or duplicates a corner)
+      out.push(b);
+    }
+    out.push(path[path.length - 1]);
+    return out;
   }
   function setDest(db, u, dest, baseSpeed) {
     const war = db.war;
@@ -602,12 +766,16 @@
     u.attackId = null; // a plain move order cancels any in-progress chase (Feature: explicit attack orders)
     // Naval kinds (boat/warship) never touch land: their dest is clamped to the
     // nearest WATER cell, and they NEVER take a transport-graph route (roads and
-    // rails are on land — a road path would drag a warship onto the shore, where
-    // advanceToward's land-refusal then leaves it wall-following the coast). They
-    // move in straight lines over open water only.
+    // rails are on land — a road path would drag a warship onto the shore).
+    // They sail an all-water A* route around any landmass in the way (see
+    // navalPath above); only when no such route exists (or the trip stays in
+    // one cell) do they fall back to the legacy straight line, where
+    // advanceToward's land-refusal still wall-follows as a last resort.
     if (NAVAL_KINDS[u.kind]) {
       u.dest = nearestWaterPoint(war, clampToWorld(war, dest));
-      u.path = null; u.pathIdx = 0;
+      const np = navalPath(war, u.pos, u.dest);
+      if (np && np.length) { u.path = np; u.pathIdx = 0; }
+      else { u.path = null; u.pathIdx = 0; }
       return;
     }
     // Neutral-territory hardening: a dest that lands on closed-border soil is
@@ -627,9 +795,14 @@
     // Neutral-territory hardening: every hand-drawn waypoint is clamped off
     // closed-border soil too — a freehand path never consults the transport
     // graph, so this is the only gate a manual order passes through before
-    // stepAlongPath walks it point-to-point.
+    // stepAlongPath walks it point-to-point. Naval kinds clamp each waypoint
+    // to WATER instead (the naval counterpart — a drawn point on shore would
+    // otherwise beach-block the whole path).
+    const clampPt = NAVAL_KINDS[u.kind]
+      ? (p) => nearestWaterPoint(war, clampToWorld(war, p))
+      : (p) => nearestNonNeutralPoint(war, clampToWorld(war, p));
     const pts = (waypoints || []).slice(0, MAX_MANUAL_PATH_POINTS)
-      .map(p => nearestNonNeutralPoint(war, clampToWorld(war, [Number(p[0]), Number(p[1])])))
+      .map(p => clampPt([Number(p[0]), Number(p[1])]))
       .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
     if (pts.length < 1) return;
     u.path = pts;
@@ -650,7 +823,9 @@
         // Manual (freehand) paths ignore the road-speed bonus entirely — the
         // player drew this line deliberately and expects the unit to just
         // walk it, not silently divert onto the transport graph's speed rule.
-        const spd = u.manualPath ? baseSpeed : (idx === 0 ? baseSpeed : baseSpeed * ROAD_SPEED_MULT);
+        // Naval paths (navalPath's water route) are open sea, not roads — base
+        // speed too.
+        const spd = (u.manualPath || NAVAL_KINDS[u.kind]) ? baseSpeed : (idx === 0 ? baseSpeed : baseSpeed * ROAD_SPEED_MULT);
         advanceToward(war, u, wp, spd);
         if (dist(u.pos, wp) < 12) u.pathIdx = idx + 1;
         return;
@@ -1608,6 +1783,7 @@
     // grid / pathing / world bounds
     buildGrid, cellKey, randomProvincePoint, worldBounds, clampToWorld,
     countryIdForEntity, refreshWarZones, neutralAt, nearestNonNeutralPoint, equipMul, unitMul, isWaterAt,
+    nearestWaterPoint, navalPath,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim
     pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick

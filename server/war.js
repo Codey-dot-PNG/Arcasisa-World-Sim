@@ -670,7 +670,7 @@ function findPortPos(db, grid, capitalPos) {
 // capital (armour) and the nearest port (navy). Called once, at startWar,
 // AFTER db.war exists (so engine.setDest/clampToWorld etc. can see the grid)
 // — units are pushed straight onto war.units.
-function deployArsenalUnits(db, war, defender) {
+function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
   const capital = db.cities.find(c => c.id === 'city_lachevan') || db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
   const capitalPos = capital ? capital.pos : [war.grid.cols * war.grid.cell / 2, war.grid.rows * war.grid.cell / 2];
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
@@ -725,6 +725,37 @@ function deployArsenalUnits(db, war, defender) {
         strength: s, maxStrength: s, org: 100,
         speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null, spawned: true
       });
+    }
+  }
+
+  // --- attacker navy (feature: the invader's fleet actually shows up): the
+  // ATTACKER's warship arsenal deploys by the same 1 hull = 1 warship rule as
+  // the defender's above — afloat around the staging box for a sea assault,
+  // or in the harbour water nearest the staging ground when the force starts
+  // ashore (land scenario / ceded-territory staging). Before this, only the
+  // defender's arsenal was walked, so a naval power like Valksland invaded
+  // with no fleet at all despite a stockpile of dreadnought hulls.
+  if (attacker && stage) {
+    const attShips = arsenalWeaponsOf(db, attacker, 'warship');
+    if (attShips.length) {
+      const centre = [(stage.x0 + stage.x1) / 2, (stage.y0 + stage.y1) / 2];
+      const anchor = landStart ? (nearestHarbourWater(war.grid, centre) || centre) : centre;
+      for (const { item, qty } of attShips) {
+        const n = Math.floor(qty);
+        for (let k = 0; k < n; k++) {
+          const stats = warshipUnitStats(item.meta.weapon);
+          const s = Math.round(stats.strength * hpMod);
+          const spawnPos = engine.nearestWaterPoint(war,
+            engine.clampToWorld(war, [anchor[0] + rand(-60, 60), anchor[1] + rand(-60, 60)]));
+          war.units.push({
+            id: store.uid('warunit'), side: 'att',
+            name: n > 1 ? `${item.name} ${toRoman(k + 1)}` : item.name,
+            kind: 'warship', pos: spawnPos, dest: null,
+            strength: s, maxStrength: s, org: 100,
+            speed: stats.speed, atk: stats.atk, state: 'holding', objectiveId: null, spawned: true
+          });
+        }
+      }
     }
   }
 }
@@ -793,39 +824,70 @@ function neutralCellsExcept(grid, attackerCountryId) {
 // war-scenarios.js's qinal_invasion for why that escape hatch exists).
 function computeDynamicStaging(db, grid, scenario, attacker, firstObjPos) {
   const cid = engine.countryIdForEntity(db, attacker.id);
-  const country = cid && ((((db.settings || {}).map || {}).countries) || []).find(c => c.id === cid);
+  const countriesAll = (((db.settings || {}).map || {}).countries) || [];
+  const country = cid && countriesAll.find(c => c.id === cid);
   const defCentroid = defenderLandCentroid(grid);
   if (!defCentroid) return null;
 
-  if (scenario.land) {
-    if (!country || !grid.countryCells || !grid.countryCells[cid] || !grid.countryCells[cid].length) return null;
-    const cs = grid.cell;
-    const target = firstObjPos || defCentroid;
+  // Ceded ex-defender territory held by the attacker (a ceded_* country entry
+  // carrying its entityId — see cedeProvince): rasterised cells of every such
+  // piece. A land neighbour treats them as extra homeland to stage from; a
+  // NAVAL attacker that holds one stages ON it (land:true) — the province it
+  // won in the last treaty is its beachhead now, so subsequent invasions
+  // march out of it rather than mounting a fresh amphibious assault.
+  const cededCells = [];
+  for (const c of countriesAll) {
+    if (c.entityId !== attacker.id || String(c.id).indexOf('ceded_') !== 0) continue;
+    for (const cell of (grid.countryCells && grid.countryCells[c.id]) || []) cededCells.push(cell);
+  }
+  const cs = grid.cell;
+  const nearestCellTo = (cells, target) => {
     let best = null, bd = Infinity;
-    for (const cell of grid.countryCells[cid]) {
+    for (const cell of cells) {
       const p = [(cell[0] + 0.5) * cs, (cell[1] + 0.5) * cs];
       const d = dist(p, target);
       if (d < bd) { bd = d; best = p; }
     }
+    return best;
+  };
+
+  if (scenario.land) {
+    const homeCells = (country && grid.countryCells && grid.countryCells[cid]) || [];
+    const best = nearestCellTo(homeCells.concat(cededCells), firstObjPos || defCentroid);
     if (!best) return null;
     const size = 130;
     return { x0: best[0] - size, y0: best[1] - size, x1: best[0] + size, y1: best[1] + size };
   }
 
-  let dir = null;
+  if (cededCells.length) {
+    const best = nearestCellTo(cededCells, firstObjPos || defCentroid);
+    if (best) {
+      const size = 130;
+      return { x0: best[0] - size, y0: best[1] - size, x1: best[0] + size, y1: best[1] + size, land: true };
+    }
+  }
+
+  const neutral = neutralCellsExcept(grid, cid);
+  let found = null;
   if (country) {
     const homeCentroid = countryCentroid(country.shape);
     if (homeCentroid) {
-      const dx = homeCentroid[0] - defCentroid[0], dy = homeCentroid[1] - defCentroid[1];
+      // Mass the fleet in HOME waters: walk from the attacker's own landmass
+      // toward the defender to the first open sea — just off the attacker's
+      // coast. (The old walk went OUTWARD from the DEFENDER's centroid and
+      // stopped at the first sea cell off the defender's own beaches, which is
+      // why the Valkish invasion force materialised on top of Port Valgos —
+      // half its staging box overlapped the Arcasian coast.)
+      const dx = defCentroid[0] - homeCentroid[0], dy = defCentroid[1] - homeCentroid[1];
       const m = Math.hypot(dx, dy) || 1;
-      dir = [dx / m, dy / m];
+      found = walkToOpenSea(grid, homeCentroid, [dx / m, dy / m], neutral);
     }
   }
-  if (!dir && scenario.bearingHint && BEARING_DIRS[scenario.bearingHint]) dir = BEARING_DIRS[scenario.bearingHint];
-  if (!dir) return null;
-
-  const neutral = neutralCellsExcept(grid, cid);
-  const found = walkToOpenSea(grid, defCentroid, dir, neutral);
+  if (!found && scenario.bearingHint && BEARING_DIRS[scenario.bearingHint]) {
+    // off-map power with no homeland polygon — legacy outward walk from the
+    // defender's landmass along the scenario's compass hint
+    found = walkToOpenSea(grid, defCentroid, BEARING_DIRS[scenario.bearingHint], neutral);
+  }
   if (!found) return null;
   const size = 100;
   return { x0: found[0] - size, y0: found[1] - size, x1: found[0] + size, y1: found[1] + size };
@@ -860,6 +922,12 @@ function startWar(db, scenario) {
   const firstObj = objectives.slice().sort((a, b) => a.priority - b.priority)[0];
   const dynamicStage = computeDynamicStaging(db, grid, scenario, attacker, firstObj ? firstObj.pos : null);
   const stage = dynamicStage || scenario.staging;
+  // A force starts ashore for a land scenario OR when dynamic staging put a
+  // naval attacker on its own ceded territory (stage.land — see
+  // computeDynamicStaging). Ashore means: spawn 'moving' on the staging
+  // ground, no sea transit, and any landing objective is already satisfied.
+  const landStart = !!(scenario.land || (dynamicStage && dynamicStage.land));
+  if (landStart) for (const o of objectives) if (o.kind === 'landing') o.status = 'done';
   // Land invasions (`scenario.land: true`) spawn troops already on their own
   // soil, marching cross-border on tick one — no sea transit, no `landing`
   // objective (the scenario simply omits one). The engine only special-cases
@@ -870,18 +938,22 @@ function startWar(db, scenario) {
   const units = scenario.units.map(u => {
     const def = unitDefaults[u.kind] || { strength: 2000, speed: 4, atk: 1 }; // ×10 fallback, consistent with the scenario-data tuning (see war-scenarios.js)
     const strength = u.strength || def.strength;
+    // An embarked force spawns AFLOAT: the staging box's edge can brush a
+    // coastline (it is only a box), so each scatter position is clamped to the
+    // nearest water cell — no more transports sitting on the beach at tick 0.
+    const scatter = [rand(stage.x0, stage.x1), rand(stage.y0, stage.y1)];
     return {
       id: store.uid('warunit'),
       side: 'att',
       name: u.name,
       kind: u.kind,
-      pos: [rand(stage.x0, stage.x1), rand(stage.y0, stage.y1)],
+      pos: landStart ? scatter : engine.nearestWaterPoint({ grid }, scatter),
       dest: null,
       strength, maxStrength: strength,
       org: 100,
       speed: u.speed || def.speed,
       atk: u.atk || def.atk || 1,
-      state: scenario.land ? 'moving' : 'embarked',
+      state: landStart ? 'moving' : 'embarked',
       objectiveId: null
     };
   });
@@ -899,7 +971,7 @@ function startWar(db, scenario) {
   // (there is no landing objective to point at). Minted once here, like
   // `seed`, so it never drifts mid-war even if objectives/positions change.
   const landingObj = objectives.find(o => o.kind === 'landing');
-  const supplyAnchor = scenario.land
+  const supplyAnchor = landStart
     ? [(stage.x0 + stage.x1) / 2, (stage.y0 + stage.y1) / 2]
     : (landingObj ? landingObj.pos.slice() : null);
 
@@ -935,14 +1007,14 @@ function startWar(db, scenario) {
   // (defender.inventory — conventionally ent_gov's stockpile) is walked for
   // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
   // naval units. No-op on a world where those items haven't been seeded yet.
-  deployArsenalUnits(db, db.war, defender);
+  deployArsenalUnits(db, db.war, defender, attacker, stage, landStart);
   // Alliance-aware wars (Task 3): nations allied with the attacker/defender
   // (entity.meta.military.allies) auto-join via the existing joinWar
   // mechanics — contingent size from their military profile, mustering from
   // their own homeland when they have one. scenario.allies:false opts a
   // scenario out; scenario.coAttackers force-joins specific entities.
   autoJoinAllies(db, db.war, scenario, attacker, defender, 'WAR ENGINE');
-  if (scenario.land) {
+  if (landStart) {
     engine.pushEvent(db.war, 'battle', units[0].pos, `${attacker.name} forces cross the border — invasion begins.`);
     SERVER_CTX.news(`WAR: ${attacker.name} FORCES CROSS THE BORDER`,
       `Armed columns belonging to ${attacker.name} have crossed into Arcasian territory. The government has not yet issued a statement.`);

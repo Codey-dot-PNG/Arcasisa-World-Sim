@@ -1137,6 +1137,7 @@ function migrate(world) {
       if (wantsTanks) {
         let tank = heldOf(e, 'tank') || wpnOf('tank', e.id);
         if (!tank && Array.isArray(mil.importsFrom)) for (const s of mil.importsFrom) { tank = wpnOf('tank', s); if (tank) break; }
+        if (!tank && Array.isArray(mil.allies)) for (const s of mil.allies) { tank = wpnOf('tank', s); if (tank) break; }
         if (!tank) tank = (world.items || []).find(i => i.id === 'item_tank_satrom42e') || (world.items || []).find(i => i.meta && i.meta.weapon && i.meta.weapon.kind === 'tank');
         grant((tank || {}).id, 60 * sm * army);
       }
@@ -1147,6 +1148,29 @@ function migrate(world) {
       }
     }
     world._foreignArsenalsSeeded = true;
+    changed = true;
+  }
+
+  // ---- Valksland arsenal correction -----------------------------------------
+  // The foreign-arsenals seeding armed Valksland with Saromese '42E tanks via
+  // the generic export fallback — kit bought from a hostile power. Swap that
+  // stock for Qinali Type-7 rifles (Qinal is Valksland's ally) of equivalent
+  // market value. One-shot; a world whose Valksland never held the tanks (or
+  // that was reseeded after the allies-aware fallback above) is a clean no-op.
+  if (!world._valksArsenalFix && Array.isArray(world.entities)) {
+    const valks = world.entities.find(e => e.id === 'for_valksland');
+    const tank = (world.items || []).find(i => i.id === 'item_tank_satrom42e');
+    const rifle = (world.items || []).find(i => i.id === 'item_gun_qinal_type7');
+    if (valks && Array.isArray(valks.inventory) && rifle) {
+      const row = valks.inventory.find(r => r.itemId === 'item_tank_satrom42e');
+      if (row && row.qty > 0) {
+        const rifles = Math.max(1, Math.round(((tank && tank.marketValue) || 9500) * row.qty / ((rifle.marketValue) || 180)));
+        valks.inventory = valks.inventory.filter(r => r.itemId !== 'item_tank_satrom42e');
+        const rr = valks.inventory.find(r => r.itemId === 'item_gun_qinal_type7');
+        if (rr) rr.qty = (rr.qty || 0) + rifles; else valks.inventory.push({ itemId: 'item_gun_qinal_type7', qty: rifles });
+      }
+    }
+    world._valksArsenalFix = true;
     changed = true;
   }
 

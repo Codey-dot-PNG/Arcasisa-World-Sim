@@ -482,15 +482,39 @@ Two new unit kinds, gathered in the engine's `NAVAL_KINDS` set:
   from its item's `meta.weapon` instead (see "Tank & warship arsenal
   deployment" below).
 
-**Movement**: naval kinds refuse to step onto land — `advanceToward` checks
-`isWaterAt` (backed by the merged `grid.landCells` lookup buildGrid now
-computes: every land cell, Republic province or foreign homeland, in one flat
-set) and wall-follows ±45°/±90°/±135° around the coastline, exactly the
-pattern already used for neutral borders. A unit that is somehow ALREADY
-beached (legacy doc, GM spawn, run aground) may move freely so it can crawl
-back to water rather than freeze forever. A legacy `war.grid` without
-`landCells` reads as "no restriction" (permissive, same spirit as
-`neutralAt`); `ensureWarGrid` backfills `landCells` onto an in-progress war.
+**Movement**: naval kinds route and step over WATER ONLY, on four layers
+(warship land-crossing fix):
+
+- **Water routing** — `setDest` for a naval kind computes a
+  `computeWaterPath`: BFS over the grid's water cells (fixed neighbour order,
+  no diagonal squeeze past a land corner — deterministic, so a predicting
+  client replays the identical route), then greedy line-of-sight
+  string-pulling (`waterLineClear`, which samples the segment every third of
+  a cell rather than endpoint-only). Returns null when the direct line is
+  already clear, either end isn't a water cell, or no water route exists —
+  those fall back to the straight-line move below. Water paths never get the
+  transport graph's 5× on-network bonus (`stepAlongPath` special-cases naval
+  kinds to base speed).
+- **Step refusal** — `advanceToward` refuses any step whose SEGMENT crosses
+  land (`waterLineClear`, not just the endpoint) and wall-follows
+  ±45°/±90°/±135° around the coastline, the pattern already used for neutral
+  borders.
+- **Shove refusal** — the friendly-separation nudge (`stepSeparation`) never
+  pushes an afloat naval unit onto a land cell (this shove is how ships used
+  to get beached, after which the old un-beach exception let them drive
+  cross-country).
+- **Un-beaching** — a naval unit that is somehow ALREADY beached (GM land
+  spawn, legacy doc) steers for the NEAREST water cell instead of its ordered
+  dest until it's afloat again.
+
+`grid.landCells` (the merged land/sea mask buildGrid computes: every land
+cell, Republic province or foreign homeland, in one flat set) is built with
+coastal sub-sampling — four quarter-points per cell, not just the centre —
+so land strips narrower than a 48px cell no longer read as phantom water
+corridors (province/country CONTROL cells stay centre-based; occupation math
+is unchanged). A legacy `war.grid` without `landCells` reads as "no
+restriction" (permissive, same spirit as `neutralAt`); `ensureWarGrid`
+backfills `landCells` onto an in-progress war.
 
 **Client**: glyphs ⛵ (boat) and 🚢 (warship); both kinds are in the GM
 spawner's kind list. A warship in `fighting` state draws a thin fading

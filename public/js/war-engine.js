@@ -415,6 +415,30 @@
     }
     return pos; // fully boxed in by neutral soil out to the search radius — give up rather than loop forever
   }
+  // The nearest WATER cell centre to `pos` — the naval counterpart of
+  // nearestNonNeutralPoint. Used to clamp a naval unit's ORDER so a warship/boat
+  // can never be aimed onto land in the first place (advanceToward's land-refusal
+  // only stops a unit mid-step; this stops the dest from ever sitting inland).
+  // Same deterministic ring search; a pos already on water is returned as-is; a
+  // legacy war with no landCells is permissive.
+  function nearestWaterPoint(war, pos) {
+    const g = war && war.grid;
+    if (!g || !g.landCells || isWaterAt(war, pos)) return pos;
+    const cs = g.cell;
+    const cx0 = Math.floor(pos[0] / cs), cy0 = Math.floor(pos[1] / cs);
+    for (let r = 1; r <= 80; r++) {
+      for (let dx = -r; dx <= r; dx++) {
+        for (let dy = -r; dy <= r; dy++) {
+          if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+          const cx = cx0 + dx, cy = cy0 + dy;
+          if (cx < 0 || cy < 0 || cx >= g.cols || cy >= g.rows) continue;
+          if (g.landCells[cellKey(cx, cy)]) continue; // want water
+          return clampToWorld(war, [(cx + 0.5) * cs, (cy + 0.5) * cs]);
+        }
+      }
+    }
+    return pos;
+  }
 
   // ---------- equipment quality (Phase 23: weapons & fuel) ----------
   // server/war.js computes war.equip = { att: {dmg,hp,morale,speed}, def: … }
@@ -574,12 +598,22 @@
   }
   function setDest(db, u, dest, baseSpeed) {
     const war = db.war;
+    u.manualPath = false; // a normal order always restores road/rail routing over any earlier freehand path
+    u.attackId = null; // a plain move order cancels any in-progress chase (Feature: explicit attack orders)
+    // Naval kinds (boat/warship) never touch land: their dest is clamped to the
+    // nearest WATER cell, and they NEVER take a transport-graph route (roads and
+    // rails are on land — a road path would drag a warship onto the shore, where
+    // advanceToward's land-refusal then leaves it wall-following the coast). They
+    // move in straight lines over open water only.
+    if (NAVAL_KINDS[u.kind]) {
+      u.dest = nearestWaterPoint(war, clampToWorld(war, dest));
+      u.path = null; u.pathIdx = 0;
+      return;
+    }
     // Neutral-territory hardening: a dest that lands on closed-border soil is
     // clamped to the nearest open ground BEFORE anything else (routing,
     // movement) ever sees it — see nearestNonNeutralPoint.
     u.dest = nearestNonNeutralPoint(war, clampToWorld(war, dest));
-    u.manualPath = false; // a normal order always restores road/rail routing over any earlier freehand path
-    u.attackId = null; // a plain move order cancels any in-progress chase (Feature: explicit attack orders)
     const path = computePath(db, u.pos, u.dest, baseSpeed || u.speed || 1);
     if (path && path.length) { u.path = path; u.pathIdx = 0; }
     else { u.path = null; u.pathIdx = 0; }

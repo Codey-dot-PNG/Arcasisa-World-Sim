@@ -650,12 +650,20 @@ function nearestHarbourWater(grid, from) {
   }
   return best;
 }
-// The water tile a warship spawns on: the harbour water nearest a seeded port
-// property (or, failing that, the capital). Always a WATER cell so the ship is
-// afloat and mobile from tick one.
+// The water tile the Republic's warships spawn on: ALWAYS Port Kradon (the
+// Republic's principal deep-water port and home of the Kradon Shipyards) in
+// every scenario, per design — the harbour water nearest the Port of Kradon
+// property (or the Port Kradon city, then any port, then the capital as
+// last-ditch fallbacks so a world that lacks it still floats its ships). Always
+// resolves to a WATER cell so the ship is afloat and mobile from tick one.
 function findPortPos(db, grid, capitalPos) {
-  const port = (db.properties || []).find(p => p.pos && (p.kind === 'port' || /\bport\b|harbou?r/i.test(p.name || '')));
-  const anchor = port ? port.pos : capitalPos;
+  const props = db.properties || [];
+  const cities = db.cities || [];
+  const anchor =
+    (props.find(p => p.id === 'prop_kradon_port' && p.pos) || {}).pos ||
+    (cities.find(c => c.id === 'city_kradon' && c.pos) || {}).pos ||
+    (props.find(p => p.pos && (p.kind === 'port' || /\bport\b|harbou?r/i.test(p.name || ''))) || {}).pos ||
+    capitalPos;
   return nearestHarbourWater(grid, anchor) || nearestHarbourWater(grid, capitalPos) || anchor;
 }
 // Groups the defender's tank/warship arsenal into fresh war units at the

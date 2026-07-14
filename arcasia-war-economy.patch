@@ -1,0 +1,376 @@
+diff --git a/public/js/war-engine.js b/public/js/war-engine.js
+index 197a0a5..bfe418e 100644
+--- a/public/js/war-engine.js
++++ b/public/js/war-engine.js
+@@ -88,6 +88,7 @@
+   // via the normal 40px collision pass and refuse to advance onto land cells
+   // (advanceToward below), mirroring how neutralCells are refused.
+   const NAVAL_KINDS = { boat: true, warship: true };
++  const CHASE_REPLAN_DIST = 48;       // px the chased target may drift from a naval chase route's endpoint before the water A* is replanned (see stepChase)
+ 
+   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
+   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+@@ -1422,17 +1423,17 @@
+   // when there was no attackId, or the target is gone (in which case the
+   // unit is dropped back to 'holding' and normal dest handling — which will
+   // find no dest either — takes over).
+-  function stepChase(war, u) {
++  function stepChase(db, war, u) {
+     if (!u.attackId) return false;
+     if (u.state === 'routed') return false; // a broken unit ignores its attack order until it rallies (the order survives on the unit)
+     const target = war.units.find(x => x.id === u.attackId);
+-    if (!target || !isLive(target)) { u.attackId = null; u.state = 'holding'; return false; }
++    if (!target || !isLive(target)) { clearDest(u); u.state = 'holding'; return false; } // clearDest also drops any chase-owned naval route/dest left on the unit
+     // A LAND unit never chases a warship (feature: "transports don't go after
+     // warships"): it would have to swim out as a defenceless transport into
+     // WARSHIP_RANGE fire it cannot return — suicide, whether the order came
+     // from the AI's hunt or a player click. Break the chase off cleanly; the
+     // unit falls back to normal dest handling. Boats/warships still may.
+-    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { u.attackId = null; u.state = 'holding'; return false; }
++    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { clearDest(u); u.state = 'holding'; return false; }
+     // Same collision rule as normal dest movement: ANY live enemy inside
+     // COLLIDE_ENEMY stops the advance and starts the fight — otherwise a
+     // chase could walk straight through a different enemy standing between
+@@ -1440,6 +1441,37 @@
+     const near = nearestLiveEnemy(war, u);
+     if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; return true; }
+     if (dist(u.pos, target.pos) <= COLLIDE_ENEMY) { u.state = 'fighting'; }
++    else if (NAVAL_KINDS[u.kind]) {
++      // Naval chase (feature: "attack orders follow sea routes"): a boat or
++      // warship ordered onto an enemy sails the same all-water A* route a
++      // plain move order takes (navalPath, as setDest uses) instead of aiming
++      // a straight line at the target — which beached the ship on any
++      // coastline standing between it and its prey. The route is NOT
++      // recomputed every tick (that would be a full A* per chasing squadron
++      // per tick — the same cost stepChase's header note rejects); it is
++      // replanned only when the target has drifted CHASE_REPLAN_DIST from the
++      // planned endpoint, or the old route is fully sailed. Deterministic on
++      // both sides: navalPath is deterministic and the replan trigger reads
++      // only synced unit state, so the predicting client replays the exact
++      // chase (both war-engine.js copies stay byte-identical).
++      ensureNavalGrid(db); // fine coastline grid backs the goal clamp + the route
++      const goal = nearestWaterPoint(war, clampToWorld(war, target.pos));
++      if (u.path && u.path.length && (u.pathIdx || 0) >= u.path.length) { u.path = null; u.pathIdx = 0; } // exhausted route — force a fresh plan from here
++      const routeEnd = (u.path && u.path.length) ? u.path[u.path.length - 1] : null;
++      if (!routeEnd || dist(routeEnd, goal) > CHASE_REPLAN_DIST) {
++        const np = navalPath(db, war, u.pos, goal);
++        u.path = (np && np.length) ? np : null;
++        u.pathIdx = 0;
++        u.manualPath = false;
++        u.dest = goal;
++      }
++      // Sail the planned route; with no all-water route (or none needed —
++      // navalPath returns null for a same-cell trip) fall back to the straight
++      // advance, where advanceToward's land-refusal still wall-follows.
++      if (u.path && u.path.length) stepAlongPath(war, u, u.speed || DEF_MOVE_SPEED);
++      else advanceToward(war, u, goal, u.speed || DEF_MOVE_SPEED);
++      u.state = 'moving';
++    }
+     else { advanceToward(war, u, target.pos, u.speed || DEF_MOVE_SPEED); u.state = 'moving'; }
+     return true;
+   }
+@@ -1462,7 +1494,7 @@
+           if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+           continue;
+         }
+-        if (stepChase(war, u)) continue;
++        if (stepChase(db, war, u)) continue;
+         if (!u.dest) continue;
+         const near = nearestLiveEnemy(war, u);
+         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
+@@ -1500,7 +1532,7 @@
+         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+         continue;
+       }
+-      if (stepChase(war, u)) continue;
++      if (stepChase(db, war, u)) continue;
+       if (u.dest) {
+         const near = nearestLiveEnemy(war, u);
+         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
+diff --git a/server/sim.js b/server/sim.js
+index b0cd21f..16cd394 100644
+--- a/server/sim.js
++++ b/server/sim.js
+@@ -1035,7 +1035,20 @@ function generateTradeOrders(db) {
+       // abundant suppliers undercut (inverted for supply)
+       const lvlMult = kind === 'demand' ? (LVL_PRICE[lvl] || 1) : (1 / (LVL_PRICE[lvl] || 1));
+       const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0.05);
+-      const qty = Math.max(1, Math.round(partnerCap(p, iid, kind) * (0.55 + Math.random() * 0.9)));
++      let qty = Math.max(1, Math.round(partnerCap(p, iid, kind) * (0.55 + Math.random() * 0.9)));
++      // Heavy military hardware is scarce on the world market (feature:
++      // "reduce their stock — at most, high supply, 100 tanks and 5 ships on
++      // the international exchange"): whatever the partner's generic capacity
++      // says, a tank order is clamped to at most 100 vehicles and a warship
++      // order to at most 5 hulls, and only at HIGH supply/demand — Med and Low
++      // listings shrink further. Applies to both sides of the book (a partner
++      // buying our tanks is no less constrained by hulls-in-yards realities).
++      const wkind = item.meta && item.meta.weapon && item.meta.weapon.kind;
++      if (wkind === 'tank' || wkind === 'warship') {
++        const HW_MAX = wkind === 'tank' ? 100 : 5;
++        const HW_LVL = { High: 1, Med: 0.6, Low: 0.3 };
++        qty = Math.max(1, Math.min(qty, Math.round(HW_MAX * (HW_LVL[lvl] || 0.6))));
++      }
+       return {
+         id: store.uid('ord'), partnerId: p.entityId, itemId: iid,
+         qty, filled: 0, level: lvl,
+diff --git a/server/store.js b/server/store.js
+index a72a984..d44e7c4 100644
+--- a/server/store.js
++++ b/server/store.js
+@@ -1025,22 +1025,22 @@ function migrate(world) {
+     });
+     const vehicles = [
+       mkVeh('item_tank_m36griz', 'M36 "Griz" Tank', 'tank', null,
+-        { model: 'M36 Griz', dmg: 0.22, hp: 0.30, armor: 0.25, speed: 0.30, fuelUse: 0.5 }, 4200,
++        { model: 'M36 Griz', dmg: 0.22, hp: 0.30, armor: 0.25, speed: 0.30, fuelUse: 0.5 }, 50000,
+         'Arcasian heavy tank of 1936. A 76mm gun behind 100mm of frontal plate — cheap, simple, and thoroughly outclassed by 1962.'),
+       mkVeh('item_tank_satrom42e', '"Muhit" Satrom Model \'42E Tank', 'tank', 'for_sarom',
+-        { model: "Satrom '42E", dmg: 0.45, hp: 0.55, armor: 0.50, speed: 0.35, fuelUse: 0.9 }, 9500,
++        { model: "Satrom '42E", dmg: 0.45, hp: 0.55, armor: 0.50, speed: 0.35, fuelUse: 0.9 }, 1800000,
+         'Old Saromese export pattern. An 88mm cannon behind 180mm of frontal armour; the oil-hungry engine drinks fuel fast, but it is cheap and plentiful on the second-hand market.'),
+       mkVeh('item_tank_type50m', 'Type 50M Tank', 'tank', 'for_qinal',
+-        { model: 'Type 50M', dmg: 0.78, hp: 0.85, armor: 0.70, speed: 0.40, fuelUse: 1.1 }, 32000,
++        { model: 'Type 50M', dmg: 0.78, hp: 0.85, armor: 0.70, speed: 0.40, fuelUse: 1.1 }, 4500000,
+         'Modern Qinali export. A stabilised 120mm gun with electronic sights behind 200mm of armour — expensive, thirsty, and far ahead of anything else in the region.'),
+       mkVeh('item_warship_kradon', 'Kradon-class Cruiser', 'warship', null,
+-        { model: 'Kradon-class', dmg: 0.30, hp: 0.40, range: 0.30, speed: 0.25 }, 60000,
++        { model: 'Kradon-class', dmg: 0.30, hp: 0.40, range: 0.30, speed: 0.25 }, 25000000,
+         'Very old Arcasian design out of the Kradon yards. Slow, lightly armed, and still the pride of the Eastern Fleet for lack of anything newer.'),
+       mkVeh('item_warship_madrosian', 'Madrosian Frigate', 'warship', 'for_madrosia',
+-        { model: 'Madrosian Frigate', dmg: 0.50, hp: 0.60, range: 0.50, speed: 0.45 }, 95000,
++        { model: 'Madrosian Frigate', dmg: 0.50, hp: 0.60, range: 0.50, speed: 0.45 }, 32000000,
+         'Fast, well-armed frigate of the Madrosian merchant marine\'s escort fleet — the backbone of a small nation with an outsized navy.'),
+       mkVeh('item_warship_valkslandic', 'Valkslandic Dreadnought', 'warship', 'for_valksland',
+-        { model: 'Valkslandic Dreadnought', dmg: 0.85, hp: 0.90, range: 0.70, speed: 0.40 }, 220000,
++        { model: 'Valkslandic Dreadnought', dmg: 0.85, hp: 0.90, range: 0.70, speed: 0.40 }, 45000000,
+         'A capital ship of the Valksland fleet — heavily armoured, heavily gunned, and priced accordingly. Nothing in the region can match it hull-for-hull.')
+     ];
+     for (const v of vehicles) if (!world.items.some(i => i.id === v.id)) world.items.push(v);
+@@ -1225,6 +1225,48 @@ function migrate(world) {
+     changed = true;
+   }
+ 
++  // ---- Heavy-arms repricing (feature: "increase price of tanks and warships
++  // all around") — tanks now run well above the old baseline (₳50k for the
++  // standard M36 pattern) and warships ₳25–45M a hull. One-shot, flag-gated: it rewrites
++  // marketValue on worlds seeded at the old calibration; the _armorNavySeeded
++  // seed above already carries the new numbers for fresh worlds. The scarcity
++  // half of the feature (at most ~100 tanks / 5 hulls on the international
++  // exchange even at High supply) is enforced procedurally in sim.js's
++  // generateTradeOrders, not here — order books are regenerated every turn.
++  if (!world._heavyArmsRepriced && Array.isArray(world.items)) {
++    const reprice = (id, value) => { const it = world.items.find(i => i.id === id); if (it) it.marketValue = value; };
++    reprice('item_tank_m36griz', 50000);
++    reprice('item_tank_satrom42e', 1800000);
++    reprice('item_tank_type50m', 4500000);
++    reprice('item_warship_kradon', 25000000);
++    reprice('item_warship_madrosian', 32000000);
++    reprice('item_warship_valkslandic', 45000000);
++    world._heavyArmsRepriced = true;
++    changed = true;
++  }
++
++  // ---- Warships as an import option ----------------------------------------
++  // The naval counterpart of _tankTradeSeeded above: hulls appear on the same
++  // international order book (feature: "ships on the international exchange"),
++  // sold by the naval powers that build them — Madrosia its frigates,
++  // Valksland its dreadnoughts. Low supply: generateTradeOrders' hardware caps
++  // then keep the listing to a handful of hulls a turn. Additive; skips a
++  // partner that isn't in this world's trade desk.
++  if (!world._warshipTradeSeeded && world.settings && world.settings.trade && Array.isArray(world.settings.trade.partners)) {
++    const addImport = (entityId, itemId, supplyLevel, mult) => {
++      const p = world.settings.trade.partners.find(x => x.entityId === entityId);
++      if (!p || !world.items.some(i => i.id === itemId)) return;
++      p.imports = p.imports || [];
++      if (!p.imports.includes(itemId)) p.imports.push(itemId);
++      p.supply = p.supply || {}; if (p.supply[itemId] === undefined) p.supply[itemId] = supplyLevel;
++      p.priceMult = p.priceMult || {}; if (p.priceMult[itemId] === undefined) p.priceMult[itemId] = mult;
++    };
++    addImport('for_madrosia', 'item_warship_madrosian', 'Low', 0.92); // cancels the Low-supply ask inflation so the ask sits at ~retail (₳25–45M band)
++    addImport('for_valksland', 'item_warship_valkslandic', 'Low', 0.92);
++    world._warshipTradeSeeded = true;
++    changed = true;
++  }
++
+   // ---- GDP re-pin ----------------------------------------------------------
+   // globalVars.gdpScale converts per-turn production gross into national GDP
+   // (sim.js updateDerived/runEconomy). It was calibrated ONCE at the schema<3
+diff --git a/server/war-engine.js b/server/war-engine.js
+index 197a0a5..bfe418e 100644
+--- a/server/war-engine.js
++++ b/server/war-engine.js
+@@ -88,6 +88,7 @@
+   // via the normal 40px collision pass and refuse to advance onto land cells
+   // (advanceToward below), mirroring how neutralCells are refused.
+   const NAVAL_KINDS = { boat: true, warship: true };
++  const CHASE_REPLAN_DIST = 48;       // px the chased target may drift from a naval chase route's endpoint before the water A* is replanned (see stepChase)
+ 
+   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
+   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
+@@ -1422,17 +1423,17 @@
+   // when there was no attackId, or the target is gone (in which case the
+   // unit is dropped back to 'holding' and normal dest handling — which will
+   // find no dest either — takes over).
+-  function stepChase(war, u) {
++  function stepChase(db, war, u) {
+     if (!u.attackId) return false;
+     if (u.state === 'routed') return false; // a broken unit ignores its attack order until it rallies (the order survives on the unit)
+     const target = war.units.find(x => x.id === u.attackId);
+-    if (!target || !isLive(target)) { u.attackId = null; u.state = 'holding'; return false; }
++    if (!target || !isLive(target)) { clearDest(u); u.state = 'holding'; return false; } // clearDest also drops any chase-owned naval route/dest left on the unit
+     // A LAND unit never chases a warship (feature: "transports don't go after
+     // warships"): it would have to swim out as a defenceless transport into
+     // WARSHIP_RANGE fire it cannot return — suicide, whether the order came
+     // from the AI's hunt or a player click. Break the chase off cleanly; the
+     // unit falls back to normal dest handling. Boats/warships still may.
+-    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { u.attackId = null; u.state = 'holding'; return false; }
++    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { clearDest(u); u.state = 'holding'; return false; }
+     // Same collision rule as normal dest movement: ANY live enemy inside
+     // COLLIDE_ENEMY stops the advance and starts the fight — otherwise a
+     // chase could walk straight through a different enemy standing between
+@@ -1440,6 +1441,37 @@
+     const near = nearestLiveEnemy(war, u);
+     if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; return true; }
+     if (dist(u.pos, target.pos) <= COLLIDE_ENEMY) { u.state = 'fighting'; }
++    else if (NAVAL_KINDS[u.kind]) {
++      // Naval chase (feature: "attack orders follow sea routes"): a boat or
++      // warship ordered onto an enemy sails the same all-water A* route a
++      // plain move order takes (navalPath, as setDest uses) instead of aiming
++      // a straight line at the target — which beached the ship on any
++      // coastline standing between it and its prey. The route is NOT
++      // recomputed every tick (that would be a full A* per chasing squadron
++      // per tick — the same cost stepChase's header note rejects); it is
++      // replanned only when the target has drifted CHASE_REPLAN_DIST from the
++      // planned endpoint, or the old route is fully sailed. Deterministic on
++      // both sides: navalPath is deterministic and the replan trigger reads
++      // only synced unit state, so the predicting client replays the exact
++      // chase (both war-engine.js copies stay byte-identical).
++      ensureNavalGrid(db); // fine coastline grid backs the goal clamp + the route
++      const goal = nearestWaterPoint(war, clampToWorld(war, target.pos));
++      if (u.path && u.path.length && (u.pathIdx || 0) >= u.path.length) { u.path = null; u.pathIdx = 0; } // exhausted route — force a fresh plan from here
++      const routeEnd = (u.path && u.path.length) ? u.path[u.path.length - 1] : null;
++      if (!routeEnd || dist(routeEnd, goal) > CHASE_REPLAN_DIST) {
++        const np = navalPath(db, war, u.pos, goal);
++        u.path = (np && np.length) ? np : null;
++        u.pathIdx = 0;
++        u.manualPath = false;
++        u.dest = goal;
++      }
++      // Sail the planned route; with no all-water route (or none needed —
++      // navalPath returns null for a same-cell trip) fall back to the straight
++      // advance, where advanceToward's land-refusal still wall-follows.
++      if (u.path && u.path.length) stepAlongPath(war, u, u.speed || DEF_MOVE_SPEED);
++      else advanceToward(war, u, goal, u.speed || DEF_MOVE_SPEED);
++      u.state = 'moving';
++    }
+     else { advanceToward(war, u, target.pos, u.speed || DEF_MOVE_SPEED); u.state = 'moving'; }
+     return true;
+   }
+@@ -1462,7 +1494,7 @@
+           if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+           continue;
+         }
+-        if (stepChase(war, u)) continue;
++        if (stepChase(db, war, u)) continue;
+         if (!u.dest) continue;
+         const near = nearestLiveEnemy(war, u);
+         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
+@@ -1500,7 +1532,7 @@
+         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+         continue;
+       }
+-      if (stepChase(war, u)) continue;
++      if (stepChase(db, war, u)) continue;
+       if (u.dest) {
+         const near = nearestLiveEnemy(war, u);
+         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
+diff --git a/server/war.js b/server/war.js
+index c9db0d8..03aa7fe 100644
+--- a/server/war.js
++++ b/server/war.js
+@@ -767,7 +767,15 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
+     let totalHulls = 0;
+     for (const { qty } of hulls) totalHulls += Math.floor(qty);
+     if (!(totalHulls > 0)) return;
+-    const numSquadrons = Math.ceil(totalHulls / shipCapacity);
++    // Squadron count is capped at 50% of the side's OTHER formations, exactly
++    // like armour above (feature: "limit warships the way tanks are limited by
++    // infantry divisions") — a navy needs a land army to screen its ports and
++    // crew its logistics; hulls beyond the cap stay in the stockpile as the
++    // reserve resupplyUnits draws replacement kit from.
++    const otherSideUnits = war.units.filter(u => u.side === side && u.kind !== 'armored' && u.kind !== 'warship').length;
++    const squadronCap = Math.floor(otherSideUnits * 0.5);
++    const numSquadrons = Math.max(0, Math.min(Math.ceil(totalHulls / shipCapacity), squadronCap));
++    if (!(numSquadrons > 0)) return;
+     const bestHullName = hulls.slice().sort((a, b) => shipQuality(b.item.meta.weapon) - shipQuality(a.item.meta.weapon))[0].item.name;
+     for (let i = 0; i < numSquadrons; i++) {
+       const s = Math.round(navDef.strength * hpMod);
+@@ -1071,6 +1079,43 @@ function startWar(db, scenario) {
+   return db.war;
+ }
+ 
++// Demobilisation (feature: "after a war ends, any items deployed or in troop
++// inventories return to the national inventory"): every SURVIVING unit hands
++// back its whole kit — tanks, hulls, rifles, fuel, whatever resupplyUnits
++// loaded aboard — to its nation's stockpile (entity.inventory, the same pool
++// nationPools draws from first), so hardware that lived through the war isn't
++// silently written off with the war document. Kit aboard DESTROYED units is
++// gone with them (attrition already sheds a dying unit's weapons; whatever a
++// wreck still holds burned with it). Called from endWar (GM stop, treaty) AND
++// from the post-tick hook in warTick/maybeWarTick — the engine can end a war
++// itself (annihilation, total conquest) without ever passing through endWar.
++// Flag-gated on the war doc so the two paths can't double-return anything.
++// Pure inventory bookkeeping — no money moves — persistence rides the
++// caller's store.save()/broadcast as usual.
++function demobilizeUnits(db, war, actor) {
++  if (!war || war._demobilized) return;
++  war._demobilized = true;
++  if (!Array.isArray(war.units)) return;
++  const returned = {}; // nationId -> item count, for the one summary log line
++  for (const u of war.units) {
++    if (!isLive(u) || !Array.isArray(u.inv) || !u.inv.length) continue;
++    const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
++    const nation = db.entities.find(x => x.id === nid);
++    if (!nation) { u.inv = []; continue; } // nation gone from the world — the kit has nowhere to go
++    nation.inventory = nation.inventory || [];
++    for (const r of u.inv) {
++      if (!(r && r.qty > 0)) continue;
++      invAdd(nation.inventory, r.itemId, r.qty);
++      returned[nid] = (returned[nid] || 0) + r.qty;
++    }
++    u.inv = [];
++  }
++  const parts = Object.keys(returned).map(nid => {
++    const e = db.entities.find(x => x.id === nid);
++    return `${Math.round(returned[nid])} item(s) to ${e ? e.name : nid}`;
++  });
++  if (parts.length) store.log('event', 'Forces demobilised', `Surviving formations returned their equipment to the national stockpiles: ${parts.join('; ')}.`, actor || 'WAR ENGINE', [war.attackerId, war.defenderId]);
++}
+ function endWar(db, actor, reason) {
+   const war = db.war;
+   if (!war) return null;
+@@ -1091,6 +1136,7 @@ function endWar(db, actor, reason) {
+   for (const prop of (db.properties || [])) {
+     if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+   }
++  demobilizeUnits(db, war, actor);
+   store.log('event', 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
+   return war;
+ }
+@@ -1628,12 +1674,16 @@ function warTick(db) {
+   ensureWarGrid(db);
+   const ticked = engine.warTick(db, ctxFor(db));
+   if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
++  // The engine ends wars itself (annihilation, total conquest) without going
++  // through endWar — catch that here so the survivors still demobilise.
++  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE');
+   return ticked;
+ }
+ function maybeWarTick(db) {
+   ensureWarGrid(db);
+   const ticked = engine.maybeWarTick(db, ctxFor(db));
+   if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
++  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE'); // see warTick — engine-ended wars must demobilise too
+   return ticked;
+ }
+ 

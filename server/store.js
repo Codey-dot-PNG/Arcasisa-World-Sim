@@ -1025,22 +1025,22 @@ function migrate(world) {
     });
     const vehicles = [
       mkVeh('item_tank_m36griz', 'M36 "Griz" Tank', 'tank', null,
-        { model: 'M36 Griz', dmg: 0.22, hp: 0.30, armor: 0.25, speed: 0.30, fuelUse: 0.5 }, 4200,
+        { model: 'M36 Griz', dmg: 0.22, hp: 0.30, armor: 0.25, speed: 0.30, fuelUse: 0.5 }, 50000,
         'Arcasian heavy tank of 1936. A 76mm gun behind 100mm of frontal plate — cheap, simple, and thoroughly outclassed by 1962.'),
       mkVeh('item_tank_satrom42e', '"Muhit" Satrom Model \'42E Tank', 'tank', 'for_sarom',
-        { model: "Satrom '42E", dmg: 0.45, hp: 0.55, armor: 0.50, speed: 0.35, fuelUse: 0.9 }, 9500,
+        { model: "Satrom '42E", dmg: 0.45, hp: 0.55, armor: 0.50, speed: 0.35, fuelUse: 0.9 }, 1800000,
         'Old Saromese export pattern. An 88mm cannon behind 180mm of frontal armour; the oil-hungry engine drinks fuel fast, but it is cheap and plentiful on the second-hand market.'),
       mkVeh('item_tank_type50m', 'Type 50M Tank', 'tank', 'for_qinal',
-        { model: 'Type 50M', dmg: 0.78, hp: 0.85, armor: 0.70, speed: 0.40, fuelUse: 1.1 }, 32000,
+        { model: 'Type 50M', dmg: 0.78, hp: 0.85, armor: 0.70, speed: 0.40, fuelUse: 1.1 }, 4500000,
         'Modern Qinali export. A stabilised 120mm gun with electronic sights behind 200mm of armour — expensive, thirsty, and far ahead of anything else in the region.'),
       mkVeh('item_warship_kradon', 'Kradon-class Cruiser', 'warship', null,
-        { model: 'Kradon-class', dmg: 0.30, hp: 0.40, range: 0.30, speed: 0.25 }, 60000,
+        { model: 'Kradon-class', dmg: 0.30, hp: 0.40, range: 0.30, speed: 0.25 }, 25000000,
         'Very old Arcasian design out of the Kradon yards. Slow, lightly armed, and still the pride of the Eastern Fleet for lack of anything newer.'),
       mkVeh('item_warship_madrosian', 'Madrosian Frigate', 'warship', 'for_madrosia',
-        { model: 'Madrosian Frigate', dmg: 0.50, hp: 0.60, range: 0.50, speed: 0.45 }, 95000,
+        { model: 'Madrosian Frigate', dmg: 0.50, hp: 0.60, range: 0.50, speed: 0.45 }, 32000000,
         'Fast, well-armed frigate of the Madrosian merchant marine\'s escort fleet — the backbone of a small nation with an outsized navy.'),
       mkVeh('item_warship_valkslandic', 'Valkslandic Dreadnought', 'warship', 'for_valksland',
-        { model: 'Valkslandic Dreadnought', dmg: 0.85, hp: 0.90, range: 0.70, speed: 0.40 }, 220000,
+        { model: 'Valkslandic Dreadnought', dmg: 0.85, hp: 0.90, range: 0.70, speed: 0.40 }, 45000000,
         'A capital ship of the Valksland fleet — heavily armoured, heavily gunned, and priced accordingly. Nothing in the region can match it hull-for-hull.')
     ];
     for (const v of vehicles) if (!world.items.some(i => i.id === v.id)) world.items.push(v);
@@ -1222,6 +1222,48 @@ function migrate(world) {
     addImport('for_sarom', 'item_tank_satrom42e', 'Low', 1.1);
     addImport('for_qinal', 'item_tank_type50m', 'Low', 1.25);
     world._tankTradeSeeded = true;
+    changed = true;
+  }
+
+  // ---- Heavy-arms repricing (feature: "increase price of tanks and warships
+  // all around") — tanks now run well above the old baseline (₳50k for the
+  // standard M36 pattern) and warships ₳25–45M a hull. One-shot, flag-gated: it rewrites
+  // marketValue on worlds seeded at the old calibration; the _armorNavySeeded
+  // seed above already carries the new numbers for fresh worlds. The scarcity
+  // half of the feature (at most ~100 tanks / 5 hulls on the international
+  // exchange even at High supply) is enforced procedurally in sim.js's
+  // generateTradeOrders, not here — order books are regenerated every turn.
+  if (!world._heavyArmsRepriced && Array.isArray(world.items)) {
+    const reprice = (id, value) => { const it = world.items.find(i => i.id === id); if (it) it.marketValue = value; };
+    reprice('item_tank_m36griz', 50000);
+    reprice('item_tank_satrom42e', 1800000);
+    reprice('item_tank_type50m', 4500000);
+    reprice('item_warship_kradon', 25000000);
+    reprice('item_warship_madrosian', 32000000);
+    reprice('item_warship_valkslandic', 45000000);
+    world._heavyArmsRepriced = true;
+    changed = true;
+  }
+
+  // ---- Warships as an import option ----------------------------------------
+  // The naval counterpart of _tankTradeSeeded above: hulls appear on the same
+  // international order book (feature: "ships on the international exchange"),
+  // sold by the naval powers that build them — Madrosia its frigates,
+  // Valksland its dreadnoughts. Low supply: generateTradeOrders' hardware caps
+  // then keep the listing to a handful of hulls a turn. Additive; skips a
+  // partner that isn't in this world's trade desk.
+  if (!world._warshipTradeSeeded && world.settings && world.settings.trade && Array.isArray(world.settings.trade.partners)) {
+    const addImport = (entityId, itemId, supplyLevel, mult) => {
+      const p = world.settings.trade.partners.find(x => x.entityId === entityId);
+      if (!p || !world.items.some(i => i.id === itemId)) return;
+      p.imports = p.imports || [];
+      if (!p.imports.includes(itemId)) p.imports.push(itemId);
+      p.supply = p.supply || {}; if (p.supply[itemId] === undefined) p.supply[itemId] = supplyLevel;
+      p.priceMult = p.priceMult || {}; if (p.priceMult[itemId] === undefined) p.priceMult[itemId] = mult;
+    };
+    addImport('for_madrosia', 'item_warship_madrosian', 'Low', 0.92); // cancels the Low-supply ask inflation so the ask sits at ~retail (₳25–45M band)
+    addImport('for_valksland', 'item_warship_valkslandic', 'Low', 0.92);
+    world._warshipTradeSeeded = true;
     changed = true;
   }
 

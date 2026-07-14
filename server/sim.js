@@ -1035,7 +1035,20 @@ function generateTradeOrders(db) {
       // abundant suppliers undercut (inverted for supply)
       const lvlMult = kind === 'demand' ? (LVL_PRICE[lvl] || 1) : (1 / (LVL_PRICE[lvl] || 1));
       const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0.05);
-      const qty = Math.max(1, Math.round(partnerCap(p, iid, kind) * (0.55 + Math.random() * 0.9)));
+      let qty = Math.max(1, Math.round(partnerCap(p, iid, kind) * (0.55 + Math.random() * 0.9)));
+      // Heavy military hardware is scarce on the world market (feature:
+      // "reduce their stock — at most, high supply, 100 tanks and 5 ships on
+      // the international exchange"): whatever the partner's generic capacity
+      // says, a tank order is clamped to at most 100 vehicles and a warship
+      // order to at most 5 hulls, and only at HIGH supply/demand — Med and Low
+      // listings shrink further. Applies to both sides of the book (a partner
+      // buying our tanks is no less constrained by hulls-in-yards realities).
+      const wkind = item.meta && item.meta.weapon && item.meta.weapon.kind;
+      if (wkind === 'tank' || wkind === 'warship') {
+        const HW_MAX = wkind === 'tank' ? 100 : 5;
+        const HW_LVL = { High: 1, Med: 0.6, Low: 0.3 };
+        qty = Math.max(1, Math.min(qty, Math.round(HW_MAX * (HW_LVL[lvl] || 0.6))));
+      }
       return {
         id: store.uid('ord'), partnerId: p.entityId, itemId: iid,
         qty, filled: 0, level: lvl,

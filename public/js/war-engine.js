@@ -88,6 +88,7 @@
   // via the normal 40px collision pass and refuse to advance onto land cells
   // (advanceToward below), mirroring how neutralCells are refused.
   const NAVAL_KINDS = { boat: true, warship: true };
+  const CHASE_REPLAN_DIST = 48;       // px the chased target may drift from a naval chase route's endpoint before the water A* is replanned (see stepChase)
 
   function isLive(u) { return !!u && u.strength > 0 && !u.dead; }
   function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
@@ -1422,17 +1423,17 @@
   // when there was no attackId, or the target is gone (in which case the
   // unit is dropped back to 'holding' and normal dest handling — which will
   // find no dest either — takes over).
-  function stepChase(war, u) {
+  function stepChase(db, war, u) {
     if (!u.attackId) return false;
     if (u.state === 'routed') return false; // a broken unit ignores its attack order until it rallies (the order survives on the unit)
     const target = war.units.find(x => x.id === u.attackId);
-    if (!target || !isLive(target)) { u.attackId = null; u.state = 'holding'; return false; }
+    if (!target || !isLive(target)) { clearDest(u); u.state = 'holding'; return false; } // clearDest also drops any chase-owned naval route/dest left on the unit
     // A LAND unit never chases a warship (feature: "transports don't go after
     // warships"): it would have to swim out as a defenceless transport into
     // WARSHIP_RANGE fire it cannot return — suicide, whether the order came
     // from the AI's hunt or a player click. Break the chase off cleanly; the
     // unit falls back to normal dest handling. Boats/warships still may.
-    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { u.attackId = null; u.state = 'holding'; return false; }
+    if (!NAVAL_KINDS[u.kind] && target.kind === 'warship') { clearDest(u); u.state = 'holding'; return false; }
     // Same collision rule as normal dest movement: ANY live enemy inside
     // COLLIDE_ENEMY stops the advance and starts the fight — otherwise a
     // chase could walk straight through a different enemy standing between
@@ -1440,6 +1441,37 @@
     const near = nearestLiveEnemy(war, u);
     if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; return true; }
     if (dist(u.pos, target.pos) <= COLLIDE_ENEMY) { u.state = 'fighting'; }
+    else if (NAVAL_KINDS[u.kind]) {
+      // Naval chase (feature: "attack orders follow sea routes"): a boat or
+      // warship ordered onto an enemy sails the same all-water A* route a
+      // plain move order takes (navalPath, as setDest uses) instead of aiming
+      // a straight line at the target — which beached the ship on any
+      // coastline standing between it and its prey. The route is NOT
+      // recomputed every tick (that would be a full A* per chasing squadron
+      // per tick — the same cost stepChase's header note rejects); it is
+      // replanned only when the target has drifted CHASE_REPLAN_DIST from the
+      // planned endpoint, or the old route is fully sailed. Deterministic on
+      // both sides: navalPath is deterministic and the replan trigger reads
+      // only synced unit state, so the predicting client replays the exact
+      // chase (both war-engine.js copies stay byte-identical).
+      ensureNavalGrid(db); // fine coastline grid backs the goal clamp + the route
+      const goal = nearestWaterPoint(war, clampToWorld(war, target.pos));
+      if (u.path && u.path.length && (u.pathIdx || 0) >= u.path.length) { u.path = null; u.pathIdx = 0; } // exhausted route — force a fresh plan from here
+      const routeEnd = (u.path && u.path.length) ? u.path[u.path.length - 1] : null;
+      if (!routeEnd || dist(routeEnd, goal) > CHASE_REPLAN_DIST) {
+        const np = navalPath(db, war, u.pos, goal);
+        u.path = (np && np.length) ? np : null;
+        u.pathIdx = 0;
+        u.manualPath = false;
+        u.dest = goal;
+      }
+      // Sail the planned route; with no all-water route (or none needed —
+      // navalPath returns null for a same-cell trip) fall back to the straight
+      // advance, where advanceToward's land-refusal still wall-follows.
+      if (u.path && u.path.length) stepAlongPath(war, u, u.speed || DEF_MOVE_SPEED);
+      else advanceToward(war, u, goal, u.speed || DEF_MOVE_SPEED);
+      u.state = 'moving';
+    }
     else { advanceToward(war, u, target.pos, u.speed || DEF_MOVE_SPEED); u.state = 'moving'; }
     return true;
   }
@@ -1462,7 +1494,7 @@
           if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
           continue;
         }
-        if (stepChase(war, u)) continue;
+        if (stepChase(db, war, u)) continue;
         if (!u.dest) continue;
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
@@ -1500,7 +1532,7 @@
         if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
         continue;
       }
-      if (stepChase(war, u)) continue;
+      if (stepChase(db, war, u)) continue;
       if (u.dest) {
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }

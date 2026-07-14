@@ -767,7 +767,15 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
     let totalHulls = 0;
     for (const { qty } of hulls) totalHulls += Math.floor(qty);
     if (!(totalHulls > 0)) return;
-    const numSquadrons = Math.ceil(totalHulls / shipCapacity);
+    // Squadron count is capped at 50% of the side's OTHER formations, exactly
+    // like armour above (feature: "limit warships the way tanks are limited by
+    // infantry divisions") — a navy needs a land army to screen its ports and
+    // crew its logistics; hulls beyond the cap stay in the stockpile as the
+    // reserve resupplyUnits draws replacement kit from.
+    const otherSideUnits = war.units.filter(u => u.side === side && u.kind !== 'armored' && u.kind !== 'warship').length;
+    const squadronCap = Math.floor(otherSideUnits * 0.5);
+    const numSquadrons = Math.max(0, Math.min(Math.ceil(totalHulls / shipCapacity), squadronCap));
+    if (!(numSquadrons > 0)) return;
     const bestHullName = hulls.slice().sort((a, b) => shipQuality(b.item.meta.weapon) - shipQuality(a.item.meta.weapon))[0].item.name;
     for (let i = 0; i < numSquadrons; i++) {
       const s = Math.round(navDef.strength * hpMod);
@@ -1071,6 +1079,43 @@ function startWar(db, scenario) {
   return db.war;
 }
 
+// Demobilisation (feature: "after a war ends, any items deployed or in troop
+// inventories return to the national inventory"): every SURVIVING unit hands
+// back its whole kit — tanks, hulls, rifles, fuel, whatever resupplyUnits
+// loaded aboard — to its nation's stockpile (entity.inventory, the same pool
+// nationPools draws from first), so hardware that lived through the war isn't
+// silently written off with the war document. Kit aboard DESTROYED units is
+// gone with them (attrition already sheds a dying unit's weapons; whatever a
+// wreck still holds burned with it). Called from endWar (GM stop, treaty) AND
+// from the post-tick hook in warTick/maybeWarTick — the engine can end a war
+// itself (annihilation, total conquest) without ever passing through endWar.
+// Flag-gated on the war doc so the two paths can't double-return anything.
+// Pure inventory bookkeeping — no money moves — persistence rides the
+// caller's store.save()/broadcast as usual.
+function demobilizeUnits(db, war, actor) {
+  if (!war || war._demobilized) return;
+  war._demobilized = true;
+  if (!Array.isArray(war.units)) return;
+  const returned = {}; // nationId -> item count, for the one summary log line
+  for (const u of war.units) {
+    if (!isLive(u) || !Array.isArray(u.inv) || !u.inv.length) continue;
+    const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
+    const nation = db.entities.find(x => x.id === nid);
+    if (!nation) { u.inv = []; continue; } // nation gone from the world — the kit has nowhere to go
+    nation.inventory = nation.inventory || [];
+    for (const r of u.inv) {
+      if (!(r && r.qty > 0)) continue;
+      invAdd(nation.inventory, r.itemId, r.qty);
+      returned[nid] = (returned[nid] || 0) + r.qty;
+    }
+    u.inv = [];
+  }
+  const parts = Object.keys(returned).map(nid => {
+    const e = db.entities.find(x => x.id === nid);
+    return `${Math.round(returned[nid])} item(s) to ${e ? e.name : nid}`;
+  });
+  if (parts.length) store.log('event', 'Forces demobilised', `Surviving formations returned their equipment to the national stockpiles: ${parts.join('; ')}.`, actor || 'WAR ENGINE', [war.attackerId, war.defenderId]);
+}
 function endWar(db, actor, reason) {
   const war = db.war;
   if (!war) return null;
@@ -1091,6 +1136,7 @@ function endWar(db, actor, reason) {
   for (const prop of (db.properties || [])) {
     if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
   }
+  demobilizeUnits(db, war, actor);
   store.log('event', 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   return war;
 }
@@ -1628,12 +1674,16 @@ function warTick(db) {
   ensureWarGrid(db);
   const ticked = engine.warTick(db, ctxFor(db));
   if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
+  // The engine ends wars itself (annihilation, total conquest) without going
+  // through endWar — catch that here so the survivors still demobilise.
+  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE');
   return ticked;
 }
 function maybeWarTick(db) {
   ensureWarGrid(db);
   const ticked = engine.maybeWarTick(db, ctxFor(db));
   if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
+  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE'); // see warTick — engine-ended wars must demobilise too
   return ticked;
 }
 

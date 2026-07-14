@@ -912,9 +912,18 @@ The principal attacker's campaign logic, each operational replan:
 - `totalWar` set (by the repel above, all objectives done, or an objective
   becoming unreachable) → phase `total`, outranking everything else — a
   total-phase force never consolidates, it hunts (side-wide: allied units
-  join the hunt). Land units only hunt LAND targets (never enemy warships —
-  see stepChase's matching refusal); if only enemy hulls remain afloat, the
-  ground forces sweep territory instead.
+  join the hunt). The hunt is LOAD-BALANCED: each hunter prefers an
+  untargeted defender unless it's much farther away (`HUNT_SPREAD_PX` 700px
+  of distance per already-assigned hunter), so the army fans out and
+  destroys the defence in parallel instead of steamrolling one city at a
+  time from a single blob. Land units only hunt LAND targets (never enemy
+  warships — see stepChase's matching refusal); with no huntable targets
+  left, the ground forces sweep territory: round-robin across EVERY
+  province still short of `TOTAL_VICTORY_PCT`, each unit aimed at an
+  actually-UNCAPTURED cell (near the finish line almost every cell is
+  already held, so random sampling had units wandering their own rear
+  areas while the last few percent crawled). A full Valgos campaign now
+  runs to a "Total conquest" result unattended.
 - Below `consolidateFrac` × starting strength → phase `consolidate`: every
   committed PRINCIPAL unit's `dest` is cleared and it holds its ground (an
   ally now follows its own posture instead of being dragged down with the
@@ -952,10 +961,18 @@ The principal attacker's campaign logic, each operational replan:
     badly mauled defenders (below `PURSUE_WEAK_FRAC` 35% strength) within
     `PURSUE_R` (220px), via the same `attackId` chase orders players issue —
     a routed unit left alone rallies at `RALLY_ORG` and comes straight back.
-  - **Spearhead** — everyone left masses on the objective (the old
-    behaviour). Naval units are an explicit fire-support role: their dest is
-    the objective, which `setDest` clamps to the nearest water — "take
-    station off its coast" — and `stepWarshipFire` does the rest.
+  - **Spearhead** — everyone left assaults the objective as a CRESCENT, not
+    a pile: each unit takes its own slot on an arc (`ASSAULT_RING_R` 48px —
+    inside `CAPTURE_RANGE`, so seize objectives still complete) centred on
+    the corps' approach bearing, slots alternating left/right
+    (`ASSAULT_SLOT_DEG` 26° apart, max `ASSAULT_MAX_ARC_DEG` 260° so the
+    rear stays open for the encircle arms), landward-slid on coasts. The old
+    planner aimed every unit at the objective's exact centre — the force
+    arrived as a single-file blob and ground frontally into the garrison
+    (the measured "whole army stacks on one pixel" complaint). Naval units
+    are an explicit fire-support role: their dest is the objective, which
+    `setDest` clamps to the nearest water — "take station off its coast" —
+    and `stepWarshipFire` does the rest.
 - Once every `landing`/`seize_*` objective is done but a `control_province`
   objective is still short of its threshold, there is nothing left to march
   toward — the force fans out across **deterministic sectors of the

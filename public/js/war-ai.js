@@ -70,8 +70,24 @@
   const PURSUE_R = 220;               // px — units run down broken/weak enemies inside this
   const PURSUE_WEAK_FRAC = 0.35;      // an enemy below this fraction of max strength is worth finishing off
   const INTERDICT_FRAC = 0.45;        // supply-cut post sits this far from the defender capital toward the objective
-  const MULTI_CORPS_MIN = 10;         // committed land units a nation needs before a SECOND corps forms
+  const MULTI_CORPS_MIN = 8;          // committed land units a nation needs before a SECOND corps forms (10 was
+                                      // unreachable in practice: a 12-unit scenario always has a couple of units
+                                      // routed/embarked at any given replan, so the front never actually split)
   const SECONDARY_CORPS_FRAC = 0.35;  // share of the nation's force the second corps takes to the second objective
+  // ---- assault fan (fix: "the whole army charges one pixel") ----
+  // The spearhead used to aim EVERY unit at the objective's exact centre —
+  // the force arrived as a single-file blob and ground frontally into the
+  // garrison. Instead each assault unit gets its own SLOT on an arc around
+  // the objective, centred on the corps' approach bearing, so the attack
+  // closes as a crescent that laps around the defence. The radius sits
+  // INSIDE the engine's CAPTURE_RANGE (60px) so a seize objective still
+  // completes with the force standing on its ring.
+  const ASSAULT_RING_R = 48;          // px — slot radius around the objective (< CAPTURE_RANGE)
+  const ASSAULT_SLOT_DEG = 26;        // degrees between adjacent slots
+  const ASSAULT_MAX_ARC_DEG = 260;    // the crescent never wraps into a full ring — the rear stays open (that's what the encircle arms are for)
+  const HUNT_SPREAD_PX = 700;         // total-war hunt load-balancing: one already-assigned hunter on a target "costs"
+                                      // this many px of extra distance, so fresh hunters fan out to untargeted
+                                      // defenders instead of the whole army steamrolling one city at a time
 
   // ---------- defender doctrine (net-new — defenders used to be static) ----------
   const DEF_THREAT_R = 300;           // px — attacker strength inside this of a city counts as a threat to it
@@ -285,12 +301,19 @@
     // the remaining defenders, then sweeps the least-controlled province.
     const defsLive = war.units.filter(x => x.side === 'def' && E.isLive(x));
     const ctl = war.stats.provinceControl || {};
-    let sweepPid = null, low = 101;
+    // EVERY province still short of total victory, least-controlled first —
+    // sweepers round-robin across the whole list. The old single
+    // least-controlled pick sent the entire army to one province, which
+    // then LOST the "least" title to another mid-sweep, redirecting all of
+    // them again — the drive to 97%-everywhere crawled and visibly thrashed.
+    const sweepPids = [];
     for (const pid in war.grid.provinceLandCells) {
-      const c = ctl[pid] || 0;
-      if (c < E.TOTAL_VICTORY_PCT && c < low) { low = c; sweepPid = pid; }
+      if ((ctl[pid] || 0) < E.TOTAL_VICTORY_PCT) sweepPids.push(pid);
     }
+    sweepPids.sort((a, b) => (ctl[a] || 0) - (ctl[b] || 0) || (a < b ? -1 : 1));
+    const sweepPid = sweepPids[0] || null; // for the note below
     let hunting = 0, sweeping = 0;
+    const hunted = {}; // defender id → hunters already assigned this replan
     for (const u of war.units) {
       if (u.side !== 'att' || !E.isLive(u) || u.state === 'routed' || u.state === 'embarked') continue;
       if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
@@ -300,16 +323,45 @@
       // instead and leave the hulls to friendly boats/warships.
       const targets = E.NAVAL_KINDS[u.kind] ? defsLive : defsLive.filter(d => d.kind !== 'warship');
       if (targets.length) {
-        let nearest = targets[0], nd = E.dist(u.pos, nearest.pos);
-        for (const d of targets) { const dd = E.dist(u.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
+        // LOAD-BALANCED hunt (fix: "everyone charges the same city"): the
+        // army starts each hunt as one blob, so plain nearest-target sent
+        // the WHOLE force at the same defender and the endgame steamrolled
+        // city by city in series. The assignment-count term makes each new
+        // hunter prefer an untargeted defender unless it's much farther
+        // away, so the hunt fans out across the map in parallel. `hunted`
+        // accumulates in unit order — deterministic on both sides.
+        let best = targets[0], bs = Infinity;
+        for (const d of targets) {
+          const score = (hunted[d.id] || 0) * HUNT_SPREAD_PX + E.dist(u.pos, d.pos);
+          if (score < bs) { bs = score; best = d; }
+        }
+        hunted[best.id] = (hunted[best.id] || 0) + 1;
         E.clearDest(u);
-        u.attackId = nearest.id;
+        u.attackId = best.id;
         u.objectiveId = null;
         if (u.state !== 'fighting') u.state = 'moving';
         hunting++;
-      } else if (sweepPid && !E.NAVAL_KINDS[u.kind]) {
+      } else if (sweepPids.length && !E.NAVAL_KINDS[u.kind]) {
+        // Round-robin so the force clears ALL remaining provinces in
+        // parallel, and aim at an actually-UNCAPTURED cell: near the 97%
+        // finish line almost every cell is already held, so
+        // randomProvincePoint's twelve biased draws mostly landed on ground
+        // the army already owned and the last few percent crawled while
+        // units wandered their own rear areas.
+        const pid = sweepPids[sweeping % sweepPids.length];
+        const cs = war.grid.cell;
+        const free = [];
+        for (const cell of (war.grid.provinceCells || {})[pid] || []) {
+          const held = war.cells[E.cellKey(cell[0], cell[1])];
+          if (!held || held.o !== 'att') free.push(cell);
+        }
+        let dest = null;
+        if (free.length) {
+          const c = free[Math.floor(rng() * free.length)];
+          dest = [(c[0] + 0.5) * cs, (c[1] + 0.5) * cs];
+        }
         u.attackId = null;
-        E.setDest(db, u, E.randomProvincePoint(war, sweepPid, rng) || u.pos.slice(), u.speed);
+        E.setDest(db, u, dest || E.randomProvincePoint(war, pid, rng) || u.pos.slice(), u.speed);
         sweeping++;
       }
     }
@@ -417,11 +469,34 @@
       out.pursuers++;
     }
 
-    // Main effort — everyone left masses on the objective.
+    // Main effort — everyone left assaults the objective, each on its own
+    // SLOT of a crescent facing the approach (see ASSAULT_RING_R above).
+    // Slot order alternates left/right of the approach axis (0, +1, -1, +2,
+    // -2, …) so a small force concentrates on the near face and a big one
+    // laps around the flanks; each slot takes the pool unit nearest to it
+    // (deterministic — takeNearest tie-breaks by pool order). Slots are
+    // landward-slid so a coastal city's seaward face never drowns a column.
     out.assault = pool.length;
-    for (const u of pool) {
-      E.setDest(db, u, target.pos.slice(), u.speed);
-      u.objectiveId = target.id;
+    if (pool.length) {
+      let cx = 0, cy = 0;
+      for (const u of pool) { cx += u.pos[0]; cy += u.pos[1]; }
+      cx /= pool.length; cy /= pool.length;
+      const approach = Math.atan2(cy - target.pos[1], cx - target.pos[0]); // bearing FROM the city TOWARD the corps
+      const slotRad = ASSAULT_SLOT_DEG * Math.PI / 180;
+      const maxOff = (ASSAULT_MAX_ARC_DEG / 2) * Math.PI / 180;
+      const n = pool.length;
+      for (let i = 0; n && pool.length; i++) {
+        const step = Math.ceil(i / 2) * (i % 2 === 1 ? 1 : -1); // 0, +1, -1, +2, -2, …
+        const ang = approach + Math.max(-maxOff, Math.min(maxOff, step * slotRad));
+        const pt = landward(E, war, E.clampToWorld(war, [
+          target.pos[0] + Math.cos(ang) * ASSAULT_RING_R,
+          target.pos[1] + Math.sin(ang) * ASSAULT_RING_R
+        ]), target.pos);
+        const u = takeNearest(E, pool, pt);
+        if (!u) break;
+        E.setDest(db, u, pt, u.speed);
+        u.objectiveId = target.id;
+      }
     }
     return out;
   }
@@ -512,9 +587,15 @@
     // Corps split — a second front only opens when the force can afford it:
     // the second corps takes SECONDARY_CORPS_FRAC of the pool (nearest units
     // first, so the split respects the map) to the next objective in priority
-    // order while I Corps presses the primary axis.
+    // order while I Corps presses the primary axis. HYSTERESIS on the way
+    // down: an already-split front stays split until the pool really
+    // collapses (threshold − 3) — without it a single rout dissolved
+    // II Corps, yanked its columns back to the primary axis, and the next
+    // replan re-split them the other way (visible order churn).
     const corps = [];
-    if (secondary && pool.length >= MULTI_CORPS_MIN) {
+    const wasSplit = Array.isArray(nat.corps) && nat.corps.length > 1;
+    const splitMin = wasSplit ? MULTI_CORPS_MIN - 3 : MULTI_CORPS_MIN;
+    if (secondary && pool.length >= splitMin) {
       const take = Math.max(2, Math.floor(pool.length * SECONDARY_CORPS_FRAC));
       const second = [];
       for (let i = 0; i < take; i++) {

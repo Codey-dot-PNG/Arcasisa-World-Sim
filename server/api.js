@@ -184,20 +184,38 @@ function histView(db, p) {
   const hist = db.history || [];
   return p.statistics ? hist : hist.map(h => ({ turn: h.turn, shares: h.shares }));
 }
-// The war doc as non-GM operators see it (fog of war). The AI's REASONING
-// (ai.notes) stays GM-only intel, but the numeric plan state — phase,
-// lastPlanTick, collapse/consolidate thresholds — ships to everyone: the
-// client's predicted engine needs it to replay runAI deterministically, so
-// enemy columns turn at the same tick locally as they do on the server.
-// (Stripping ai wholesale meant a player's prediction could never replan the
-// attacker between snapshots; on slow serverless heartbeats every AI turn
-// surfaced as a visible rubberband correction.) notes is [] not absent so
-// the engine's note() can push into a predicted doc without guards. Shared
-// by filterState and the GET /api/war/state heartbeat.
+// The war doc as non-GM operators see it (fog of war). Each nation command's
+// REASONING (war.command[side].nations[id].notes) stays GM-only intel, but
+// the numeric plan state — phase/posture, doctrines, thresholds, the tier
+// gates — ships to everyone: the client's predicted engine needs it to
+// replay the commander AI (war-ai.js) deterministically, so enemy columns
+// turn at the same tick locally as they do on the server. (Stripping it
+// wholesale meant a player's prediction could never replan the attacker
+// between snapshots; on slow serverless heartbeats every AI turn surfaced
+// as a visible rubberband correction.) notes is [] not absent so the
+// engine's note() can push into a predicted doc without guards. The legacy
+// flat war.ai gets the same treatment for any pre-hierarchy doc still in
+// flight. Shared by filterState and the GET /api/war/state heartbeat.
 function warForPlayers(war) {
-  if (!war || !war.ai) return war;
-  const { notes, ...aiRest } = war.ai;
-  return { ...war, ai: { ...aiRest, notes: [] } };
+  if (!war) return war;
+  let out = war;
+  if (war.ai) {
+    const { notes, ...aiRest } = war.ai;
+    out = { ...war, ai: { ...aiRest, notes: [] } };
+  }
+  if (war.command) {
+    const redactSide = (sideCmd) => {
+      const nations = {};
+      for (const nid in ((sideCmd || {}).nations || {})) {
+        const { notes, ...natRest } = sideCmd.nations[nid];
+        nations[nid] = { ...natRest, notes: [] };
+      }
+      return { ...(sideCmd || {}), nations };
+    };
+    if (out === war) out = { ...war };
+    out.command = { ...war.command, att: redactSide(war.command.att), def: redactSide(war.command.def) };
+  }
+  return out;
 }
 function filterState(u) {
   const db = store.get();
@@ -828,13 +846,20 @@ async function handle(req, res, pathname, method) {
             `Market confidence stands at ${Math.round(c.confidence || 50)}, and the register lists ${(c.shareholders || []).length} holders of record.`
         });
       }
-      if (db.war && db.war.active && db.war.ai) {
-        const lastNote = (db.war.ai.notes || []).slice(-1)[0];
-        scoops.push({
-          headline: 'INSIDE THE INVADER’S WAR ROOM',
-          body: `Sources close to the front say the invading command has entered its “${db.war.ai.phase}” posture.` +
-            (lastNote ? ` A staff note passed to this paper reads: “${lastNote.text}”` : '')
-        });
+      if (db.war && db.war.active) {
+        // The invader's National Command (war.command — see war-ai.js);
+        // legacy flat war.ai for a pre-hierarchy doc still in flight.
+        const natt = db.war.command && db.war.command.att && db.war.command.att.nations
+          && db.war.command.att.nations[db.war.attackerId];
+        const brain = natt || db.war.ai;
+        if (brain) {
+          const lastNote = (brain.notes || []).slice(-1)[0];
+          scoops.push({
+            headline: 'INSIDE THE INVADER’S WAR ROOM',
+            body: `Sources close to the front say the invading command has entered its “${brain.phase}” posture.` +
+              (lastNote ? ` A staff note passed to this paper reads: “${lastNote.text}”` : '')
+          });
+        }
       }
       const tre = db.accounts.find(a => a.id === 'acct_treasury');
       if (tre) {

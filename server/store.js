@@ -438,6 +438,19 @@ function migrate(world) {
   // split has no PRNG seed; default it to the same value the engine falls
   // back to ((seed>>>0)||1), so server and predicting clients agree.
   if (world.war && typeof world.war.seed !== 'number') { world.war.seed = 1; changed = true; }
+  // Command hierarchy (war-ai.js) — a war in flight when the flat war.ai
+  // became war.command gets wrapped in place, one-shot, preserving its
+  // phase/thresholds/notes so the campaign doesn't skip a beat. Same upgrade
+  // the engine-side ensureCommand performs on its first tick (that path
+  // covers hand-built test wars); doing it here too means the very first
+  // filterState/logAiNotes after a deploy already see the new shape. Lazy
+  // require, same pattern as the sim.syncPresidency call below.
+  if (world.war && world.war.ai && !world.war.command) {
+    try {
+      require('./war-ai').ensureCommand(require('./war-engine'), world, world.war);
+      changed = true;
+    } catch (e) { /* war modules optional during early boot — the engine upgrades on first tick */ }
+  }
 
   // Reconcile ent_gov's ceoId/executives with whoever holds the 'president'
   // role, so live worlds pick up role changes made outside the normal API

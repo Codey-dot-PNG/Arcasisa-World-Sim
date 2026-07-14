@@ -1,4 +1,4 @@
-# War (server/war-engine.js, server/war.js, server/war-scenarios.js, public/js/war-engine.js, public/js/war.js)
+# War (server/war-engine.js, server/war-ai.js, server/war.js, server/war-scenarios.js, public/js/war-engine.js, public/js/war-ai.js, public/js/war.js)
 
 A realtime, wall-clock-ticking battlefield RTS layered on top of the turn-based
 simulation. Since Phase 22 the war **does** touch the world: ground combat and
@@ -128,7 +128,7 @@ below; state fields remain additive/absent-safe):
 **Module split (Phase 18):**
 
 - `server/war-engine.js` — the deterministic, dependency-free SIMULATION
-  (movement, combat, territory, objectives, AI, transport-graph pathing,
+  (movement, combat, territory, objectives, transport-graph pathing,
   airstrike blast resolution, embedded point-in-polygon geometry). Shared
   **byte-for-byte** with `public/js/war-engine.js` (the browser copy — edit
   both together, same rule as pricepath.js). All tick-time randomness comes
@@ -138,6 +138,18 @@ below; state fields remain additive/absent-safe):
   authority-only ground effects are all `ctx` hooks: the server passes real
   `store.log`/`sim.draftNews`/`onAirstrike`; a predicting client passes
   nothing (no-ops).
+- `server/war-ai.js` — the COMMANDER HIERARCHY (Tier-1 national commands,
+  Tier-2 corps planners, defender doctrine — see "The commander hierarchy"
+  below), split out of the engine the same way war-scenarios.js was. Also
+  shared **byte-for-byte** with `public/js/war-ai.js` and also
+  dependency-free: the engine INJECTS its own exported helper bundle
+  (`WarAI.run(api, db, war, ctx, rng)` inside `warTick`), so the dependency
+  arrow stays one-way. In Node the engine `require`s it; in the browser
+  `public/index.html` loads war-ai.js as a script tag BEFORE war-engine.js
+  and the engine picks it up off the global. Every replan is deterministic
+  (nation iteration follows `war.command` insertion order, pools iterate in
+  `war.units` order, rng draws only for sweep sectors), so a predicting
+  client replays the identical plans.
 - `server/war.js` — the server-only AUTHORITY layer: scenario spawning
   (startWar mints `war.seed` once), endWar, dropBomb (ORDERS an airstrike —
   the blast itself is engine-side, see "Airstrikes" below), the ground
@@ -174,7 +186,18 @@ war: {
   units: [ { id, side:'att'|'def', name, kind, pos:[x,y], dest:[x,y]|null,
              strength, maxStrength, org, speed, atk, state, objectiveId, garrison? } ],
   objectives: [ { id, kind, ref, pos:[x,y], priority, status, holdTicks } ],
-  ai: { phase, lastPlanTick, notes:[{t,text}], attackerStartStrength, consolidateFrac, collapseFrac }, // GM-only — stripped by filterState
+  command: {                                 // the commander hierarchy (war-ai.js) — replaced the old flat `ai`
+    lastPlanTick, lastStratTick,             // operational (AI_INTERVAL) / strategic (STRATEGIC_INTERVAL) tier gates
+    att: { nations: { [entityId]: {          // one National Command per belligerent (principal + every war.allies member)
+      principal, doctrine,                   // doctrine: 'aggressive' (att) | 'static'|'defensive'|'opportunistic' (def)
+      phase,                                 // principal att: landing|breakout|consolidate|exploit|total;
+                                             // att ally posture: fight|hold|withdraw; def posture: hold|counterattack|fallback
+      startStrength, consolidateFrac, collapseFrac, // Tier-1 thresholds, judged per NATION
+      notes: [{t,text,p?,c?}],               // GM-only reasoning (redacted by filterState); c = corps tag
+      corps: [{name, objective, units}]      // display summary of the last operational plan
+    } } },
+    def: { nations: { … } }
+  },
   events: [ { t, kind:'battle'|'capture'|'landing'|'milestone', pos, text } ], // cap 60, for client animation
   stats: { attLosses, defLosses, provinceControl: { provId: 0..100 }, citiesHeld: [cityIds] },
   bombs: { att: { cooldownUntil: <epoch ms> }, def: { cooldownUntil: <epoch ms> } }, // {att,def} shape kept for compatibility, but only `def` is ever used — bombs are DEFENDER-ONLY
@@ -192,7 +215,7 @@ war: {
 
 Unit fields gained by the interactive layer (Phase 16): `dead`/`deadAt` (a
 corpse — see below), `orderedBy:'player'`/`playerHoldUntil` (a direct player
-move order and, for attacker units only, how long `runAI` must leave it
+move order and, for attacker units only, how long the attacker AI must leave it
 alone). Phase 17 adds `path` (array of `[x,y]` transport-graph waypoints) +
 `pathIdx`, set alongside `dest` whenever routing via roads/rails beats the
 straight line — see "Transport-graph pathing" below. Phase 19 adds
@@ -231,7 +254,9 @@ otherwise cost a geometry lookup per cell per tick.
 
 One tick does, in order:
 
-1. **AI grand strategy**, every `AI_INTERVAL` (10) ticks — see below.
+1. **The commander hierarchy** (`WarAI.run` — war-ai.js): strategic
+   posture reviews every `STRATEGIC_INTERVAL` (40) ticks, operational corps
+   replans every `AI_INTERVAL` (10) — see "The commander hierarchy" below.
 2. **Movement** (`stepMovement`) — embarked units sail toward the scenario's
    `landing` objective; land units advance toward `dest`, following their
    transport-graph `path` at `speed × ROAD_SPEED_MULT` (5×) while between
@@ -311,7 +336,7 @@ with real route-following over a graph built from `settings.map.roads` **plus**
   used only when it wins, otherwise `null` (straight line, exactly the old
   behaviour).
 - **`setDest()`** is the single choke point that assigns `dest` and computes
-  `path`/`pathIdx`; every dest writer (player `commandUnits`, `runAI` target
+  `path`/`pathIdx`; every dest writer (player `commandUnits`, the AI's target
   and sweep assignment, the embarked→landing handoff) goes through it, and
   `clearDest()` wipes all three together. `stepMovement` runs waypoint legs at
   `baseSpeed × ROAD_SPEED_MULT` (advancing `pathIdx` within 12px of each
@@ -848,32 +873,57 @@ nation select (every `foreign` entity not already the attacker, defender, or
 a listed ally — hidden entirely once none remain), a side toggle, and a Join
 button that POSTs `/api/gm/war/join`.
 
-## AI grand strategy — attacker only
+## The commander hierarchy — `server/war-ai.js`
 
-Defenders have no AI: garrisons spawn static at cities and `type:'military'`
-properties (population-scaled since Phase 27 — see above), and the arsenal's
-armoured/warship units spawn `'holding'` — none of them move until a player
-orders them. Only the attacker plans.
+The AI is a three-tier command hierarchy over `war.command`, run for EVERY
+belligerent nation (the principal attacker, the principal defender, and each
+`war.allies.att/def` member gets its own National Command):
 
-Every `AI_INTERVAL` ticks, `runAI`:
+- **Tier 1 — National Command (strategic, every `STRATEGIC_INTERVAL` = 40
+  ticks)**: posture per nation, judged on that nation's OWN committed
+  strength against its own `startStrength × consolidateFrac/collapseFrac`
+  thresholds. An attacker ALLY runs `fight → hold` (halts and requests
+  reinforcement — the GM sees the request in the notes/Timeline) `→
+  withdraw` (bows out of a losing war: its contingent falls back toward its
+  own homeland and digs in, with a Timeline entry; a withdrawal is never
+  reversed). A defending nation with an active doctrine runs `hold →
+  counterattack` (opportunistic doctrine, once the invader is badly
+  outweighed) / `fallback` (the defence is spent — field formations converge
+  on the capital line). The PRINCIPAL attacker's campaign phase
+  (`landing/breakout/consolidate/exploit/total`) stays on the operational
+  cadence below — it is the war's heartbeat, and every scenario's tuning was
+  playtested against it.
+- **Tier 2 — Corps Command (operational, every `AI_INTERVAL` = 10 ticks)**:
+  the role-based assault planner below, run per NATION over that nation's
+  own units — split into MULTIPLE corps when the force is big enough to
+  fight on two axes (see "Multi-corps fronts" below) — plus the
+  mirror-image defender doctrine pass (see "Defender doctrine" below).
+- **Tier 3 — Unit/Tactical (every tick)**: unchanged — `stepChase`/
+  `stepMovement`/`stepCombat` execute whatever dests/attackIds the corps
+  tier assigned.
 
-- Computes attacker total strength. Below `collapseFrac` × starting strength
+The principal attacker's campaign logic, each operational replan:
+
+- Computes attacker SIDE total strength (allies included — the invasion as a
+  venture). Below `collapseFrac` × the principal's starting strength
   → the invasion is REPELLED: the war does NOT end — it turns `totalWar`
   (one-shot) and the remnants fight to the last. The defender's win now
   comes from checkVictory's annihilation path (no live attacker units).
 - `totalWar` set (by the repel above, all objectives done, or an objective
   becoming unreachable) → phase `total`, outranking everything else — a
-  total-phase force never consolidates, it hunts. Land units only hunt LAND
-  targets (never enemy warships — see stepChase's matching refusal); if only
-  enemy hulls remain afloat, the ground forces sweep territory instead.
+  total-phase force never consolidates, it hunts (side-wide: allied units
+  join the hunt). Land units only hunt LAND targets (never enemy warships —
+  see stepChase's matching refusal); if only enemy hulls remain afloat, the
+  ground forces sweep territory instead.
 - Below `consolidateFrac` × starting strength → phase `consolidate`: every
-  committed unit's `dest` is cleared and it holds its ground. No further
-  pushes are ordered until (if ever) that changes.
+  committed PRINCIPAL unit's `dest` is cleared and it holds its ground (an
+  ally now follows its own posture instead of being dragged down with the
+  principal). No further pushes are ordered until (if ever) that changes.
 - Otherwise phase is `landing` while the scenario's `landing` objective is
   still pending, else `breakout` (working through the objective list) or
   `exploit` once every objective is done.
 - **Role-based assault planner (Phase 28)** — during `landing`/`breakout`,
-  the committed force is no longer a single blob marched at the top
+  a nation's committed force is not a single blob marched at the top
   objective. Each replan splits it into roles, every one of which exploits a
   real engine mechanic rather than being flavour (all deterministic: pools
   iterate in `war.units` order, nearest-picks tie-break by pool order, and
@@ -913,11 +963,90 @@ Every `AI_INTERVAL` ticks, `runAI`:
   via the tick PRNG), so the sweep spreads instead of repeatedly piling into
   one corner; arrivals are still reassigned immediately in `stepMovement`
   (via `randomProvincePoint`), not gated on the next AI cycle.
-- Every decision writes a one-line reasoning string into `ai.notes` (capped
-  20) — now narrating the full plan ("6 on the assault; 2 swinging wide to
-  encircle; 1 cutting the Capitalia supply line; …"). This is the GM's
-  window into what the AI is "thinking"; it is stripped from the client
-  payload for non-GM operators (see Fog of war).
+- Every decision writes a one-line reasoning string into that NATION's
+  `command[side].nations[id].notes` (capped 20 per nation) — narrating the
+  full plan ("6 on the assault; 2 swinging wide to encircle; 1 cutting the
+  Capitalia supply line; …"), tagged with the corps that issued it (`c`)
+  when a front has split. This is the GM's window into what each command is
+  "thinking"; it is stripped from the client payload for non-GM operators
+  (see Fog of war).
+- **Plan notes land in the Timeline too**: grand-strategy notes (phase/
+  posture changes and corps plans) carry `p: 1` (see the engine's `note()`),
+  and the authority-only `logAiNotes` pass (server/war.js, after every real
+  tick) `store.log`s new ones as type `'event'` / actor `WAR AI` — GM-only
+  in the timeline filter, so the redaction above isn't undone. Entries title
+  as "`<Nation> High Command`" / "`<Nation> Defence Command`" / "`<Nation> —
+  II Corps`", so the record reads as a hierarchy. Deduped by text hash and
+  throttled per nation to one routine entry per `AI_NOTE_LOG_MIN_TICKS`
+  (30); a phase/posture change always logs and re-opens the gate so its
+  accompanying fresh plan logs too. Bookkeeping
+  (`nat._noteSeenTick/_noteLogAt/_noteLogHash`) is numeric only —
+  `warForPlayers` ships every command field except `notes`, so a stored
+  text would leak the reasoning it exists to redact.
+
+### Multi-corps fronts
+
+When a nation's committed land force is large (`MULTI_CORPS_MIN` = 10 units
+after the rear guard is posted) and a SECOND seize objective is still
+pending, the force splits: II Corps takes `SECONDARY_CORPS_FRAC` (35%) of
+the pool — nearest units first, so the split respects the map — to the
+second objective in priority order while I Corps presses the primary axis.
+Each corps runs the full role planner against its own objective; naval
+squadrons take fire-support station off the primary. A multi-objective
+scenario (`qinal_invasion`'s two-city push) therefore fights on two axes at
+once instead of queueing. Smaller forces keep the single-corps plan
+unchanged. `natCmd.corps` carries a `{name, objective, units}` summary of
+the last plan for the GM.
+
+### Allied contingents — their own commanders
+
+A `joinWar` ally is no longer pooled anonymously into its side: the engine's
+`ensureCommand` backfills a National Command for any nation that appears in
+`war.allies` (deterministically — both the server and every predicting
+client derive the identical entry from the same war state on the ally's
+first tick, `startStrength` = its contingent as it stands). An attacker
+ally in `fight` posture plans its own corps against the shared objective
+list; `hold` digs its contingent in; `withdraw` (Tier 1, above) marches it
+back toward its own homeland (`grid.countryCells`, falling back to the
+supply anchor). Defender allies fight under the principal defender's
+doctrine — a static Home Front keeps its allies static too.
+
+### Defender doctrine — reserves, counter-attacks, fallback lines
+
+Gated by doctrine, which is DATA (engine-generic, rule 7): the scenario's
+optional `doctrine: { def: 'defensive'|'opportunistic' }` wins, then the
+defender entity's authored `meta.military.doctrine`, else **'static' — no
+defender AI at all, exactly the pre-hierarchy behaviour**, so existing
+scenarios don't get harder without playtesting. With an active doctrine,
+each defending nation's Home Defence corps runs every operational replan:
+
+- **Cut-off units fall back** — an unsupplied (`u.supplied === false`),
+  unengaged field formation walks back toward the capital (the root of the
+  defender supply flood-fill) instead of dying in a pocket. Garrisons hold
+  their sites regardless.
+- **Reserve commitment** — a city with more attacker strength bearing down
+  on it (`DEF_THREAT_R` 300px) than defenders holding it (`DEF_HELD_R`
+  140px, ×1.15 margin) pulls the nearest uncommitted reserves in (up to
+  `DEF_COMMIT_MAX` 3 per city, from `DEF_RESERVE_R` 800px), worst deficit
+  first. A garrison may leave its post only when another live defender
+  stands within `DEF_STACK_R` (80px) — a city is never stripped to zero by
+  its own AI — and a reserve already holding one threatened city is never
+  poached for another.
+- **Counter-attacks** — routed attackers near the line (`PURSUE_R`) are run
+  down before they rally, via the same `attackId` chase orders players
+  issue; posture `counterattack` also commits against badly mauled
+  (sub-`PURSUE_WEAK_FRAC`) ones. Capped at ⅓ of the committable pool.
+- **The capital line** — posture `fallback` pulls every field formation onto
+  a deterministic ring (`DEF_CAPITAL_RING_R` 90px, index-spaced angles — no
+  rng draws) around the capital; garrisons hold their sites to the last.
+
+**Player agency is preserved HARD**: a defender unit a player has EVER
+ordered gets `playerControlled: true` (stamped by the engine's
+`applyOrders`) and is never re-tasked by Home Defence — unlike the attacker
+AI's expiring 12-tick hold. The players are the defence's field commanders;
+the AI only drives what nobody touches. Warships and boats are also left
+alone (they already fight at range on their own; steaming the fleet into a
+massed landing is a losing trade only a player may choose).
 
 ## Scenario format — `server/war-scenarios.js`
 
@@ -937,6 +1066,10 @@ scenario = {
                                             // staging bearing from (see qinal_invasion)
   allies: false,                            // OPTIONAL (Phase 27) — opt this scenario out of alliance auto-join
   coAttackers: [entityId, …],               // OPTIONAL (Phase 27) — force-join these entities on the attacker's side
+  doctrine: { att: 'aggressive',            // OPTIONAL — per-side doctrine hints (see "Defender doctrine" above).
+              def: 'defensive' },           // def: 'static' (default — no defender AI) | 'defensive' | 'opportunistic';
+                                            // falls back to the defender entity's meta.military.doctrine. Same
+                                            // data-not-code spirit as `tuning` — no nation is ever named in engine code.
   objectives: [ { kind, ref?, priority } ], // ref is a city/province id. 'seize_capital' may omit ref —
                                             // war.js resolves whichever city has isCapital:true, so the
                                             // scenario never has to name the capital twice. A land:true
@@ -1010,7 +1143,7 @@ A land scenario spawns its attacker units already on solid ground instead of
 instead of `'embarked'`, and the scenario's `objectives` list simply contains
 no `kind: 'landing'` entry (there is nothing to resolve — `startWar` only
 ever creates the objectives a scenario lists). No engine change was needed
-for this: `runAI`'s `landingObj` lookup already tolerates "no landing
+for this: the AI's `landingObj` lookup already tolerates "no landing
 objective in this war" (`war.objectives.find(...)` returning `undefined`
 just skips the `landing` AI phase and goes straight to `breakout`), and
 `stepMovement`'s embarked-only branch only ever runs for units whose `state`
@@ -1031,7 +1164,7 @@ client only sends orders; `server/war.js` validates and applies them.
   (default `'def'`); every other operator is forced onto `'def'` regardless
   of what the client sends (`server/api.js`'s two war routes compute
   `side = u.role.perms.gm && b.side === 'att' ? 'att' : 'def'`). The attacker
-  AI (`runAI`) keeps driving the invasion — a GM commanding `'att'` directly
+  AI (war-ai.js) keeps driving the invasion — a GM commanding `'att'` directly
   only pins the units it explicitly orders (see player-hold below); it
   doesn't disable the AI.
 - **Input gestures** (Phase 19 redesign — right-drag used to be the formation
@@ -1263,12 +1396,13 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
    stale) — resetting it per snapshot would starve prediction whenever
    snapshots arrive faster than the tick interval, which is exactly what
    happens at 4×/8×. A stale snapshot of the same war (`tick <` the rebase
-   base tick) is ignored. Non-GM clients receive a REDACTED `war.ai`
-   (numeric plan state with `notes: []` — see api.js `warForPlayers`), so
-   their prediction replays the attacker's replans deterministically too;
-   only the reasoning notes stay GM-only. (Before Phase 27 `ai` was stripped
-   wholesale and player predictions kept units marching on stale dests —
-   on slow serverless heartbeats every AI turn surfaced as a rubberband.)
+   base tick) is ignored. Non-GM clients receive a REDACTED `war.command`
+   (numeric plan state per nation with `notes: []` — see api.js
+   `warForPlayers`), so their prediction replays every command's replans
+   deterministically too; only the reasoning notes stay GM-only. (Before
+   Phase 27 the plan state was stripped wholesale and player predictions
+   kept units marching on stale dests — on slow serverless heartbeats every
+   AI turn surfaced as a rubberband.)
 2. **Optimistic orders** — `_issueMove`/`_issueFormation`/`_issuePath` apply
    orders to the predicted war immediately via `WarEngine.applyOrders` (the
    same pure function the server route uses), before the POST round-trips.
@@ -1397,9 +1531,9 @@ war. Useful as a regression check whenever `_rebase`, `_optimistic`,
   shape.
 - `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
   18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
-  `{war, v}` only, with `war.ai` redacted for non-GM exactly like
-  filterState (numeric plan state ships, `notes` emptied — see
-  `warForPlayers`). Clients watching an active war poll it at ~tick cadence;
+  `{war, v}` only, with `war.command` redacted for non-GM exactly like
+  filterState (numeric plan state ships, every nation's `notes` emptied —
+  see `warForPlayers`). Clients watching an active war poll it at ~tick cadence;
   see "Client-side prediction" above.
 - Heartbeat: `GET /api/state` also calls `war.maybeWarTick(db)` right after
   the existing `market.maybeDayTick(db)` call, saving + broadcasting on a
@@ -1407,12 +1541,12 @@ war. Useful as a regression check whenever `_rebase`, `_optimistic`,
   drives the war even if no one is running the dedicated heartbeat.
 - `api.filterState`: `db.war` ships to every logged-in operator (so all
   players can watch the front). Since Phase 27 non-GM roles receive a
-  REDACTED `war.ai` — the numeric plan state (phase, lastPlanTick,
-  thresholds) with `notes: []` — because the client's predicted engine
-  needs it to replay `runAI` deterministically between snapshots (see
-  `warForPlayers` in api.js). The AI's REASONING (`ai.notes`) remains
-  GM-only intel; players still see objectives, casualties, province control
-  and the event feed.
+  REDACTED `war.command` — the numeric plan state (phases/postures,
+  doctrines, thresholds, tier gates) with every nation's `notes: []` —
+  because the client's predicted engine needs it to replay the commander AI
+  deterministically between snapshots (see `warForPlayers` in api.js). Each
+  command's REASONING (its `notes`) remains GM-only intel; players still
+  see objectives, casualties, province control and the event feed.
 
 ## Local realtime — `server.js`
 
@@ -1432,7 +1566,12 @@ more additive guards next to it: a `db.war` missing `bombs` or `craters`
 (started before this change) gets them defaulted in place. Phase 18 adds one
 more: a `db.war` missing a numeric `seed` gets `seed: 1` — the same value the
 engine falls back to (`(seed>>>0)||1`), so server and predicting clients
-agree even on a pre-engine war.
+agree even on a pre-engine war. The commander hierarchy adds one more: a
+`db.war` carrying the old flat `ai` but no `command` is wrapped in place
+(`WarAI.ensureCommand` — the same one-shot upgrade the engine performs on
+its first tick over any legacy doc, so hand-built test wars work too): the
+old ai becomes the attacker's National Command, preserving its
+phase/thresholds/notes, and `war.ai` is deleted.
 
 ## Client — `public/js/war.js`
 
@@ -1532,10 +1671,16 @@ Loaded after `map.js`/`mapedit.js`, before `views.js`.
   waypoints (it finishes the remembered path at on-network speed), and a
   straight-line fallback can still path into water at a re-entrant coastline
   if a scenario ever places waypoints badly.
-- Defenders are purely static garrisons unless a player moves them; there's
-  still no defender-side AI (no counter-attacks, no falling back to
-  consolidate a line) — a defender left alone by every player behaves exactly
-  as before.
+- Defender doctrine ships OFF by default (`'static'` — see "Defender
+  doctrine" above): a scenario/entity that doesn't opt in behaves exactly as
+  before, static garrisons and all. The active doctrines are deliberately
+  conservative and unplaytested at scale — reserve sizing is a radius-sum
+  deficit heuristic, and the defence never masses for a deliberate
+  counter-offensive (only chases broken units).
+- Defender warship squadrons are never AI-tasked (moving the fleet into a
+  massed landing is a losing trade only a player may choose) — an idle
+  defending fleet just holds station and fires at whatever strays into
+  range.
 - The formation gesture assigns slots along a straight line only — no
   wedge/column presets, and a very uneven selection (wildly different
   positions) can produce awkward nearest-in-order pairings.

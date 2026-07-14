@@ -70,6 +70,7 @@ server/ownership.js    "who controls whom" chain (owner/CEO/leader/majority shar
 server/deeds.js        property deeds as tradeable items (mirror of property.ownerId)
 server/casino.js       roulette/blackjack/lottery — outcomes decided server-side
 server/war.js          realtime battlefield RTS engine (generic — see docs/WAR.md)
+server/war-ai.js       commander-hierarchy AI (national commands/corps/defender doctrine) — byte-identical to public/js/war-ai.js
 server/war-scenarios.js scenario data (attacker/defender, objectives, roster) — no engine logic
 server/buildings.js    map building texture assignment per property kind
 server/geometry.js     point-in-polygon province lookup for map placement

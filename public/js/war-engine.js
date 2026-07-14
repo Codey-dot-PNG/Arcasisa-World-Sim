@@ -18,7 +18,13 @@
 // store.log/sim.draftNews; a predicting client passes nothing and gets
 // no-ops, so predicted milestones never double-publish. Everything that
 // needs server-only modules (store.uid, deeds, scenario spawning, bombs)
-// stays in server/war.js — this module has ZERO requires.
+// stays in server/war.js — this module's ONLY sibling is war-ai.js (the
+// hierarchical commander AI, split out the same way war-scenarios.js was:
+// the guarded require below resolves it in Node, and the browser loads
+// public/js/war-ai.js as a script tag BEFORE this file and hands it over on
+// the global). war-ai.js is shared byte-for-byte and dependency-free too —
+// the engine INJECTS its own helpers into it (WarAI.run(api, …)), keeping
+// the dependency arrow one-way.
 //
 // Airstrikes (cinematic two-phase bombing) split the same way: server/war.js's
 // dropBomb only ENQUEUES a strike onto war.airstrikes (additive, absent-safe
@@ -36,20 +42,23 @@
 // back into the simulation.
 (function (global) {
 
+  // The commander AI (Tier 1 national commands + Tier 2 corps planners —
+  // see war-ai.js / docs/WAR.md). In Node this resolves the sibling module;
+  // in the browser `module` is undefined and the script-tag-loaded global
+  // (public/index.html loads war-ai.js first) is used instead. Absent on a
+  // malformed load → the war simply coasts on existing dests, same as a
+  // legacy doc with no ai/command state at all.
+  const WarAI = (typeof module !== 'undefined' && module.exports) ? require('./war-ai') : global.WarAI;
+
   // ---------- tunables (identical to the pre-split server/war.js values) ----------
   const CELL = 48;
   const CONTROL_RADIUS_CELLS = 1.5;   // a unit projects control this many cells out
   const COMBAT_RANGE = 40;            // px — opposing units this close fight (symbol width — combat on box-touch)
   const CAPTURE_RANGE = 60;           // px — how close to a city counts as "holding" it
   const CAPTURE_HOLD_TICKS = 3;       // consecutive uncontested ticks to flip a city
-  const AI_INTERVAL = 10;             // ticks between grand-strategy replans
-  // ---- AI tactical planner (Phase 28) — see runAI's role assignment ----
-  const OBJ_THREAT_R = 260;           // px — defenders inside this of an objective count as its garrison when planning
-  const ENCIRCLE_R = 170;             // px — how wide the pincer arms swing around a defended objective
-  const GARRISON_THREAT_R = 300;      // px — a captured city with live defenders inside this needs a rear guard
-  const PURSUE_R = 220;               // px — spearhead units run down broken/weak defenders inside this
-  const PURSUE_WEAK_FRAC = 0.35;      // a defender below this fraction of max strength is worth finishing off
-  const INTERDICT_FRAC = 0.45;        // supply-cut post sits this far from the defender capital toward the objective
+  const AI_INTERVAL = 10;             // ticks between OPERATIONAL (corps) replans — the strategic tier's coarser cadence lives in war-ai.js (STRATEGIC_INTERVAL)
+  // The AI tactical planner's own tunables (OBJ_THREAT_R, ENCIRCLE_R, …)
+  // moved to war-ai.js with the planner itself.
   // ---- refugee columns (Phase 28) — see stepRefugees ----
   const REFUGEE_SPEED = 7;            // px/tick — a column on the roads (faster than infantry: they drop everything)
   const REFUGEE_ARRIVE_R = 30;        // px — close enough to the destination to disperse into it
@@ -1044,328 +1053,55 @@
     war.events.push({ t: Date.now(), kind, pos, text });
     if (war.events.length > 60) war.events.splice(0, war.events.length - 60);
   }
-  function note(war, text) {
-    if (!war.ai) return; // non-GM predicted state has ai stripped — notes are GM-only intel anyway
-    war.ai.notes.push({ t: war.tick, text });
-    if (war.ai.notes.length > 20) war.ai.notes.shift();
+  // Command-hierarchy notes: every note belongs to a NATION's command
+  // (war.command[side].nations[nationId].notes — see war-ai.js for the
+  // schema), so the GM's War Room can attribute "Valksland National Command"
+  // vs "II Corps" instead of one undifferentiated feed. opts:
+  //   plan: true  — a GRAND-STRATEGY entry (phase/posture changes and corps
+  //                 plans, as opposed to per-unit chatter like rally notes):
+  //                 gets `p: 1`, which the AUTHORITY layer (server/war.js
+  //                 logAiNotes) uses to decide what deserves a store.log
+  //                 timeline entry;
+  //   corps: name — tags the entry with the corps that issued it (`c`).
+  // A nationId of null/undefined resolves to the side's principal
+  // belligerent. Purely additive: a predicting client pushes the identical
+  // entries (deterministic) without ever logging; a legacy pre-hierarchy doc
+  // still lands on war.ai.notes.
+  function commandNotes(war, side, nationId) {
+    const cmd = war.command;
+    if (cmd) {
+      const sideCmd = side === 'def' ? cmd.def : cmd.att;
+      const nations = sideCmd && sideCmd.nations;
+      if (!nations) return null;
+      const prin = side === 'def' ? war.defenderId : war.attackerId;
+      const nat = nations[nationId] || nations[prin];
+      if (!nat) return null;
+      return (nat.notes = nat.notes || []);
+    }
+    if (war.ai) return (war.ai.notes = war.ai.notes || []); // legacy pre-hierarchy doc
+    return null; // stripped predicted state from a pre-redaction server — notes are GM intel anyway
+  }
+  function note(war, side, nationId, text, opts) {
+    const list = commandNotes(war, side, nationId);
+    if (!list) return;
+    const entry = { t: war.tick, text };
+    if (opts && opts.plan) entry.p = 1;
+    if (opts && opts.corps) entry.c = opts.corps;
+    list.push(entry);
+    if (list.length > 20) list.shift();
   }
 
-  // ---------- AI grand strategy (attacker only) ----------
+  // ---------- AI grand strategy ----------
+  // The commander hierarchy itself (Tier-1 national commands, Tier-2 corps
+  // planners, defender doctrine) lives in war-ai.js — warTick calls
+  // WarAI.run(api, db, war, ctx, rng) where the old flat runAI ran.
+  // primaryObjective stays here because stepMovement's embarked→landing
+  // handoff needs it too; it is also exported for war-ai.
   function primaryObjective(war) {
     const pending = war.objectives.filter(o => o.status !== 'done' && o.kind !== 'control_province');
     pending.sort((a, b) => a.priority - b.priority);
     return pending[0] || null;
   }
-  // Sum of live defending strength within r of a point. Warships are
-  // excluded — shore bombardment can't be cleared by land manoeuvre, so a
-  // squadron offshore must not read as "the city is garrisoned".
-  function defStrengthNear(war, pos, r) {
-    let s = 0;
-    for (const u of war.units) {
-      if (u.side !== 'def' || !isLive(u) || u.kind === 'warship') continue;
-      if (dist(u.pos, pos) <= r) s += u.strength;
-    }
-    return s;
-  }
-  // Slide a planned point along the straight line toward `toward` until it
-  // sits on land — a pincer arm or supply-cut post computed in open water
-  // would send a land column swimming (transport state: can't fight, prime
-  // warship bait). Deterministic fixed-fraction march; `toward` itself is a
-  // city/capital position, so the walk always terminates on land.
-  function landward(war, point, toward) {
-    if (!isWaterAt(war, point)) return point;
-    const steps = Math.max(1, Math.ceil((dist(point, toward) || 1) / 16));
-    for (let i = 1; i <= steps; i++) {
-      const t = i / steps;
-      const cand = [point[0] + (toward[0] - point[0]) * t, point[1] + (toward[1] - point[1]) * t];
-      if (!isWaterAt(war, cand)) return cand;
-    }
-    return toward.slice();
-  }
-  // Remove and return the pool unit nearest to `pos`. Ties break by pool
-  // order, which follows war.units order — part of state, so the server and
-  // a predicting client pick the exact same unit.
-  function takeNearest(pool, pos) {
-    let bi = -1, bd = Infinity;
-    for (let i = 0; i < pool.length; i++) {
-      const d = dist(pool[i].pos, pos);
-      if (d < bd) { bd = d; bi = i; }
-    }
-    return bi >= 0 ? pool.splice(bi, 1)[0] : null;
-  }
-  function runAI(db, war, ctx, rng) {
-    const attTotal = war.units.filter(u => u.side === 'att' && isLive(u)).reduce((s, u) => s + u.strength, 0);
-    const collapseAt = war.ai.attackerStartStrength * war.ai.collapseFrac;
-    const consolidateAt = war.ai.attackerStartStrength * war.ai.consolidateFrac;
-
-    if (attTotal <= collapseAt && !war.totalWar) {
-      // A repelled invasion no longer ends the war on a negotiated collapse —
-      // it goes TOTAL instead (feature: "repelled → total phase"): the
-      // shattered invader refuses terms and its remnants fight to the last,
-      // so the defence must destroy every remaining formation. checkVictory's
-      // annihilation path (no live attacker units → winner 'def') is what
-      // finally ends the war. One-shot: totalWar gates re-entry.
-      war.totalWar = true;
-      war.ai.phase = 'total';
-      note(war, `Attacking force collapsed (${Math.round(attTotal)} strength remaining) — no terms; the remnants fight to the last.`);
-      ctx.log('event', 'The invasion is repelled — the war turns total', war.name, 'WAR ENGINE', [war.attackerId, war.defenderId]);
-      ctx.news('THE INVASION IS REPELLED', 'The invading expeditionary force has been shattered — yet its commanders refuse all terms. What remains digs in to fight to the last. The war enters its total phase.');
-    }
-
-    const landingObj = war.objectives.find(o => o.kind === 'landing');
-    const wasPhase = war.ai.phase;
-    // totalWar outranks consolidation: a total-phase force never digs in, it
-    // hunts (that is also what keeps a collapsed-but-unbeaten remnant fighting).
-    if (war.totalWar) war.ai.phase = 'total';
-    else if (attTotal <= consolidateAt) war.ai.phase = 'consolidate';
-    else if (landingObj && landingObj.status !== 'done') war.ai.phase = 'landing';
-    else war.ai.phase = war.ai.phase === 'consolidate' ? 'consolidate' : (war.objectives.every(o => o.status === 'done') ? 'exploit' : 'breakout');
-    if (war.ai.phase !== wasPhase) note(war, `Phase change: ${wasPhase} → ${war.ai.phase}`);
-
-    // Total war (Phase 22): objectives are history — hunt down every
-    // remaining defender, then sweep whatever ground is still uncontrolled.
-    // Chase orders reuse stepChase; the sweep reuses randomProvincePoint on
-    // the LEAST-controlled province, so the drive converges on 100%.
-    if (war.ai.phase === 'total') {
-      const defsLive = war.units.filter(x => x.side === 'def' && isLive(x));
-      const ctl = war.stats.provinceControl || {};
-      let sweepPid = null, low = 101;
-      for (const pid in war.grid.provinceLandCells) {
-        const c = ctl[pid] || 0;
-        if (c < TOTAL_VICTORY_PCT && c < low) { low = c; sweepPid = pid; }
-      }
-      let hunting = 0, sweeping = 0;
-      for (const u of war.units) {
-        if (u.side !== 'att' || !isLive(u) || u.state === 'routed' || u.state === 'embarked') continue;
-        if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
-        // A LAND unit only hunts land targets — sending infantry swimming
-        // after a warship is suicide (see stepChase's matching refusal). If
-        // only enemy warships remain afloat, the ground forces sweep territory
-        // instead and leave the hulls to friendly boats/warships.
-        const targets = NAVAL_KINDS[u.kind] ? defsLive : defsLive.filter(d => d.kind !== 'warship');
-        if (targets.length) {
-          let nearest = targets[0], nd = dist(u.pos, nearest.pos);
-          for (const d of targets) { const dd = dist(u.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
-          clearDest(u);
-          u.attackId = nearest.id;
-          u.objectiveId = null;
-          if (u.state !== 'fighting') u.state = 'moving';
-          hunting++;
-        } else if (sweepPid && !NAVAL_KINDS[u.kind]) {
-          u.attackId = null;
-          setDest(db, u, randomProvincePoint(war, sweepPid, rng) || u.pos.slice(), u.speed);
-          sweeping++;
-        }
-      }
-      if (defsLive.length) note(war, `Total war: ${hunting} unit(s) hunting the ${defsLive.length} defending formation(s) still in the field.`);
-      else if (sweepPid) note(war, `Total war: ${sweeping} unit(s) sweeping the last uncontrolled ground.`);
-      return;
-    }
-
-    const target = primaryObjective(war);
-    if (war.ai.phase === 'consolidate') {
-      for (const u of war.units) {
-        if (u.side !== 'att' || !isLive(u) || u.state === 'embarked') continue;
-        if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
-        clearDest(u);
-        if (u.state !== 'routed') u.state = 'holding';
-      }
-      note(war, 'Digging in on captured ground — no further advances ordered.');
-      return;
-    }
-
-    const sweepObj = !target ? war.objectives.find(o => o.status !== 'done' && o.kind === 'control_province') : null;
-
-    /* ---- Role-based assault planner (Phase 28) ----
-       The old plan was a single blob: every committed unit marched straight
-       at the top objective, with a flat "every 4th unit sits on the last
-       city taken" rear guard. The replan below splits the committed force
-       into ROLES, each of which exploits a real engine mechanic rather than
-       being flavour:
-         · rear guard    — only where live defenders actually threaten a
-                           captured city, sized to the threat (stepTerritory
-                           recapture + city fall are what it protects);
-         · interdiction  — a detachment posted on the ground between the
-                           defender capital and the objective: the territory
-                           it takes pinches the capital-rooted supply
-                           flood-fill (stepSupply), so the objective's
-                           garrison stops healing — a mechanical siege;
-         · encirclement  — pincer arms swing wide around a DEFENDED
-                           objective to close behind it: routed garrisons
-                           retreating from the assault (retreatTarget) run
-                           straight into them, and the flanks feed the same
-                           supply pinch;
-         · pursuit       — spearheads run down routed/mauled defenders near
-                           the axis instead of marching past them (a routed
-                           unit left alone rallies at RALLY_ORG and comes
-                           straight back);
-         · spearhead     — everyone left masses on the objective, exactly
-                           the old behaviour.
-       Everything is deterministic: pools iterate in war.units order (state),
-       nearest-picks tie-break by pool order, and the only rng draws are the
-       sweep-sector samples below — so a predicting client replays the same
-       plan from the same snapshot. */
-
-    // Keep embarked units pointed at the landing; split everyone else.
-    const landForce = [], navalForce = [];
-    for (const u of war.units) {
-      if (u.side !== 'att' || !isLive(u) || u.state === 'routed') continue;
-      if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
-      if (u.state === 'embarked') { u.objectiveId = landingObj ? landingObj.id : null; continue; }
-      if (NAVAL_KINDS[u.kind]) navalForce.push(u); else landForce.push(u);
-    }
-
-    // Naval units: fire support. setDest clamps a naval dest to the nearest
-    // water, so "go to the city" reads as "take station off its coast" and
-    // stepWarshipFire does the rest — same effective behaviour the old
-    // single-blob assignment produced, now stated as an explicit role.
-    const navalAim = target || sweepObj;
-    for (const u of navalForce) {
-      if (navalAim) { setDest(db, u, navalAim.pos.slice(), u.speed); u.objectiveId = navalAim.id; }
-    }
-
-    if (!target && sweepObj) {
-      // Exploit phase: fan the force out across the province in deterministic
-      // SECTORS of its land-cell list instead of everyone sampling the same
-      // random point independently — the old sweep could pile half the army
-      // into one corner while the far side of the province stayed unswept
-      // for several replans (the documented "already dense" rough edge).
-      const cells = (war.grid.provinceCells || {})[sweepObj.ref] || [];
-      const cs = war.grid.cell;
-      let n = 0;
-      for (const u of landForce) {
-        let dest = null;
-        if (cells.length) {
-          const idx = Math.floor(((n + rng()) / Math.max(1, landForce.length)) * cells.length) % cells.length;
-          dest = [cells[idx][0] * cs + cs / 2, cells[idx][1] * cs + cs / 2];
-        }
-        setDest(db, u, dest || sweepObj.pos.slice(), u.speed);
-        u.objectiveId = sweepObj.id;
-        n++;
-      }
-      const prov = (db.provinces || []).find(p => p.id === sweepObj.ref);
-      note(war, `Sweeping ${n} unit(s) through ${prov ? prov.name : sweepObj.ref} in spread sectors to raise territorial control.`);
-      return;
-    }
-    if (!target) { note(war, 'All objectives complete — mopping up.'); return; }
-
-    const pool = landForce.slice();
-    const cityById = (id) => (db.cities || []).find(c => c.id === id);
-
-    // 1. Rear guard — threat-aware. Walk captured cities most-recent-first;
-    //    only one with live defenders nearby gets a guard, 1–2 units by
-    //    threat strength, chosen by proximity. No threat anywhere → the
-    //    whole force stays forward (the old rule idled 25% of it always).
-    const guardedNames = [];
-    let guards = 0;
-    const maxGuards = Math.floor(pool.length / 4);
-    const heldIds = (war.stats.citiesHeld || []).slice().reverse();
-    for (const cid of heldIds) {
-      if (guards >= maxGuards) break;
-      const city = cityById(cid);
-      if (!city || !city.pos) continue;
-      const threat = defStrengthNear(war, city.pos, GARRISON_THREAT_R);
-      if (threat <= 0) continue;
-      const want = Math.min(2, Math.max(1, Math.round(threat / 3000)), maxGuards - guards);
-      let took = 0;
-      for (let i = 0; i < want; i++) {
-        const u = takeNearest(pool, city.pos);
-        if (!u) break;
-        clearDest(u);
-        u.state = 'holding';
-        u.objectiveId = null;
-        guards++; took++;
-      }
-      if (took) guardedNames.push(city.name);
-    }
-
-    // 2. Supply interdiction — post a detachment between the defender
-    //    capital (the root of stepSupply's defender flood-fill) and the
-    //    objective. Pointless when the objective IS the capital (there is
-    //    no line behind it to cut) or the force is too small to detach.
-    let interdictors = 0;
-    const capital = (db.cities || []).find(c => c.isCapital && c.pos);
-    const targetIsCapital = !!(capital && dist(capital.pos, target.pos) < 60);
-    if (capital && !targetIsCapital && pool.length >= 6) {
-      const cut = landward(war, clampToWorld(war, [
-        capital.pos[0] + (target.pos[0] - capital.pos[0]) * INTERDICT_FRAC,
-        capital.pos[1] + (target.pos[1] - capital.pos[1]) * INTERDICT_FRAC
-      ]), capital.pos);
-      const want = pool.length >= 10 ? 2 : 1;
-      for (let i = 0; i < want; i++) {
-        const u = takeNearest(pool, cut);
-        if (!u) break;
-        setDest(db, u, cut.slice(), u.speed);
-        u.objectiveId = target.id;
-        interdictors++;
-      }
-    }
-
-    // 3. Encirclement — only when the objective is actually defended. Pincer
-    //    arms aim ENCIRCLE_R to each flank, biased slightly PAST the city
-    //    along the approach axis so they close behind it, and landward-slid
-    //    so a coastal objective never sends a column into the sea.
-    let encirclers = 0;
-    const defAtObj = defStrengthNear(war, target.pos, OBJ_THREAT_R);
-    if (defAtObj > 0 && pool.length >= 4) {
-      let cx = 0, cy = 0;
-      for (const u of pool) { cx += u.pos[0]; cy += u.pos[1]; }
-      cx /= pool.length; cy /= pool.length;
-      let ax = target.pos[0] - cx, ay = target.pos[1] - cy;
-      const am = Math.hypot(ax, ay) || 1; ax /= am; ay /= am;
-      const arms = pool.length >= 8 ? 2 : 1;
-      for (let i = 0; i < arms; i++) {
-        const side = i === 0 ? 1 : -1;
-        const pt = landward(war, clampToWorld(war, [
-          target.pos[0] - ay * side * ENCIRCLE_R + ax * ENCIRCLE_R * 0.35,
-          target.pos[1] + ax * side * ENCIRCLE_R + ay * ENCIRCLE_R * 0.35
-        ]), target.pos);
-        const u = takeNearest(pool, pt);
-        if (!u) break;
-        setDest(db, u, pt, u.speed);
-        u.objectiveId = target.id;
-        encirclers++;
-      }
-    }
-
-    // 4. Pursuit — run down routed/mauled defenders within PURSUE_R of the
-    //    remaining force rather than marching past them. Chase orders reuse
-    //    stepChase; the next replan's setDest clears any stale attackId.
-    let pursuers = 0;
-    const maxPursuit = Math.ceil(pool.length / 3);
-    for (const d of war.units) {
-      if (pursuers >= maxPursuit || !pool.length) break;
-      if (d.side !== 'def' || !isLive(d) || d.kind === 'warship') continue;
-      if (!(d.state === 'routed' || d.strength < (d.maxStrength || d.strength) * PURSUE_WEAK_FRAC)) continue;
-      let bi = -1, bd = Infinity;
-      for (let i = 0; i < pool.length; i++) {
-        const dd = dist(pool[i].pos, d.pos);
-        if (dd <= PURSUE_R && dd < bd) { bd = dd; bi = i; }
-      }
-      if (bi < 0) continue;
-      const u = pool.splice(bi, 1)[0];
-      clearDest(u);
-      u.attackId = d.id;
-      u.objectiveId = null;
-      if (u.state !== 'fighting') u.state = 'moving';
-      pursuers++;
-    }
-
-    // 5. Main effort — everyone left masses on the objective.
-    for (const u of pool) {
-      setDest(db, u, target.pos.slice(), u.speed);
-      u.objectiveId = target.id;
-    }
-
-    const parts = [`${pool.length} on the assault`];
-    if (encirclers) parts.push(`${encirclers} swinging wide to encircle`);
-    if (interdictors) parts.push(`${interdictors} cutting the ${capital ? capital.name + ' ' : ''}supply line`);
-    if (pursuers) parts.push(`${pursuers} running down broken formations`);
-    if (guards) parts.push(`${guards} guarding ${guardedNames.join(', ')}`);
-    if (navalForce.length && navalAim) parts.push(`${navalForce.length} squadron(s) on fire support`);
-    note(war, `${target.kind} (priority ${target.priority}): ${parts.join('; ')}.`);
-  }
-
   // ---------- movement ----------
   function nearestLiveEnemy(war, u) {
     let nearest = null, nd = Infinity;
@@ -1491,7 +1227,7 @@
           // pace rather than standing in the fire.
           advanceToward(war, u, retreatTarget(war, u), (u.speed || DEF_MOVE_SPEED) * 0.8);
           u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
-          if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+          if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, u.side, u.nationId, `${u.name} rallies (org ${Math.round(u.org)}).`); }
           continue;
         }
         if (stepChase(db, war, u)) continue;
@@ -1529,7 +1265,7 @@
         // enforces both) — replaces the old blind flee-from-enemy heading.
         advanceToward(war, u, retreatTarget(war, u), u.speed * 0.8);
         u.org = clamp(u.org + ORG_REGEN * 1.5, 0, 100);
-        if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, `${u.name} rallies (org ${Math.round(u.org)}).`); }
+        if (u.org >= RALLY_ORG) { u.state = 'holding'; note(war, u.side, u.nationId, `${u.name} rallies (org ${Math.round(u.org)}).`); }
         continue;
       }
       if (stepChase(db, war, u)) continue;
@@ -2150,6 +1886,16 @@
       : o.ref;
     return !!ref && (db.cities || []).some(c => c.id === ref);
   }
+  // Stamp the principal attacker's campaign phase (used by checkVictory's
+  // total-war flips). Command-hierarchy docs carry it on the attacker's
+  // National Command; a legacy pre-hierarchy doc still carries war.ai.
+  function setAttackerPhase(war, phase) {
+    const nations = war.command && war.command.att && war.command.att.nations;
+    if (nations) {
+      for (const nid in nations) if (nations[nid] && nations[nid].principal) nations[nid].phase = phase;
+    }
+    if (war.ai) war.ai.phase = phase;
+  }
   function checkVictory(db, war, ctx) {
     if (!war.active) return;
     // Ceded-objective fallback: a still-pending objective whose city/province
@@ -2162,7 +1908,7 @@
       const stuck = war.objectives.some(o => o.status !== 'done' && !objectiveReachable(db, war, o));
       if (stuck) {
         war.totalWar = true;
-        if (war.ai) war.ai.phase = 'total';
+        setAttackerPhase(war, 'total');
         const anchor = war.units.find(u => u.side === 'att' && isLive(u));
         pushEvent(war, 'milestone', anchor ? anchor.pos.slice() : [1920, 1080], 'An objective is no longer reachable — the invader drives for total conquest instead.');
         ctx.log('event', 'The war enters its total phase', `${war.name}: a strategic objective has been ceded away; the invasion presses on for total victory.`, 'WAR ENGINE', [war.attackerId, war.defenderId]);
@@ -2172,7 +1918,7 @@
     const allDone = war.objectives.every(o => o.status === 'done');
     if (allDone && !war.totalWar) {
       war.totalWar = true;
-      if (war.ai) war.ai.phase = 'total';
+      setAttackerPhase(war, 'total');
       const anchor = war.units.find(u => u.side === 'att' && isLive(u));
       pushEvent(war, 'milestone', anchor ? anchor.pos.slice() : [1920, 1080], 'All objectives secured — the invader now drives for total conquest.');
       ctx.log('event', 'The war enters its total phase', `${war.name}: every objective has fallen; nothing short of total victory ends this now.`, 'WAR ENGINE', [war.attackerId, war.defenderId]);
@@ -2235,6 +1981,13 @@
       }
       u.orderedBy = 'player';
       u.playerHoldUntil = war.tick + PLAYER_HOLD_TICKS;
+      // Defenders a player has EVER commanded stay theirs for good: Home
+      // Defence (war-ai.js planNationDefence) never re-tasks a
+      // playerControlled unit, unlike the attacker AI's expiring 12-tick
+      // hold — the players ARE the defence's field commanders, and an AI
+      // yanking a garrison they placed 30 seconds later would fight them
+      // for the mouse. Additive/absent-safe (legacy units simply lack it).
+      if (u.side === 'def') u.playerControlled = true;
     }
   }
 
@@ -2258,17 +2011,17 @@
     // — no-op when the key matches, so this is a cheap per-tick guard that
     // keeps server and predicting client in step without extra sync plumbing.
     refreshWarZones(db, war);
-    // AI runs whenever war.ai is present: always on the server, and on every
-    // predicting client too — players receive a REDACTED ai (numeric plan
-    // state, notes emptied — see api.js) precisely so their local replay
-    // makes the same deterministic replans the server makes. Before that, a
-    // player client kept units marching on stale dests between snapshots and
-    // every AI turn showed up as a rubberband correction. A legacy snapshot
-    // with no ai at all still just coasts on existing dests.
-    if (war.ai && war.tick - (war.ai.lastPlanTick || 0) >= AI_INTERVAL) {
-      runAI(db, war, ctx, rng);
-      war.ai.lastPlanTick = war.tick;
-      if (!war.active) return true; // AI declared a collapse-defeat this tick
+    // The commander hierarchy (war-ai.js) runs whenever war.command (or a
+    // legacy war.ai, which it upgrades in place) is present: always on the
+    // server, and on every predicting client too — players receive a
+    // REDACTED command (numeric plan state, notes emptied — see api.js)
+    // precisely so their local replay makes the same deterministic replans
+    // the server makes. Its tier gates (strategic every STRATEGIC_INTERVAL,
+    // operational every AI_INTERVAL) live inside WarAI.run; a snapshot with
+    // neither ai nor command still just coasts on existing dests.
+    if (WarAI) {
+      WarAI.run(api, db, war, ctx, rng);
+      if (!war.active) return true; // AI declared a defeat this tick
     }
     stepMovement(db, war, ctx, rng);
     stepTransportState(war);
@@ -2318,6 +2071,7 @@
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
     BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS, WARSHIP_RANGE, WARSHIP_TRANSPORT_BONUS, NAVAL_KINDS,
     REFUGEE_MAX, REFUGEE_FADE_TICKS, REFUGEE_SPEED,
+    AI_INTERVAL, TOTAL_VICTORY_PCT,
     // helpers
     isLive, dist, clamp, round1, mulberry32, tickRng,
     // geometry
@@ -2327,8 +2081,9 @@
     countryIdForEntity, refreshWarZones, neutralAt, nearestNonNeutralPoint, equipMul, unitMul, isWaterAt,
     nearestWaterPoint, navalPath, ensureNavalGrid, navalWaterAt,
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
-    // sim
-    pushEvent, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick
+    // sim (note/primaryObjective are consumed by war-ai.js — the whole api
+    // bundle is what warTick injects into WarAI.run as its helper set)
+    pushEvent, note, primaryObjective, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else global.WarEngine = api;

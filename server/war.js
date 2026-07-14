@@ -22,6 +22,7 @@
 const store = require('./store');
 const sim = require('./sim');
 const engine = require('./war-engine');
+const warAI = require('./war-ai'); // command-hierarchy schema helpers (initialCommand) — the AI itself runs inside engine ticks
 const geometry = require('./geometry');
 
 // ---------- occupation devastation (Phase 22) ----------
@@ -139,6 +140,65 @@ function settleRefugees(db) {
     if (r._settled || r.arrived == null) continue;
     creditRefugees(db, r.to, r.count);
     r._settled = true;
+  }
+}
+
+// ---------- AI plan notes → audit timeline ----------
+// The commander AI (war-ai.js) writes each nation's reasoning into
+// war.command[side].nations[id].notes (the War Room's GM-only intel feed,
+// capped at 20 per nation and redacted from players). Entries flagged `p: 1`
+// are GRAND-STRATEGY decisions (phase/posture changes, corps plans — see
+// war-engine.js note()); this authority-only pass gives them a permanent
+// store.log record so the campaign's command history survives the cap and
+// reads back in the Timeline. Type 'event' keeps it GM-only (filterState's
+// player whitelist is economy/ownership/market/inventory). Corps-tagged
+// entries (`c`) log under "<Nation> — <Corps>" so the record reads as a
+// command hierarchy, not one undifferentiated feed.
+// Bookkeeping lives on each nation command as NUMBERS only (_noteSeenTick/
+// _noteLogAt/_noteLogHash) because warForPlayers ships every command field
+// except `notes` — a stored text would hand players the reasoning it exists
+// to redact. A predicting client pushes the identical notes but never runs
+// this.
+const AI_NOTE_LOG_MIN_TICKS = 30; // ≥1min at 1× between routine plan entries per nation; phase/posture changes bypass and re-open the gate
+function noteHash(text) {
+  let h = 5381;
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) >>> 0;
+  return h;
+}
+function logNationNotes(db, war, side, nid, nat) {
+  if (!nat || !Array.isArray(nat.notes)) return;
+  const seen = nat._noteSeenTick || 0;
+  let maxT = seen;
+  const ent = (db.entities || []).find(e => e.id === nid);
+  const entName = ent ? ent.name : nid;
+  for (const n of nat.notes) {
+    if (!n || typeof n.t !== 'number' || n.t <= seen) continue;
+    maxT = Math.max(maxT, n.t);
+    if (n.p !== 1) continue; // per-unit chatter (rallies) stays out of the record
+    const text = String(n.text || '');
+    const h = noteHash(text);
+    if (h === nat._noteLogHash) continue; // unchanged plan — nothing new to record
+    const posture = /^(Phase|Posture) change:/.test(text);
+    // Routine plan churn (role counts shifting as units die/rout) is
+    // throttled; a phase/posture change always logs AND re-opens the gate so
+    // the fresh plan issued on the same replan tick gets its entry too.
+    if (!posture && nat._noteLogAt != null && n.t - nat._noteLogAt < AI_NOTE_LOG_MIN_TICKS) continue;
+    const title = n.c ? `${entName} — ${n.c}`
+      : `${entName} ${side === 'att' ? 'High Command' : 'Defence Command'}`;
+    store.log('event', title, `[tick ${n.t}] ${text}`, 'WAR AI', [nid]);
+    nat._noteLogHash = h;
+    nat._noteLogAt = posture ? null : n.t;
+  }
+  nat._noteSeenTick = maxT;
+}
+function logAiNotes(db) {
+  const war = db.war;
+  if (!war) return;
+  const cmd = war.command;
+  if (!cmd) return; // pre-hierarchy doc — store.migrate/ensureCommand upgrade it before the first logged tick
+  for (const side of ['att', 'def']) {
+    const nations = (cmd[side] && cmd[side].nations) || {};
+    for (const nid in nations) logNationNotes(db, war, side, nid, nations[nid]);
   }
 }
 function applyDevastation(db) {
@@ -1032,9 +1092,25 @@ function startWar(db, scenario) {
     scenarioId: scenario.id, name: scenario.name, attackerId: attacker.id, defenderId: defender.id,
     grid, cells: {}, units, objectives,
     supplyAnchor,
-    ai: { phase: 'landing', lastPlanTick: 0, notes: [], attackerStartStrength: attackerTotal,
+    // The command hierarchy (Tier-1 national commands + Tier-2 corps — see
+    // war-ai.js / docs/WAR.md). Replaces the old flat war.ai; allies that
+    // join later get their nation entry backfilled by the engine's
+    // ensureCommand on their first tick. Doctrine is data: the scenario's
+    // optional `doctrine: {att, def}` wins, then the defender entity's
+    // authored military profile (meta.military.doctrine), then the
+    // defaults — 'aggressive' attacker (today's planner), 'static' defender
+    // (no AI at all: the pre-hierarchy behaviour, so existing scenarios
+    // don't suddenly get harder without playtesting).
+    command: warAI.initialCommand({
+      attackerId: attacker.id, defenderId: defender.id,
+      attackerStartStrength: attackerTotal,
+      defenderStartStrength: units.filter(u => u.side === 'def').reduce((s, u) => s + u.strength, 0),
       consolidateFrac: (scenario.tuning || {}).consolidateFrac || 0.35,
-      collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12 },
+      collapseFrac: (scenario.tuning || {}).collapseFrac || 0.12,
+      attDoctrine: (scenario.doctrine || {}).att,
+      defDoctrine: (scenario.doctrine || {}).def ||
+        (defender.meta && defender.meta.military && defender.meta.military.doctrine)
+    }),
     events: [],
     // Visible refugee columns (Phase 28) — spawned by moveRefugees' waves,
     // walked by the engine's stepRefugees, settled by settleRefugees below.
@@ -1058,6 +1134,15 @@ function startWar(db, scenario) {
   // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
   // naval units. No-op on a world where those items haven't been seeded yet.
   deployArsenalUnits(db, db.war, defender, attacker, stage, landStart);
+  // The defender's Tier-1 baseline includes its arsenal formations (armour,
+  // fleet) deployed just above; the attacker's deliberately does NOT include
+  // its own fleet — attackerStartStrength was minted before deployment, and
+  // the collapse/consolidate thresholds derived from it are what every
+  // scenario's tuning was playtested against (parity with the pre-hierarchy
+  // planner). Allies aren't in yet either way — each gets its OWN baseline
+  // when its nation command forms.
+  db.war.command.def.nations[defender.id].startStrength =
+    db.war.units.filter(u => u.side === 'def').reduce((s, u) => s + u.strength, 0);
   // Alliance-aware wars (Task 3): nations allied with the attacker/defender
   // (entity.meta.military.allies) auto-join via the existing joinWar
   // mechanics — contingent size from their military profile, mustering from
@@ -1673,7 +1758,7 @@ function ctxFor(db) {
 function warTick(db) {
   ensureWarGrid(db);
   const ticked = engine.warTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); logAiNotes(db); applyOccupationTransfers(db); }
   // The engine ends wars itself (annihilation, total conquest) without going
   // through endWar — catch that here so the survivors still demobilise.
   if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE');
@@ -1682,7 +1767,7 @@ function warTick(db) {
 function maybeWarTick(db) {
   ensureWarGrid(db);
   const ticked = engine.maybeWarTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); applyOccupationTransfers(db); }
+  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); logAiNotes(db); applyOccupationTransfers(db); }
   if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE'); // see warTick — engine-ended wars must demobilise too
   return ticked;
 }

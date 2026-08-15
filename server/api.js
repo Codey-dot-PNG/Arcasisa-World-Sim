@@ -132,7 +132,13 @@ function sanitizeTariffs(raw) {
     return out;
   };
   raw = raw || {};
-  return { global: pair(raw.global), byCountry: map(raw.byCountry), byCompany: map(raw.byCompany) };
+  const byItem = map(raw.byItem);
+  const embargoes = {};
+  for (const id in (raw.embargoes || {})) {
+    const v = raw.embargoes[id] || {};
+    if (v.import || v.export) embargoes[id] = { import: !!v.import, export: !!v.export };
+  }
+  return { global: pair(raw.global), byCountry: map(raw.byCountry), byCompany: map(raw.byCompany), byItem, embargoes };
 }
 function readBody(req, maxBytes) {
   const cap = maxBytes || 4e6;
@@ -1017,9 +1023,13 @@ async function handle(req, res, pathname, method) {
       const clampWage = (n) => Math.max(0, Math.min(300, Math.round(Number(n) || 0)));
       if (b.keepPct !== undefined) co.keepPct = clampPct(b.keepPct);
       if (b.wage !== undefined) co.wage = clampWage(b.wage);
+      if (b.keepPctByItem && typeof b.keepPctByItem === 'object') {
+        co.keepPctByItem = {};
+        for (const iid of Object.keys(b.keepPctByItem)) co.keepPctByItem[iid] = clampPct(b.keepPctByItem[iid]);
+      }
       store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% in stock · wage ${co.wage}`, u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, wage: co.wage } });
+      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, keepPctByItem: co.keepPctByItem || {}, wage: co.wage } });
     }
 
     // ---- government trade tariffs (Phase 16) ----
@@ -1225,7 +1235,7 @@ async function handle(req, res, pathname, method) {
       if (pathname === '/api/gm/war/start' && method === 'POST') {
         const b = await readBody(req);
         if (db.war && db.war.active) return json(res, 409, { error: 'A war is already active.' });
-        const scenario = warScenarios.scenarios[b.scenario];
+        const scenario = warScenarios.scenarios[b.scenario] || ((db.settings.warCustomScenarios || []).find(s => s.id === b.scenario));
         if (!scenario) return bad('Unknown scenario: ' + b.scenario);
         try {
           war.startWar(db, scenario);
@@ -1275,7 +1285,7 @@ async function handle(req, res, pathname, method) {
       // every scenario in server/war-scenarios.js, so the War Room's Start
       // form doesn't have to hardcode the list client-side.
       if (pathname === '/api/gm/war/scenarios' && method === 'GET') {
-        const list = Object.values(warScenarios.scenarios).map(s => {
+        const list = [...Object.values(warScenarios.scenarios), ...(db.settings.warCustomScenarios || [])].map(s => {
           const att = db.entities.find(e => e.id === s.attackerId);
           const def = db.entities.find(e => e.id === s.defenderId);
           return {
@@ -1284,6 +1294,22 @@ async function handle(req, res, pathname, method) {
           };
         });
         return json(res, 200, { scenarios: list });
+      }
+      if (pathname === '/api/gm/war/scenarios/custom' && method === 'POST') {
+        const b = await readBody(req);
+        const attackerId = String(b.attackerId || ''), defenderId = String(b.defenderId || 'ent_gov');
+        const attacker = db.entities.find(e => e.id === attackerId && e.type === 'foreign');
+        const defender = db.entities.find(e => e.id === defenderId);
+        if (!attacker || !defender) return bad('Choose a foreign attacker and a valid defender.');
+        const count = (k) => Math.max(0, Math.min(30, Math.round(Number(b[k]) || 0)));
+        const units = [];
+        for (const [kind, label] of [['infantry','Infantry'],['armored','Armored'],['marine','Marines'],['boat','Boats'],['warship','Warships']]) for (let i = 0; i < count(kind); i++) units.push({ name: `Custom ${label} ${i + 1}`, kind });
+        if (!units.length) return bad('Add at least one attacking unit.');
+        const scenario = { id: 'custom_' + Date.now().toString(36), name: String(b.name || 'Custom War').slice(0, 80), attackerId, defenderId, staging: { x0: 2900, y0: 500, x1: 3100, y1: 900 }, objectives: [{ kind: 'seize_capital', priority: 1 }], units, defense: { citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 }, militaryPropertyStrength: 2600 }, tuning: { consolidateFrac: .35, collapseFrac: .12 } };
+        db.settings.warCustomScenarios = db.settings.warCustomScenarios || [];
+        db.settings.warCustomScenarios.push(scenario);
+        store.save(); broadcast('sync');
+        return json(res, 200, { scenario });
       }
       // GM unit spawner — deploy fresh units mid-war for either side at an
       // arbitrary point, with adjustable stats (see war.spawnUnits).

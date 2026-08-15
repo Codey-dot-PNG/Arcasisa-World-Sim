@@ -1939,6 +1939,30 @@ const War = {
         catch (e) { toast(e.message, true); }
       }
     }, '⚔ Start War')));
+    this.renderCustomScenarioForm(inner);
+  },
+
+  _customDraft: { name: 'Custom War', attackerId: '', defenderId: 'ent_gov', infantry: 3, armored: 1, marine: 0, boat: 0, warship: 0 },
+  renderCustomScenarioForm(inner) {
+    inner.appendChild(Views.secLabel('Custom Scenario Creator'));
+    const d = this._customDraft;
+    const attackers = S().entities.filter(e => e.type === 'foreign').map(e => [e.id, e.name]);
+    const defenders = S().entities.filter(e => ['government','foreign'].includes(e.type)).map(e => [e.id, e.name]);
+    if (!d.attackerId && attackers.length) d.attackerId = attackers[0][0];
+    const box = el('div.form-grid',
+      Forms.field('Scenario name', Forms.text(d, 'name')),
+      Forms.field('Attacker', Forms.sel(d, 'attackerId', attackers)),
+      Forms.field('Defender', Forms.sel(d, 'defenderId', defenders)),
+      Forms.field('Infantry', Forms.num(d, 'infantry')),
+      Forms.field('Armored', Forms.num(d, 'armored')),
+      Forms.field('Marines', Forms.num(d, 'marine')),
+      Forms.field('Boats', Forms.num(d, 'boat')),
+      Forms.field('Warships', Forms.num(d, 'warship')));
+    inner.appendChild(box);
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: async () => {
+      try { const r = await POST('/api/gm/war/scenarios/custom', d); this._scenarioList = null; toast(`${r.scenario.name} created.`); this._ensureScenarioList(); }
+      catch (e) { toast(e.message, true); }
+    } }, 'Create Custom Scenario')));
   },
 
   // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/

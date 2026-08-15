@@ -161,13 +161,13 @@ function market_valuedSharesClient(co) {
 }
 // Effective government tariff (%) on an open-market trade — mirrors
 // sim.tradeTariffRate: global + per-country + per-company, import/export apart.
-function tradeTariffRateClient(side, holder, partnerId) {
+function tradeTariffRateClient(side, holder, partnerId, itemId) {
   const tf = S().settings.trade && S().settings.trade.tariffs;
   if (!tf || !holder) return 0;
   if (holder.type === 'government' || holder.id === 'ent_gov') return 0;
   const key = side === 'sell' ? 'export' : 'import';
   const num = (o) => (o && Number(o[key])) || 0;
-  const rate = num(tf.global) + num(tf.byCountry && tf.byCountry[partnerId]) + num(tf.byCompany && tf.byCompany[holder.id]);
+  const rate = num(tf.global) + num(tf.byCountry && tf.byCountry[partnerId]) + num(tf.byCompany && tf.byCompany[holder.id]) + num(tf.byItem && tf.byItem[itemId]);
   return Math.max(0, Math.min(90, rate));
 }
 

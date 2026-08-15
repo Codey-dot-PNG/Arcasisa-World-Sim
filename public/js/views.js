@@ -985,6 +985,15 @@ const Views = {
       ['Opposition Seats', fmtNum(parties.filter(p => !p.inGovernment).reduce((s, p) => s + (p.mpCount || 0), 0))]
     ]));
 
+    const partyBar = el('div', { style: 'display:flex; height:42px; margin-top:16px; border:1px solid var(--rule-strong); overflow:hidden;' });
+    for (const p of [...parties].sort((a, b) => (b.mpCount || 0) - (a.mpCount || 0))) {
+      const seats = p.mpCount || 0;
+      if (!seats) continue;
+      partyBar.appendChild(el('div', { title: `${p.name}: ${seats} seats`, style: `flex:${seats}; min-width:24px; background:${p.color || 'var(--ink-faint)'}; color:#fff; display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-size:11px; border-right:1px solid rgba(255,255,255,.35); cursor:pointer;`, onclick: () => select('entity', p.id) }, `${p.abbrev || p.name} · ${seats}`));
+    }
+    inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:5px 0 0;' }, 'SEAT DISPLAY · LEFT TO RIGHT BY PARTY SIZE'));
+    inner.appendChild(partyBar);
+
     const stage = el('div.stage', { style: 'margin-top:16px; text-align:center;' });
     stage.appendChild(this.seatArc(parties, totalSeats));
     inner.appendChild(stage);
@@ -1201,7 +1210,13 @@ const Views = {
     const nameOf = (eid) => { const e = entById(eid); return e ? e.name : eid; };
     const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
     const lvl = (s) => el('span', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.05em; color:' + (s === 'High' ? 'var(--good)' : s === 'Low' ? 'var(--accent)' : 'var(--ink-soft)') }, (s || 'Med').toUpperCase());
-    const book = trade.orders || { buys: [], sells: [] };
+    const embargoed = (order, side) => {
+      const it = itemById(order.itemId), em = trade.tariffs && trade.tariffs.embargoes && trade.tariffs.embargoes[order.itemId];
+      if (!it || it.tradable === false) return true;
+      return !!(em && em[side === 'sell' ? 'export' : 'import']);
+    };
+    const rawBook = trade.orders || { buys: [], sells: [] };
+    const book = { buys: (rawBook.buys || []).filter(o => !embargoed(o, 'sell')), sells: (rawBook.sells || []).filter(o => !embargoed(o, 'buy')) };
     const holders = this.tradeHolders();
     if (holders.length && (!W.tradeAs || !holders.some(h => h.id === W.tradeAs))) W.tradeAs = holders[0].id;
     const me = holders.find(h => h.id === W.tradeAs) || null;
@@ -1259,7 +1274,7 @@ const Views = {
         const unit = this.tradeUnit(order, q, side);
         const value = Math.round(unit * q * 100) / 100;
         const fillPct = Math.round(((order.filled || 0) + q) / order.qty * 100);
-        const tRate = tradeTariffRateClient(side, me, order.partnerId);
+        const tRate = tradeTariffRateClient(side, me, order.partnerId, order.itemId);
         const tariff = Math.round(value * tRate / 100 * 100) / 100;
         const net = side === 'sell' ? value - tariff : value + tariff; // proceeds after duty / cost incl. tariff
         preview.textContent = fmtNum(q) + ' @ ~' + CUR() + fmtNum(unit) + ' = ' + CUR() + fmtNum(value) +
@@ -1320,14 +1335,19 @@ const Views = {
      plus additive per-country and per-company surcharges (President or GM).
      Duties are collected into the treasury as trades execute. */
   intlTariffs(inner, trade, partners) {
-    const tf = trade.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {} };
+    const tf = trade.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {}, byItem: {}, embargoes: {} };
     const companies = S().entities.filter(e => e.type === 'company');
     const g0 = (m, id, k) => ((tf[m] && tf[m][id]) || {})[k] || 0;
     // persistent draft so slider drags survive the day-market re-render
     if (!W.tariffDraft) {
-      W.tariffDraft = { global: { import: tf.global && tf.global.import || 0, export: tf.global && tf.global.export || 0 }, byCountry: {}, byCompany: {} };
+      W.tariffDraft = { global: { import: tf.global && tf.global.import || 0, export: tf.global && tf.global.export || 0 }, byCountry: {}, byCompany: {}, byItem: {}, embargoes: {} };
       for (const p of partners) W.tariffDraft.byCountry[p.entityId] = { import: g0('byCountry', p.entityId, 'import'), export: g0('byCountry', p.entityId, 'export') };
       for (const c of companies) W.tariffDraft.byCompany[c.id] = { import: g0('byCompany', c.id, 'import'), export: g0('byCompany', c.id, 'export') };
+      for (const it of S().items.filter(i => i.tradable !== false)) {
+        W.tariffDraft.byItem[it.id] = { import: g0('byItem', it.id, 'import'), export: g0('byItem', it.id, 'export') };
+        const em = (tf.embargoes && tf.embargoes[it.id]) || {};
+        W.tariffDraft.embargoes[it.id] = { import: !!em.import, export: !!em.export };
+      }
     }
     const dr = W.tariffDraft;
 
@@ -1352,6 +1372,15 @@ const Views = {
     if (companies.length) {
       inner.appendChild(this.secLabel('By company (domestic trader)'));
       for (const c of companies) inner.appendChild(dutyRow(c.name, dr.byCompany[c.id], 'surcharge on this company’s trades'));
+    }
+
+    inner.appendChild(this.secLabel('By specific good / embargoes'));
+    for (const it of S().items.filter(i => i.tradable !== false)) {
+      const row = dr.byItem[it.id], em = dr.embargoes[it.id];
+      inner.appendChild(el('div', { style: 'display:grid; grid-template-columns:170px 1fr 1fr auto; gap:12px; align-items:center; padding:6px 0; border-bottom:1px dashed var(--rule);' },
+        el('div', el('div', { style: 'font-size:12.5px;' }, it.name), el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, it.category)),
+        Forms.sliderNum(row, 'import', 0, 90, { suffix: '%' }), Forms.sliderNum(row, 'export', 0, 90, { suffix: '%' }),
+        el('div', { style: 'font-size:10px; white-space:nowrap;' }, Forms.check(em, 'import', 'Import embargo'), Forms.check(em, 'export', 'Export embargo'))));
     }
 
     inner.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
@@ -1479,7 +1508,8 @@ const Views = {
     const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
       id: c.id,
       keepPct: c.keepPct === undefined ? 0 : c.keepPct,
-      wage: c.wage === undefined ? 100 : c.wage
+      wage: c.wage === undefined ? 100 : c.wage,
+      keepPctByItem: Object.assign({}, c.keepPctByItem || {})
     });
 
     inner.appendChild(this.secLabel('Sales & Output'));
@@ -1497,15 +1527,17 @@ const Views = {
       inner.appendChild(this.secLabel('Products'));
       const stockOf = (iid) => this.holderStockClient(c, iid);
       const tbl = el('table.data', el('thead', el('tr',
-        el('th', 'Product'), el('th.num', 'Retail'), el('th.num', 'Made / turn'),
+        el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Retail'), el('th.num', 'Made / turn'),
         el('th.num', 'Sold / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Stock on hand'))));
       const body = el('tbody');
       for (const iid of producedItems) {
         const it = itemById(iid);
         const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0), 0), 0);
-        const kept = Math.floor(made * Math.max(0, Math.min(100, dr.keepPct)) / 100);
+        const pct = dr.keepPctByItem[iid] === undefined ? dr.keepPct : dr.keepPctByItem[iid];
+        const kept = Math.floor(made * Math.max(0, Math.min(100, pct)) / 100);
         body.appendChild(el('tr',
           el('td', it.name),
+          el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { suffix: '% kept' })),
           el('td.num', fmtMoney(it.marketValue || 0)),
           el('td.num', fmtNum(made)),
           el('td.num', fmtNum(made - kept)),
@@ -1522,10 +1554,10 @@ const Views = {
       onclick: async (ev) => {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
-          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, wage: dr.wage });
+          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wage: dr.wage });
           // apply the server-confirmed values to local state at once, so no
           // refetch timing can revert them and navigating away keeps the change
-          if (r && r.company) { c.keepPct = r.company.keepPct; c.wage = r.company.wage; }
+          if (r && r.company) { c.keepPct = r.company.keepPct; c.keepPctByItem = r.company.keepPctByItem; c.wage = r.company.wage; }
           W.opsDraft = null;
           toast('Operations saved.');
         } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -1571,11 +1603,13 @@ const Views = {
     const hist = Views.histAll();
     const profRows = hist.filter(h => h.profits && h.profits[c.id] !== undefined);
     const revRows = hist.filter(h => h.revenues && h.revenues[c.id] !== undefined);
+    const expRows = hist.filter(h => h.expenses && h.expenses[c.id] !== undefined);
     if (profRows.length >= 2) {
       inner.appendChild(this.secLabel('Profit & Revenue Over Time (annualised run-rate)'));
       inner.appendChild(Charts.chartLine([
         { name: 'Profit', color: 'var(--good)', points: profRows.map(h => ({ x: h.turn, y: h.profits[c.id] })) },
-        revRows.length >= 2 ? { name: 'Revenue', color: 'var(--ink-soft)', points: revRows.map(h => ({ x: h.turn, y: h.revenues[c.id] })) } : null
+        revRows.length >= 2 ? { name: 'Revenue', color: 'var(--ink-soft)', points: revRows.map(h => ({ x: h.turn, y: h.revenues[c.id] })) } : null,
+        expRows.length >= 2 ? { name: 'Expenses', color: 'var(--accent)', points: expRows.map(h => ({ x: h.turn, y: h.expenses[c.id] })) } : null
       ].filter(Boolean), { title: 'COMPANY FINANCES', yFormat: v => CUR() + fmtCompact(v) }));
     }
     const priceHist = hist.filter(h => h.shares && h.shares[c.id] !== undefined).map(h => ({ x: h.turn, y: h.shares[c.id] }));
@@ -1791,6 +1825,16 @@ const Views = {
     cells.push(['Visible Accounts', fmtNum(S().accounts.length)]);
     inner.appendChild(this.statStrip(cells));
 
+    const mineSet = ownershipSetClient();
+    const myAccts = (S().accounts || []).filter(a => mineSet.has(a.ownerId));
+    if (myAccts.length) {
+      inner.appendChild(this.secLabel('Your Accounts'));
+      const box = el('div.stage');
+      myAccts.forEach(a => box.appendChild(this.kv((a.ownerId === W.me.entityId ? '' : entName(a.ownerId) + ' — ') + a.name, fmtMoney(a.balance))));
+      box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, CUR() + ' Wire Transfer')));
+      inner.appendChild(box);
+    }
+
     // at-a-glance pies: who holds the (visible) money, and how the exchange
     // values the listed companies
     const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
@@ -1831,16 +1875,6 @@ const Views = {
 
     // your accounts = the whole ownership chain: own entity plus any company
     // you own or run as CEO, and their subsidiaries
-    const mineSet = ownershipSetClient();
-    const myAccts = (S().accounts || []).filter(a => mineSet.has(a.ownerId));
-    if (myAccts.length) {
-      inner.appendChild(this.secLabel('Your Accounts'));
-      const box = el('div.stage');
-      myAccts.forEach(a => box.appendChild(this.kv((a.ownerId === W.me.entityId ? '' : entName(a.ownerId) + ' — ') + a.name, fmtMoney(a.balance))));
-      box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, CUR() + ' Wire Transfer')));
-      inner.appendChild(box);
-    }
-
     if (perms().accounts === 'all' || isGM()) {
       inner.appendChild(this.secLabel('All Accounts'));
       inner.appendChild(el('table.data',

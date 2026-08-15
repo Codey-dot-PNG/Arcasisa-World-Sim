@@ -665,6 +665,7 @@ function migrate(world) {
       if (e.sellPct === undefined) e.sellPct = 100;   // % of production sold domestically
       if (e.govPct === undefined) e.govPct = 0;       // % sold to the government
       if (e.wage === undefined) e.wage = 100;         // wage index (100 = baseline)
+      if (!e.keepPctByItem) e.keepPctByItem = {};    // per-product stock policy
     }
 
     // economy tunables (GM-adjustable later)
@@ -789,7 +790,9 @@ function migrate(world) {
       // Government trade tariffs: a global baseline plus additive per-country
       // and per-company surcharges, separate import/export rates. Empty = free
       // trade. Collected into the treasury by sim.executeTrade.
-      t.tariffs = t.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {} };
+      t.tariffs = t.tariffs || { global: { import: 0, export: 0 }, byCountry: {}, byCompany: {}, byItem: {}, embargoes: {} };
+      t.tariffs.byItem = t.tariffs.byItem || {};
+      t.tariffs.embargoes = t.tariffs.embargoes || {};
     }
     // Re-derive demographic group SHARES per province from its character
     // (urbanisation stays as authored; class mix now follows industry,

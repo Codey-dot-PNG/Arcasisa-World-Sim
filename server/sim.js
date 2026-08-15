@@ -714,7 +714,7 @@ function runEconomy(db, actor) {
     if (!pr.ownerId) continue;
     const owner = db.entities.find(e => e.id === pr.ownerId);
     const co = owner && owner.type === 'company' ? owner : null;
-    const keepPct = co ? clampPct(co.keepPct, 0) : 0; // % held back as stock (the rest sells domestically)
+    const keepPct = co ? clampPct(co.keepPct, 0) : 0; // fallback company-wide policy
     const wageIdx = co ? (co.wage === undefined ? 100 : Number(co.wage)) : 100;
     const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
 
@@ -737,7 +737,9 @@ function runEconomy(db, actor) {
         const retail = priceOf(e.itemId);
         const produced = Math.round((e.perTurn || 0) * f);
         if (produced <= 0) continue;
-        const keep = Math.floor(produced * keepPct / 100);
+        const itemKeepPct = co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
+          ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct;
+        const keep = Math.floor(produced * itemKeepPct / 100);
         if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
         o.dom += (produced - keep) * retail;
       }
@@ -790,6 +792,7 @@ function runEconomy(db, actor) {
     if (owner && owner.type === 'company') {
       owner.vars = owner.vars || {};
       owner.vars.revenue = Math.round(dom * 365);
+      owner.vars.expenses = Math.round((o.upkeep + o.wage) * 365);
       owner.vars.profit = Math.round((dom - o.upkeep - o.wage) * 365);
     }
     settledOwners++;
@@ -1016,7 +1019,7 @@ function generateTradeOrders(db) {
     if (!db.entities.some(e => e.id === p.entityId)) continue;
     const mk = (iid, kind) => {
       const item = db.items.find(i => i.id === iid);
-      if (!item) return null;
+      if (!item || item.tradable === false) return null;
       // Price = the item's GLOBAL retail value × this partner's per-item
       // MULTIPLIER (1 = at retail; >1 pays a premium, <1 a discount). Legacy
       // absolute prices are honoured as an implied multiplier so old worlds
@@ -1101,7 +1104,7 @@ function drawHolderStock(db, holder, itemId, qty) {
 // (the foreign partner) + a per-COMPANY surcharge (the domestic trader). Import
 // and export are tracked separately. The government never tariffs its own
 // stockpile trades (it IS the taxing authority). Clamped to [0, 90]%.
-function tradeTariffRate(db, side, holder, partnerId) {
+function tradeTariffRate(db, side, holder, partnerId, itemId) {
   const tf = db.settings.trade && db.settings.trade.tariffs;
   if (!tf || !holder) return 0;
   if (holder.type === 'government' || holder.id === 'ent_gov') return 0;
@@ -1109,7 +1112,8 @@ function tradeTariffRate(db, side, holder, partnerId) {
   const num = (o) => (o && Number(o[key])) || 0;
   const rate = num(tf.global)
     + num(tf.byCountry && tf.byCountry[partnerId])
-    + num(tf.byCompany && tf.byCompany[holder.id]);
+    + num(tf.byCompany && tf.byCompany[holder.id])
+    + num(tf.byItem && tf.byItem[itemId]);
   return Math.max(0, Math.min(90, rate));
 }
 
@@ -1128,6 +1132,7 @@ function executeTrade(side, orderId, holderId, qty, actor) {
   if (!holder) throw new Error('Unknown holder');
   const item = db.items.find(i => i.id === order.itemId);
   if (!item) throw new Error('Unknown item');
+  if (item.tradable === false) throw new Error('That item is no longer tradable.');
   qty = Math.round(Number(qty));
   const remaining = order.qty - (order.filled || 0);
   if (!(qty > 0)) throw new Error('Quantity must be positive');
@@ -1141,7 +1146,10 @@ function executeTrade(side, orderId, holderId, qty, actor) {
   const unit = tradeUnitPrice(order, qty, side);
   const value = Math.round(unit * qty * 100) / 100;
   const partnerName = (db.entities.find(e => e.id === order.partnerId) || {}).name || order.partnerId;
-  const tariffRate = tradeTariffRate(db, side, holder, order.partnerId);
+  const embargo = trade.tariffs && trade.tariffs.embargoes && trade.tariffs.embargoes[item.id];
+  const direction = side === 'sell' ? 'export' : 'import';
+  if (embargo && embargo[direction]) throw new Error(`Trade embargoed for ${item.name}.`);
+  const tariffRate = tradeTariffRate(db, side, holder, order.partnerId, item.id);
   const tariff = Math.round(value * tariffRate / 100 * 100) / 100;
   const treasury = tariff > 0 ? (db.accounts.find(a => a.id === 'acct_treasury')) : null;
   const cur = db.settings.currency;
@@ -1473,7 +1481,8 @@ function recordHistory(weekly) {
     avgHappiness: g.avgHappiness || 0, avgApproval: g.avgApproval || 0,
     moneySupply: g.moneySupply || 0, treasury: g.treasury || 0,
     tax: g.lastTaxIncome || 0, exports: g.lastExportIncome || 0, imports: g.lastImportSpend || 0,
-    provinces, shares, profits, revenues
+    provinces, shares, profits, revenues,
+    expenses: Object.fromEntries(db.entities.filter(e => e.type === 'company' && e.vars && e.vars.expenses !== undefined).map(e => [e.id, e.vars.expenses]))
   };
   if (weekly) {
     try {

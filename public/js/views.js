@@ -939,21 +939,6 @@ const Views = {
     svg.setAttribute('width', '420'); svg.setAttribute('height', '230');
     svg.setAttribute('id', 'seat-arc');
     const sorted = [...parties].sort((a, b) => (a.ideology ? a.ideology.econ : 0) - (b.ideology ? b.ideology.econ : 0));
-    // Colour by radial row, rather than by render order (which is a mixture of
-    // rows and angles). This keeps each party as a continuous band across the
-    // arch instead of producing the split spokes seen in the old layout.
-    const partyBands = [];
-    let partySeats = 0;
-    sorted.forEach(p => {
-      const n = Math.max(0, p.mpCount || 0);
-      if (n) partyBands.push({ end: partySeats + n, color: p.color || 'var(--ink-faint)' });
-      partySeats += n;
-    });
-    const colorAt = (fraction) => {
-      const seat = Math.min(totalSeats - 1, Math.floor(fraction * totalSeats));
-      const band = partyBands.find(b => seat < b.end);
-      return band ? band.color : 'var(--paper-line)';
-    };
     const rows = 6, inner = 88, outer = 196;
     const rowSeats = [];
     let alloc = 0;
@@ -965,21 +950,38 @@ const Views = {
     const counts = rowSeats.map(s => Math.round(s / alloc * totalSeats));
     let diff = totalSeats - counts.reduce((a, b) => a + b, 0);
     counts[rows - 1] += diff;
-    let idx = 0;
+    // Build the physical chamber first. Political order is assigned from the
+    // seats' horizontal positions, not from row/radius order. This preserves
+    // the curved rows while making party blocks run left → right.
+    const seats = [];
     for (let r = 0; r < rows; r++) {
       const radius = inner + (outer - inner) * r / (rows - 1);
       const n = counts[r];
-      for (let iSeat = 0; iSeat < n && idx < totalSeats; iSeat++, idx++) {
+      for (let iSeat = 0; iSeat < n && seats.length < totalSeats; iSeat++) {
         const angle = Math.PI - (n === 1 ? Math.PI / 2 : iSeat / (n - 1) * Math.PI);
         const cx = 210 + Math.cos(angle) * radius;
         const cy = 216 - Math.sin(angle) * radius;
-        const c = document.createElementNS(NS, 'circle');
-        c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', 4.6);
-        c.setAttribute('fill', colorAt((r + 0.5) / rows));
-        c.setAttribute('stroke', 'rgba(34,29,21,.4)'); c.setAttribute('stroke-width', '.5');
-        svg.appendChild(c);
+        seats.push({ r, cx, cy });
       }
     }
+
+    // Exact seat counts, with each party occupying one contiguous horizontal
+    // block. Missing seats (if any) remain neutral at the right-hand edge.
+    const orderedSeats = [...seats].sort((a, b) => a.cx - b.cx || a.cy - b.cy);
+    const colors = [];
+    sorted.forEach(p => {
+      for (let i = 0; i < Math.max(0, p.mpCount || 0); i++) colors.push(p.color || 'var(--ink-faint)');
+    });
+    while (colors.length < totalSeats) colors.push('var(--paper-line)');
+    const colorBySeat = new Map(orderedSeats.map((seat, i) => [seat, colors[i]]));
+
+    seats.forEach(seat => {
+        const c = document.createElementNS(NS, 'circle');
+        c.setAttribute('cx', seat.cx); c.setAttribute('cy', seat.cy); c.setAttribute('r', 4.6);
+        c.setAttribute('fill', colorBySeat.get(seat) || 'var(--paper-line)');
+        c.setAttribute('stroke', 'rgba(34,29,21,.4)'); c.setAttribute('stroke-width', '.5');
+        svg.appendChild(c);
+    });
     return svg;
   },
 

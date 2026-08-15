@@ -939,9 +939,21 @@ const Views = {
     svg.setAttribute('width', '420'); svg.setAttribute('height', '230');
     svg.setAttribute('id', 'seat-arc');
     const sorted = [...parties].sort((a, b) => (a.ideology ? a.ideology.econ : 0) - (b.ideology ? b.ideology.econ : 0));
-    const seatColors = [];
-    sorted.forEach(p => { for (let i = 0; i < (p.mpCount || 0); i++) seatColors.push(p.color || 'var(--ink-faint)'); });
-    while (seatColors.length < totalSeats) seatColors.push('var(--paper-line)');
+    // Colour by radial row, rather than by render order (which is a mixture of
+    // rows and angles). This keeps each party as a continuous band across the
+    // arch instead of producing the split spokes seen in the old layout.
+    const partyBands = [];
+    let partySeats = 0;
+    sorted.forEach(p => {
+      const n = Math.max(0, p.mpCount || 0);
+      if (n) partyBands.push({ end: partySeats + n, color: p.color || 'var(--ink-faint)' });
+      partySeats += n;
+    });
+    const colorAt = (fraction) => {
+      const seat = Math.min(totalSeats - 1, Math.floor(fraction * totalSeats));
+      const band = partyBands.find(b => seat < b.end);
+      return band ? band.color : 'var(--paper-line)';
+    };
     const rows = 6, inner = 88, outer = 196;
     const rowSeats = [];
     let alloc = 0;
@@ -963,7 +975,7 @@ const Views = {
         const cy = 216 - Math.sin(angle) * radius;
         const c = document.createElementNS(NS, 'circle');
         c.setAttribute('cx', cx); c.setAttribute('cy', cy); c.setAttribute('r', 4.6);
-        c.setAttribute('fill', seatColors[idx]);
+        c.setAttribute('fill', colorAt((r + 0.5) / rows));
         c.setAttribute('stroke', 'rgba(34,29,21,.4)'); c.setAttribute('stroke-width', '.5');
         svg.appendChild(c);
       }

@@ -938,7 +938,11 @@ const Views = {
     svg.setAttribute('viewBox', '0 0 420 230');
     svg.setAttribute('width', '420'); svg.setAttribute('height', '230');
     svg.setAttribute('id', 'seat-arc');
-    const sorted = [...parties].sort((a, b) => (a.ideology ? a.ideology.econ : 0) - (b.ideology ? b.ideology.econ : 0));
+    // Chamber order is by seat count: largest party on the left, smallest on
+    // the right. Ideology is only a deterministic tie-breaker here.
+    const sorted = [...parties].sort((a, b) =>
+      (b.mpCount || 0) - (a.mpCount || 0) ||
+      (a.ideology ? a.ideology.econ : 0) - (b.ideology ? b.ideology.econ : 0));
     const rows = 6, inner = 88, outer = 196;
     const rowSeats = [];
     let alloc = 0;
@@ -965,20 +969,28 @@ const Views = {
       }
     }
 
-    // Exact seat counts, with each party occupying one contiguous horizontal
-    // block. Missing seats (if any) remain neutral at the right-hand edge.
-    const orderedSeats = [...seats].sort((a, b) => a.cx - b.cx || a.cy - b.cy);
-    const colors = [];
+    // Political assignment is a separate projection onto one horizontal axis.
+    // Only x participates below: row, y, radius, and distance from the speaker
+    // deliberately have no bearing on party ownership.
+    const minX = Math.min(...seats.map(seat => seat.cx));
+    const maxX = Math.max(...seats.map(seat => seat.cx));
+    const partyBands = [];
+    let cumulative = 0;
     sorted.forEach(p => {
-      for (let i = 0; i < Math.max(0, p.mpCount || 0); i++) colors.push(p.color || 'var(--ink-faint)');
+      const share = Math.max(0, p.mpCount || 0) / Math.max(1, totalSeats);
+      cumulative += share;
+      partyBands.push({ end: cumulative, color: p.color || 'var(--ink-faint)' });
     });
-    while (colors.length < totalSeats) colors.push('var(--paper-line)');
-    const colorBySeat = new Map(orderedSeats.map((seat, i) => [seat, colors[i]]));
+    const partyAtHorizontalPosition = (x) => {
+      const politicalX = (x - minX) / Math.max(1, maxX - minX);
+      const band = partyBands.find(b => politicalX <= b.end);
+      return band ? band.color : 'var(--paper-line)';
+    };
 
     seats.forEach(seat => {
         const c = document.createElementNS(NS, 'circle');
         c.setAttribute('cx', seat.cx); c.setAttribute('cy', seat.cy); c.setAttribute('r', 4.6);
-        c.setAttribute('fill', colorBySeat.get(seat) || 'var(--paper-line)');
+        c.setAttribute('fill', partyAtHorizontalPosition(seat.cx));
         c.setAttribute('stroke', 'rgba(34,29,21,.4)'); c.setAttribute('stroke-width', '.5');
         svg.appendChild(c);
     });

@@ -23,6 +23,7 @@ function mapFingerprint() {
       s.war ? (s.war.active ? 'w1' : 'w0') : 'w-',
       JSON.stringify([s.provinces, s.cities, s.properties, s.markers,
         s.settings.map, s.settings.worldName, s.variables,
+        s.settings.ambience,
         s.entities.map(e => [e.id, e.name, e.color])])
     ].join('|');
   } catch (e) { return 'nofp:' + Math.random(); } // can't fingerprint — always render
@@ -178,10 +179,15 @@ const App = {
     const t = state.settings.time || {};
     const c = t.clock || {};
     if (!c.enabled) { out.textContent = 'WORLD PAUSED'; return; }
+    const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60);
+    const sample = Number(c.nowMs);
+    const sampleAt = Number(c.serverNowMs);
     const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
     const anchor = Number(c.anchorRealMs) || Date.now();
-    const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60) / 60000;
-    const d = new Date(base + (Date.now() - anchor) * rate);
+    const worldMs = Number.isFinite(sample) && Number.isFinite(sampleAt)
+      ? sample + (Date.now() - sampleAt) * rate
+      : base + (Date.now() - anchor) * rate;
+    const d = new Date(worldMs);
     const iso = d.toISOString();
     out.textContent = 'WORLD ' + iso.slice(0, 10) + ' ' + iso.slice(11, 16);
   },

@@ -1693,7 +1693,9 @@ function worldClockNow(t, now) {
   const c = t.clock || {};
   const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
   const anchor = Number(c.anchorRealMs) || Date.now();
-  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60) / 60000;
+  // Both sides are milliseconds after conversion: N world minutes per real
+  // minute means N world milliseconds per real millisecond.
+  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60);
   return base + ((Number(now) || Date.now()) - anchor) * rate;
 }
 
@@ -1720,9 +1722,12 @@ function scheduleAuto() {
   if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
   const auto = db.settings.time.auto;
   if (auto && auto.enabled) {
+    const pollSeconds = auto.mode === 'clock'
+      ? Math.min(60, Math.max(15, auto.seconds || 60))
+      : Math.max(15, auto.seconds || 3600);
     autoTimer = setInterval(() => {
       try { autoTick('AUTO'); } catch (e) { console.error('auto-advance failed:', e); }
-    }, Math.max(15, auto.seconds || 3600) * 1000);
+    }, pollSeconds * 1000);
   }
 }
 

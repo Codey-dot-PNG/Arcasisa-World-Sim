@@ -226,6 +226,12 @@ function warForPlayers(war) {
 function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
+  const settings = { ...db.settings, time: { ...db.settings.time } };
+  if (db.settings.time && db.settings.time.clock) {
+    settings.time.clock = { ...db.settings.time.clock };
+    settings.time.clock.nowMs = sim.worldClockNow(db.settings.time, Date.now());
+    settings.time.clock.serverNowMs = Date.now();
+  }
   const own = u.user.entityId;
   // The ownership chain the operator commands (own entity + everything it
   // controls). 'own' visibility follows this chain, so an owner sees the
@@ -288,7 +294,7 @@ function filterState(u) {
     : (db.trades || []).filter(t => controlled.has(t.fromEntityId) || controlled.has(t.toEntityId));
 
   return {
-    settings: db.settings,
+    settings,
     // Economic confidence is public market information (like share prices), so
     // it is exposed even without the statistics clearance.
     globalVars: p.statistics ? db.globalVars : { population: db.globalVars.population, econConfidence: db.globalVars.econConfidence },
@@ -1541,12 +1547,18 @@ async function handle(req, res, pathname, method) {
         for (const k of ['worldName', 'currency', 'currencyName', 'parliamentSeats']) if (b[k] !== undefined) s[k] = b[k];
         if (b.time) {
           const oldDate = s.time.date;
+          const oldWorldMs = sim.worldClockNow(s.time, Date.now());
+          const requestedClock = b.time.clock && b.time.clock.currentTime;
           Object.assign(s.time, b.time);
           s.time.clock = s.time.clock || { enabled: true, minutesPerRealMinute: 60 };
           if (b.time.date !== undefined || b.time.clock) {
-            const base = Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now();
+            const changedDate = b.time.date !== undefined && b.time.date !== oldDate;
+            let base = changedDate ? (Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now()) : oldWorldMs;
+            const m = String(requestedClock || '').match(/^(\d{1,2}):(\d{2})$/);
+            if (m) base = (Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now()) + (Math.min(23, Number(m[1])) * 60 + Math.min(59, Number(m[2]))) * 60000;
             s.time.clock.anchorRealMs = Date.now();
             s.time.clock.anchorWorldMs = base;
+            delete s.time.clock.currentTime;
             if (s.time.auto) s.time.auto.lastWorldMs = sim.worldClockNow(s.time, Date.now());
           }
           // editing the auto schedule restarts its clock — otherwise a stale
@@ -1566,6 +1578,21 @@ async function handle(req, res, pathname, method) {
           if (b.taxation.gamblingRate !== undefined) t.gamblingRate = clamp(b.taxation.gamblingRate);
         }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
+        if (b.ambience) {
+          s.ambience = s.ambience || {};
+          if (b.ambience.traffic) {
+            const tr = s.ambience.traffic = s.ambience.traffic || {};
+            for (const k of ['enabled', 'presence', 'speed', 'size', 'fadeOutSeconds', 'fadeDurationSeconds']) {
+              if (b.ambience.traffic[k] !== undefined) tr[k] = b.ambience.traffic[k];
+            }
+            tr.presence = Math.max(0, Math.min(100, Number(tr.presence) || 0));
+            tr.speed = Math.max(0.05, Math.min(10, Number(tr.speed) || 1));
+            tr.size = Math.max(0.25, Math.min(4, Number(tr.size) || 1));
+            tr.fadeOutSeconds = Math.max(0.5, Math.min(300, Number(tr.fadeOutSeconds) || 8));
+            tr.fadeDurationSeconds = Math.max(0.2, Math.min(20, Number(tr.fadeDurationSeconds) || 1.5));
+            tr.enabled = tr.enabled !== false;
+          }
+        }
         if (b.entertainment) s.entertainment = b.entertainment; // GM Studio entertainment editor writes the whole object
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor

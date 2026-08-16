@@ -96,6 +96,21 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
+  if (!world.settings) { world.settings = {}; changed = true; }
+  if (!world.settings.ambience) {
+    world.settings.ambience = { traffic: {
+      enabled: true, presence: 55, speed: 1, size: 1,
+      fadeOutSeconds: 8, fadeDurationSeconds: 1.5
+    }};
+    changed = true;
+  } else if (!world.settings.ambience.traffic) {
+    world.settings.ambience.traffic = { enabled: true, presence: 55, speed: 1, size: 1, fadeOutSeconds: 8, fadeDurationSeconds: 1.5 };
+    changed = true;
+  } else {
+    const tr = world.settings.ambience.traffic;
+    const defaults = { enabled: true, presence: 55, speed: 1, size: 1, fadeOutSeconds: 8, fadeDurationSeconds: 1.5 };
+    for (const k of Object.keys(defaults)) if (tr[k] === undefined) { tr[k] = defaults[k]; changed = true; }
+  }
   // Phase 30 — wall-clock world time. The anchor makes the clock continue
   // while no browser is open; request/cron ticks only materialise due turns.
   if (world.settings && world.settings.time) {
@@ -1436,7 +1451,10 @@ async function commit() {
     // conflict nothing below must run, so a retry never duplicates log rows.
     if (pendingSnapshot) {
       await sb.upsert('snapshots', [pendingSnapshot]);
-      await sb.rpc('prune_arcasia').catch(() => { }); // keeps logs/snapshots bounded
+      // Transaction history is permanent. Do not call the legacy prune
+      // function here: older Supabase installations delete rows past 12,000.
+      // Timeline/snapshot housekeeping can be handled separately without
+      // touching the bank ledger.
     }
     if (pendingTimeline.length) await sb.insert('timeline', pendingTimeline.map(tlRow));
     if (pendingTxns.length) await sb.insert('transactions', pendingTxns.map(txRow));

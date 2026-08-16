@@ -40,6 +40,8 @@ create table if not exists transactions (
   kind      text
 );
 create index if not exists transactions_ts_idx on transactions (ts desc);
+create index if not exists transactions_from_acct_idx on transactions (from_acct, ts desc);
+create index if not exists transactions_to_acct_idx on transactions (to_acct, ts desc);
 
 -- Rollback snapshots (one per turn-advance).
 create table if not exists snapshots (
@@ -56,14 +58,13 @@ alter table timeline     enable row level security;
 alter table transactions enable row level security;
 alter table snapshots    enable row level security;
 
--- Housekeeping called by the engine after turn advances: keeps the logs and
--- snapshot archive bounded so the free tier never fills up.
+-- Housekeeping called by the engine after turn advances: keeps non-financial
+-- logs and snapshots bounded. Transactions are a permanent bank ledger and
+-- must never be deleted.
 create or replace function prune_arcasia() returns void
 language sql security definer as $$
   delete from timeline
    where ts < coalesce((select ts from timeline order by ts desc offset 8000 limit 1), 0);
-  delete from transactions
-   where ts < coalesce((select ts from transactions order by ts desc offset 12000 limit 1), 0);
   -- prune by write time, not turn number: after a rollback the freshest
   -- snapshots can carry lower turn numbers than stale ones
   delete from snapshots

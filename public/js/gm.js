@@ -700,13 +700,21 @@ const GM = {
   /* ═══════════ WORLD & TIME ═══════════ */
   tabWorld(main) {
     const s = S().settings;
+    const wc = s.time.clock || {};
+    const clockMs = Number(wc.nowMs) || Date.parse(String(s.time.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
+    const clockTime = new Date(clockMs).toISOString().slice(11, 16);
+    const traffic = ((s.ambience || {}).traffic || {});
     const d = this.getDraft('world', {
       worldName: s.worldName, currency: s.currency, currencyName: s.currencyName, parliamentSeats: s.parliamentSeats,
       unit: s.time.unit, perTurn: s.time.perTurn, date: s.time.date,
       clockEnabled: s.time.clock ? s.time.clock.enabled : true,
       clockSpeed: s.time.clock ? s.time.clock.minutesPerRealMinute : 60,
+      clockTime,
       autoEnabled: s.time.auto.enabled, autoSeconds: s.time.auto.seconds,
       autoMode: s.time.auto.mode || 'interval', autoAt: s.time.auto.at || '08:00',
+      trafficEnabled: traffic.enabled !== false, trafficPresence: traffic.presence === undefined ? 55 : traffic.presence,
+      trafficSpeed: traffic.speed || 1, trafficSize: traffic.size || 1,
+      trafficFadeOut: traffic.fadeOutSeconds || 8, trafficFadeDuration: traffic.fadeDurationSeconds || 1.5,
       regOpen: s.registration.open, regRole: s.registration.defaultRole, regStipend: s.registration.stipend,
       newsTx: s.newsThresholds.transaction,
       // Taxation lives in the same draft object (not a second getDraft() key)
@@ -744,10 +752,20 @@ const GM = {
     main.appendChild(this.check(d, 'clockEnabled', 'Run the wall-clock world time'));
     main.appendChild(el('div.form-grid',
       this.field('World minutes per real minute', this.num(d, 'clockSpeed')),
+      this.field('Current world time (HH:MM)', this.text(d, 'clockTime')),
       this.field('Auto mode', this.sel(d, 'autoMode', [['interval', 'Every real-time interval'], ['clock', 'At world-clock time']]))));
     main.appendChild(el('div.form-grid',
       this.field('Real seconds per turn (interval mode)', this.num(d, 'autoSeconds')),
       this.field('Advance at (clock mode, HH:MM)', this.text(d, 'autoAt'))));
+
+    main.appendChild(Views.secLabel('Ambient Traffic'));
+    main.appendChild(this.check(d, 'trafficEnabled', 'Show ambient cars and trains on roads and railways'));
+    main.appendChild(el('div.form-grid',
+      this.field('Traffic presence (%)', this.num(d, 'trafficPresence')),
+      this.field('Traffic speed (×)', this.num(d, 'trafficSpeed')),
+      this.field('Vehicle size (×)', this.num(d, 'trafficSize')),
+      this.field('Seconds until fade-out', this.num(d, 'trafficFadeOut')),
+      this.field('Fade duration (seconds)', this.num(d, 'trafficFadeDuration'))));
 
     main.appendChild(Views.secLabel('Registration & Wire Service'));
     main.appendChild(this.check(d, 'regOpen', 'Open registration (players can request citizenship)'));
@@ -763,9 +781,14 @@ const GM = {
             worldName: d.worldName, currency: d.currency, currencyName: d.currencyName, parliamentSeats: Number(d.parliamentSeats) || 150,
             time: {
               unit: d.unit, perTurn: Number(d.perTurn) || 1, date: d.date,
-              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 60 },
+              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 60, currentTime: d.clockTime },
               auto: { enabled: !!d.autoEnabled, mode: d.autoMode, at: d.autoAt, seconds: Number(d.autoSeconds) || 3600 }
             },
+            ambience: { traffic: {
+              enabled: !!d.trafficEnabled, presence: Number(d.trafficPresence) || 0,
+              speed: Number(d.trafficSpeed) || 1, size: Number(d.trafficSize) || 1,
+              fadeOutSeconds: Number(d.trafficFadeOut) || 8, fadeDurationSeconds: Number(d.trafficFadeDuration) || 1.5
+            }},
             registration: { open: !!d.regOpen, defaultRole: d.regRole, stipend: Number(d.regStipend) || 0 },
             newsThresholds: { transaction: Number(d.newsTx) || 5000000 }
           });

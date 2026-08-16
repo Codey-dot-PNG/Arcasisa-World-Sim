@@ -285,12 +285,19 @@ const GameMap = {
     }
     return pts[pts.length - 1];
   },
-  buildTraffic(map, mk) {
+  buildTraffic(map) {
     const NS = 'http://www.w3.org/2000/svg';
     this.trafficLayer = document.createElementNS(NS, 'g');
     this.trafficLayer.setAttribute('class', 'map-traffic');
     this.world.appendChild(this.trafficLayer);
     this.trafficUnits = [];
+    const cfg = (((S().settings || {}).ambience || {}).traffic || {});
+    if (cfg.enabled === false || !(Number(cfg.presence) > 0)) return;
+    const presence = Math.max(0, Math.min(100, cfg.presence === undefined ? 55 : Number(cfg.presence) || 0)) / 100;
+    const speed = Math.max(0.05, Math.min(10, Number(cfg.speed) || 1));
+    const size = Math.max(0.25, Math.min(4, Number(cfg.size) || 1));
+    const fadeOutMs = Math.max(500, Math.min(300000, (Number(cfg.fadeOutSeconds) || 8) * 1000));
+    const fadeMs = Math.max(200, Math.min(20000, (Number(cfg.fadeDurationSeconds) || 1.5) * 1000));
     const paths = [];
     for (const r of (map.roads || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'car' });
     for (const r of (map.rails || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'train' });
@@ -303,30 +310,40 @@ const GameMap = {
       this.trafficUnits.push({
         node, path, kind,
         phase: (i * 1731 + (kind === 'train' ? 9000 : 0)) % 26000,
-        cycle: (kind === 'train' ? 24000 : 15000) + (i % 4) * 1700,
-        active: kind === 'train' ? 0.78 : 0.58
+        fadeMs, fadeOutMs, size, speed,
+        cycle: fadeMs + fadeOutMs + fadeMs + 5000 + (i % 4) * 1700
       });
     };
     const roadPaths = paths.filter(p => p.kind === 'car');
     const railPaths = paths.filter(p => p.kind === 'train');
-    roadPaths.forEach((p, i) => { if (i % 2 === 0 || i < 6) add(p, i, 'car'); });
-    railPaths.forEach((p, i) => add(p, i + 30, 'train'));
+    const choose = (list, max) => {
+      const count = Math.min(list.length, Math.round(max * presence));
+      if (!count) return [];
+      return Array.from({ length: count }, (_, i) => list[Math.floor(i * list.length / count)]);
+    };
+    choose(roadPaths, Math.min(18, roadPaths.length)).forEach((p, i) => add(p, i, 'car'));
+    choose(railPaths, Math.min(6, railPaths.length)).forEach((p, i) => add(p, i + 30, 'train'));
     if (!this.trafficFrame) {
       const tick = (now) => {
         this.trafficFrame = requestAnimationFrame(tick);
         if (!this.trafficLayer) return;
         for (const u of this.trafficUnits) {
           const phase = (now + u.phase) % u.cycle;
-          const activeMs = u.cycle * u.active;
-          const visible = phase < activeMs;
+          const visibleMs = u.fadeMs + u.fadeOutMs + u.fadeMs;
+          const visible = phase < visibleMs;
           u.node.style.display = visible ? '' : 'none';
           if (!visible) continue;
+          const opacity = phase < u.fadeMs
+            ? phase / u.fadeMs
+            : phase < u.fadeMs + u.fadeOutMs ? 1
+              : 1 - (phase - u.fadeMs - u.fadeOutMs) / u.fadeMs;
+          u.node.style.opacity = Math.max(0, Math.min(1, opacity));
           // A ping-pong path gives the impression of traffic travelling both
           // directions without adding any persistent simulation state.
-          const q = phase / activeMs;
-          const along = (q <= 0.5 ? q * 2 : (1 - q) * 2) * u.path.len;
+          const movement = (phase / visibleMs * u.speed) % 2;
+          const along = (movement <= 1 ? movement : 2 - movement) * u.path.len;
           const pt = this.pointOnPath(u.path.pts, along, u.path.len);
-          u.node.setAttribute('transform', `translate(${pt[0]},${pt[1]})`);
+          u.node.setAttribute('transform', `translate(${pt[0]},${pt[1]}) scale(${u.size})`);
         }
       };
       this.trafficFrame = requestAnimationFrame(tick);
@@ -576,7 +593,7 @@ const GameMap = {
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-base', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-dash', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
     }
-    this.buildTraffic(map, mk);
+    this.buildTraffic(map);
     // wide invisible strokes so the pen tool can pick a line up easily
     if (editing && (MapEdit.mode === 'roads' || MapEdit.mode === 'rails')) {
       for (const r of (map[MapEdit.mode] || [])) {

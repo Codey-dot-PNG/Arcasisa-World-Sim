@@ -1216,17 +1216,23 @@ const Views = {
     const upkeep = pr.expenses || 0;
     // Operations draft (survives re-renders until saved) — sales & payroll
     // policy only; the production line itself is a Game Master lever.
+    const draftedOverride = pr.workHours !== undefined || pr.safety !== undefined;
     const draftId = 'property:' + pr.id;
     const dr = (W.propOpsDraft && W.propOpsDraft.id === draftId) ? W.propOpsDraft : (W.propOpsDraft = {
       id: draftId, keepPct: baseKeep, wagePerTurn: baseWage,
       keepPctByItem: Object.assign({}, pr.keepPctByItem || {}),
       workHours: pr.workHours !== undefined ? pr.workHours : coHours,
       safety: pr.safety !== undefined ? pr.safety : coSafety,
-      employees: pr.employees !== undefined ? pr.employees : maxEmp
+      employees: pr.employees !== undefined ? pr.employees : maxEmp,
+      inherit: !(owner && owner.type === 'company') || !draftedOverride
     });
     if (dr.workHours === undefined) dr.workHours = coHours;
     if (dr.safety === undefined) dr.safety = coSafety;
     if (dr.employees === undefined) dr.employees = pr.employees !== undefined ? pr.employees : maxEmp;
+    if (dr.inherit === undefined) dr.inherit = !(owner && owner.type === 'company') || !draftedOverride;
+    // Live preview multiplier: follows the unsaved hours/safety/staffing draft
+    // so the output figures move the moment the levers do.
+    const wf = this.wfMult({ hours: dr.workHours, safety: dr.safety, employees: dr.employees, cap: maxEmp, invested: pr.upgradeInvested, value: pr.value });
 
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
       el('div',
@@ -1234,9 +1240,10 @@ const Views = {
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
           (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—')))));
     inner.appendChild(this.statStrip([
-      ['Employees', fmtNum(pr.employees || 0)], ['Output value / turn', fmtMoney(revenue)],
-      ['Upkeep / turn', fmtMoney(upkeep)], ['Wages / turn', fmtMoney(wages)],
-      ['Net / turn', fmtMoney(revenue - upkeep - wages)], ['Stock on site', fmtMoney((pr.inventory || []).reduce((s, r) => s + (r.qty || 0) * priceOf(r.itemId), 0))]
+      ['Employees', fmtNum(pr.employees || 0)], ['Output value / turn', fmtMoney(revenue * wf)],
+      ['Output multiplier', wf.toFixed(2) + '×'], ['Upkeep / turn', fmtMoney(upkeep)],
+      ['Wages / turn', fmtMoney(wages)],
+      ['Net / turn', fmtMoney(revenue * wf - upkeep - wages)], ['Stock on site', fmtMoney((pr.inventory || []).reduce((s, r) => s + (r.qty || 0) * priceOf(r.itemId), 0))]
     ]));
 
     inner.appendChild(this.secLabel('Operations'));
@@ -1257,6 +1264,11 @@ const Views = {
       Forms.field('Staffing', Forms.slider(dr, 'employees', 0, maxEmp,
         { format: (v) => v + ' / ' + maxEmp + ' — fulfilment ' + Math.round((v / maxEmp) * 100) + '%' }),
         'Hiring cap: ' + maxEmp + '. Production scales with fulfilment — fully staffed means full output.')));
+    if (owner && owner.type === 'company') {
+      inner.appendChild(Forms.check(dr, 'inherit', 'Follow the company policy for work hours & safety (uncheck to fix this site’s own schedule)'));
+    }
+    inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:2px 0 6px;' },
+      'OUTPUT FIGURES ABOVE PREVIEW THE UNSAVED DRAFT (HOURS · SAFETY · STAFFING); THE ENGINE ADDS A SMALL DAILY WOBBLE.'));
     const happ = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:8px 0 4px;' },
       el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;' }, 'WORKER MORALE'),
@@ -1302,9 +1314,11 @@ const Views = {
       const lineBody = el('tbody');
       produces.forEach(e => {
         const it = itemById(e.itemId);
-        lineBody.appendChild(el('tr', el('td', it ? it.name : e.itemId), el('td.num', fmtNum(e.perTurn, 4))));
+        lineBody.appendChild(el('tr', el('td', it ? it.name : e.itemId), el('td.num', fmtNum(e.perTurn * wf, 4))));
       });
       lineTbl.appendChild(lineBody); inner.appendChild(lineTbl);
+      inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:-2px 0 6px;' },
+        'AUTHORED LINE SHOWN ×' + wf.toFixed(2) + ' — WHAT THE SITE ACTUALLY TURNS OUT FOLLOWS THE WORKFORCE DRAFT.'));
 
       if (producedItems.length) {
         inner.appendChild(this.secLabel('Sales & Output'));
@@ -1313,7 +1327,7 @@ const Views = {
         producedItems.forEach(iid => {
           if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = baseKeep;
           const made = produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
-          const kept = made * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
+          const kept = made * wf * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
           const site = (pr.inventory || []).find(r => r.itemId === iid);
           body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
             el('td', this.mixSlider(dr.keepPctByItem, iid)),
@@ -1322,7 +1336,7 @@ const Views = {
         tbl.appendChild(body); inner.appendChild(tbl);
       }
     } else if (prodMode === 'cash') {
-      inner.appendChild(this.kv('Cash generated / turn', fmtMoney(Number(pr.cashPerTurn) || 0)));
+      inner.appendChild(this.kv('Cash generated / turn', fmtMoney(Number(pr.cashPerTurn) * wf)));
     }
     inner.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
@@ -1330,7 +1344,9 @@ const Views = {
         try {
           const r = await PATCH('/api/property/' + pr.id + '/controls', {
             keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn,
-            workHours: dr.workHours, safety: dr.safety, employees: dr.employees
+            workHours: dr.inherit ? 'inherit' : dr.workHours,
+            safety: dr.inherit ? 'inherit' : dr.safety,
+            employees: dr.employees
           });
           if (r && r.property) Object.assign(pr, r.property);
           W.propOpsDraft = null;
@@ -1385,6 +1401,16 @@ const Views = {
       el('div.slider-row', input, readout),
       el('div', { style: 'display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:-2px;' },
         el('span', '◀ KEEP IN STOCK'), el('span', 'SELL DOMESTICALLY ▶')));
+  },
+  // Client mirror of the engine's workforce multiplier (sim.js runEconomy,
+  // Phase 28): hours/8 × safety × staffing fulfilment × upgrade. The live
+  // world adds a small per-turn wobble; this is the exact promised factor.
+  wfMult(o) {
+    const h = Number.isFinite(Number(o.hours)) ? Math.max(0, Math.min(24, Number(o.hours))) : 8;
+    const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
+    const staffMult = o.cap > 0 ? Math.max(0, Math.min(1, (o.employees || 0) / o.cap)) : 1;
+    const upgradeMult = 1 + ((o.invested || 0) / Math.max(50, o.value || 100));
+    return (h / 8) * (SAFETY_MULT[o.safety] || 1) * staffMult * upgradeMult;
   },
   // Entities the current player can trade for: the government (if they control
   // it) plus every company they direct.
@@ -1749,6 +1775,20 @@ const Views = {
     if (dr.safety === undefined) dr.safety = 'standard';
     if (dr.staffingPct === undefined) dr.staffingPct = totalCap > 0 ? Math.round(totalEmp / totalCap * 100) : 0;
 
+    // Live preview per site: site overrides win, the unsaved company draft
+    // fills in; staffing previews at the draft's company-wide share of the
+    // site's own capacity, so the numbers move while dragging.
+    const wfFor = (pr) => {
+      const cap = maxEmpOf(pr);
+      const prevEmp = Math.round(cap * Math.max(0, Math.min(100, Number(dr.staffingPct) || 0)) / 100);
+      return this.wfMult({
+        hours: pr.workHours !== undefined ? pr.workHours : dr.workHours,
+        safety: pr.safety !== undefined ? pr.safety : dr.safety,
+        employees: prevEmp, cap,
+        invested: pr.upgradeInvested, value: pr.value
+      });
+    };
+
     inner.appendChild(this.secLabel('Sales & Output'));
     // ONE compact combined bar+slider: the track itself is the split — the
     // green span left of the thumb is sold domestically, the neutral span
@@ -1780,7 +1820,7 @@ const Views = {
       const body = el('tbody');
       for (const iid of producedItems) {
         const it = itemById(iid);
-        const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0), 0), 0);
+        const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0) * wfFor(pr), 0), 0);
         if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = dr.keepPct;
         const pct = dr.keepPctByItem[iid];
         const kept = made * Math.max(0, Math.min(100, pct)) / 100;
@@ -1796,7 +1836,7 @@ const Views = {
       tbl.appendChild(body);
       inner.appendChild(tbl);
       inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:4px;' },
-        'SOLD/KEPT PREVIEWS FOLLOW THE UNSAVED SLIDER ABOVE.'));
+        'PREVIEWS FOLLOW THE UNSAVED SLIDERS ABOVE AND THE WORKFORCE DRAFT (HOURS · SAFETY · STAFFING); THE ENGINE ADDS A SMALL DAILY WOBBLE.'));
     }
 
     inner.appendChild(el('div.btn-row', el('button.solid-btn', {
@@ -1844,9 +1884,10 @@ const Views = {
       inner.appendChild(el('table.data',
         el('thead', el('tr', el('th', 'Property'), el('th', 'Province'), el('th.num', 'Employees'), el('th', 'Production / turn'), el('th.num', 'Revenue'), el('th.num', 'Upkeep'), el('th.num', 'Wages'), el('th.num', 'Total expenses'), el('th.num', 'Net'))),
         el('tbody', props.map(pr => {
-          const rev = propRev(pr), upk = pr.expenses || 0, wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0), total = upk + wages;
+          const wfp = wfFor(pr);
+          const rev = propRev(pr) * wfp, upk = pr.expenses || 0, wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0), total = upk + wages;
           const prodText = pr.prodMode === 'goods'
-            ? (pr.produces || []).map(e => fmtNum(e.perTurn) + ' × ' + (itemById(e.itemId) || { name: e.itemId }).name).join(', ')
+            ? (pr.produces || []).map(e => fmtNum(e.perTurn * wfp) + ' × ' + (itemById(e.itemId) || { name: e.itemId }).name).join(', ')
             : pr.prodMode === 'cash' ? 'cash operation' : 'upkeep only';
           const p = provById(pr.provinceId);
           return el('tr.row-link', { onclick: () => select('property', pr.id) },
@@ -1860,11 +1901,12 @@ const Views = {
     // ---- workforce by site: morale, accidents and per-property staffing ----
     inner.appendChild(this.secLabel('Workforce by Site (' + totalEmp + ' / ' + totalCap + ' employed)'));
     inner.appendChild(el('table.data',
-      el('thead', el('tr', el('th', 'Property'), el('th', 'Staffed'), el('th.num', 'Fulfilment'), el('th', 'Morale'), el('th', 'Last accident'))),
+      el('thead', el('tr', el('th', 'Property'), el('th', 'Staffed'), el('th', 'Wage / emp / turn'), el('th.num', 'Fulfilment'), el('th', 'Morale'), el('th', 'Last accident'))),
       el('tbody', props.map(pr => {
         const cap = maxEmpOf(pr);
         W.opsStaff = W.opsStaff || {};
-        const staffN = W.opsStaff[pr.id] || (W.opsStaff[pr.id] = { n: pr.employees || 0 });
+        const effWage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (c.wagePerTurn !== undefined ? c.wagePerTurn : 1);
+        const staffN = W.opsStaff[pr.id] || (W.opsStaff[pr.id] = { n: pr.employees || 0, wage: effWage });
         const ful = cap > 0 ? Math.round((pr.employees || 0) / cap * 100) : 0;
         const happ = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
         const acc = pr.accident;
@@ -1876,13 +1918,16 @@ const Views = {
               onclick: async () => {
                 const want = Math.max(0, Math.round(Number(staffN.n) || 0));
                 try {
-                  const r = await PATCH('/api/property/' + pr.id + '/controls', { employees: want });
-                  if (r && r.property) { pr.employees = r.property.employees; delete W.opsStaff[pr.id]; }
-                  toast('Staffing updated at ' + pr.name + '.');
+                  const r = await PATCH('/api/property/' + pr.id + '/controls', {
+                    employees: want, wagePerTurn: Math.max(0, Number(staffN.wage) || 0)
+                  });
+                  if (r && r.property) { pr.employees = r.property.employees; pr.wagePerTurn = r.property.wagePerTurn; delete W.opsStaff[pr.id]; }
+                  toast('Staffing & wage updated at ' + pr.name + '.');
                   App.renderView();
                 } catch (err) { toast(err.message, true); }
               }
             }, 'Set')),
+          el('td', { style: 'min-width:110px;' }, Forms.num(staffN, 'wage', '0.01')),
           el('td.num', ful + '%'),
           el('td', { style: 'min-width:110px;' }, this.tradeBar(happ, 100, happ >= 60 ? 'var(--good)' : happ >= 40 ? 'var(--ink-soft)' : 'var(--accent)')),
           el('td', { style: 'font-size:11px; color:' + (acc ? 'var(--accent)' : 'var(--ink-faint)') + ';' }, acc

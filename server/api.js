@@ -842,15 +842,15 @@ async function handle(req, res, pathname, method) {
       // workforce & safety (Phase 28): hours, safety policy, staffing and
       // upgrade investment. Hours/safety default to the owning company's
       // policy when left untouched; the employee cap is the site's own.
-      if (b.workHours !== undefined) {
+      if (b.workHours !== undefined && b.workHours !== 'inherit') {
         const h = Number(b.workHours);
         if (!Number.isFinite(h) || h < 0 || h > 24) return bad('Work hours must be between 0 and 24.');
         pr.workHours = Math.round(h * 100) / 100;
-      }
-      if (b.safety !== undefined) {
+      } else if (b.workHours === 'inherit') delete pr.workHours;
+      if (b.safety !== undefined && b.safety !== 'inherit') {
         if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');
         pr.safety = b.safety;
-      }
+      } else if (b.safety === 'inherit') delete pr.safety;
       if (b.employees !== undefined) {
         const cap = pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, Math.round(pr.employees || 1));
         const want = Math.max(0, Math.round(Number(b.employees) || 0));

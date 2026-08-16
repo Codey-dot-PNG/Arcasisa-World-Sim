@@ -935,6 +935,24 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 29 — company-owned sites inherit company policy (schema < 8) --
+  // Phase 28 seeded EVERY property with concrete workHours=8 / safety='standard'.
+  // Those constants sit on the property, so they shadow the company desk's
+  // policy defaults forever — company-wide hour/safety changes did nothing.
+  // Strip the migration-era defaults from company-owned sites: only genuine
+  // overrides (a value that differs from the company's current policy)
+  // survive, which is what an explicit site-level choice looks like.
+  if ((world.schema || 1) < 8 && world.settings) {
+    for (const pr of (world.properties || [])) {
+      const co = (world.entities || []).find(e => e.id === pr.ownerId && e.type === 'company');
+      if (!co) continue;
+      if (pr.workHours === (co.workHours === undefined ? 8 : co.workHours)) delete pr.workHours;
+      if (pr.safety === (co.safety === undefined ? 'standard' : co.safety)) delete pr.safety;
+    }
+    world.schema = 8;
+    changed = true;
+  }
+
   // ---- Phase 26 — the Republic's arms industry + national fuel reserves ---
   // One-shot (flag-gated), additive; sits AFTER the schema<3 production
   // conversion so the factory's per-turn prodMode figures are never

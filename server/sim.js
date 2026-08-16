@@ -746,7 +746,8 @@ function runEconomy(db, actor) {
     // wobble floor applies to the output base only, so safety/staffing/upgrade
     // decisions always move production exactly as much as they promise.
     const hoursRaw = pr.workHours !== undefined ? pr.workHours : (co && co.workHours !== undefined ? co.workHours : 8);
-    const hoursMult = Math.max(8, Math.min(24, Number(hoursRaw) || 8)) / 8;
+    const hoursNum = Number(hoursRaw);
+    const hoursMult = (Number.isFinite(hoursNum) ? Math.max(0, Math.min(24, hoursNum)) : 8) / 8;
     const safetyRaw = pr.safety !== undefined ? pr.safety : (co && co.safety !== undefined ? co.safety : 'standard');
     const maxEmp = pr.maxEmployees !== undefined
       ? Math.max(0, Math.round(pr.maxEmployees))
@@ -793,7 +794,7 @@ function runEconomy(db, actor) {
     // industrial accident — odds by safety policy — kills/maims a slice of the
     // crew. The dead drop off payroll here (employees is read below), dent
     // morale, thin the province's population and post a notice for the desk.
-    if (active && (pr.employees || 0) > 0) {
+    if (active && hoursMult > 0 && (pr.employees || 0) > 0) {
       const target = 50 + clamp01((wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
       const h0 = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
       pr.workerHappiness = Math.round(clamp01(h0 + (target - h0) * 0.03 + (Math.random() * 2 - 1) * 0.5, 0, 100) * 10) / 10;

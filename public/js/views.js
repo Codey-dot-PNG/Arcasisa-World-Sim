@@ -1247,9 +1247,8 @@ const Views = {
 
     inner.appendChild(this.secLabel('Workforce & Safety'));
     inner.appendChild(el('div.form-grid',
-      Forms.field('Work hours / day', Forms.sel(dr, 'workHours',
-        [[8, '8 — single shift'], [12, '12 — long shift'], [16, '16 — double shift (2×)'], [20, '20 — extended (2.5×)'], [24, '24 — continuous (3×)']]),
-        'Output scales with hours: 8h is the baseline, 16h doubles it, 24h triples it.' +
+      Forms.field('Work hours / day (0–24)', Forms.num(dr, 'workHours', 'any'),
+        'Output scales proportionally with hours: 8 is the standard baseline, 16 doubles output, 24 triples it — decimals allowed.' +
         (owner && owner.type === 'company' ? ' The company policy default is ' + coHours + 'h.' : '')),
       Forms.field('Onsite safety', Forms.sel(dr, 'safety',
         [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
@@ -1309,7 +1308,7 @@ const Views = {
 
       if (producedItems.length) {
         inner.appendChild(this.secLabel('Sales & Output'));
-        const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
+        const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th', 'Sell / keep'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
         const body = el('tbody');
         producedItems.forEach(iid => {
           if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = baseKeep;
@@ -1317,7 +1316,7 @@ const Views = {
           const kept = made * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
           const site = (pr.inventory || []).find(r => r.itemId === iid);
           body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
-            el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { step: 1, suffix: '%' })),
+            el('td', this.mixSlider(dr.keepPctByItem, iid)),
             el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
         });
         tbl.appendChild(body); inner.appendChild(tbl);
@@ -1762,9 +1761,8 @@ const Views = {
     // ---- workforce & safety (Phase 28) — company-wide policy defaults ----
     inner.appendChild(this.secLabel('Workforce & Safety'));
     inner.appendChild(el('div.form-grid',
-      Forms.field('Work hours / day (policy default)', Forms.sel(dr, 'workHours',
-        [[8, '8 — single shift'], [12, '12 — long shift'], [16, '16 — double shift (2×)'], [20, '20 — extended (2.5×)'], [24, '24 — continuous (3×)']]),
-        'Every site follows this unless it overrides it in its own Operations desk. 16h doubles output, 24h triples it.'),
+      Forms.field('Work hours / day — policy default (0–24)', Forms.num(dr, 'workHours', 'any'),
+        'Every site follows this unless it overrides it in its own Operations desk. 8 is the standard baseline, 16 doubles output, 24 triples it — decimals allowed.'),
       Forms.field('Onsite safety (policy default)', Forms.sel(dr, 'safety',
         [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
         'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and thin the province’s population.'),
@@ -1777,17 +1775,18 @@ const Views = {
       inner.appendChild(this.secLabel('Products'));
       const stockOf = (iid) => this.holderStockClient(c, iid);
       const tbl = el('table.data', el('thead', el('tr',
-        el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Retail'), el('th.num', 'Made / turn'),
+        el('th', 'Product'), el('th', 'Sell / keep'), el('th.num', 'Retail'), el('th.num', 'Made / turn'),
         el('th.num', 'Sold / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Stock on hand'))));
       const body = el('tbody');
       for (const iid of producedItems) {
         const it = itemById(iid);
         const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0), 0), 0);
-        const pct = dr.keepPctByItem[iid] === undefined ? dr.keepPct : dr.keepPctByItem[iid];
+        if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = dr.keepPct;
+        const pct = dr.keepPctByItem[iid];
         const kept = made * Math.max(0, Math.min(100, pct)) / 100;
         body.appendChild(el('tr',
           el('td', it.name),
-          el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { suffix: '% kept' })),
+          el('td', this.mixSlider(dr.keepPctByItem, iid)),
           el('td.num', fmtMoney(it.marketValue || 0)),
           el('td.num', fmtNum(made)),
           el('td.num', fmtNum(made - kept)),

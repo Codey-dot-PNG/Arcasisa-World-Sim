@@ -843,8 +843,9 @@ async function handle(req, res, pathname, method) {
       // upgrade investment. Hours/safety default to the owning company's
       // policy when left untouched; the employee cap is the site's own.
       if (b.workHours !== undefined) {
-        if (![8, 12, 16, 20, 24].includes(b.workHours)) return bad('Work hours must be 8, 12, 16, 20 or 24.');
-        pr.workHours = b.workHours;
+        const h = Number(b.workHours);
+        if (!Number.isFinite(h) || h < 0 || h > 24) return bad('Work hours must be between 0 and 24.');
+        pr.workHours = Math.round(h * 100) / 100;
       }
       if (b.safety !== undefined) {
         if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');
@@ -1166,8 +1167,9 @@ async function handle(req, res, pathname, method) {
       // workforce policy defaults (Phase 28) — every property of this company
       // inherits these unless it carries its own override:
       if (b.workHours !== undefined) {
-        if (![8, 12, 16, 20, 24].includes(b.workHours)) return bad('Work hours must be 8, 12, 16, 20 or 24.');
-        co.workHours = b.workHours;
+        const h = Number(b.workHours);
+        if (!Number.isFinite(h) || h < 0 || h > 24) return bad('Work hours must be between 0 and 24.');
+        co.workHours = Math.round(h * 100) / 100;
       }
       if (b.safety !== undefined) {
         if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');

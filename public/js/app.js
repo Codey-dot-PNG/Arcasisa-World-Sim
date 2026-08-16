@@ -64,12 +64,22 @@ const App = {
 
   async boot() {
     // palette
-    const mood = localStorage.getItem('arcasia-mood');
-    if (mood && mood !== 'paper') document.body.setAttribute('data-mood', mood);
+    const mood = localStorage.getItem('arcasia-mood') || 'paper';
+    const daynight = localStorage.getItem('arcasia-daynight') === '1';
+    if (mood !== 'paper') document.body.setAttribute('data-mood', mood);
+    document.body.dataset.daynight = daynight ? 'on' : 'off';
     document.querySelectorAll('.swatch').forEach(btn => {
-      btn.classList.toggle('active', (mood || 'paper') === btn.dataset.mood);
+      btn.classList.toggle('active', btn.dataset.mood === 'daynight' ? daynight : mood === btn.dataset.mood);
       btn.addEventListener('click', () => {
-        document.querySelectorAll('.swatch').forEach(b => b.classList.remove('active'));
+        if (btn.dataset.mood === 'daynight') {
+          const on = document.body.dataset.daynight !== 'on';
+          document.body.dataset.daynight = on ? 'on' : 'off';
+          localStorage.setItem('arcasia-daynight', on ? '1' : '0');
+          btn.classList.toggle('active', on);
+          this.renderWorldClock();
+          return;
+        }
+        document.querySelectorAll('.swatch:not([data-mood=\"daynight\"])').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         if (btn.dataset.mood === 'paper') document.body.removeAttribute('data-mood');
         else document.body.setAttribute('data-mood', btn.dataset.mood);
@@ -178,8 +188,8 @@ const App = {
     if (!out || !state) return;
     const t = state.settings.time || {};
     const c = t.clock || {};
-    if (!c.enabled) { out.textContent = 'WORLD PAUSED'; return; }
-    const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60);
+    if (!c.enabled) { out.textContent = 'WORLD PAUSED'; if (window.GameMap) GameMap.setDayNight(null); return; }
+    const rate = Math.max(0, Number(c.minutesPerRealMinute) || 59.5);
     const sample = Number(c.nowMs);
     const sampleAt = Number(c.serverNowMs);
     const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
@@ -189,7 +199,8 @@ const App = {
       : base + (Date.now() - anchor) * rate;
     const d = new Date(worldMs);
     const iso = d.toISOString();
-    out.textContent = 'WORLD ' + iso.slice(0, 10) + ' ' + iso.slice(11, 16);
+    out.textContent = 'WORLD ' + iso.slice(11, 16);
+    if (window.GameMap) GameMap.setDayNight(worldMs);
   },
 
   renderView(fresh) {

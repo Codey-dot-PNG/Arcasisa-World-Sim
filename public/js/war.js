@@ -701,6 +701,9 @@ const War = {
       // heartbeat; the engine's deterministic stepAirstrikes then predicts
       // the blast locally at strikeTick, and rebases reconcile as usual.
       if (window.WarEngine && r && r.strike) {
+        if (r.aircraftRemaining !== undefined && S().war && S().war.bombs && S().war.bombs.def) {
+          S().war.bombs.def.aircraftRemaining = r.aircraftRemaining;
+        }
         const war = this.predictedWar();
         if (war) {
           war.airstrikes = war.airstrikes || [];
@@ -1659,6 +1662,9 @@ const War = {
     const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
     const now = Date.now();
     const onCooldown = now < bomb.cooldownUntil;
+    const aircraftKnown = Number.isFinite(Number(bomb.aircraftRemaining));
+    const aircraftRemaining = aircraftKnown ? Math.max(0, Number(bomb.aircraftRemaining)) : null;
+    const noAircraft = side === 'def' && aircraftKnown && aircraftRemaining <= 0;
     // The predicted war (when available) gives a smoother countdown than the
     // authoritative doc — same reasoning as every other tick-driven readout.
     const predWar = (window.WarEngine && this.predictedWar()) || war;
@@ -1673,10 +1679,11 @@ const War = {
     const bombBtn = (side === 'att')
       ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '✈ No air arm')
       : el('button.dash-btn', {
-          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || !live) ? 'disabled' : undefined,
+          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live) ? 'disabled' : undefined,
           onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
         }, !live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike'));
     row.appendChild(bombBtn);
+    if (side === 'def' && aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' F55 available'));
     if (side === 'att') this._bombArmed = false; // never leave an airstrike armed while commanding the side that has none
     // Countdown chip for a pending (not-yet-landed) strike this side ordered —
     // visible even after clicking away from the arming flow, since the plane

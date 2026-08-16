@@ -202,12 +202,22 @@ function histView(db, p) {
 // engine's note() can push into a predicted doc without guards. The legacy
 // flat war.ai gets the same treatment for any pre-hierarchy doc still in
 // flight. Shared by filterState and the GET /api/war/state heartbeat.
-function warForPlayers(war) {
+function warWithAircraftCapacity(war, db) {
+  if (!war || !db || !war.bombs) return war;
+  const gov = (db.entities || []).find(e => e.id === (war.defenderId || 'ent_gov')) ||
+    (db.entities || []).find(e => e.type === 'government');
+  const aircraft = gov && (gov.inventory || []).reduce((sum, row) => {
+    const item = (db.items || []).find(i => i.id === row.itemId);
+    return sum + (item && item.meta && item.meta.weapon && item.meta.weapon.kind === 'aircraft' ? Math.max(0, Number(row.qty) || 0) : 0);
+  }, 0);
+  return { ...war, bombs: { ...war.bombs, def: { ...(war.bombs.def || {}), aircraftRemaining: aircraft } } };
+}
+function warForPlayers(war, db) {
   if (!war) return war;
-  let out = war;
+  let out = warWithAircraftCapacity(war, db);
   if (war.ai) {
     const { notes, ...aiRest } = war.ai;
-    out = { ...war, ai: { ...aiRest, notes: [] } };
+    out = { ...out, ai: { ...aiRest, notes: [] } };
   }
   if (war.command) {
     const redactSide = (sideCmd) => {
@@ -316,7 +326,7 @@ function filterState(u) {
     // units, objectives, casualties — plus the AI's numeric plan state so
     // client prediction can replay replans; only ai.notes (the reasoning)
     // stays GM-only. See warForPlayers above.
-    war: db.war ? (p.gm ? db.war : warForPlayers(db.war)) : null,
+    war: db.war ? (p.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db)) : null,
     // Day Market tick clock — same "expose the wall-clock gate so the client
     // can predict the next tick" idea as war.tick/tickMs (see docs/WAR.md's
     // heartbeat), applied read-only to market.maybeDayTick's gate: not
@@ -685,7 +695,7 @@ async function handle(req, res, pathname, method) {
     // simulation onto. Same fog-of-war filtering as filterState.
     if (pathname === '/api/war/state' && method === 'GET') {
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
-      const w = db.war ? (u.role.perms.gm ? db.war : warForPlayers(db.war)) : null;
+      const w = db.war ? (u.role.perms.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db)) : null;
       return json(res, 200, { war: w, v: store.getVersion() });
     }
     if (pathname === '/api/war/command' && method === 'POST') {
@@ -740,7 +750,7 @@ async function handle(req, res, pathname, method) {
       store.save();
       // strike is returned so the client can insert it into the predicted
       // war immediately (plane/countdown start before the next heartbeat).
-      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil, strike: result.strike });
+      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil, aircraftRemaining: result.aircraftRemaining, strike: result.strike });
     }
 
     if (pathname === '/api/trade' && method === 'POST') {
@@ -1056,7 +1066,7 @@ async function handle(req, res, pathname, method) {
 
     // ---- CEO / owner company controls (Phase 15) ----
     // keepPct — % of production held back as company stock (the rest sells on
-    // the domestic market) — and the wage index. Goods held as stock are traded
+    // the domestic market) — and direct wages per employee per turn. Goods held as stock are traded
     // on the open market or via trade offers. Editable by the company's
     // controller (CEO or owner chain) or GM.
     m = pathname.match(/^\/api\/company\/([\w-]+)\/controls$/);
@@ -1067,16 +1077,16 @@ async function handle(req, res, pathname, method) {
       if (!gm && !ownership.controls(u.user.entityId, co.id)) return deny('You do not control this company.');
       const b = await readBody(req);
       const clampPct = (n) => Math.max(0, Math.min(100, Math.round(Number(n) || 0)));
-      const clampWage = (n) => Math.max(0, Math.min(300, Math.round(Number(n) || 0)));
+      const clampWage = (n) => Math.max(0, Math.min(1000000, Math.round((Number(n) || 0) * 100) / 100));
       if (b.keepPct !== undefined) co.keepPct = clampPct(b.keepPct);
-      if (b.wage !== undefined) co.wage = clampWage(b.wage);
+      if (b.wagePerTurn !== undefined) co.wagePerTurn = clampWage(b.wagePerTurn);
       if (b.keepPctByItem && typeof b.keepPctByItem === 'object') {
         co.keepPctByItem = {};
         for (const iid of Object.keys(b.keepPctByItem)) co.keepPctByItem[iid] = clampPct(b.keepPctByItem[iid]);
       }
-      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% in stock · wage ${co.wage}`, u.user.displayName, [co.id]);
+      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% in stock · wages ${co.wagePerTurn || 0} per employee/turn`, u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, keepPctByItem: co.keepPctByItem || {}, wage: co.wage } });
+      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, keepPctByItem: co.keepPctByItem || {}, wagePerTurn: co.wagePerTurn } });
     }
 
     // ---- government trade tariffs (Phase 16) ----
@@ -1550,7 +1560,8 @@ async function handle(req, res, pathname, method) {
           const oldWorldMs = sim.worldClockNow(s.time, Date.now());
           const requestedClock = b.time.clock && b.time.clock.currentTime;
           Object.assign(s.time, b.time);
-          s.time.clock = s.time.clock || { enabled: true, minutesPerRealMinute: 60 };
+          s.time.clock = s.time.clock || { enabled: true, minutesPerRealMinute: 59.5 };
+          s.time.clock.rateVersion = 1;
           if (b.time.date !== undefined || b.time.clock) {
             const changedDate = b.time.date !== undefined && b.time.date !== oldDate;
             let base = changedDate ? (Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now()) : oldWorldMs;
@@ -1681,6 +1692,7 @@ async function handle(req, res, pathname, method) {
             }
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
+          if (coll === 'entities' && b.type === 'company' && b.wagePerTurn === undefined) b.wagePerTurn = 1;
           if (coll === 'properties') buildings.assignTexture(b); // random variant for the kind
           db[coll].push(b);
           if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
@@ -1693,6 +1705,9 @@ async function handle(req, res, pathname, method) {
           const obj = db[coll].find(x => x.id === m[2]);
           if (!obj) return bad('Not found: ' + m[2]);
           const b = await readBody(req);
+          if (coll === 'entities' && (obj.type === 'company' || b.type === 'company') && b.wagePerTurn !== undefined) {
+            b.wagePerTurn = Math.max(0, Math.min(1000000, Math.round((Number(b.wagePerTurn) || 0) * 100) / 100));
+          }
           if (coll === 'items' && b.marketValue !== undefined && b.marketValue !== obj.marketValue) {
             store.log('market', `${obj.name} repriced: ${db.settings.currency}${obj.marketValue} → ${db.settings.currency}${b.marketValue}`, 'Every inventory holding this item updates automatically.', actor, [obj.id]);
           }

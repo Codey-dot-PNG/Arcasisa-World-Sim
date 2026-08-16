@@ -259,7 +259,7 @@ const Views = {
       Forms.field('Assessed value', Forms.num(d, 'value')),
       Forms.field('Employees', Forms.num(d, 'employees')),
       Forms.field('Monthly income', Forms.num(d, 'income')),
-      Forms.field('Monthly expenses', Forms.num(d, 'expenses'))));
+      Forms.field('Upkeep / turn', Forms.num(d, 'expenses'))));
     wrap.appendChild(Forms.field('Description', Forms.area(d, 'description')));
     wrap.appendChild(this.editBar(async () => {
       await PATCH(`/api/gm/coll/properties/${id}`, {
@@ -298,6 +298,7 @@ const Views = {
       e.type === 'company' ? Forms.field('Industry', Forms.text(d, 'industry')) : null,
       e.type === 'company' ? Forms.field('Controlled by', Forms.sel(d, 'ownerId', Forms.entOptions(null, true))) : null,
       e.type === 'company' ? Forms.field('Chief Executive', Forms.sel(d, 'ceoId', Forms.entOptions(['person'], true))) : null,
+      e.type === 'company' ? Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(d, 'wagePerTurn', '0.01')) : null,
       e.type === 'company' ? Forms.field('Shares outstanding', Forms.num(d, 'sharesOutstanding')) : null,
       e.type === 'party' ? Forms.field('Leader', Forms.sel(d, 'leaderId', Forms.entOptions(['person'], true))) : null,
       e.type === 'person' ? Forms.field('Title', Forms.text(d, 'title')) : null,
@@ -327,7 +328,7 @@ const Views = {
     wrap.appendChild(this.editBar(async () => {
       const body = { name: d.name, color: d.color, logo: d.logo, description: d.description };
       if (e.type === 'company') Object.assign(body, {
-        industry: d.industry, ownerId: d.ownerId, ceoId: d.ceoId, sharesOutstanding: Number(d.sharesOutstanding) || 0,
+        industry: d.industry, ownerId: d.ownerId, ceoId: d.ceoId, wagePerTurn: Math.max(0, Number(d.wagePerTurn) || 0), sharesOutstanding: Number(d.sharesOutstanding) || 0,
         sharePrice: Number(d.sharePrice) || 0, trust: Number(d.trust) || 0, publicFloat: Number(d.publicFloat) || 0
       });
       if (e.type === 'party') Object.assign(body, { leaderId: d.leaderId, ideology: d.ideology, inGovernment: !!d.inGovernment });
@@ -530,7 +531,11 @@ const Views = {
     const grossPerTurn = pr.prodMode === 'goods'
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
+    const owner = entById(pr.ownerId);
+    const wagePerTurn = owner && owner.type === 'company' ? Math.max(0, Number(owner.wagePerTurn === undefined ? 1 : owner.wagePerTurn) || 0) : 0;
+    const wages = (pr.employees || 0) * wagePerTurn;
     const upkeep = pr.expenses || 0;
+    const totalExpenses = upkeep + wages;
     wrap.appendChild(this.secLabel('Production (per turn)'));
     if (pr.prodMode === 'goods' && (pr.produces || []).length) {
       (pr.produces || []).forEach(e => {
@@ -544,12 +549,15 @@ const Views = {
     }
     wrap.appendChild(this.kv('Revenue / turn', fmtMoney(grossPerTurn), 'pos'));
     wrap.appendChild(this.kv('Upkeep / turn', fmtMoney(upkeep), 'neg'));
-    wrap.appendChild(this.kv('Net / turn', fmtMoney(grossPerTurn - upkeep), grossPerTurn - upkeep >= 0 ? 'pos' : 'neg'));
-    if (grossPerTurn > 0 || upkeep > 0) {
+    wrap.appendChild(this.kv('Wages / turn', fmtMoney(wages), wages ? 'neg' : ''));
+    wrap.appendChild(this.kv('Total expenses / turn', fmtMoney(totalExpenses), 'neg'));
+    wrap.appendChild(this.kv('Net / turn', fmtMoney(grossPerTurn - totalExpenses), grossPerTurn - totalExpenses >= 0 ? 'pos' : 'neg'));
+    if (grossPerTurn > 0 || totalExpenses > 0) {
       wrap.appendChild(Charts.chartBars([
         { label: 'Revenue', value: grossPerTurn, color: '#4a6a48' },
         { label: 'Upkeep', value: upkeep, color: 'var(--bad)' },
-        { label: 'Net', value: Math.max(0, grossPerTurn - upkeep), color: 'var(--ink-soft)' }
+        { label: 'Wages', value: wages, color: 'var(--accent-soft)' },
+        { label: 'Net', value: Math.max(0, grossPerTurn - totalExpenses), color: 'var(--ink-soft)' }
       ], { width: 300, height: 140, title: 'Per-turn P&L', valueFormat: (v) => CUR() + fmtCompact(v) }));
     }
     for (const k in (pr.vars || {})) wrap.appendChild(this.kv(k, fmtNum(pr.vars[k])));
@@ -1144,27 +1152,27 @@ const Views = {
   },
 
   /* CEO / owner operations panel on the company dossier (Phase 13). Sell%
-     (domestic), gov% (routed to the state trade desk) and wage index. Editable
+     (domestic), gov% (routed to the state trade desk) and direct payroll. Editable
      by the company's controller or GM; read-only for everyone else. */
   companyControls(e) {
     const controllable = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, e.id));
     const keep = e.keepPct === undefined ? 0 : e.keepPct;
-    const wage = e.wage === undefined ? 100 : e.wage;
+    const wage = e.wagePerTurn === undefined ? 1 : e.wagePerTurn;
     const box = el('div');
     box.appendChild(this.secLabel('Operations'));
     if (!controllable) {
       box.appendChild(this.kv('Output', (100 - keep) + '% sold · ' + keep + '% kept as stock'));
-      box.appendChild(this.kv('Wage level', wage + (wage === 100 ? ' (baseline)' : '')));
+      box.appendChild(this.kv('Wage / employee / turn', fmtMoney(wage)));
       return box;
     }
-    const draft = { keepPct: keep, wage: wage };
+    const draft = { keepPct: keep, wagePerTurn: wage };
     box.appendChild(el('div.form-grid',
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(draft, 'keepPct'), 'Kept stock trades on the open market or via trade offers'),
-      Forms.field('Wage index (100 = base)', Forms.slider(draft, 'wage', 0, 200, {}), 'Higher pay lifts local happiness/employment but costs more')));
+      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(draft, 'wagePerTurn', '0.01'), 'Payroll is added to every company property’s total expenses')));
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
         const b = ev.currentTarget; b.disabled = true;
-        try { const r = await PATCH('/api/company/' + e.id + '/controls', draft); if (r && r.company) { e.keepPct = r.company.keepPct; e.wage = r.company.wage; } toast('Operations updated.'); }
+        try { const r = await PATCH('/api/company/' + e.id + '/controls', draft); if (r && r.company) { e.keepPct = r.company.keepPct; e.wagePerTurn = r.company.wagePerTurn; } toast('Operations updated.'); }
         catch (err) { toast(err.message, true); b.disabled = false; }
       }
     }, 'Save Operations'),
@@ -1541,6 +1549,9 @@ const Views = {
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
     const employees = props.reduce((s, pr) => s + (pr.employees || 0), 0);
+    const wagePerTurn = Math.max(0, Number(c.wagePerTurn === undefined ? 1 : c.wagePerTurn) || 0);
+    const upkeepPerTurn = props.reduce((s, pr) => s + (pr.expenses || 0), 0);
+    const wagesPerTurn = employees * wagePerTurn;
     const cash = this.accountsOf(c.id).reduce((s, a) => s + a.balance, 0);
 
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
@@ -1554,6 +1565,7 @@ const Views = {
       ['Confidence', c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'],
       ['Trust', c.trust !== undefined ? c.trust + '' : '—'],
       ['Annual Revenue', c.vars && c.vars.revenue !== undefined ? CUR() + fmtCompact(c.vars.revenue) : '—'],
+      ['Expenses / turn', fmtMoney(upkeepPerTurn + wagesPerTurn)],
       ['Annual Profit', c.vars && c.vars.profit !== undefined ? CUR() + fmtCompact(c.vars.profit) : '—'],
       ['Cash', fmtMoney(cash)],
       ['Employees', fmtNum(employees)]
@@ -1563,7 +1575,7 @@ const Views = {
     const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
       id: c.id,
       keepPct: c.keepPct === undefined ? 0 : c.keepPct,
-      wage: c.wage === undefined ? 100 : c.wage,
+      wagePerTurn: c.wagePerTurn === undefined ? 1 : c.wagePerTurn,
       keepPctByItem: Object.assign({}, c.keepPctByItem || {})
     });
 
@@ -1574,7 +1586,7 @@ const Views = {
     inner.appendChild(el('div.form-grid',
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
         'Kept stock piles up on your sites — sell it abroad on the open market (Economy → International Trade) or to anyone via trade offers.'),
-      Forms.field('Wage index (100 = baseline)', Forms.slider(dr, 'wage', 0, 200, { suffix: '' }), 'Higher pay lifts local happiness & employment, but costs more')));
+      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'), 'Payroll is added to upkeep for every property owned by this company')));
 
     // ---- per-product table: retail value, output and where it goes ----
     const producedItems = [...new Set(props.flatMap(pr => (pr.produces || []).map(e => e.itemId)))].filter(iid => itemById(iid));
@@ -1609,10 +1621,10 @@ const Views = {
       onclick: async (ev) => {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
-          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wage: dr.wage });
+          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn });
           // apply the server-confirmed values to local state at once, so no
           // refetch timing can revert them and navigating away keeps the change
-          if (r && r.company) { c.keepPct = r.company.keepPct; c.keepPctByItem = r.company.keepPctByItem; c.wage = r.company.wage; }
+          if (r && r.company) { c.keepPct = r.company.keepPct; c.keepPctByItem = r.company.keepPctByItem; c.wagePerTurn = r.company.wagePerTurn; }
           W.opsDraft = null;
           toast('Operations saved.');
         } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -1639,9 +1651,9 @@ const Views = {
     if (!props.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'The company holds no property.'));
     else {
       inner.appendChild(el('table.data',
-        el('thead', el('tr', el('th', 'Property'), el('th', 'Province'), el('th.num', 'Employees'), el('th', 'Production / turn'), el('th.num', 'Revenue'), el('th.num', 'Upkeep'), el('th.num', 'Net'))),
+        el('thead', el('tr', el('th', 'Property'), el('th', 'Province'), el('th.num', 'Employees'), el('th', 'Production / turn'), el('th.num', 'Revenue'), el('th.num', 'Upkeep'), el('th.num', 'Wages'), el('th.num', 'Total expenses'), el('th.num', 'Net'))),
         el('tbody', props.map(pr => {
-          const rev = propRev(pr), upk = pr.expenses || 0;
+          const rev = propRev(pr), upk = pr.expenses || 0, wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0), total = upk + wages;
           const prodText = pr.prodMode === 'goods'
             ? (pr.produces || []).map(e => fmtNum(e.perTurn) + ' × ' + (itemById(e.itemId) || { name: e.itemId }).name).join(', ')
             : pr.prodMode === 'cash' ? 'cash operation' : 'upkeep only';
@@ -1649,8 +1661,8 @@ const Views = {
           return el('tr.row-link', { onclick: () => select('property', pr.id) },
             el('td', pr.name), el('td', p ? p.name : '—'), el('td.num', fmtNum(pr.employees)),
             el('td', { style: 'font-size:12px; color:var(--ink-soft);' }, prodText),
-            el('td.num', fmtMoney(rev)), el('td.num', fmtMoney(upk)),
-            el('td.num', { style: 'color:' + (rev - upk >= 0 ? 'var(--good)' : 'var(--accent)') }, fmtMoney(rev - upk)));
+            el('td.num', fmtMoney(rev)), el('td.num', fmtMoney(upk)), el('td.num', fmtMoney(wages)), el('td.num', fmtMoney(total)),
+            el('td.num', { style: 'color:' + (rev - total >= 0 ? 'var(--good)' : 'var(--accent)') }, fmtMoney(rev - total)));
         }))));
     }
 

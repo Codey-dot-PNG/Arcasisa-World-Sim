@@ -38,6 +38,7 @@ const ITEM_TEMPLATES = [
   ['industrial', 'Industrial good'],
   ['military', 'Military hardware'],
   ['weapon', 'Weapon — small arms (war stats)'],
+  ['aircraft', 'Military aircraft — one per airstrike'],
   ['armyfuel', 'Army fuel (war mobility)'],
   ['reserve', 'Reserve / bullion']
 ];
@@ -52,6 +53,7 @@ const ITEM_TEMPLATE_PATCH = {
   // mobility against settings.war.fuelPerStrength. originId (an entity id)
   // records the nation of manufacture — informational + tradeable flavour.
   weapon: { category: 'Military', tradable: true, marketValue: 300, icon: 'W', meta: { weapon: { kind: 'smallarms', dmg: 0.2, hp: 0.1, morale: 0.08 }, originId: null } },
+  aircraft: { category: 'Military', tradable: true, marketValue: 1200000, icon: '✈', meta: { weapon: { kind: 'aircraft', model: 'F55', dmg: 0.42, hp: 0.38, speed: 0.82, range: 0.62 }, originId: null } },
   armyfuel: { category: 'Commodities', tradable: true, marketValue: 40, icon: '🛢', meta: { weapon: { kind: 'fuel', speed: 0.5 } } },
   reserve: { category: 'Reserves', tradable: true, marketValue: 1000, icon: 'R' }
 };
@@ -466,6 +468,7 @@ const GM = {
       this.field('Marker colour', this.color(d, 'color')),
       this.field('Logo / image path', this.text(d, 'logo', '/assets/…')),
       d.type === 'company' ? this.field('Industry', this.text(d, 'industry')) : null,
+      d.type === 'company' ? this.field('Wage / employee / turn (' + CUR() + ')', this.num(d, 'wagePerTurn', '0.01')) : null,
       d.type === 'company' ? this.field('Shares outstanding', this.num(d, 'sharesOutstanding')) : null,
       d.type === 'person' ? this.field('Title', this.text(d, 'title')) : null,
       d.type === 'party' ? this.field('Abbreviation', this.text(d, 'abbrev')) : null,
@@ -652,7 +655,8 @@ const GM = {
      block) saved through the properties collection. */
   geProperties(main, e) {
     const props = (S().properties || []).filter(p => p.ownerId === e.id);
-    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - (p.expenses || 0), color: 'var(--accent)' }));
+    const wage = e.type === 'company' ? Math.max(0, Number(e.wagePerTurn === undefined ? 1 : e.wagePerTurn) || 0) : 0;
+    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - (p.expenses || 0) - (p.employees || 0) * wage, color: 'var(--accent)' }));
     if (rows.length) {
       main.appendChild(Views.secLabel('Net cash / turn by property'));
       main.appendChild(Charts.chartBars(rows, { horizontal: true, width: 520, height: Math.max(90, rows.length * 24 + 30), valueFormat: v => fmtMoney(v) }));
@@ -708,7 +712,7 @@ const GM = {
       worldName: s.worldName, currency: s.currency, currencyName: s.currencyName, parliamentSeats: s.parliamentSeats,
       unit: s.time.unit, perTurn: s.time.perTurn, date: s.time.date,
       clockEnabled: s.time.clock ? s.time.clock.enabled : true,
-      clockSpeed: s.time.clock ? s.time.clock.minutesPerRealMinute : 60,
+      clockSpeed: s.time.clock ? s.time.clock.minutesPerRealMinute : 59.5,
       clockTime,
       autoEnabled: s.time.auto.enabled, autoSeconds: s.time.auto.seconds,
       autoMode: s.time.auto.mode || 'interval', autoAt: s.time.auto.at || '08:00',
@@ -781,7 +785,7 @@ const GM = {
             worldName: d.worldName, currency: d.currency, currencyName: d.currencyName, parliamentSeats: Number(d.parliamentSeats) || 150,
             time: {
               unit: d.unit, perTurn: Number(d.perTurn) || 1, date: d.date,
-              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 60, currentTime: d.clockTime },
+              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 59.5, currentTime: d.clockTime },
               auto: { enabled: !!d.autoEnabled, mode: d.autoMode, at: d.autoAt, seconds: Number(d.autoSeconds) || 3600 }
             },
             ambience: { traffic: {
@@ -1095,6 +1099,7 @@ const GM = {
       d.type === 'company' ? this.field('Industry', this.text(d, 'industry')) : null,
       d.type === 'company' ? this.field('Controlled by', this.sel(d, 'ownerId', this.entOptions(null, true))) : null,
       d.type === 'company' ? this.field('Chief Executive', this.sel(d, 'ceoId', this.entOptions(['person'], true))) : null,
+      d.type === 'company' ? this.field('Wage / employee / turn (' + CUR() + ')', this.num(d, 'wagePerTurn', '0.01')) : null,
       d.type === 'company' ? this.field('Shares outstanding', this.num(d, 'sharesOutstanding')) : null,
       d.type === 'party' ? this.field('Leader', this.sel(d, 'leaderId', this.entOptions(['person'], true))) : null,
       d.type === 'party' ? this.field('Abbreviation', this.text(d, 'abbrev')) : null,
@@ -1282,6 +1287,47 @@ const GM = {
   },
 
   /* ═══════════ ITEMS ═══════════ */
+  itemMetadataEditor(d) {
+    d.meta = d.meta || {};
+    const weapon = d.meta.weapon || { kind: '__none__' };
+    const kindOptions = [
+      ['__none__', '— no military metadata —'],
+      ['smallarms', 'Small arms'],
+      ['tank', 'Tank'],
+      ['warship', 'Warship'],
+      ['aircraft', 'Military aircraft'],
+      ['fuel', 'Army fuel']
+    ];
+    const statFields = {
+      smallarms: [['dmg', 'Damage'], ['hp', 'Durability'], ['morale', 'Morale']],
+      tank: [['dmg', 'Damage'], ['hp', 'Durability'], ['armor', 'Armor'], ['speed', 'Speed'], ['fuelUse', 'Fuel use']],
+      warship: [['dmg', 'Damage'], ['hp', 'Durability'], ['range', 'Range'], ['speed', 'Speed']],
+      aircraft: [['dmg', 'Damage'], ['hp', 'Durability'], ['speed', 'Speed'], ['range', 'Range']],
+      fuel: [['speed', 'Mobility bonus']]
+    };
+    const box = el('div');
+    box.appendChild(Views.secLabel('Structured Metadata'));
+    box.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Use dropdowns and fields for common item metadata. The JSON editor below remains available for advanced or custom keys.'));
+    box.appendChild(el('div.form-grid',
+      this.field('Military metadata type', this.sel(weapon, 'kind', kindOptions, (value) => {
+        if (value === '__none__') delete d.meta.weapon;
+        else { d.meta.weapon = d.meta.weapon || {}; d.meta.weapon.kind = value; }
+        App.renderView();
+      })),
+      this.field('Manufacturing origin', this.sel({ value: d.meta.originId || '__null__' }, 'value',
+        [['__null__', '— no origin —'], ...this.entOptions()],
+        (value) => { if (value === '__null__') delete d.meta.originId; else d.meta.originId = value; }))
+    ));
+    const activeKind = d.meta.weapon && d.meta.weapon.kind;
+    if (activeKind && statFields[activeKind]) {
+      const fields = [['model', 'Model']].concat(statFields[activeKind]);
+      box.appendChild(el('div.form-grid', fields.map(([key, label]) =>
+        this.field(label, key === 'model' ? this.text(d.meta.weapon, key) : this.num(d.meta.weapon, key, '0.01')))));
+    }
+    return box;
+  },
+
   tabItems(main) {
     main.appendChild(el('div.doc-title', 'Items & Market'));
     main.appendChild(el('div.doc-sub', 'changing a market value updates every inventory in the world'));
@@ -1305,7 +1351,8 @@ const GM = {
       this.field('Icon (emoji, a letter, or an icon name)', this.text(d, 'icon'), 'e.g. 🛢, R, or one of: ' + (typeof ICON_MANIFEST !== 'undefined' ? ICON_MANIFEST.join(', ') : ''))));
     main.appendChild(this.check(d, 'tradable', 'Tradable between entities'));
     main.appendChild(this.field('Description', this.area(d, 'description')));
-    main.appendChild(this.field('Metadata (JSON)', el('textarea.text-input', {
+    main.appendChild(this.itemMetadataEditor(d));
+    main.appendChild(this.field('Metadata (JSON — advanced)', el('textarea.text-input', {
       style: 'font-family:var(--font-mono); font-size:11px;',
       oninput: (e) => { try { d.meta = JSON.parse(e.target.value || '{}'); e.target.style.borderColor = ''; } catch (x) { e.target.style.borderColor = 'var(--accent)'; } }
     }, JSON.stringify(d.meta || {}))));

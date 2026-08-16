@@ -715,7 +715,10 @@ function runEconomy(db, actor) {
     const owner = db.entities.find(e => e.id === pr.ownerId);
     const co = owner && owner.type === 'company' ? owner : null;
     const keepPct = co ? clampPct(co.keepPct, 0) : 0; // fallback company-wide policy
-    const wageIdx = co ? (co.wage === undefined ? 100 : Number(co.wage)) : 100;
+    // Direct currency wages replace the old relative wage index. Keep the
+    // derived index for the existing province happiness/employment nudges.
+    const wagePerTurn = co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0;
+    const wageIdx = co ? wagePerTurn * 100 : 100;
     const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
 
     // gross production value (drives GDP): private at output, public at cost
@@ -747,9 +750,9 @@ function runEconomy(db, actor) {
       o.dom += (pr.cashPerTurn || 0) * f;
     }
 
-    // expenses: upkeep + signed wage delta from the baseline index
+    // expenses: property upkeep plus direct company payroll
     o.upkeep += pr.expenses || 0;
-    o.wage += (pr.employees || 0) * econ.baseDailyWage * ((wageIdx - 100) / 100);
+    o.wage += (pr.employees || 0) * wagePerTurn;
 
     // wage pressure on the province (employee-weighted)
     if (pr.provinceId && pr.employees) {
@@ -1695,7 +1698,7 @@ function worldClockNow(t, now) {
   const anchor = Number(c.anchorRealMs) || Date.now();
   // Both sides are milliseconds after conversion: N world minutes per real
   // minute means N world milliseconds per real millisecond.
-  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60);
+  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 59.5);
   return base + ((Number(now) || Date.now()) - anchor) * rate;
 }
 

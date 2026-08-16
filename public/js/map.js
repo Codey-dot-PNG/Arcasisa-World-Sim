@@ -40,6 +40,7 @@ const GameMap = {
     this.ready = true;
     this.reset(true);
     this.render();
+    if (window.App && App.renderWorldClock) App.renderWorldClock();
   },
 
   reset(silent) {
@@ -59,6 +60,22 @@ const GameMap = {
   },
 
   editing() { return !!(window.MapEdit && MapEdit.active); },
+
+  setDayNight(worldMs) {
+    const wrap = document.getElementById('map-wrap');
+    if (!wrap) return;
+    const enabled = document.body && document.body.dataset.daynight === 'on';
+    if (!enabled || !Number.isFinite(Number(worldMs))) {
+      wrap.classList.remove('day-night-night');
+      delete wrap.dataset.dayphase;
+      return;
+    }
+    const d = new Date(Number(worldMs));
+    const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
+    const night = minutes < 6 * 60 || minutes >= 18 * 60;
+    wrap.dataset.dayphase = night ? 'night' : 'day';
+    wrap.classList.toggle('day-night-night', night);
+  },
 
   /* ---------- pan & zoom ---------- */
   clientToWorld(cx, cy) {

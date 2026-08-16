@@ -720,6 +720,12 @@ function arsenalWeaponsOf(db, entity, kind) {
   }
   return out;
 }
+function aircraftStock(db, entityId) {
+  const entity = (db.entities || []).find(e => e.id === entityId) ||
+    (db.entities || []).find(e => e.type === 'government');
+  const rows = arsenalWeaponsOf(db, entity, 'aircraft');
+  return rows.reduce((sum, row) => sum + Math.max(0, Number(row.qty) || 0), 0);
+}
 // toRoman is defined once, further down (foreign-intervention naming) — JS
 // hoists function declarations within a scope regardless of source order, so
 // it's available here too.
@@ -1117,7 +1123,7 @@ function startWar(db, scenario) {
     // Additive/absent-safe: the engine treats a missing array as none.
     refugees: [],
     stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [], civilianDeaths: 0, refugees: 0, enemyControl: {} },
-    bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } },
+    bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0, aircraftRemaining: 0 } },
     craters: [],
     // GM global tuning (Feature: war.mods) — defaults are also the engine's
     // fallback (`(war.mods && war.mods.dmg) || 1`), so a legacy war missing
@@ -1129,6 +1135,7 @@ function startWar(db, scenario) {
     allies: { att: [], def: [] },
     result: null
   };
+  db.war.bombs.def.aircraftRemaining = aircraftStock(db, defender.id);
   // Tank & warship deployment (Task 3): defender's national arsenal
   // (defender.inventory — conventionally ent_gov's stockpile) is walked for
   // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
@@ -1645,9 +1652,18 @@ function dropBomb(db, side, pos, actor) {
   const now = Date.now();
   if (now < bomb.cooldownUntil) return { ok: false, error: 'Bomb is on cooldown.' };
   if (!Array.isArray(pos) || pos.length !== 2) return { ok: false, error: 'Invalid target position.' };
+  const defenderId = war.defenderId || 'ent_gov';
+  const defender = (db.entities || []).find(e => e.id === defenderId) || (db.entities || []).find(e => e.type === 'government');
+  const aircraft = arsenalWeaponsOf(db, defender, 'aircraft').find(row => row.qty > 0);
+  const aircraftRow = defender && (defender.inventory || []).find(row => aircraft && row.itemId === aircraft.item.id && row.qty > 0);
+  if (!aircraft || !aircraftRow) return { ok: false, error: 'The air wing has no military aircraft available.' };
   // Cooldown starts at ORDER time, same as the old instant bomb — a player
   // can't spam strikes just because the last one hasn't landed yet.
   bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
+  aircraftRow.qty -= 1;
+  if (aircraftRow.qty <= 0 && defender && Array.isArray(defender.inventory)) {
+    defender.inventory = defender.inventory.filter(row => row !== aircraftRow);
+  }
 
   war.airstrikes = war.airstrikes || [];
   const strike = {
@@ -1658,11 +1674,13 @@ function dropBomb(db, side, pos, actor) {
     orderedTick: war.tick,
     strikeTick: war.tick + AIRSTRIKE_FLIGHT_TICKS,
     orderedAt: now,
+    aircraftItemId: aircraft.item.id,
     done: false,
     groundApplied: false // guards applyAirstrikeGroundEffects against double-application
   };
   war.airstrikes.push(strike);
-  return { ok: true, strike };
+  bomb.aircraftRemaining = aircraftStock(db, defender ? defender.id : 'ent_gov');
+  return { ok: true, strike, aircraftRemaining: bomb.aircraftRemaining };
 }
 
 // ---------- authority-only ground effects, wired via ctx.onAirstrike ----------

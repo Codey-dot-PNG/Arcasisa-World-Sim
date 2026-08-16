@@ -117,7 +117,23 @@ function migrate(world) {
     const t = world.settings.time;
     if (!t.clock) {
       const base = Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
-      t.clock = { enabled: true, minutesPerRealMinute: 60, anchorRealMs: Date.now(), anchorWorldMs: base };
+      t.clock = { enabled: true, minutesPerRealMinute: 59.5, anchorRealMs: Date.now(), anchorWorldMs: base };
+      changed = true;
+    }
+    // The original default was exactly 60 world minutes per real minute.
+    // Nudge only that old default to a slightly slower 59.5 rate while
+    // preserving the current world instant; an explicitly different GM rate
+    // is left untouched.
+    if (t.clock && t.clock.rateVersion !== 1) {
+      if (Number(t.clock.minutesPerRealMinute) === 60) {
+        const now = Date.now();
+        const current = (Number(t.clock.anchorWorldMs) || Date.now()) +
+          (now - (Number(t.clock.anchorRealMs) || now)) * 60;
+        t.clock.anchorWorldMs = current;
+        t.clock.anchorRealMs = now;
+        t.clock.minutesPerRealMinute = 59.5;
+      }
+      t.clock.rateVersion = 1;
       changed = true;
     }
     if (!t.auto) { t.auto = { enabled: false, seconds: 3600 }; changed = true; }
@@ -692,7 +708,8 @@ function migrate(world) {
       if (e.type !== 'company') continue;
       if (e.sellPct === undefined) e.sellPct = 100;   // % of production sold domestically
       if (e.govPct === undefined) e.govPct = 0;       // % sold to the government
-      if (e.wage === undefined) e.wage = 100;         // wage index (100 = baseline)
+      if (e.wage === undefined) e.wage = 100;         // legacy wage index (old snapshots)
+      if (e.wagePerTurn === undefined) e.wagePerTurn = 1; // direct ₳/employee/turn
       if (!e.keepPctByItem) e.keepPctByItem = {};    // per-product stock policy
     }
 
@@ -1092,6 +1109,23 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Military aircraft ---------------------------------------------------
+  // Aircraft are consumable airstrike capacity: one aircraft inventory unit
+  // authorizes exactly one defender airstrike order. The first catalogue
+  // aircraft is Arcasia's F55 fighter.
+  if (!world._aircraftSeeded && Array.isArray(world.items)) {
+    if (!world.items.some(i => i.id === 'item_aircraft_f55')) {
+      world.items.push({
+        id: 'item_aircraft_f55', icon: '✈', name: 'F55 Fighter Aircraft',
+        category: 'Military', tradable: true, marketValue: 1200000,
+        meta: { weapon: { kind: 'aircraft', model: 'F55', dmg: 0.42, hp: 0.38, speed: 0.82, range: 0.62 }, originId: null },
+        description: 'Arcasian F55 tactical fighter. Each serviceable aircraft can carry one battlefield airstrike.'
+      });
+    }
+    world._aircraftSeeded = true;
+    changed = true;
+  }
+
   // Republic standing arsenal — a modest peacetime stock of home-built armour
   // and hulls so that armour and warships actually take the field when a war
   // starts (the ARC Arms Works and Kradon Shipyards produce these only a
@@ -1105,7 +1139,20 @@ function migrate(world) {
       const grant = (itemId, qty) => { const r = gov.inventory.find(x => x.itemId === itemId); if (r) r.qty = Math.max(r.qty || 0, qty); else gov.inventory.push({ itemId, qty }); };
       grant('item_tank_m36griz', 80);   // ~3 M36 "Griz" armoured divisions' worth (25 tanks each), the ageing home-built fleet
       grant('item_warship_kradon', 3);  // three Kradon-class cruisers — "the pride of the Eastern Fleet for lack of anything newer"
+      if (world.items.some(i => i.id === 'item_aircraft_f55')) grant('item_aircraft_f55', 12);
       world._republicArsenalSeeded = true;
+      changed = true;
+    }
+  }
+
+  if (!world._republicAircraftSeeded && Array.isArray(world.entities)) {
+    const gov = world.entities.find(e => e.id === 'ent_gov');
+    if (gov && world.items.some(i => i.id === 'item_aircraft_f55')) {
+      gov.inventory = gov.inventory || [];
+      const row = gov.inventory.find(x => x.itemId === 'item_aircraft_f55');
+      if (row) row.qty = Math.max(row.qty || 0, 12);
+      else gov.inventory.push({ itemId: 'item_aircraft_f55', qty: 12 });
+      world._republicAircraftSeeded = true;
       changed = true;
     }
   }
@@ -1355,6 +1402,16 @@ function migrate(world) {
         changed = true;
       }
     }
+  }
+
+  // Direct company wages. Existing companies begin at the requested
+  // ₳1/employee/turn baseline; the legacy wage index remains only for old
+  // snapshots and old saved data.
+  for (const co of (world.entities || [])) {
+    if (co.type !== 'company') continue;
+    if (co.wagePerTurn === undefined) { co.wagePerTurn = 1; changed = true; }
+    const wage = Math.max(0, Math.min(1000000, Math.round((Number(co.wagePerTurn) || 0) * 100) / 100));
+    if (co.wagePerTurn !== wage) { co.wagePerTurn = wage; changed = true; }
   }
 
   return changed;

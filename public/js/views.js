@@ -1211,6 +1211,13 @@ const Views = {
       : prodMode === 'cash' ? (Number(pr.cashPerTurn) || 0) : 0;
     const wages = (pr.employees || 0) * (Number(baseWage) || 0);
     const upkeep = pr.expenses || 0;
+    // Operations draft (survives re-renders until saved) — sales & payroll
+    // policy only; the production line itself is a Game Master lever.
+    const draftId = 'property:' + pr.id;
+    const dr = (W.propOpsDraft && W.propOpsDraft.id === draftId) ? W.propOpsDraft : (W.propOpsDraft = {
+      id: draftId, keepPct: baseKeep, wagePerTurn: baseWage,
+      keepPctByItem: Object.assign({}, pr.keepPctByItem || {})
+    });
 
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
       el('div',
@@ -1224,28 +1231,55 @@ const Views = {
     ]));
 
     inner.appendChild(this.secLabel('Operations'));
-    inner.appendChild(this.kv('Mode', prodMode === 'goods' ? 'Produces goods' : prodMode === 'cash' ? 'Generates cash' : 'None (upkeep only)'));
-    inner.appendChild(this.kv('Keep in stock (%)', String(baseKeep) + '%'));
-    inner.appendChild(this.kv('Wage / employee / turn', fmtMoney(baseWage)));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
+        'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
+      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'))));
 
     if (prodMode === 'goods') {
       inner.appendChild(this.secLabel('Production lines'));
-      const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th.num', 'Made / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
-      const body = el('tbody');
-      producedItems.forEach(iid => {
-        const made = produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
-        const pct = pr.keepPctByItem && pr.keepPctByItem[iid] !== undefined ? pr.keepPctByItem[iid] : baseKeep;
-        const kept = made * Math.max(0, Math.min(100, Number(pct) || 0)) / 100;
-        const site = (pr.inventory || []).find(r => r.itemId === iid);
-        body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
-          el('td.num', fmtNum(made, 4)), el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
+      // What the site makes (and how much) is set by the Game Master — shown
+      // here for reference only.
+      const lineTbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th.num', 'Made / turn'))));
+      const lineBody = el('tbody');
+      produces.forEach(e => {
+        const it = itemById(e.itemId);
+        lineBody.appendChild(el('tr', el('td', it ? it.name : e.itemId), el('td.num', fmtNum(e.perTurn, 4))));
       });
-      tbl.appendChild(body); inner.appendChild(tbl);
+      lineTbl.appendChild(lineBody); inner.appendChild(lineTbl);
+
+      if (producedItems.length) {
+        inner.appendChild(this.secLabel('Sales & Output'));
+        const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
+        const body = el('tbody');
+        producedItems.forEach(iid => {
+          if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = baseKeep;
+          const made = produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
+          const kept = made * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
+          const site = (pr.inventory || []).find(r => r.itemId === iid);
+          body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
+            el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { step: 1, suffix: '%' })),
+            el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
+        });
+        tbl.appendChild(body); inner.appendChild(tbl);
+      }
     } else if (prodMode === 'cash') {
       inner.appendChild(this.kv('Cash generated / turn', fmtMoney(Number(pr.cashPerTurn) || 0)));
     }
-    inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:14px;' },
-      'Operations are set by the Game Master — this page is read-only.'));
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          const r = await PATCH('/api/property/' + pr.id + '/controls', {
+            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn
+          });
+          if (r && r.property) Object.assign(pr, r.property);
+          W.propOpsDraft = null;
+          toast('Property operations saved.');
+          App.renderView();
+        } catch (err) { toast(err.message, true); btn.disabled = false; }
+      }
+    }, 'Save Property Operations')));
   },
 
   /* ---- International Trade (Phase 15 — the open market) ---- */
@@ -1870,9 +1904,10 @@ const Views = {
       (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
   },
   // Any property whose owner sits in the current user's control chain is
-  // viewable here, including properties owned directly by a person. The page
-  // is read-only — production tuning is a Game Master lever (the GM Studio
-  // edits it; the server /api/property/:id/controls route is GM-only).
+  // actionable here, including properties owned directly by a person. Sales &
+  // payroll policy (keep %, wages) is editable exactly like the company desk;
+  // the production line itself is a Game Master lever (the server route is
+  // GM-gated for prodMode/produces/cashPerTurn).
   opsProperties() {
     if (!S()) return [];
     const mine = W.me && W.me.entityId;

@@ -821,15 +821,20 @@ async function handle(req, res, pathname, method) {
     // A property may be owned directly by a person, so operations cannot be
     // limited to the company desk. These controls are deliberately scoped to
     // the property: output, cash mode, stock policy and local payroll.
-    // GM-ONLY: production tuning rewrites what a site outputs for the whole
-    // world's economy, so it is a Game Master lever — owners/CEOs read this
-    // data but may not change it.
+    // Sales & payroll policy (keep %, wages) follows the company desk's
+    // access — anyone in the owner's control chain may tune it. The
+    // production line itself (what the site makes, its mode, cash output)
+    // is a Game Master lever.
     const propertyControlsMatch = pathname.match(/^\/api\/property\/([\w-]+)\/controls$/);
     if (propertyControlsMatch && method === 'PATCH') {
       const pr = db.properties.find(p => p.id === propertyControlsMatch[1]);
       if (!pr) return bad('No such property.');
-      if (!u.role.perms.gm) return deny('Only the Game Master may adjust property operations.');
+      const gm = u.role.perms.gm;
+      if (!gm && (!pr.ownerId || !ownership.controls(u.user.entityId, pr.ownerId))) return deny('You do not control this property.');
       const b = await readBody(req);
+      if (!gm && (b.prodMode !== undefined || Array.isArray(b.produces) || b.cashPerTurn !== undefined)) {
+        return deny('Only the Game Master may manage the production line.');
+      }
       const clampPct = (n, fallback) => Math.max(0, Math.min(100, Number.isFinite(Number(n)) ? Number(n) : fallback));
       const cleanQty = (n) => Math.round((Number(n) || 0) * 1000000) / 1000000;
       if (b.keepPct !== undefined) pr.keepPct = clampPct(b.keepPct, 0);

@@ -569,7 +569,8 @@ const Views = {
     if (controlsProp) {
       wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
-        el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items')));
+        el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items'),
+        el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations')));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
@@ -593,7 +594,7 @@ const Views = {
       const it = itemById(r.itemId);
       return el('option', { value: it.id }, `${it.name} (×${fmtNum(r.qty)})`);
     }));
-    const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1' });
+    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
     openModal(withdraw ? 'WITHDRAW FROM SITE — ' + pr.name : 'DEPOSIT AT SITE — ' + pr.name, el('div',
       el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
         withdraw ? `Goods move from the site inventory to ${owner ? owner.name : 'the owner'}.` : `Goods move from ${owner ? owner.name : 'the owner'} to the site inventory.`),
@@ -910,7 +911,7 @@ const Views = {
 
     const toSel = el('select.text-input', S().entities.filter(e => e.id !== fromId).map(e =>
       el('option', { value: e.id, selected: e.id === prefTo ? 'selected' : undefined }, e.name)));
-    const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1' });
+    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
     openModal('TRANSFER OF GOODS', el('div',
       el('label.field-label', 'From'), fromSel,
       el('label.field-label', 'Item'), itemSel,
@@ -1180,6 +1181,111 @@ const Views = {
     return box;
   },
 
+  /* ---- Property Operations (owner desk) ------------------------------- */
+  // Properties can be owned directly by a person, without a company in the
+  // ownership chain. This desk gives those owners the same day-to-day levers
+  // as a company desk, scoped to one site.
+  viewPropertyOps(inner) {
+    const props = this.opsProperties();
+    if (!props.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' }, 'You directly control no property.'));
+      return;
+    }
+    if (!W.opsProp || !props.some(p => p.id === W.opsProp)) W.opsProp = props[0].id;
+    if (props.length > 1) {
+      inner.appendChild(el('div.chip-row', props.map(p =>
+        el('button.chip', { class: p.id === W.opsProp ? 'active' : '', onclick: () => { W.opsProp = p.id; W.propOpsDraft = null; App.renderView(); } }, p.name))));
+    }
+    const pr = props.find(p => p.id === W.opsProp);
+    if (!pr) return;
+    const owner = entById(pr.ownerId);
+    const province = provById(pr.provinceId);
+    const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const baseKeep = pr.keepPct !== undefined ? pr.keepPct : (owner && owner.type === 'company' ? (owner.keepPct || 0) : 0);
+    const baseWage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (owner && owner.type === 'company' ? (owner.wagePerTurn || 1) : 0);
+    const draftId = 'property:' + pr.id;
+    const dr = (W.propOpsDraft && W.propOpsDraft.id === draftId) ? W.propOpsDraft : (W.propOpsDraft = {
+      id: draftId, prodMode: pr.prodMode || 'none', cashPerTurn: pr.cashPerTurn || 0,
+      keepPct: baseKeep, wagePerTurn: baseWage,
+      keepPctByItem: Object.assign({}, pr.keepPctByItem || {}),
+      produces: (pr.produces || []).map(e => ({ itemId: e.itemId, perTurn: e.perTurn || 0 }))
+    });
+    const producedItems = [...new Set(dr.produces.map(e => e.itemId))].filter(iid => itemById(iid));
+    const revenue = dr.prodMode === 'goods'
+      ? dr.produces.reduce((s, e) => s + (Number(e.perTurn) || 0) * priceOf(e.itemId), 0)
+      : dr.prodMode === 'cash' ? (Number(dr.cashPerTurn) || 0) : 0;
+    const wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0);
+    const upkeep = pr.expenses || 0;
+
+    inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
+      el('div',
+        el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, pr.name),
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+          (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—')))));
+    inner.appendChild(this.statStrip([
+      ['Employees', fmtNum(pr.employees || 0)], ['Output value / turn', fmtMoney(revenue)],
+      ['Upkeep / turn', fmtMoney(upkeep)], ['Wages / turn', fmtMoney(wages)],
+      ['Net / turn', fmtMoney(revenue - upkeep - wages)], ['Stock on site', fmtMoney((pr.inventory || []).reduce((s, r) => s + (r.qty || 0) * priceOf(r.itemId), 0))]
+    ]));
+
+    inner.appendChild(this.secLabel('Operations'));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Mode', Forms.sel(dr, 'prodMode', [['none', 'Nothing (upkeep only)'], ['goods', 'Produces goods'], ['cash', 'Generates cash']], () => App.renderView())),
+      Forms.field('Keep in stock (%)', Forms.sliderNum(dr, 'keepPct', 0, 100, { step: 1, suffix: '%' }),
+        'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
+      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'))));
+
+    if (dr.prodMode === 'goods') {
+      inner.appendChild(this.secLabel('Production lines'));
+      const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category));
+      const rows = el('div');
+      const renderRows = () => {
+        clear(rows);
+        dr.produces.forEach((line, i) => {
+          rows.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:7px; flex-wrap:wrap;' },
+            el('div', { style: 'flex:1 1 240px;' }, Forms.field('Product', Forms.sel(line, 'itemId', goods.map(it => [it.id, it.name])))),
+            el('div', { style: 'flex:0 1 150px;' }, Forms.field('Units / turn', Forms.num(line, 'perTurn', '0.000001'))),
+            el('button.icon-btn', { onclick: () => { dr.produces.splice(i, 1); renderRows(); } }, '✕')));
+        });
+      };
+      renderRows();
+      inner.appendChild(rows);
+      inner.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => { dr.produces.push({ itemId: (goods[0] || {}).id, perTurn: 0 }); renderRows(); } }, '+ Add production line')));
+
+      if (producedItems.length) {
+        const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Made / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
+        const body = el('tbody');
+        producedItems.forEach(iid => {
+          if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = dr.keepPct;
+          const made = dr.produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
+          const kept = made * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
+          const site = (pr.inventory || []).find(r => r.itemId === iid);
+          body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
+            el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { step: 1, suffix: '%' })),
+            el('td.num', fmtNum(made, 4)), el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
+        });
+        tbl.appendChild(body); inner.appendChild(tbl);
+      }
+    } else if (dr.prodMode === 'cash') {
+      inner.appendChild(el('div.form-grid', Forms.field('Cash generated / turn (' + CUR() + ')', Forms.num(dr, 'cashPerTurn', '0.01'))));
+    }
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async (ev) => {
+        const btn = ev.currentTarget; btn.disabled = true;
+        try {
+          const r = await PATCH('/api/property/' + pr.id + '/controls', {
+            prodMode: dr.prodMode, produces: dr.produces, cashPerTurn: dr.cashPerTurn,
+            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn
+          });
+          if (r && r.property) Object.assign(pr, r.property);
+          W.propOpsDraft = null;
+          toast('Property operations saved.');
+          App.renderView();
+        } catch (err) { toast(err.message, true); btn.disabled = false; }
+      }
+    }, 'Save Property Operations')));
+  },
+
   /* ---- International Trade (Phase 15 — the open market) ---- */
   // A small horizontal progress bar: `done` of `total`.
   tradeBar(done, total, color) {
@@ -1330,7 +1436,7 @@ const Views = {
       const dr = W.mktDraft[order.id + ':' + me.id] = W.mktDraft[order.id + ':' + me.id] || { pct: 0 };
       const preview = el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); flex:1; min-width:210px;' });
       const btn = el('button.solid-btn', { style: 'padding:4px 14px; font-size:11px;', disabled: 'disabled' }, side === 'sell' ? 'Sell' : 'Buy');
-      const qtyFor = () => Math.min(basis, Math.round(basis * dr.pct / 100));
+      const qtyFor = () => Math.min(basis, Math.round(basis * dr.pct / 100 * 1000000) / 1000000);
       const render = () => {
         const q = qtyFor();
         if (q <= 0) { preview.textContent = side === 'sell' ? 'DRAG TO SELL FROM YOUR ' + fmtNum(myStock) + ' IN STOCK' : 'DRAG TO BUY (THEY OFFER ' + fmtNum(remaining) + ')'; btn.disabled = true; return; }
@@ -1601,7 +1707,7 @@ const Views = {
         const it = itemById(iid);
         const made = props.reduce((s, pr) => s + (pr.produces || []).filter(e => e.itemId === iid).reduce((a, e) => a + (e.perTurn || 0), 0), 0);
         const pct = dr.keepPctByItem[iid] === undefined ? dr.keepPct : dr.keepPctByItem[iid];
-        const kept = Math.floor(made * Math.max(0, Math.min(100, pct)) / 100);
+        const kept = made * Math.max(0, Math.min(100, pct)) / 100;
         body.appendChild(el('tr',
           el('td', it.name),
           el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { suffix: '% kept' })),
@@ -1801,6 +1907,14 @@ const Views = {
     return S().entities.filter(e => e.type === 'company' &&
       (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
   },
+  // Any property whose owner sits in the current user's control chain is
+  // actionable here, including properties owned directly by a person.
+  opsProperties() {
+    if (!S()) return [];
+    const mine = W.me && W.me.entityId;
+    return S().properties.filter(pr => pr.ownerId &&
+      (isGM() || (mine && ownership_controlsClient(mine, pr.ownerId))));
+  },
   govEntity() {
     return S().entities.find(e => e.id === 'ent_gov') || S().entities.find(e => e.type === 'government');
   },
@@ -1814,7 +1928,9 @@ const Views = {
     if (!W.ecoTab) W.ecoTab = 'overview';
     const incoming = this.openIncomingTrades();
     const opsCos = this.opsCompanies();
+    const opsProps = this.opsProperties();
     if (W.ecoTab === 'company' && !opsCos.length) W.ecoTab = 'overview';
+    if (W.ecoTab === 'property' && !opsProps.length) W.ecoTab = 'overview';
     if (W.ecoTab === 'government' && !this.canGovFinance()) W.ecoTab = 'overview';
     inner.appendChild(el('div.doc-title', 'The Economy'));
     inner.appendChild(el('div.doc-sub', S().settings.currencyName + ' (' + CUR() + ') · turn ' + S().settings.time.turn));
@@ -1832,6 +1948,7 @@ const Views = {
       el('button.chip', { class: W.ecoTab === 'intl' ? 'active' : '', onclick: () => { W.ecoTab = 'intl'; App.renderView(); } }, 'International Trade'),
       el('button.chip', { class: W.ecoTab === 'inventory' ? 'active' : '', onclick: () => { W.ecoTab = 'inventory'; App.renderView(); } }, 'Inventory'),
       opsCos.length ? el('button.chip', { class: W.ecoTab === 'company' ? 'active' : '', onclick: () => { W.ecoTab = 'company'; App.renderView(); } }, 'Company Ops') : null,
+      opsProps.length ? el('button.chip', { class: W.ecoTab === 'property' ? 'active' : '', onclick: () => { W.ecoTab = 'property'; App.renderView(); } }, 'Property Ops') : null,
       this.canGovFinance() ? el('button.chip', { class: W.ecoTab === 'government' ? 'active' : '', onclick: () => { W.ecoTab = 'government'; App.renderView(); } }, 'Gov. Finances') : null
     );
     inner.appendChild(tabs);
@@ -1841,6 +1958,7 @@ const Views = {
     if (W.ecoTab === 'intl') return this.viewIntlTrade(inner);
     if (W.ecoTab === 'inventory') return this.viewInventory(inner);
     if (W.ecoTab === 'company') return this.viewCompanyOps(inner);
+    if (W.ecoTab === 'property') return this.viewPropertyOps(inner);
     if (W.ecoTab === 'government') return this.viewGovFinance(inner);
     this.viewEconomyOverview(inner);
   },
@@ -2477,7 +2595,7 @@ const Views = {
         const it = itemById(r.itemId);
         if (!it) return null;
         const check = el('input', { type: 'checkbox' });
-        const qty = el('input.text-input', { type: 'number', min: '1', max: String(r.qty), step: '1', value: '1', style: 'width:80px;' });
+        const qty = el('input.text-input', { type: 'number', min: '0.000001', max: String(r.qty), step: '0.000001', value: '1', style: 'width:80px;' });
         return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
       }).filter(Boolean);
       if (giveRows.length) giveRows.forEach(r => giveBox.appendChild(r.node));
@@ -2491,7 +2609,7 @@ const Views = {
     const getBox = el('div');
     const addGetRow = () => {
       const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
-      const qty = el('input.text-input', { type: 'number', min: '1', step: '1', value: '1', style: 'width:80px;' });
+      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
       const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
         el('button.icon-btn', { onclick: () => { getBox.removeChild(rowNode); getRows.splice(getRows.indexOf(entry), 1); } }, '✕'));
       const entry = { itemSel, qty };

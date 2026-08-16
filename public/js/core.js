@@ -487,20 +487,25 @@ const Forms = {
     return el('div.slider-row', input, readout);
   },
   // Draggable slider WITH a typing box — both bound to obj[key], kept in sync.
-  // opts: { step, suffix, onInput }. Used anywhere a value wants both a quick
-  // drag and an exact keyed entry (tariffs, GM editors, …).
+  // opts: { step, suffix, onInput, allowBeyondRange }. Used anywhere a value
+  // wants both a quick drag and an exact keyed entry (tariffs, GM editors,
+  // trade multipliers, …). When allowBeyondRange is true, the range remains
+  // a quick-pick aid but typed values are not clamped to its min/max.
   sliderNum(obj, key, min, max, opts) {
     opts = opts || {};
     const step = opts.step || 1;
-    const clamp = (v) => Math.max(min, Math.min(max, isFinite(v) ? v : min));
+    const clampRange = (v) => Math.max(min, Math.min(max, isFinite(v) ? v : min));
+    const clamp = (v) => opts.allowBeyondRange
+      ? Math.max(min, isFinite(v) ? v : min)
+      : clampRange(v);
     const val = clamp(Number(obj[key]));
     obj[key] = val;
-    const range = el('input.slider-input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(val), style: 'flex:1;' });
-    const box = el('input.text-input', { type: 'number', min: String(min), max: String(max), step: String(step), value: String(val), style: 'width:72px; flex:0 0 auto; text-align:right;' });
+    const range = el('input.slider-input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(clampRange(val)), style: 'flex:1;' });
+    const box = el('input.text-input', { type: 'number', min: opts.allowBeyondRange ? undefined : String(min), max: opts.allowBeyondRange ? undefined : String(max), step: String(step), value: String(val), style: 'width:72px; flex:0 0 auto; text-align:right;' });
     const suffix = opts.suffix ? el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-faint);' }, opts.suffix) : null;
     const sync = (v, from) => {
       v = clamp(Number(v)); obj[key] = v;
-      if (from !== 'range') range.value = String(v);
+      if (from !== 'range') range.value = String(clampRange(v));
       if (from !== 'box') box.value = String(v);
       if (opts.onInput) opts.onInput(v);
     };

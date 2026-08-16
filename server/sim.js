@@ -640,18 +640,19 @@ function collectTaxes(db, actor) {
 
 const clampPct = (v, def) => { const n = Number(v); return isNaN(n) ? def : Math.max(0, Math.min(100, n)); };
 const clamp01 = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+const cleanQty = (v) => Math.round((Number(v) || 0) * 1000000) / 1000000;
 function addInventory(holder, itemId, qty) {
   if (!holder || !(qty > 0)) return;
   holder.inventory = holder.inventory || [];
   const row = holder.inventory.find(r => r.itemId === itemId);
-  if (row) row.qty = (row.qty || 0) + qty; else holder.inventory.push({ itemId, qty });
+  if (row) row.qty = cleanQty((row.qty || 0) + qty); else holder.inventory.push({ itemId, qty: cleanQty(qty) });
 }
 function removeInventory(holder, itemId, qty) {
   if (!holder || !holder.inventory || !(qty > 0)) return 0;
   const row = holder.inventory.find(r => r.itemId === itemId);
   if (!row) return 0;
   const take = Math.min(row.qty || 0, qty);
-  row.qty -= take;
+  row.qty = cleanQty(row.qty - take);
   if (row.qty <= 0) holder.inventory = holder.inventory.filter(r => r !== row);
   return take;
 }
@@ -661,9 +662,20 @@ function removeInventory(holder, itemId, qty) {
 const DEMAND_CAP = { Low: 250, Med: 750, High: 2500 };
 function partnerCap(p, itemId, kind /* 'demand' | 'supply' */) {
   const explicit = p.capacity && Number(p.capacity[itemId]);
-  if (explicit > 0) return explicit;
+  const demandMult = kind === 'demand' ? partnerDemandMultiplier(p, itemId) : 1;
+  if (explicit > 0) return explicit * demandMult;
   const lvlMap = (kind === 'supply' ? p.supply : p.demand) || {};
-  return DEMAND_CAP[lvlMap[itemId]] || DEMAND_CAP.Med;
+  return (DEMAND_CAP[lvlMap[itemId]] || DEMAND_CAP.Med) * demandMult;
+}
+// Demand can be tuned globally for a partner and then multiplied again for an
+// individual item. A missing item override is neutral (1×), so old worlds keep
+// their authored demand exactly.
+function partnerDemandMultiplier(p, itemId) {
+  const total = Number(p.demandMultiplier === undefined ? 1 : p.demandMultiplier);
+  const byItem = p.demandMultiplierByItem && p.demandMultiplierByItem[itemId];
+  const item = byItem === undefined ? 1 : Number(byItem);
+  if (!Number.isFinite(total) || !Number.isFinite(item)) return 1;
+  return Math.max(0, total) * Math.max(0, item);
 }
 // Audit-ledger money move without the per-call timeline entry (routine daily
 // ops would otherwise flood the wire). Balances still move and the transaction
@@ -714,16 +726,20 @@ function runEconomy(db, actor) {
     if (!pr.ownerId) continue;
     const owner = db.entities.find(e => e.id === pr.ownerId);
     const co = owner && owner.type === 'company' ? owner : null;
-    const keepPct = co ? clampPct(co.keepPct, 0) : 0; // fallback company-wide policy
+    const keepPct = pr.keepPct !== undefined
+      ? clampPct(pr.keepPct, 0)
+      : (co ? clampPct(co.keepPct, 0) : 0); // property override, then company policy
     // Direct currency wages replace the old relative wage index. Keep the
     // derived index for the existing province happiness/employment nudges.
-    const wagePerTurn = co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0;
+    const wagePerTurn = pr.wagePerTurn !== undefined
+      ? Math.max(0, Number(pr.wagePerTurn) || 0)
+      : (co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0);
     const wageIdx = co ? wagePerTurn * 100 : 100;
     const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
 
     // gross production value (drives GDP): private at output, public at cost
     let gross;
-    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + Math.round((e.perTurn || 0) * f) * priceOf(e.itemId), 0);
+    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId), 0);
     else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f;
     else gross = pr.expenses || 0;
     if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
@@ -738,11 +754,13 @@ function runEconomy(db, actor) {
     if (pr.prodMode === 'goods') {
       for (const e of (pr.produces || [])) {
         const retail = priceOf(e.itemId);
-        const produced = Math.round((e.perTurn || 0) * f);
+        const produced = cleanQty((e.perTurn || 0) * f);
         if (produced <= 0) continue;
-        const itemKeepPct = co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
-          ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct;
-        const keep = Math.floor(produced * itemKeepPct / 100);
+        const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
+          ? clampPct(pr.keepPctByItem[e.itemId], keepPct)
+          : (co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
+            ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct);
+        const keep = cleanQty(produced * itemKeepPct / 100);
         if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
         o.dom += (produced - keep) * retail;
       }
@@ -1041,7 +1059,9 @@ function generateTradeOrders(db) {
       // abundant suppliers undercut (inverted for supply)
       const lvlMult = kind === 'demand' ? (LVL_PRICE[lvl] || 1) : (1 / (LVL_PRICE[lvl] || 1));
       const drift = 1 + (Math.random() * 2 - 1) * (p.priceDrift || 0.05);
-      let qty = Math.max(1, Math.round(partnerCap(p, iid, kind) * (0.55 + Math.random() * 0.9)));
+      const cap = partnerCap(p, iid, kind);
+      if (!(cap > 0)) return null;
+      let qty = Math.max(1, Math.round(cap * (0.55 + Math.random() * 0.9)));
       // Heavy military hardware is scarce on the world market (feature:
       // "reduce their stock — at most, high supply, 100 tanks and 5 ships on
       // the international exchange"): whatever the partner's generic capacity
@@ -1136,7 +1156,7 @@ function executeTrade(side, orderId, holderId, qty, actor) {
   const item = db.items.find(i => i.id === order.itemId);
   if (!item) throw new Error('Unknown item');
   if (item.tradable === false) throw new Error('That item is no longer tradable.');
-  qty = Math.round(Number(qty));
+  qty = cleanQty(qty);
   const remaining = order.qty - (order.filled || 0);
   if (!(qty > 0)) throw new Error('Quantity must be positive');
   if (qty > remaining) qty = remaining;

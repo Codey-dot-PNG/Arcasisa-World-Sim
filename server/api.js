@@ -16,6 +16,7 @@ const war = require('./war');
 const warScenarios = require('./war-scenarios');
 
 const COOKIE_EXTRA = process.env.VERCEL ? '; Secure' : '';
+const cleanQty = (v) => Math.round((Number(v) || 0) * 1000000) / 1000000;
 
 // ---------- SSE hub (file mode) / realtime ping (cloud mode) ---------------
 const sseClients = new Set();
@@ -760,7 +761,7 @@ async function handle(req, res, pathname, method) {
       const fromEnt = db.entities.find(e => e.id === (b.fromEntityId || u.user.entityId));
       const toEnt = db.entities.find(e => e.id === b.toEntityId);
       const item = db.items.find(i => i.id === b.itemId);
-      const qty = Math.round(Number(b.qty));
+      const qty = cleanQty(b.qty);
       if (!fromEnt || !toEnt || !item) return bad('Unknown entity or item.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
@@ -802,7 +803,7 @@ async function handle(req, res, pathname, method) {
       const owner = db.entities.find(e => e.id === pr.ownerId);
       if (!owner) return bad('The property has no owner entity to move goods to.');
       const item = db.items.find(i => i.id === b.itemId);
-      const qty = Math.round(Number(b.qty));
+      const qty = cleanQty(b.qty);
       if (!item || !(qty > 0)) return bad('Item and a positive quantity are required.');
       if (item.meta && (item.meta.companyId || item.meta.propertyId)) return bad('Certificates and deeds are ownership records — they cannot be stored on site.');
       const withdraw = b.direction === 'withdraw'; // site → owner; otherwise owner → site
@@ -819,6 +820,46 @@ async function handle(req, res, pathname, method) {
       store.log('inventory', `${qty} × ${item.name} ${withdraw ? 'withdrawn from' : 'deposited at'} ${pr.name}`, '', u.user.displayName, [pr.ownerId, pr.id, item.id]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });
+    }
+
+    // ---- property operations (Phase 28) ---------------------------------
+    // A property may be owned directly by a person, so operations cannot be
+    // limited to the company desk. These controls are deliberately scoped to
+    // the property: output, cash mode, stock policy and local payroll.
+    const propertyControlsMatch = pathname.match(/^\/api\/property\/([\w-]+)\/controls$/);
+    if (propertyControlsMatch && method === 'PATCH') {
+      const pr = db.properties.find(p => p.id === propertyControlsMatch[1]);
+      if (!pr) return bad('No such property.');
+      const gm = u.role.perms.gm;
+      if (!gm && (!pr.ownerId || !ownership.controls(u.user.entityId, pr.ownerId))) return deny('You do not control this property.');
+      const b = await readBody(req);
+      const clampPct = (n, fallback) => Math.max(0, Math.min(100, Number.isFinite(Number(n)) ? Number(n) : fallback));
+      const cleanQty = (n) => Math.round((Number(n) || 0) * 1000000) / 1000000;
+      if (b.keepPct !== undefined) pr.keepPct = clampPct(b.keepPct, 0);
+      if (b.wagePerTurn !== undefined) pr.wagePerTurn = Math.max(0, Math.min(1000000, cleanQty(b.wagePerTurn)));
+      if (b.keepPctByItem && typeof b.keepPctByItem === 'object') {
+        pr.keepPctByItem = {};
+        for (const iid of Object.keys(b.keepPctByItem)) {
+          if (db.items.some(i => i.id === iid)) pr.keepPctByItem[iid] = clampPct(b.keepPctByItem[iid], pr.keepPct);
+        }
+      }
+      if (b.prodMode !== undefined) {
+        if (!['none', 'goods', 'cash'].includes(b.prodMode)) return bad('Invalid property operation mode.');
+        pr.prodMode = b.prodMode;
+      }
+      if (Array.isArray(b.produces)) {
+        pr.produces = b.produces.slice(0, 32).map(row => ({
+          itemId: String(row.itemId || ''), perTurn: cleanQty(row.perTurn)
+        })).filter(row => row.itemId && row.perTurn >= 0 && db.items.some(i => i.id === row.itemId));
+      }
+      if (b.cashPerTurn !== undefined) pr.cashPerTurn = Math.max(0, cleanQty(b.cashPerTurn));
+      store.log('economy', `${pr.name} adjusts operations`,
+        `${pr.prodMode || 'none'} · ${pr.keepPct || 0}% kept · wages ${pr.wagePerTurn || 0} per employee/turn`, u.user.displayName, [pr.id, pr.ownerId]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, property: {
+        id: pr.id, prodMode: pr.prodMode, produces: pr.produces || [], cashPerTurn: pr.cashPerTurn || 0,
+        keepPct: pr.keepPct, keepPctByItem: pr.keepPctByItem || {}, wagePerTurn: pr.wagePerTurn
+      }});
     }
 
     // ---- negotiated trade offers (Phase 4.3) ----
@@ -953,7 +994,7 @@ async function handle(req, res, pathname, method) {
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
       if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
       const cleanRows = (arr) => (Array.isArray(arr) ? arr : [])
-        .map(r => ({ itemId: String(r.itemId || ''), qty: Math.round(Number(r.qty)) }))
+        .map(r => ({ itemId: String(r.itemId || ''), qty: cleanQty(r.qty) }))
         .filter(r => r.itemId && r.qty > 0 && db.items.some(i => i.id === r.itemId));
       const give = cleanRows(b.give);
       const get = cleanRows(b.get);
@@ -1460,7 +1501,7 @@ async function handle(req, res, pathname, method) {
         const fromE = db.entities.find(e => e.id === b.fromEntityId);
         const toE = db.entities.find(e => e.id === b.toEntityId);
         const item = db.items.find(i => i.id === b.itemId);
-        const qty = Math.round(Number(b.qty));
+        const qty = cleanQty(b.qty);
         if (!fromE || !toE) return bad('Pick a valid source and destination holder.');
         if (fromE.id === toE.id) return bad('Source and destination are the same.');
         if (!item) return bad('Unknown item.');

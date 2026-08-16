@@ -36,6 +36,7 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `POST /api/trades/:id/(accept\|decline\|cancel)` | accept validates everything first, then moves items/money; single-company cert-vs-cash trades re-mark the day quote |
 | `PATCH /api/entity/:id` | owner-editable descriptive fields only (description, color, logo) |
 | `PATCH /api/company/:id/controls` | CEO/owner: `keepPct, govMix, govPriceMult, wage, govMixByItem` |
+| `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |
 | `PATCH /api/trade/controls` | President (controls `ent_gov`) or GM: `govBuy`, `exports`, `imports` |
 
 ## Market (Phase 4.4 / Workstream A)

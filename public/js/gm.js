@@ -341,6 +341,9 @@ const GM = {
     const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
     const ent = entById(p.entityId);
     const box = el('div.stage', { style: 'margin-bottom:12px;' });
+    p.demandMultiplier = p.demandMultiplier === undefined ? 1 : p.demandMultiplier;
+    p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.priceMult = p.priceMult || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+    p.demandMultiplierByItem = p.demandMultiplierByItem || {};
     box.appendChild(el('div.stage-header',
       el('span.stage-chapter', ent ? ent.name : (p.entityId || 'Partner')),
       opts.lockEntity ? null : el('button.icon-btn', { title: 'Remove partner', onclick: () => { trade.partners.splice(pi, 1); App.renderView(); } }, '✕')));
@@ -348,8 +351,9 @@ const GM = {
       opts.lockEntity ? null : F.field('Partner', F.sel(p, 'entityId', foreigns.map(e => [e.id, e.name]), () => App.renderView())),
       F.field('Tariff', F.sel(p, 'tariff', [['Low', 'Low'], ['Med', 'Medium'], ['High', 'High']])),
       F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
-      F.field('Price drift ±', F.num(p, 'priceDrift', '0.01'))));
-    p.exports = p.exports || []; p.imports = p.imports || []; p.prices = p.prices || {}; p.priceMult = p.priceMult || {}; p.demand = p.demand || {}; p.supply = p.supply || {};
+      F.field('Price drift ±', F.num(p, 'priceDrift', '0.01')),
+      F.field('Partner demand ×', Forms.sliderNum(p, 'demandMultiplier', 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+        'Scales all goods this partner wants to buy. Typed values may exceed the slider range.')));
     // implied multiplier for a legacy absolute price, so old worlds show a
     // sensible starting multiplier before they're re-authored
     const multOf = (it) => {
@@ -377,10 +381,16 @@ const GM = {
           const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
           const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(it.marketValue * (p.priceMult[it.id] || 1) * 100) / 100); };
           paint();
-          const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', onInput: () => { delete p.prices[it.id]; paint(); } });
+          const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', allowBeyondRange: true, onInput: () => { delete p.prices[it.id]; paint(); } });
           const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
           lvlSel.style.maxWidth = '84px';
-          row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px;' }, el('div', { style: 'flex:1;' }, slider), priceOut, lvlSel));
+          if (lvlKey === 'demand' && p.demandMultiplierByItem[it.id] === undefined) p.demandMultiplierByItem[it.id] = 1;
+          const demandControl = lvlKey === 'demand'
+            ? el('div', { style: 'min-width:250px; flex:1 1 300px;' },
+                el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-bottom:2px;' }, 'ITEM DEMAND × · ON TOP OF PARTNER'),
+                Forms.sliderNum(p.demandMultiplierByItem, it.id, 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }))
+            : null;
+          row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px; flex-wrap:wrap;' }, el('div', { style: 'flex:1 1 220px;' }, slider), priceOut, demandControl, lvlSel));
         }
         box.appendChild(row);
       });
@@ -692,7 +702,7 @@ const GM = {
     if (pi < 0) {
       main.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, e.name + ' is not yet a trade partner.'));
       main.appendChild(el('div.btn-row', el('button.solid-btn', {
-        onclick: () => { trade.partners.push({ entityId: e.id, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
+        onclick: () => { trade.partners.push({ entityId: e.id, tariff: 'Low', netBalance: 0, priceDrift: 0.05, demandMultiplier: 1, demandMultiplierByItem: {}, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
       }, '+ Make ' + e.name + ' a trade partner')));
       return;
     }
@@ -1029,14 +1039,14 @@ const GM = {
   },
 
   /* Production section (Phase 13). A property either mints goods (its owner
-     sells them) or generates cash. For goods, the GM enters a target revenue
-     and the units/turn are back-calculated from the item's market value. */
+     sells them) or generates cash. Goods accept fractional units per turn —
+     useful for slow production lines such as one aircraft every 50 turns. */
   productionEditor(d) {
     const F = this;
     const box = el('div');
     box.appendChild(Views.secLabel('Production (per turn)'));
     box.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Runs every turn. “Produces goods” mints items into this property’s stock for the owner to sell; “Generates cash” pays money directly (casinos, banks, offices). Enter a target revenue and the units/turn are computed from the item price.'));
+      'Runs every turn. “Produces goods” mints items into this property’s stock for the owner to sell; “Generates cash” pays money directly (casinos, banks, offices). Units per turn may be fractional.'));
     if (d.prodMode === undefined) d.prodMode = (d.produces && d.produces.length) ? 'goods' : (d.cashPerTurn ? 'cash' : 'none');
     box.appendChild(this.field('Mode', this.sel(d, 'prodMode',
       [['none', 'Nothing (upkeep only)'], ['goods', 'Produces goods'], ['cash', 'Generates cash']], () => App.renderView())));
@@ -1045,15 +1055,14 @@ const GM = {
       const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category));
       d.produces = (d.produces && d.produces.length) ? d.produces : [{ itemId: (goods[0] || {}).id, perTurn: 1 }];
       d.produces.forEach((row, i) => {
-        const priceNow = () => { const it = itemById(row.itemId); return it ? (it.marketValue || 0) : 0; };
-        const unitOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); padding-bottom:9px; white-space:nowrap;' }, '≈ ' + fmtNum(row.perTurn || 0) + '/turn');
+        const unitOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); padding-bottom:9px; white-space:nowrap;' }, '≈ ' + fmtNum(row.perTurn || 0, 4) + '/turn');
         const revInput = el('input.text-input', {
-          type: 'number', value: Math.round((row.perTurn || 0) * priceNow()),
-          oninput: (e) => { const rev = Number(e.target.value) || 0; row.perTurn = priceNow() > 0 ? Math.max(0, Math.round(rev / priceNow())) : 0; unitOut.textContent = '≈ ' + fmtNum(row.perTurn) + '/turn'; }
+          type: 'number', min: '0', step: '0.000001', value: row.perTurn || 0,
+          oninput: (e) => { row.perTurn = Math.max(0, Number(e.target.value) || 0); unitOut.textContent = '≈ ' + fmtNum(row.perTurn, 4) + '/turn'; }
         });
         box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:6px; flex-wrap:wrap;' },
           el('div', { style: 'flex:1 1 180px' }, F.field('Item produced', F.sel(row, 'itemId', goods.map(it => [it.id, it.name + ' (' + CUR() + fmtNum(it.marketValue) + ')']), () => App.renderView()))),
-          el('div', { style: 'flex:1 1 150px' }, F.field('Target revenue / turn (' + CUR() + ')', revInput)),
+          el('div', { style: 'flex:1 1 150px' }, F.field('Units / turn', revInput)),
           unitOut,
           el('button.icon-btn', { style: 'padding-bottom:8px;', onclick: () => { d.produces.splice(i, 1); App.renderView(); } }, '✕')));
       });
@@ -1388,7 +1397,7 @@ const GM = {
       main.appendChild(this.tradePartnerBox(trade, p, pi));
     });
     main.appendChild(el('div.btn-row', el('button.dash-btn', {
-      onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
+      onclick: () => { const used = new Set(trade.partners.map(p => p.entityId)); const avail = foreigns.find(e => !used.has(e.id)) || foreigns[0]; trade.partners.push({ entityId: avail ? avail.id : null, tariff: 'Low', netBalance: 0, priceDrift: 0.05, demandMultiplier: 1, demandMultiplierByItem: {}, exports: [], imports: [], prices: {}, demand: {}, supply: {} }); App.renderView(); }
     }, '+ Add partner')));
 
     main.appendChild(el('div.btn-row', { style: 'margin-top:18px; border-top:1px dashed var(--rule-strong); padding-top:14px;' },

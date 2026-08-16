@@ -567,11 +567,10 @@ const Views = {
       wrap.appendChild(this.inventoryTable(pr.inventory, pr.ownerId));
     }
     if (controlsProp) {
-      const opsBtn = isGM() ? el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations') : null;
       wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items'),
-        opsBtn));
+        el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations')));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
@@ -1202,20 +1201,15 @@ const Views = {
     const owner = entById(pr.ownerId);
     const province = provById(pr.provinceId);
     const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const prodMode = pr.prodMode || 'none';
+    const produces = pr.produces || [];
     const baseKeep = pr.keepPct !== undefined ? pr.keepPct : (owner && owner.type === 'company' ? (owner.keepPct || 0) : 0);
     const baseWage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (owner && owner.type === 'company' ? (owner.wagePerTurn || 1) : 0);
-    const draftId = 'property:' + pr.id;
-    const dr = (W.propOpsDraft && W.propOpsDraft.id === draftId) ? W.propOpsDraft : (W.propOpsDraft = {
-      id: draftId, prodMode: pr.prodMode || 'none', cashPerTurn: pr.cashPerTurn || 0,
-      keepPct: baseKeep, wagePerTurn: baseWage,
-      keepPctByItem: Object.assign({}, pr.keepPctByItem || {}),
-      produces: (pr.produces || []).map(e => ({ itemId: e.itemId, perTurn: e.perTurn || 0 }))
-    });
-    const producedItems = [...new Set(dr.produces.map(e => e.itemId))].filter(iid => itemById(iid));
-    const revenue = dr.prodMode === 'goods'
-      ? dr.produces.reduce((s, e) => s + (Number(e.perTurn) || 0) * priceOf(e.itemId), 0)
-      : dr.prodMode === 'cash' ? (Number(dr.cashPerTurn) || 0) : 0;
-    const wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0);
+    const producedItems = [...new Set(produces.map(e => e.itemId))].filter(iid => itemById(iid));
+    const revenue = prodMode === 'goods'
+      ? produces.reduce((s, e) => s + (Number(e.perTurn) || 0) * priceOf(e.itemId), 0)
+      : prodMode === 'cash' ? (Number(pr.cashPerTurn) || 0) : 0;
+    const wages = (pr.employees || 0) * (Number(baseWage) || 0);
     const upkeep = pr.expenses || 0;
 
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
@@ -1230,61 +1224,28 @@ const Views = {
     ]));
 
     inner.appendChild(this.secLabel('Operations'));
-    inner.appendChild(el('div.form-grid',
-      Forms.field('Mode', Forms.sel(dr, 'prodMode', [['none', 'Nothing (upkeep only)'], ['goods', 'Produces goods'], ['cash', 'Generates cash']], () => App.renderView())),
-      Forms.field('Keep in stock (%)', Forms.sliderNum(dr, 'keepPct', 0, 100, { step: 1, suffix: '%' }),
-        'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
-      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'))));
+    inner.appendChild(this.kv('Mode', prodMode === 'goods' ? 'Produces goods' : prodMode === 'cash' ? 'Generates cash' : 'None (upkeep only)'));
+    inner.appendChild(this.kv('Keep in stock (%)', String(baseKeep) + '%'));
+    inner.appendChild(this.kv('Wage / employee / turn', fmtMoney(baseWage)));
 
-    if (dr.prodMode === 'goods') {
+    if (prodMode === 'goods') {
       inner.appendChild(this.secLabel('Production lines'));
-      const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category));
-      const rows = el('div');
-      const renderRows = () => {
-        clear(rows);
-        dr.produces.forEach((line, i) => {
-          rows.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:7px; flex-wrap:wrap;' },
-            el('div', { style: 'flex:1 1 240px;' }, Forms.field('Product', Forms.sel(line, 'itemId', goods.map(it => [it.id, it.name])))),
-            el('div', { style: 'flex:0 1 150px;' }, Forms.field('Units / turn', Forms.num(line, 'perTurn', '0.000001'))),
-            el('button.icon-btn', { onclick: () => { dr.produces.splice(i, 1); renderRows(); } }, '✕')));
-        });
-      };
-      renderRows();
-      inner.appendChild(rows);
-      inner.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => { dr.produces.push({ itemId: (goods[0] || {}).id, perTurn: 0 }); renderRows(); } }, '+ Add production line')));
-
-      if (producedItems.length) {
-        const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th', 'Keep / sell'), el('th.num', 'Made / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
-        const body = el('tbody');
-        producedItems.forEach(iid => {
-          if (dr.keepPctByItem[iid] === undefined) dr.keepPctByItem[iid] = dr.keepPct;
-          const made = dr.produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
-          const kept = made * Math.max(0, Math.min(100, Number(dr.keepPctByItem[iid]) || 0)) / 100;
-          const site = (pr.inventory || []).find(r => r.itemId === iid);
-          body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
-            el('td', Forms.sliderNum(dr.keepPctByItem, iid, 0, 100, { step: 1, suffix: '%' })),
-            el('td.num', fmtNum(made, 4)), el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
-        });
-        tbl.appendChild(body); inner.appendChild(tbl);
-      }
-    } else if (dr.prodMode === 'cash') {
-      inner.appendChild(el('div.form-grid', Forms.field('Cash generated / turn (' + CUR() + ')', Forms.num(dr, 'cashPerTurn', '0.01'))));
+      const tbl = el('table.data', el('thead', el('tr', el('th', 'Product'), el('th.num', 'Made / turn'), el('th.num', 'Kept / turn'), el('th.num', 'Site stock'))));
+      const body = el('tbody');
+      producedItems.forEach(iid => {
+        const made = produces.filter(e => e.itemId === iid).reduce((s, e) => s + (Number(e.perTurn) || 0), 0);
+        const pct = pr.keepPctByItem && pr.keepPctByItem[iid] !== undefined ? pr.keepPctByItem[iid] : baseKeep;
+        const kept = made * Math.max(0, Math.min(100, Number(pct) || 0)) / 100;
+        const site = (pr.inventory || []).find(r => r.itemId === iid);
+        body.appendChild(el('tr', el('td', (itemById(iid) || { name: iid }).name),
+          el('td.num', fmtNum(made, 4)), el('td.num', fmtNum(kept, 4)), el('td.num', fmtNum(site ? site.qty : 0, 4))));
+      });
+      tbl.appendChild(body); inner.appendChild(tbl);
+    } else if (prodMode === 'cash') {
+      inner.appendChild(this.kv('Cash generated / turn', fmtMoney(Number(pr.cashPerTurn) || 0)));
     }
-    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
-      onclick: async (ev) => {
-        const btn = ev.currentTarget; btn.disabled = true;
-        try {
-          const r = await PATCH('/api/property/' + pr.id + '/controls', {
-            prodMode: dr.prodMode, produces: dr.produces, cashPerTurn: dr.cashPerTurn,
-            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn
-          });
-          if (r && r.property) Object.assign(pr, r.property);
-          W.propOpsDraft = null;
-          toast('Property operations saved.');
-          App.renderView();
-        } catch (err) { toast(err.message, true); btn.disabled = false; }
-      }
-    }, 'Save Property Operations')));
+    inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-top:14px;' },
+      'Operations are set by the Game Master — this page is read-only.'));
   },
 
   /* ---- International Trade (Phase 15 — the open market) ---- */
@@ -1908,13 +1869,15 @@ const Views = {
     return S().entities.filter(e => e.type === 'company' &&
       (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
   },
-  // Properties whose Production/Ops desk is actionable here — GM-only: tuning
-  // what a site outputs is an economy-defining lever, so non-GMs never see
-  // the desk or the tab (server /api/property/:id/controls also enforces it).
+  // Any property whose owner sits in the current user's control chain is
+  // viewable here, including properties owned directly by a person. The page
+  // is read-only — production tuning is a Game Master lever (the GM Studio
+  // edits it; the server /api/property/:id/controls route is GM-only).
   opsProperties() {
     if (!S()) return [];
-    if (!isGM()) return [];
-    return S().properties.filter(pr => pr.ownerId);
+    const mine = W.me && W.me.entityId;
+    return S().properties.filter(pr => pr.ownerId &&
+      (isGM() || (mine && ownership_controlsClient(mine, pr.ownerId))));
   },
   govEntity() {
     return S().entities.find(e => e.id === 'ent_gov') || S().entities.find(e => e.type === 'government');

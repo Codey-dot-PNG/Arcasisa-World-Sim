@@ -1688,6 +1688,32 @@ function setLongLived(v) { longLived = !!v; }
 // doesn't maintain auto.lastTick), hence the guard.
 function isLongLived() { return longLived; }
 
+function worldClockNow(t, now) {
+  t = t || {};
+  const c = t.clock || {};
+  const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
+  const anchor = Number(c.anchorRealMs) || Date.now();
+  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60) / 60000;
+  return base + ((Number(now) || Date.now()) - anchor) * rate;
+}
+
+function parseClockMinutes(value) {
+  const m = String(value || '08:00').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return 8 * 60;
+  return Math.min(1439, Math.max(0, Number(m[1]) * 60 + Number(m[2])));
+}
+
+function clockTurnsDue(t, now) {
+  const current = worldClockNow(t, now);
+  const previous = Number(t.auto.lastWorldMs) || current;
+  const at = parseClockMinutes(t.auto.at);
+  const day = 86400000;
+  const firstDay = Math.floor(previous / day) * day + at * 60000;
+  const first = firstDay <= previous ? firstDay + day : firstDay;
+  if (first > current) return { due: 0, current };
+  return { due: Math.min(30, Math.floor((current - first) / day) + 1), current };
+}
+
 function scheduleAuto() {
   if (!longLived) return;
   const db = store.get();
@@ -1695,7 +1721,7 @@ function scheduleAuto() {
   const auto = db.settings.time.auto;
   if (auto && auto.enabled) {
     autoTimer = setInterval(() => {
-      try { advanceTurn(1, 'AUTO'); } catch (e) { console.error('auto-advance failed:', e); }
+      try { autoTick('AUTO'); } catch (e) { console.error('auto-advance failed:', e); }
     }, Math.max(15, auto.seconds || 3600) * 1000);
   }
 }
@@ -1703,6 +1729,20 @@ function scheduleAuto() {
 function autoTick(actor) {
   const t = store.get().settings.time;
   if (!t.auto || !t.auto.enabled) return { advanced: 0, enabled: false };
+  if (t.auto.mode === 'clock') {
+    if (!t.clock || !t.clock.enabled) return { advanced: 0, enabled: true, mode: 'clock', turn: t.turn };
+    const hit = clockTurnsDue(t, Date.now());
+    if (!t.auto.lastWorldMs) t.auto.lastWorldMs = hit.current;
+    if (hit.due > 0) {
+      advanceTurn(hit.due, actor || 'AUTO');
+      // Move the watermark to now so a dormant serverless app catches up once
+      // rather than replaying the same wall-clock crossings on every request.
+      t.auto.lastWorldMs = hit.current;
+      store.save();
+      return { advanced: hit.due, enabled: true, mode: 'clock', turn: t.turn, worldMs: hit.current };
+    }
+    return { advanced: 0, enabled: true, mode: 'clock', turn: t.turn, worldMs: hit.current };
+  }
   const now = Date.now();
   const stepMs = Math.max(15, t.auto.seconds || 3600) * 1000;
   if (!t.auto.lastTick) {
@@ -1724,6 +1764,6 @@ module.exports = {
   runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
-  shiftRelations, relationsOf,
+  shiftRelations, relationsOf, worldClockNow,
   findProv, findEnt, findItem
 };

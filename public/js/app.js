@@ -5,6 +5,7 @@
 // restore scroll positions while a real view switch (App.go) still lands at
 // the top as expected.
 let lastRenderedView = null;
+let worldClockTimer = null;
 
 // Content fingerprint over everything GameMap.render() draws from. A sync
 // that leaves these byte-identical cannot change the map, so renderView may
@@ -162,10 +163,27 @@ const App = {
     document.getElementById('brand-world').textContent = (S().settings.worldName || 'ARCASIA').toUpperCase();
     document.getElementById('clock-turn').textContent = 'TURN ' + t.turn;
     document.getElementById('clock-date').textContent = fmtDate(t.date);
+    this.renderWorldClock();
     document.getElementById('clock-auto').classList.toggle('hidden', !(t.auto && t.auto.enabled));
     document.getElementById('advance-btn').classList.toggle('hidden', !isGM());
     document.getElementById('user-name').textContent = W.me.displayName;
     document.getElementById('user-role').textContent = W.me.role.name;
+    if (!worldClockTimer) worldClockTimer = setInterval(() => this.renderWorldClock(), 1000);
+  },
+
+  renderWorldClock() {
+    const out = document.getElementById('clock-world');
+    const state = S();
+    if (!out || !state) return;
+    const t = state.settings.time || {};
+    const c = t.clock || {};
+    if (!c.enabled) { out.textContent = 'WORLD PAUSED'; return; }
+    const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
+    const anchor = Number(c.anchorRealMs) || Date.now();
+    const rate = Math.max(0, Number(c.minutesPerRealMinute) || 60) / 60000;
+    const d = new Date(base + (Date.now() - anchor) * rate);
+    const iso = d.toISOString();
+    out.textContent = 'WORLD ' + iso.slice(0, 10) + ' ' + iso.slice(11, 16);
   },
 
   renderView(fresh) {

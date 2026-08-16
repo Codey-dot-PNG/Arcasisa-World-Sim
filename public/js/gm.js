@@ -703,7 +703,10 @@ const GM = {
     const d = this.getDraft('world', {
       worldName: s.worldName, currency: s.currency, currencyName: s.currencyName, parliamentSeats: s.parliamentSeats,
       unit: s.time.unit, perTurn: s.time.perTurn, date: s.time.date,
+      clockEnabled: s.time.clock ? s.time.clock.enabled : true,
+      clockSpeed: s.time.clock ? s.time.clock.minutesPerRealMinute : 60,
       autoEnabled: s.time.auto.enabled, autoSeconds: s.time.auto.seconds,
+      autoMode: s.time.auto.mode || 'interval', autoAt: s.time.auto.at || '08:00',
       regOpen: s.registration.open, regRole: s.registration.defaultRole, regStipend: s.registration.stipend,
       newsTx: s.newsThresholds.transaction,
       // Taxation lives in the same draft object (not a second getDraft() key)
@@ -738,7 +741,13 @@ const GM = {
       this.field('Current date (YYYY-MM-DD)', this.text(d, 'date')),
       this.field('', el('span'))));
     main.appendChild(this.check(d, 'autoEnabled', 'Auto-advance the simulation'));
-    main.appendChild(el('div.form-grid', this.field('Real seconds per turn (auto)', this.num(d, 'autoSeconds'))));
+    main.appendChild(this.check(d, 'clockEnabled', 'Run the wall-clock world time'));
+    main.appendChild(el('div.form-grid',
+      this.field('World minutes per real minute', this.num(d, 'clockSpeed')),
+      this.field('Auto mode', this.sel(d, 'autoMode', [['interval', 'Every real-time interval'], ['clock', 'At world-clock time']]))));
+    main.appendChild(el('div.form-grid',
+      this.field('Real seconds per turn (interval mode)', this.num(d, 'autoSeconds')),
+      this.field('Advance at (clock mode, HH:MM)', this.text(d, 'autoAt'))));
 
     main.appendChild(Views.secLabel('Registration & Wire Service'));
     main.appendChild(this.check(d, 'regOpen', 'Open registration (players can request citizenship)'));
@@ -752,7 +761,11 @@ const GM = {
         try {
           await PATCH('/api/gm/settings', {
             worldName: d.worldName, currency: d.currency, currencyName: d.currencyName, parliamentSeats: Number(d.parliamentSeats) || 150,
-            time: { unit: d.unit, perTurn: Number(d.perTurn) || 1, date: d.date, auto: { enabled: !!d.autoEnabled, seconds: Number(d.autoSeconds) || 3600 } },
+            time: {
+              unit: d.unit, perTurn: Number(d.perTurn) || 1, date: d.date,
+              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 60 },
+              auto: { enabled: !!d.autoEnabled, mode: d.autoMode, at: d.autoAt, seconds: Number(d.autoSeconds) || 3600 }
+            },
             registration: { open: !!d.regOpen, defaultRole: d.regRole, stipend: Number(d.regStipend) || 0 },
             newsThresholds: { transaction: Number(d.newsTx) || 5000000 }
           });

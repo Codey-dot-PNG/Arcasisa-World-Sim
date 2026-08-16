@@ -96,6 +96,19 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
+  // Phase 30 — wall-clock world time. The anchor makes the clock continue
+  // while no browser is open; request/cron ticks only materialise due turns.
+  if (world.settings && world.settings.time) {
+    const t = world.settings.time;
+    if (!t.clock) {
+      const base = Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
+      t.clock = { enabled: true, minutesPerRealMinute: 60, anchorRealMs: Date.now(), anchorWorldMs: base };
+      changed = true;
+    }
+    if (!t.auto) { t.auto = { enabled: false, seconds: 3600 }; changed = true; }
+    if (!t.auto.mode) { t.auto.mode = 'interval'; changed = true; }
+    if (!t.auto.at) { t.auto.at = '08:00'; changed = true; }
+  }
 
   // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded
   // once (flag-gated); the GM freely edits stats/names or mints new models
@@ -1612,7 +1625,6 @@ function log(type, title, detail, actor, refs) {
 // their own table.
 function recordTxn(t) {
   db.transactions.push(t);
-  if (db.transactions.length > 12000) db.transactions.splice(0, db.transactions.length - 12000);
   if (MODE !== 'file') pendingTxns.push(t);
 }
 

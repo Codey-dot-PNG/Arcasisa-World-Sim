@@ -356,6 +356,43 @@ function cascadeDelete(coll, obj) {
   }
 }
 
+// Paginated transaction history. The state payload intentionally contains a
+// recent window, but the ledger itself is append-only and can be browsed back
+// indefinitely. Visibility follows the same account permissions as state.
+async function ledgerPage(u, query) {
+  const db = store.get();
+  const p = u.role.perms;
+  const controlled = u.user.entityId ? ownership.controlledSet(u.user.entityId) : new Set();
+  const visible = p.accounts === 'all'
+    ? db.accounts
+    : p.accounts === 'own' ? db.accounts.filter(a => controlled.has(a.ownerId)) : [];
+  const visibleIds = new Set(visible.map(a => a.id));
+  const requested = query.get('account');
+  const accountIds = requested ? new Set([requested].filter(id => visibleIds.has(id))) : visibleIds;
+  const limit = Math.max(1, Math.min(100, Number(query.get('limit')) || 80));
+  const before = Number(query.get('before'));
+  const matches = (t) => {
+    if (Number.isFinite(before) && before > 0 && Number(t.ts) >= before) return false;
+    return (t.from && accountIds.has(t.from)) || (t.to && accountIds.has(t.to));
+  };
+
+  if (store.MODE === 'supabase') {
+    if (!accountIds.size) return { transactions: [], hasMore: false, nextBefore: null };
+    const ids = [...accountIds].join(',');
+    const clauses = `or=(from_acct.in.(${ids}),to_acct.in.(${ids}))`;
+    const cursor = Number.isFinite(before) && before > 0 ? `&ts=lt.${Math.floor(before)}` : '';
+    const rows = await sb.select('transactions', `select=*&${clauses}${cursor}&order=ts.desc&limit=${limit + 1}`);
+    const all = rows.map(r => ({ id: r.id, ts: Number(r.ts), turn: r.turn, simDate: r.sim_date, from: r.from_acct, to: r.to_acct, amount: Number(r.amount), memo: r.memo, actor: r.actor, kind: r.kind }));
+    const hasMore = all.length > limit;
+    const transactions = all.slice(0, limit);
+    return { transactions, hasMore, nextBefore: hasMore && transactions.length ? transactions[transactions.length - 1].ts : null };
+  }
+
+  const all = db.transactions.filter(matches).slice().sort((a, b) => Number(b.ts) - Number(a.ts));
+  const transactions = all.slice(0, limit);
+  return { transactions, hasMore: all.length > limit, nextBefore: all.length > limit && transactions.length ? transactions[transactions.length - 1].ts : null };
+}
+
 // ---------- request handling ----------------------------------------------
 async function handle(req, res, pathname, method) {
   if (!pathname.startsWith('/api/')) return false;
@@ -500,6 +537,10 @@ async function handle(req, res, pathname, method) {
     // per turn and cache client-side. Same role filtering as filterState.
     if (pathname === '/api/history' && method === 'GET') {
       return json(res, 200, { history: histView(db, u.role.perms), turn: db.settings.time.turn });
+    }
+    if (pathname === '/api/ledger' && method === 'GET') {
+      const q = new URL(req.url, 'http://localhost').searchParams;
+      return json(res, 200, await ledgerPage(u, q));
     }
     // Full article body (Phase 21 payload diet) — the state's news list is
     // metadata-only. Visibility mirrors filterState: drafts require manageNews.
@@ -1499,11 +1540,19 @@ async function handle(req, res, pathname, method) {
         const s = db.settings;
         for (const k of ['worldName', 'currency', 'currencyName', 'parliamentSeats']) if (b[k] !== undefined) s[k] = b[k];
         if (b.time) {
+          const oldDate = s.time.date;
           Object.assign(s.time, b.time);
+          s.time.clock = s.time.clock || { enabled: true, minutesPerRealMinute: 60 };
+          if (b.time.date !== undefined || b.time.clock) {
+            const base = Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now();
+            s.time.clock.anchorRealMs = Date.now();
+            s.time.clock.anchorWorldMs = base;
+            if (s.time.auto) s.time.auto.lastWorldMs = sim.worldClockNow(s.time, Date.now());
+          }
           // editing the auto schedule restarts its clock — otherwise a stale
           // lastTick from a previous enable makes the serverless autoTick
           // "catch up" with a burst of turns the moment auto is re-enabled
-          if (b.time.auto) { Object.assign(s.time.auto, b.time.auto); s.time.auto.lastTick = Date.now(); }
+          if (b.time.auto) { Object.assign(s.time.auto, b.time.auto); s.time.auto.lastTick = Date.now(); s.time.auto.lastWorldMs = sim.worldClockNow(s.time, Date.now()); }
         }
         if (b.registration) Object.assign(s.registration, b.registration);
         if (b.newsThresholds) Object.assign(s.newsThresholds, b.newsThresholds);

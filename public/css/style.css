@@ -246,8 +246,12 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   color:var(--ink-soft); display:flex; gap:10px; align-items:center; white-space:nowrap;
 }
 #clock-turn{color:var(--accent); font-weight:700;}
+#clock-world{color:var(--ink-faint);}
 #clock-auto{color:var(--good); animation:pulse 2s ease-in-out infinite;}
 @keyframes pulse{0%,100%{opacity:1;} 50%{opacity:.3;}}
+.map-traffic{pointer-events:none;}
+.map-car{fill:#191817; stroke:rgba(255,255,255,.55); stroke-width:2; vector-effect:non-scaling-stroke;}
+.map-train{fill:#191817; stroke:rgba(255,255,255,.7); stroke-width:2; vector-effect:non-scaling-stroke;}
 .mood-row{display:flex; align-items:center; gap:7px;}
 .swatch{width:15px; height:15px; border-radius:50%; border:2px solid var(--rule-strong); cursor:pointer; padding:0;}
 .swatch.active{border-color:var(--ink); box-shadow:0 0 0 2px var(--paper), 0 0 0 3px var(--ink);}

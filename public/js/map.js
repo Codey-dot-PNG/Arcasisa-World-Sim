@@ -12,6 +12,7 @@ const GameMap = {
   TEX_SCALE: 0.7,
   view: { x: 0, y: 0, k: 1 },
   svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
+  trafficLayer: null, trafficUnits: [], trafficFrame: null,
   drag: null,
 
   mount(container) {
@@ -264,6 +265,74 @@ const GameMap = {
     this.updateMarkerScale();
   },
 
+  /* ---------- ambient transport traffic ---------- */
+  pathLength(pts) {
+    let n = 0;
+    for (let i = 1; i < pts.length; i++) n += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+    return n;
+  },
+  pointOnPath(pts, distance, total) {
+    let left = Math.max(0, Math.min(total, distance));
+    for (let i = 1; i < pts.length; i++) {
+      const ax = pts[i - 1][0], ay = pts[i - 1][1];
+      const bx = pts[i][0], by = pts[i][1];
+      const len = Math.hypot(bx - ax, by - ay);
+      if (left <= len || i === pts.length - 1) {
+        const u = len ? left / len : 0;
+        return [ax + (bx - ax) * u, ay + (by - ay) * u];
+      }
+      left -= len;
+    }
+    return pts[pts.length - 1];
+  },
+  buildTraffic(map, mk) {
+    const NS = 'http://www.w3.org/2000/svg';
+    this.trafficLayer = document.createElementNS(NS, 'g');
+    this.trafficLayer.setAttribute('class', 'map-traffic');
+    this.world.appendChild(this.trafficLayer);
+    this.trafficUnits = [];
+    const paths = [];
+    for (const r of (map.roads || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'car' });
+    for (const r of (map.rails || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'train' });
+    const add = (path, i, kind) => {
+      const node = document.createElementNS(NS, kind === 'train' ? 'rect' : 'circle');
+      node.setAttribute('class', kind === 'train' ? 'map-train' : 'map-car');
+      if (kind === 'train') { node.setAttribute('width', 34); node.setAttribute('height', 18); node.setAttribute('rx', 3); node.setAttribute('x', -17); node.setAttribute('y', -9); }
+      else node.setAttribute('r', 11);
+      this.trafficLayer.appendChild(node);
+      this.trafficUnits.push({
+        node, path, kind,
+        phase: (i * 1731 + (kind === 'train' ? 9000 : 0)) % 26000,
+        cycle: (kind === 'train' ? 24000 : 15000) + (i % 4) * 1700,
+        active: kind === 'train' ? 0.78 : 0.58
+      });
+    };
+    const roadPaths = paths.filter(p => p.kind === 'car');
+    const railPaths = paths.filter(p => p.kind === 'train');
+    roadPaths.forEach((p, i) => { if (i % 2 === 0 || i < 6) add(p, i, 'car'); });
+    railPaths.forEach((p, i) => add(p, i + 30, 'train'));
+    if (!this.trafficFrame) {
+      const tick = (now) => {
+        this.trafficFrame = requestAnimationFrame(tick);
+        if (!this.trafficLayer) return;
+        for (const u of this.trafficUnits) {
+          const phase = (now + u.phase) % u.cycle;
+          const activeMs = u.cycle * u.active;
+          const visible = phase < activeMs;
+          u.node.style.display = visible ? '' : 'none';
+          if (!visible) continue;
+          // A ping-pong path gives the impression of traffic travelling both
+          // directions without adding any persistent simulation state.
+          const q = phase / activeMs;
+          const along = (q <= 0.5 ? q * 2 : (1 - q) * 2) * u.path.len;
+          const pt = this.pointOnPath(u.path.pts, along, u.path.len);
+          u.node.setAttribute('transform', `translate(${pt[0]},${pt[1]})`);
+        }
+      };
+      this.trafficFrame = requestAnimationFrame(tick);
+    }
+  },
+
   /* ---------- layers ---------- */
   permittedLayers() {
     const l = perms().mapLayers || [];
@@ -507,6 +576,7 @@ const GameMap = {
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-base', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-dash', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
     }
+    this.buildTraffic(map, mk);
     // wide invisible strokes so the pen tool can pick a line up easily
     if (editing && (MapEdit.mode === 'roads' || MapEdit.mode === 'rails')) {
       for (const r of (map[MapEdit.mode] || [])) {

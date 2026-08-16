@@ -33,6 +33,35 @@ const Views = {
     this._newsBodies[id] = (r.article && r.article.body) || '';
     return this._newsBodies[id];
   },
+  ledgerRows() {
+    const byId = new Map();
+    for (const t of [...(S().transactions || []), ...(this._ledgerExtra || [])]) byId.set(t.id, t);
+    return [...byId.values()].sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+  },
+  async loadOlderLedger() {
+    if (this._ledgerLoading) return;
+    const rows = this.ledgerRows();
+    const oldest = rows[rows.length - 1];
+    if (!oldest) return;
+    const pageSize = 80;
+    const page = this._ledgerPage || 0;
+    if (rows.length > (page + 1) * pageSize) {
+      this._ledgerPage = page + 1;
+      App.renderView();
+      return;
+    }
+    this._ledgerLoading = true;
+    try {
+      const q = new URLSearchParams({ before: String(this._ledgerCursor || oldest.ts), limit: String(pageSize) });
+      const r = await GET('/api/ledger?' + q.toString());
+      this._ledgerExtra = [...(this._ledgerExtra || []), ...(r.transactions || [])];
+      this._ledgerHasMore = !!r.hasMore;
+      this._ledgerCursor = r.nextBefore || this._ledgerCursor;
+      if ((r.transactions || []).length) this._ledgerPage = page + 1;
+    } catch (e) { toast(e.message, true); }
+    this._ledgerLoading = false;
+    App.renderView();
+  },
   kv(label, value, cls) {
     return el('div.var-row', el('span.var-label', label), el('span.var-value', { class: cls || '' }, value));
   },
@@ -1909,8 +1938,10 @@ const Views = {
           el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance)))))));
     }
 
-    inner.appendChild(this.secLabel('Ledger — Recent Transactions'));
-    const txns = [...(S().transactions || [])].slice(-80).reverse();
+    inner.appendChild(this.secLabel('Ledger — All Transactions'));
+    const allTxns = this.ledgerRows();
+    const page = this._ledgerPage || 0;
+    const txns = allTxns.slice(page * 80, (page + 1) * 80);
     if (!txns.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'No transactions on record.'));
     else inner.appendChild(el('table.data',
       el('thead', el('tr', el('th', 'When'), el('th', 'From'), el('th', 'To'), el('th.num', 'Amount'), el('th', 'Memo'))),
@@ -1923,6 +1954,11 @@ const Views = {
           el('td.num', fmtMoney(t.amount)),
           el('td', { style: 'color:var(--ink-soft); font-size:12px;' }, t.memo || ''));
       }))));
+    if (txns.length >= 80 && this._ledgerHasMore !== false) {
+      inner.appendChild(el('div.btn-row', { style: 'margin-top:10px;' },
+        el('button.outline-btn', { disabled: !!this._ledgerLoading, onclick: () => this.loadOlderLedger() },
+        this._ledgerLoading ? 'Loading older transactions…' : 'Next ledger page')));
+    }
 
     inner.appendChild(this.secLabel('Market Values'));
     inner.appendChild(el('table.data',

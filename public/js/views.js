@@ -567,10 +567,11 @@ const Views = {
       wrap.appendChild(this.inventoryTable(pr.inventory, pr.ownerId));
     }
     if (controlsProp) {
+      const opsBtn = isGM() ? el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations') : null;
       wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items'),
-        el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations')));
+        opsBtn));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
@@ -1907,13 +1908,13 @@ const Views = {
     return S().entities.filter(e => e.type === 'company' &&
       (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
   },
-  // Any property whose owner sits in the current user's control chain is
-  // actionable here, including properties owned directly by a person.
+  // Properties whose Production/Ops desk is actionable here — GM-only: tuning
+  // what a site outputs is an economy-defining lever, so non-GMs never see
+  // the desk or the tab (server /api/property/:id/controls also enforces it).
   opsProperties() {
     if (!S()) return [];
-    const mine = W.me && W.me.entityId;
-    return S().properties.filter(pr => pr.ownerId &&
-      (isGM() || (mine && ownership_controlsClient(mine, pr.ownerId))));
+    if (!isGM()) return [];
+    return S().properties.filter(pr => pr.ownerId);
   },
   govEntity() {
     return S().entities.find(e => e.id === 'ent_gov') || S().entities.find(e => e.type === 'government');

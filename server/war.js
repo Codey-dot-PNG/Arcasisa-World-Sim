@@ -334,6 +334,7 @@ function weaponCatalog(db) {
     if (k === 'fuel') fuels.push(it);
     else if (k === 'tank') tanks.push(it);
     else if (k === 'warship') ships.push(it); // hulls supply warship squadrons exactly like tanks supply armour
+    else if (k === 'aircraft') continue; // jets are consumable airstrike capacity — never small-arms supply
     else guns.push(it);
   }
   guns.sort((a, b) => gunQuality(b.meta.weapon) - gunQuality(a.meta.weapon));
@@ -720,11 +721,36 @@ function arsenalWeaponsOf(db, entity, kind) {
   }
   return out;
 }
-function aircraftStock(db, entityId) {
+// Every inventory the defending side can keep serviceable aircraft in: the
+// defending entity's own stockpile plus (for the war's defender) the site
+// inventories of the military properties it owns — the same pool shape
+// nationPools uses for resupply, so jets produced and stockpiled at a depot
+// are airworthy, not just the ones sitting in the government's own inventory.
+function aircraftPools(db, war, entityId) {
   const entity = (db.entities || []).find(e => e.id === entityId) ||
     (db.entities || []).find(e => e.type === 'government');
-  const rows = arsenalWeaponsOf(db, entity, 'aircraft');
-  return rows.reduce((sum, row) => sum + Math.max(0, Number(row.qty) || 0), 0);
+  const pools = [];
+  if (entity) {
+    entity.inventory = entity.inventory || [];
+    pools.push(entity.inventory);
+  }
+  if (war && war.defenderId === entityId) {
+    for (const p of db.properties) if (p.type === 'military' && Array.isArray(p.inventory)) pools.push(p.inventory);
+  }
+  return pools;
+}
+function aircraftStock(db, entityId, war) {
+  let total = 0;
+  for (const pool of aircraftPools(db, war, entityId)) {
+    for (const row of pool) {
+      if (!(row && row.qty > 0)) continue;
+      const item = (db.items || []).find(it => it.id === row.itemId);
+      if (item && item.meta && item.meta.weapon && item.meta.weapon.kind === 'aircraft') {
+        total += Math.max(0, Number(row.qty) || 0);
+      }
+    }
+  }
+  return total;
 }
 // toRoman is defined once, further down (foreign-intervention naming) — JS
 // hoists function declarations within a scope regardless of source order, so
@@ -1135,7 +1161,7 @@ function startWar(db, scenario) {
     allies: { att: [], def: [] },
     result: null
   };
-  db.war.bombs.def.aircraftRemaining = aircraftStock(db, defender.id);
+  db.war.bombs.def.aircraftRemaining = aircraftStock(db, defender.id, db.war);
   // Tank & warship deployment (Task 3): defender's national arsenal
   // (defender.inventory — conventionally ent_gov's stockpile) is walked for
   // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
@@ -1654,15 +1680,31 @@ function dropBomb(db, side, pos, actor) {
   if (!Array.isArray(pos) || pos.length !== 2) return { ok: false, error: 'Invalid target position.' };
   const defenderId = war.defenderId || 'ent_gov';
   const defender = (db.entities || []).find(e => e.id === defenderId) || (db.entities || []).find(e => e.type === 'government');
-  const aircraft = arsenalWeaponsOf(db, defender, 'aircraft').find(row => row.qty > 0);
-  const aircraftRow = defender && (defender.inventory || []).find(row => aircraft && row.itemId === aircraft.item.id && row.qty > 0);
+  // One serviceable aircraft authorizes one airstrike, drawn from ANY of the
+  // defender's aircraft pools — its own stockpile or the military depots it
+  // owns — since both are legitimately "planes in storage".
+  const pools = aircraftPools(db, war, defender ? defender.id : 'ent_gov');
+  let aircraft = null, aircraftRow = null;
+  for (const pool of pools) {
+    for (const row of pool) {
+      if (!(row && row.qty > 0)) continue;
+      const item = (db.items || []).find(i => i.id === row.itemId);
+      if (item && item.meta && item.meta.weapon && item.meta.weapon.kind === 'aircraft') {
+        aircraft = { item, qty: row.qty }; aircraftRow = row; break;
+      }
+    }
+    if (aircraft) break;
+  }
   if (!aircraft || !aircraftRow) return { ok: false, error: 'The air wing has no military aircraft available.' };
   // Cooldown starts at ORDER time, same as the old instant bomb — a player
   // can't spam strikes just because the last one hasn't landed yet.
   bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
   aircraftRow.qty -= 1;
-  if (aircraftRow.qty <= 0 && defender && Array.isArray(defender.inventory)) {
-    defender.inventory = defender.inventory.filter(row => row !== aircraftRow);
+  if (aircraftRow.qty <= 0) {
+    for (const pool of pools) {
+      const idx = pool.indexOf(aircraftRow);
+      if (idx >= 0) { pool.splice(idx, 1); break; }
+    }
   }
 
   war.airstrikes = war.airstrikes || [];
@@ -1679,7 +1721,7 @@ function dropBomb(db, side, pos, actor) {
     groundApplied: false // guards applyAirstrikeGroundEffects against double-application
   };
   war.airstrikes.push(strike);
-  bomb.aircraftRemaining = aircraftStock(db, defender ? defender.id : 'ent_gov');
+  bomb.aircraftRemaining = aircraftStock(db, defender ? defender.id : 'ent_gov', war);
   return { ok: true, strike, aircraftRemaining: bomb.aircraftRemaining };
 }
 
@@ -1814,4 +1856,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock };

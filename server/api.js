@@ -203,15 +203,10 @@ function histView(db, p) {
 // engine's note() can push into a predicted doc without guards. The legacy
 // flat war.ai gets the same treatment for any pre-hierarchy doc still in
 // flight. Shared by filterState and the GET /api/war/state heartbeat.
-function warWithAircraftCapacity(war, db) {
-  if (!war || !db || !war.bombs) return war;
-  const gov = (db.entities || []).find(e => e.id === (war.defenderId || 'ent_gov')) ||
-    (db.entities || []).find(e => e.type === 'government');
-  const aircraft = gov && (gov.inventory || []).reduce((sum, row) => {
-    const item = (db.items || []).find(i => i.id === row.itemId);
-    return sum + (item && item.meta && item.meta.weapon && item.meta.weapon.kind === 'aircraft' ? Math.max(0, Number(row.qty) || 0) : 0);
-  }, 0);
-  return { ...war, bombs: { ...war.bombs, def: { ...(war.bombs.def || {}), aircraftRemaining: aircraft } } };
+function warWithAircraftCapacity(w, db) {
+  if (!w || !db || !w.bombs) return w;
+  const aircraft = war.aircraftStock(db, w.defenderId || 'ent_gov', w);
+  return { ...w, bombs: { ...w.bombs, def: { ...((w.bombs.def) || {}), aircraftRemaining: aircraft } } };
 }
 function warForPlayers(war, db) {
   if (!war) return war;
@@ -826,12 +821,14 @@ async function handle(req, res, pathname, method) {
     // A property may be owned directly by a person, so operations cannot be
     // limited to the company desk. These controls are deliberately scoped to
     // the property: output, cash mode, stock policy and local payroll.
+    // GM-ONLY: production tuning rewrites what a site outputs for the whole
+    // world's economy, so it is a Game Master lever — owners/CEOs read this
+    // data but may not change it.
     const propertyControlsMatch = pathname.match(/^\/api\/property\/([\w-]+)\/controls$/);
     if (propertyControlsMatch && method === 'PATCH') {
       const pr = db.properties.find(p => p.id === propertyControlsMatch[1]);
       if (!pr) return bad('No such property.');
-      const gm = u.role.perms.gm;
-      if (!gm && (!pr.ownerId || !ownership.controls(u.user.entityId, pr.ownerId))) return deny('You do not control this property.');
+      if (!u.role.perms.gm) return deny('Only the Game Master may adjust property operations.');
       const b = await readBody(req);
       const clampPct = (n, fallback) => Math.max(0, Math.min(100, Number.isFinite(Number(n)) ? Number(n) : fallback));
       const cleanQty = (n) => Math.round((Number(n) || 0) * 1000000) / 1000000;

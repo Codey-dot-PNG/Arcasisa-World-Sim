@@ -709,6 +709,10 @@ function runEconomy(db, actor) {
   // being a flat line. Both knobs live in settings.economy.
   const variance = econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06;
   const hapK = econ.happinessOutputK !== undefined ? Number(econ.happinessOutputK) : 0.15;
+  // Workforce levers (Phase 28): output multiplier and per-turn accident odds
+  // by safety policy; morale drift happens per property below.
+  const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
+  const SAFETY_RISK = { none: 0.20, relaxed: 0.10, standard: 0.05, strict: 0.01 };
   const provFactor = {};
   for (const p of db.provinces) {
     const hap = p.vars.happiness !== undefined ? Number(p.vars.happiness) : 50;
@@ -735,7 +739,24 @@ function runEconomy(db, actor) {
       ? Math.max(0, Number(pr.wagePerTurn) || 0)
       : (co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0);
     const wageIdx = co ? wagePerTurn * 100 : 100;
-    const f = pr.prodMode === 'goods' || pr.prodMode === 'cash' ? outFactor(pr) : 1;
+    // Workforce multipliers (Phase 28): property overrides win, the company's
+    // policy defaults fill in, then hard defaults. 16h doubles output, 24h
+    // triples it; staffing scales linearly with fulfilment (100% at capacity);
+    // every koren sunk into upgrades adds a koren of productive value. The
+    // wobble floor applies to the output base only, so safety/staffing/upgrade
+    // decisions always move production exactly as much as they promise.
+    const hoursRaw = pr.workHours !== undefined ? pr.workHours : (co && co.workHours !== undefined ? co.workHours : 8);
+    const hoursMult = Math.max(8, Math.min(24, Number(hoursRaw) || 8)) / 8;
+    const safetyRaw = pr.safety !== undefined ? pr.safety : (co && co.safety !== undefined ? co.safety : 'standard');
+    const maxEmp = pr.maxEmployees !== undefined
+      ? Math.max(0, Math.round(pr.maxEmployees))
+      : Math.max(1, Math.round(pr.employees || 1));
+    const staffMult = maxEmp > 0 ? Math.max(0, Math.min(1, (pr.employees || 0) / maxEmp)) : 1;
+    const upgradeMult = 1 + ((pr.upgradeInvested || 0) / Math.max(50, pr.value || 100));
+    const active = pr.prodMode === 'goods' || pr.prodMode === 'cash';
+    const f = active
+      ? Math.max(0.4, outFactor(pr)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult
+      : 1;
 
     // gross production value (drives GDP): private at output, public at cost
     let gross;
@@ -766,6 +787,36 @@ function runEconomy(db, actor) {
       }
     } else if (pr.prodMode === 'cash') {
       o.dom += (pr.cashPerTurn || 0) * f;
+    }
+
+    // workforce (Phase 28): morale drifts toward the wage anchor, and an
+    // industrial accident — odds by safety policy — kills/maims a slice of the
+    // crew. The dead drop off payroll here (employees is read below), dent
+    // morale, thin the province's population and post a notice for the desk.
+    if (active && (pr.employees || 0) > 0) {
+      const target = 50 + clamp01((wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
+      const h0 = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
+      pr.workerHappiness = Math.round(clamp01(h0 + (target - h0) * 0.03 + (Math.random() * 2 - 1) * 0.5, 0, 100) * 10) / 10;
+      if (Math.random() < (SAFETY_RISK[safetyRaw] || 0.05)) {
+        const deaths = Math.min(
+          Math.max(1, Math.round(pr.employees * (0.04 + Math.random() * 0.06))),
+          Math.max(1, Math.round(pr.employees * 0.5)));
+        const injuries = Math.min(pr.employees, Math.round(pr.employees * (0.10 + Math.random() * 0.15)));
+        pr.employees -= deaths;
+        pr.workerHappiness = Math.round(clamp01(pr.workerHappiness - 20, 0, 100) * 10) / 10;
+        const prov = db.provinces.find(p => p.id === pr.provinceId);
+        if (prov) {
+          if (prov.vars) prov.vars.population = Math.max(0, (prov.vars.population || 0) - deaths);
+          const wc = prov.demographics && prov.demographics['Working Class'];
+          if (wc) wc.population = Math.max(0, Math.round((wc.population || 0) - deaths));
+        }
+        pr.accident = {
+          turn: db.settings.time.turn, date: db.settings.time.date, safety: safetyRaw,
+          hours: Math.round(hoursMult * 8), deaths, injuries, fulfilment: Math.round(staffMult * 100)
+        };
+        store.log('accident', `Industrial accident at ${pr.name}`,
+          `${fmtNum(deaths)} dead, ${fmtNum(injuries)} injured (${safetyRaw} safety)`, actor || 'ENGINE', [pr.id, pr.ownerId]);
+      }
     }
 
     // expenses: property upkeep plus direct company payroll

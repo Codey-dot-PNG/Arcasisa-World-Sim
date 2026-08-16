@@ -839,6 +839,31 @@ async function handle(req, res, pathname, method) {
       const cleanQty = (n) => Math.round((Number(n) || 0) * 1000000) / 1000000;
       if (b.keepPct !== undefined) pr.keepPct = clampPct(b.keepPct, 0);
       if (b.wagePerTurn !== undefined) pr.wagePerTurn = Math.max(0, Math.min(1000000, cleanQty(b.wagePerTurn)));
+      // workforce & safety (Phase 28): hours, safety policy, staffing and
+      // upgrade investment. Hours/safety default to the owning company's
+      // policy when left untouched; the employee cap is the site's own.
+      if (b.workHours !== undefined) {
+        if (![8, 12, 16, 20, 24].includes(b.workHours)) return bad('Work hours must be 8, 12, 16, 20 or 24.');
+        pr.workHours = b.workHours;
+      }
+      if (b.safety !== undefined) {
+        if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');
+        pr.safety = b.safety;
+      }
+      if (b.employees !== undefined) {
+        const cap = pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, Math.round(pr.employees || 1));
+        const want = Math.max(0, Math.round(Number(b.employees) || 0));
+        if (want > cap) return bad('Hiring is capped at ' + cap + ' employees on this site.');
+        pr.employees = want;
+      }
+      if (b.upgradeInvest !== undefined) {
+        const amt = Math.round((Number(b.upgradeInvest) || 0) * 100) / 100;
+        if (!(amt >= 1)) return bad('Invest at least ' + db.settings.currency + '1.');
+        const acct = sim.primaryAccount(pr.ownerId, true);
+        if (!acct || acct.balance < amt) return bad('The owning account lacks the funds for this investment.');
+        sim.txn(acct.id, null, amt, 'Site upgrade investment — ' + pr.name, u.user.displayName, 'withdraw');
+        pr.upgradeInvested = Math.round(((pr.upgradeInvested || 0) + amt) * 100) / 100;
+      }
       if (b.keepPctByItem && typeof b.keepPctByItem === 'object') {
         pr.keepPctByItem = {};
         for (const iid of Object.keys(b.keepPctByItem)) {
@@ -857,10 +882,21 @@ async function handle(req, res, pathname, method) {
       if (b.cashPerTurn !== undefined) pr.cashPerTurn = Math.max(0, cleanQty(b.cashPerTurn));
       store.log('economy', `${pr.name} adjusts operations`,
         `${pr.prodMode || 'none'} · ${pr.keepPct || 0}% kept · wages ${pr.wagePerTurn || 0} per employee/turn`, u.user.displayName, [pr.id, pr.ownerId]);
+      if (b.workHours !== undefined || b.safety !== undefined || b.employees !== undefined || b.upgradeInvest !== undefined) {
+        const wfBits = [];
+        if (b.workHours !== undefined) wfBits.push(pr.workHours + 'h shifts');
+        if (b.safety !== undefined) wfBits.push(pr.safety + ' safety');
+        if (b.employees !== undefined) wfBits.push(pr.employees + ' staff');
+        if (b.upgradeInvest !== undefined) wfBits.push('invested ' + db.settings.currency + cleanQty(b.upgradeInvest) + ' in upgrades (total ' + db.settings.currency + (pr.upgradeInvested || 0) + ')');
+        store.log('economy', `${pr.name} workforce & safety`, wfBits.join(' · '), u.user.displayName, [pr.id, pr.ownerId]);
+      }
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, property: {
         id: pr.id, prodMode: pr.prodMode, produces: pr.produces || [], cashPerTurn: pr.cashPerTurn || 0,
-        keepPct: pr.keepPct, keepPctByItem: pr.keepPctByItem || {}, wagePerTurn: pr.wagePerTurn
+        keepPct: pr.keepPct, keepPctByItem: pr.keepPctByItem || {}, wagePerTurn: pr.wagePerTurn,
+        workHours: pr.workHours, safety: pr.safety, maxEmployees: pr.maxEmployees,
+        employees: pr.employees, upgradeInvested: pr.upgradeInvested || 0,
+        workerHappiness: pr.workerHappiness, accident: pr.accident || null
       }});
     }
 
@@ -1127,9 +1163,39 @@ async function handle(req, res, pathname, method) {
         co.keepPctByItem = {};
         for (const iid of Object.keys(b.keepPctByItem)) co.keepPctByItem[iid] = clampPct(b.keepPctByItem[iid]);
       }
-      store.log('economy', `${co.name} adjusts operations`, `keep ${co.keepPct || 0}% in stock · wages ${co.wagePerTurn || 0} per employee/turn`, u.user.displayName, [co.id]);
+      // workforce policy defaults (Phase 28) — every property of this company
+      // inherits these unless it carries its own override:
+      if (b.workHours !== undefined) {
+        if (![8, 12, 16, 20, 24].includes(b.workHours)) return bad('Work hours must be 8, 12, 16, 20 or 24.');
+        co.workHours = b.workHours;
+      }
+      if (b.safety !== undefined) {
+        if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');
+        co.safety = b.safety;
+      }
+      // company-wide staffing: every site is (re)staffed to this share of its
+      // own capacity. Rounded server-side; the desk mirrors the exact rows.
+      let staffed = null;
+      if (b.staffingPct !== undefined) {
+        const pct = clampPct(b.staffingPct);
+        staffed = [];
+        for (const pr2 of db.properties) {
+          if (pr2.ownerId !== co.id) continue;
+          const cap = pr2.maxEmployees !== undefined ? Math.max(0, Math.round(pr2.maxEmployees)) : Math.max(1, Math.round(pr2.employees || 1));
+          pr2.employees = Math.round(cap * pct / 100);
+          staffed.push({ id: pr2.id, employees: pr2.employees });
+        }
+      }
+      store.log('economy', `${co.name} adjusts operations`,
+        `keep ${co.keepPct || 0}% in stock · wages ${co.wagePerTurn || 0} per employee/turn` +
+        (b.workHours !== undefined || b.safety !== undefined || b.staffingPct !== undefined
+          ? ` · ${co.workHours}h shifts · ${co.safety} safety${b.staffingPct !== undefined ? ' · staffed to ' + (b.staffingPct === 100 ? 100 : Math.min(100, Math.max(0, Math.round(Number(b.staffingPct) || 0)))) + '% of capacity' : ''}`
+          : ''), u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, company: { id: co.id, keepPct: co.keepPct, keepPctByItem: co.keepPctByItem || {}, wagePerTurn: co.wagePerTurn } });
+      return json(res, 200, { ok: true, company: {
+        id: co.id, keepPct: co.keepPct, keepPctByItem: co.keepPctByItem || {}, wagePerTurn: co.wagePerTurn,
+        workHours: co.workHours, safety: co.safety, staffed
+      } });
     }
 
     // ---- government trade tariffs (Phase 16) ----

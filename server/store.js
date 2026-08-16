@@ -912,6 +912,29 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 28 — workforce & safety (schema < 7) --------------------------
+  // Work hours, onsite safety policy, staffing capacity, upgrade investment
+  // and worker morale are per-property fields; companies carry policy DEFAULTS
+  // (hours + safety) that their properties inherit unless they override.
+  // Capacity is seeded from the authored employee count, so existing worlds
+  // start fully staffed.
+  if ((world.schema || 1) < 7 && world.settings) {
+    for (const pr of (world.properties || [])) {
+      if (pr.workHours === undefined) pr.workHours = 8;
+      if (pr.safety === undefined) pr.safety = 'standard';
+      if (pr.maxEmployees === undefined) pr.maxEmployees = Math.max(1, Math.round(pr.employees || 1));
+      if (pr.upgradeInvested === undefined) pr.upgradeInvested = 0;
+      if (pr.workerHappiness === undefined) pr.workerHappiness = 50;
+    }
+    for (const e of (world.entities || [])) {
+      if (e.type !== 'company') continue;
+      if (e.workHours === undefined) e.workHours = 8;
+      if (e.safety === undefined) e.safety = 'standard';
+    }
+    world.schema = 7;
+    changed = true;
+  }
+
   // ---- Phase 26 — the Republic's arms industry + national fuel reserves ---
   // One-shot (flag-gated), additive; sits AFTER the schema<3 production
   // conversion so the factory's per-turn prodMode figures are never

@@ -1205,6 +1205,9 @@ const Views = {
     const produces = pr.produces || [];
     const baseKeep = pr.keepPct !== undefined ? pr.keepPct : (owner && owner.type === 'company' ? (owner.keepPct || 0) : 0);
     const baseWage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (owner && owner.type === 'company' ? (owner.wagePerTurn || 1) : 0);
+    const maxEmp = pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, pr.employees || 1);
+    const coHours = owner && owner.type === 'company' && owner.workHours !== undefined ? owner.workHours : 8;
+    const coSafety = owner && owner.type === 'company' && owner.safety !== undefined ? owner.safety : 'standard';
     const producedItems = [...new Set(produces.map(e => e.itemId))].filter(iid => itemById(iid));
     const revenue = prodMode === 'goods'
       ? produces.reduce((s, e) => s + (Number(e.perTurn) || 0) * priceOf(e.itemId), 0)
@@ -1216,8 +1219,14 @@ const Views = {
     const draftId = 'property:' + pr.id;
     const dr = (W.propOpsDraft && W.propOpsDraft.id === draftId) ? W.propOpsDraft : (W.propOpsDraft = {
       id: draftId, keepPct: baseKeep, wagePerTurn: baseWage,
-      keepPctByItem: Object.assign({}, pr.keepPctByItem || {})
+      keepPctByItem: Object.assign({}, pr.keepPctByItem || {}),
+      workHours: pr.workHours !== undefined ? pr.workHours : coHours,
+      safety: pr.safety !== undefined ? pr.safety : coSafety,
+      employees: pr.employees !== undefined ? pr.employees : maxEmp
     });
+    if (dr.workHours === undefined) dr.workHours = coHours;
+    if (dr.safety === undefined) dr.safety = coSafety;
+    if (dr.employees === undefined) dr.employees = pr.employees !== undefined ? pr.employees : maxEmp;
 
     inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; margin:10px 0 4px;' },
       el('div',
@@ -1235,6 +1244,56 @@ const Views = {
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
         'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'))));
+
+    inner.appendChild(this.secLabel('Workforce & Safety'));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Work hours / day', Forms.sel(dr, 'workHours',
+        [[8, '8 — single shift'], [12, '12 — long shift'], [16, '16 — double shift (2×)'], [20, '20 — extended (2.5×)'], [24, '24 — continuous (3×)']]),
+        'Output scales with hours: 8h is the baseline, 16h doubles it, 24h triples it.' +
+        (owner && owner.type === 'company' ? ' The company policy default is ' + coHours + 'h.' : '')),
+      Forms.field('Onsite safety', Forms.sel(dr, 'safety',
+        [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
+        'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and hit the province’s population.' +
+        (owner && owner.type === 'company' ? ' The company policy default is ' + coSafety + '.' : '')),
+      Forms.field('Staffing', Forms.slider(dr, 'employees', 0, maxEmp,
+        { format: (v) => v + ' / ' + maxEmp + ' — fulfilment ' + Math.round((v / maxEmp) * 100) + '%' }),
+        'Hiring cap: ' + maxEmp + '. Production scales with fulfilment — fully staffed means full output.')));
+    const happ = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
+    inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:8px 0 4px;' },
+      el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;' }, 'WORKER MORALE'),
+      this.tradeBar(happ, 100, happ >= 60 ? 'var(--good)' : happ >= 40 ? 'var(--ink-soft)' : 'var(--accent)'),
+      el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, happ + '%')));
+    const acc = pr.accident;
+    if (acc) {
+      inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
+        'Industrial accident — ' + (acc.date || 'turn ' + acc.turn) + ': ' + fmtNum(acc.deaths) + ' dead, ' + fmtNum(acc.injuries) + ' injured (' + acc.safety + ' safety, ' + acc.hours + 'h shifts). ' +
+        'The crew is shaken and morale has taken a hit.' + (acc.fulfilment !== undefined && acc.fulfilment < 100 ? ' The site is now ' + acc.fulfilment + '% staffed.' : '')));
+    }
+
+    if (prodMode === 'goods' || prodMode === 'cash') {
+      const inv = pr.upgradeInvested || 0;
+      const base = pr.value || 100;
+      const boostPct = Math.round(inv / Math.max(50, base) * 100);
+      const upgInput = el('input.text-input', { type: 'number', min: '1', step: '1', style: 'width:150px;' });
+      inner.appendChild(this.secLabel('Site Upgrades'));
+      inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; flex-wrap:wrap; font-size:12px;' },
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+          'ASSESSED ' + CUR() + fmtNum(base) + (inv > 0 ? ' · INVESTED ' + CUR() + fmtNum(inv) + ' · +' + boostPct + '% OUTPUT' : ' · NO INVESTMENT YET')),
+        upgInput,
+        el('button.solid-btn', {
+          onclick: async (ev) => {
+            const amt = Math.round(Number(upgInput.value) || 0);
+            if (!(amt >= 1)) { toast('Enter an investment amount.', true); return; }
+            const btn = ev.currentTarget; btn.disabled = true;
+            try {
+              const r = await PATCH('/api/property/' + pr.id + '/controls', { upgradeInvest: amt });
+              if (r && r.property) { pr.upgradeInvested = r.property.upgradeInvested; pr.workerHappiness = r.property.workerHappiness; }
+              toast('Investment sunk into ' + pr.name + '.');
+              App.renderView();
+            } catch (err) { toast(err.message, true); btn.disabled = false; }
+          }
+        }, 'Invest from owner funds')));
+    }
 
     if (prodMode === 'goods') {
       inner.appendChild(this.secLabel('Production lines'));
@@ -1271,7 +1330,8 @@ const Views = {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
           const r = await PATCH('/api/property/' + pr.id + '/controls', {
-            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn
+            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn,
+            workHours: dr.workHours, safety: dr.safety, employees: dr.employees
           });
           if (r && r.property) Object.assign(pr, r.property);
           W.propOpsDraft = null;
@@ -1673,13 +1733,22 @@ const Views = {
       ['Employees', fmtNum(employees)]
     ]));
 
-    // ---- controls draft (survives re-renders until saved) ----
+// ---- controls draft (survives re-renders until saved) ----
+    const maxEmpOf = (pr) => pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, pr.employees || 1);
+    const totalCap = props.reduce((s, pr) => s + maxEmpOf(pr), 0);
+    const totalEmp = props.reduce((s, pr) => s + (pr.employees || 0), 0);
     const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
       id: c.id,
       keepPct: c.keepPct === undefined ? 0 : c.keepPct,
       wagePerTurn: c.wagePerTurn === undefined ? 1 : c.wagePerTurn,
-      keepPctByItem: Object.assign({}, c.keepPctByItem || {})
+      keepPctByItem: Object.assign({}, c.keepPctByItem || {}),
+      workHours: c.workHours !== undefined ? c.workHours : 8,
+      safety: c.safety !== undefined ? c.safety : 'standard',
+      staffingPct: totalCap > 0 ? Math.round(totalEmp / totalCap * 100) : 0
     });
+    if (dr.workHours === undefined) dr.workHours = 8;
+    if (dr.safety === undefined) dr.safety = 'standard';
+    if (dr.staffingPct === undefined) dr.staffingPct = totalCap > 0 ? Math.round(totalEmp / totalCap * 100) : 0;
 
     inner.appendChild(this.secLabel('Sales & Output'));
     // ONE compact combined bar+slider: the track itself is the split — the
@@ -1689,6 +1758,18 @@ const Views = {
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
         'Kept stock piles up on your sites — sell it abroad on the open market (Economy → International Trade) or to anyone via trade offers.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'), 'Payroll is added to upkeep for every property owned by this company')));
+
+    // ---- workforce & safety (Phase 28) — company-wide policy defaults ----
+    inner.appendChild(this.secLabel('Workforce & Safety'));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Work hours / day (policy default)', Forms.sel(dr, 'workHours',
+        [[8, '8 — single shift'], [12, '12 — long shift'], [16, '16 — double shift (2×)'], [20, '20 — extended (2.5×)'], [24, '24 — continuous (3×)']]),
+        'Every site follows this unless it overrides it in its own Operations desk. 16h doubles output, 24h triples it.'),
+      Forms.field('Onsite safety (policy default)', Forms.sel(dr, 'safety',
+        [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
+        'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and thin the province’s population.'),
+      Forms.field('Staffing (company-wide)', Forms.slider(dr, 'staffingPct', 0, 100, { suffix: '% of capacity' }),
+        totalEmp + ' of ' + totalCap + ' workers employed now. Saving staffs every site to this share of its capacity (site-level overrides are clobbered).')));
 
     // ---- per-product table: retail value, output and where it goes ----
     const producedItems = [...new Set(props.flatMap(pr => (pr.produces || []).map(e => e.itemId)))].filter(iid => itemById(iid));
@@ -1723,10 +1804,19 @@ const Views = {
       onclick: async (ev) => {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
-          const r = await PATCH('/api/company/' + c.id + '/controls', { keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn });
+          const r = await PATCH('/api/company/' + c.id + '/controls', {
+            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn,
+            workHours: dr.workHours, safety: dr.safety, staffingPct: dr.staffingPct
+          });
           // apply the server-confirmed values to local state at once, so no
           // refetch timing can revert them and navigating away keeps the change
-          if (r && r.company) { c.keepPct = r.company.keepPct; c.keepPctByItem = r.company.keepPctByItem; c.wagePerTurn = r.company.wagePerTurn; }
+          if (r && r.company) {
+            c.keepPct = r.company.keepPct; c.keepPctByItem = r.company.keepPctByItem; c.wagePerTurn = r.company.wagePerTurn;
+            c.workHours = r.company.workHours; c.safety = r.company.safety;
+            if (Array.isArray(r.company.staffed)) for (const row of r.company.staffed) {
+              const p = props.find(x => x.id === row.id); if (p) p.employees = row.employees;
+            }
+          }
           W.opsDraft = null;
           toast('Operations saved.');
         } catch (err) { toast(err.message, true); btn.disabled = false; }
@@ -1767,6 +1857,39 @@ const Views = {
             el('td.num', { style: 'color:' + (rev - total >= 0 ? 'var(--good)' : 'var(--accent)') }, fmtMoney(rev - total)));
         }))));
     }
+
+    // ---- workforce by site: morale, accidents and per-property staffing ----
+    inner.appendChild(this.secLabel('Workforce by Site (' + totalEmp + ' / ' + totalCap + ' employed)'));
+    inner.appendChild(el('table.data',
+      el('thead', el('tr', el('th', 'Property'), el('th', 'Staffed'), el('th.num', 'Fulfilment'), el('th', 'Morale'), el('th', 'Last accident'))),
+      el('tbody', props.map(pr => {
+        const cap = maxEmpOf(pr);
+        W.opsStaff = W.opsStaff || {};
+        const staffN = W.opsStaff[pr.id] || (W.opsStaff[pr.id] = { n: pr.employees || 0 });
+        const ful = cap > 0 ? Math.round((pr.employees || 0) / cap * 100) : 0;
+        const happ = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
+        const acc = pr.accident;
+        return el('tr',
+          el('td', { style: 'white-space:normal;' }, pr.name),
+          el('td', { style: 'min-width:230px; white-space:nowrap;' },
+            Forms.sliderNum(staffN, 'n', 0, cap, { suffix: ' / ' + cap }), ' ',
+            el('button.dash-btn', {
+              onclick: async () => {
+                const want = Math.max(0, Math.round(Number(staffN.n) || 0));
+                try {
+                  const r = await PATCH('/api/property/' + pr.id + '/controls', { employees: want });
+                  if (r && r.property) { pr.employees = r.property.employees; delete W.opsStaff[pr.id]; }
+                  toast('Staffing updated at ' + pr.name + '.');
+                  App.renderView();
+                } catch (err) { toast(err.message, true); }
+              }
+            }, 'Set')),
+          el('td.num', ful + '%'),
+          el('td', { style: 'min-width:110px;' }, this.tradeBar(happ, 100, happ >= 60 ? 'var(--good)' : happ >= 40 ? 'var(--ink-soft)' : 'var(--accent)')),
+          el('td', { style: 'font-size:11px; color:' + (acc ? 'var(--accent)' : 'var(--ink-faint)') + ';' }, acc
+            ? fmtNum(acc.deaths) + ' dead, ' + fmtNum(acc.injuries) + ' injured · ' + (acc.date || 'turn ' + acc.turn) + ' (' + acc.safety + ')'
+            : 'clean record'));
+      }))));
 
     // ---- historical graphs ----
     const hist = Views.histAll();

@@ -699,6 +699,9 @@ function runEconomy(db, actor) {
   const items = db.items;
   const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
   const econ = db.settings.economy || { baseDailyWage: 4, wageHappinessK: 0.03, wageEmploymentK: 0.03 };
+  // Global GM levers (Economy tab): scale sale prices and property expenses.
+  const priceMult = econ.priceMultiplier !== undefined ? Number(econ.priceMultiplier) : 1;
+  const expMult = econ.expensesMultiplier !== undefined ? Number(econ.expensesMultiplier) : 1;
   const scale = g.gdpScale || 1;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
@@ -784,7 +787,7 @@ function runEconomy(db, actor) {
             ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct);
         const keep = cleanQty(produced * itemKeepPct / 100);
         if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
-        o.dom += (produced - keep) * retail;
+        o.dom += (produced - keep) * retail * priceMult;
       }
     } else if (pr.prodMode === 'cash') {
       o.dom += (pr.cashPerTurn || 0) * f;
@@ -821,7 +824,7 @@ function runEconomy(db, actor) {
     }
 
     // expenses: property upkeep plus direct company payroll
-    o.upkeep += pr.expenses || 0;
+    o.upkeep += (pr.expenses || 0) * expMult;
     o.wage += (pr.employees || 0) * wagePerTurn;
 
     // wage pressure on the province (employee-weighted)
@@ -1080,6 +1083,9 @@ function repriceAllShares(db, a, b, c, e, actor) {
 function generateTradeOrders(db) {
   const trade = db.settings.trade;
   if (!trade || !Array.isArray(trade.partners)) return;
+  // Global GM price lever (Economy tab) applies to the foreign order book too.
+  const econ = db.settings.economy || {};
+  const priceMult = econ.priceMultiplier !== undefined ? Number(econ.priceMultiplier) : 1;
   // the previous turn's executed trades were archived by recordTradeHistory —
   // reset the per-turn accumulators the moment the new order book opens
   trade.lastFlows = [];
@@ -1097,7 +1103,7 @@ function generateTradeOrders(db) {
       // MULTIPLIER (1 = at retail; >1 pays a premium, <1 a discount). Legacy
       // absolute prices are honoured as an implied multiplier so old worlds
       // keep their numbers until re-authored.
-      const retail = item.marketValue || 0;
+      const retail = (item.marketValue || 0) * priceMult;
       const mult = (p.priceMult && p.priceMult[iid] > 0) ? p.priceMult[iid]
         : (p.prices && p.prices[iid] > 0 && retail > 0 ? p.prices[iid] / retail : 1);
       // Diplomacy (Phase 25): warm partners bid over the odds for our goods

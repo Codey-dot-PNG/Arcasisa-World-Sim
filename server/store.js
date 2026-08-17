@@ -140,6 +140,13 @@ function migrate(world) {
     if (!t.auto.mode) { t.auto.mode = 'interval'; changed = true; }
     if (!t.auto.at) { t.auto.at = '08:00'; changed = true; }
   }
+  // GM Economy tab — global price/expense levers (1 = authored values).
+  // Ungated (not phase-locked) so live worlds of any schema pick them up.
+  if (world.settings) {
+    const e = world.settings.economy = world.settings.economy || {};
+    if (e.priceMultiplier === undefined) { e.priceMultiplier = 1; changed = true; }
+    if (e.expensesMultiplier === undefined) { e.expensesMultiplier = 1; changed = true; }
+  }
 
   // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded
   // once (flag-gated); the GM freely edits stats/names or mints new models

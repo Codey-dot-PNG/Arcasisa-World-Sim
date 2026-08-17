@@ -179,10 +179,11 @@ const GM = {
   TABS: [
     ['globaledit', 'Experimental Global Editor'],
     ['world', 'World & Time'],
+    ['economy', 'Economy'],
     ['provinces', 'Provinces'],
     ['mapobjects', 'Cities & Properties'],
     ['registry', 'Entity Registry'],
-    ['economy', 'Money & Accounts'],
+    ['money', 'Money & Accounts'],
     ['assets', 'Assets & Ownership'],
     ['items', 'Items & Market'],
     ['trade', 'Trade Desk'],
@@ -217,7 +218,7 @@ const GM = {
     const fn = {
       globaledit: this.tabGlobalEdit,
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
-      registry: this.tabRegistry, economy: this.tabEconomy, assets: this.tabAssets, items: this.tabItems,
+      registry: this.tabRegistry, economy: this.tabEconomy, money: this.tabMoney, assets: this.tabAssets, items: this.tabItems,
       trade: this.tabTrade,
       variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
       presentation: this.tabPresentation,
@@ -1176,7 +1177,7 @@ const GM = {
   },
 
   /* ═══════════ MONEY ═══════════ */
-  tabEconomy(main) {
+  tabMoney(main) {
     main.appendChild(el('div.doc-title', 'Money & Accounts'));
     main.appendChild(el('div.doc-sub', 'the Bank of Arcasia answers to you alone'));
     main.appendChild(el('div.btn-row',
@@ -1209,6 +1210,36 @@ const GM = {
       el('tbody', [...S().accounts].sort((a, b) => b.balance - a.balance).map(a => el('tr',
         el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance)),
         el('td', el('button.icon-btn', { title: 'Close account', onclick: () => this.deleteColl('accounts', a.id, a.name) }, '✕')))))));
+  },
+
+  /* ═══════════ ECONOMY (global levers) ═══════════ */
+  tabEconomy(main) {
+    const e = (S().settings.economy) || {};
+    const d = this.getDraft('economy', {
+      priceMultiplier: e.priceMultiplier === undefined ? 1 : e.priceMultiplier,
+      expensesMultiplier: e.expensesMultiplier === undefined ? 1 : e.expensesMultiplier
+    });
+    main.appendChild(el('div.doc-title', 'Economy'));
+    main.appendChild(el('div.doc-sub', 'global levers over sale prices and running costs'));
+    main.appendChild(Views.secLabel('Global prices'));
+    main.appendChild(this.field('Prices multiplier',
+      Forms.sliderNum(d, 'priceMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'Modifies the sale price of all items globally — domestic retail sales and foreign trade orders.'));
+    main.appendChild(Views.secLabel('Global expenses'));
+    main.appendChild(this.field('Expenses multiplier',
+      Forms.sliderNum(d, 'expensesMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'Modifies all property expenses (upkeep) by this amount.'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:20px;' }, el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', {
+            economy: { priceMultiplier: d.priceMultiplier, expensesMultiplier: d.expensesMultiplier }
+          });
+          this.draftKey = null;
+          toast('Economy settings saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Economy Settings')));
   },
 
   /* ═══════════ ASSETS & OWNERSHIP (Workstream C) ═══════════

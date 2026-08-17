@@ -1726,7 +1726,12 @@ async function handle(req, res, pathname, method) {
           // partner edits reshape the market — reopen the order book at once
           try { sim.generateTradeOrders(db); } catch (e) { /* orders regenerate next turn */ }
         }
-        if (b.economy) s.economy = b.economy; // Phase 13 — economy tunables (baseDailyWage, wage nudges)
+        if (b.economy) { // Phase 13 economy tunables — merge so a partial save (e.g. the GM Economy tab) never wipes sibling knobs
+          const e = s.economy = s.economy || {};
+          for (const k in b.economy) e[k] = b.economy[k];
+          if (e.priceMultiplier !== undefined) e.priceMultiplier = Math.max(0.1, Math.min(10, Number(e.priceMultiplier) || 1));
+          if (e.expensesMultiplier !== undefined) e.expensesMultiplier = Math.max(0.1, Math.min(10, Number(e.expensesMultiplier) || 1));
+        }
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);
         store.save(); broadcast('sync');

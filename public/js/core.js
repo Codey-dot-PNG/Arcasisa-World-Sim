@@ -99,8 +99,9 @@ const itemById = (id) => S() && S().items.find(i => i.id === id);
 const acctById = (id) => S() && S().accounts.find(a => a.id === id);
 // Global GM economy levers (Economy tab): records keep their authored values,
 // so these return the EFFECTIVE numbers the engine actually charges/pays this
-// turn. Securities/deeds are market-driven instruments (day price / property
-// value) — the price lever deliberately does not touch them.
+// turn. effPrice is the domestic sale price (domesticMultiplier). Securities/
+// deeds are market-driven instruments (day price / property value) — the price
+// levers deliberately do not touch them.
 const econMult = (key) => {
   const e = (S() && S().settings && S().settings.economy) || {};
   const v = e[key];
@@ -109,7 +110,7 @@ const econMult = (key) => {
 const effPrice = (it) => {
   if (!it) return 0;
   if (it.category === 'Securities' || it.category === 'Deeds') return it.marketValue || 0;
-  return (it.marketValue || 0) * econMult('priceMultiplier');
+  return (it.marketValue || 0) * econMult('domesticMultiplier');
 };
 const effUpkeep = (pr) => (pr && pr.expenses || 0) * econMult('expensesMultiplier');
 const entName = (id) => { const e = entById(id); return e ? e.name : '—'; };

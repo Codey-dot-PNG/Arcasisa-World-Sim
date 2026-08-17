@@ -699,8 +699,9 @@ function runEconomy(db, actor) {
   const items = db.items;
   const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
   const econ = db.settings.economy || { baseDailyWage: 4, wageHappinessK: 0.03, wageEmploymentK: 0.03 };
-  // Global GM levers (Economy tab): scale sale prices and property expenses.
-  const priceMult = econ.priceMultiplier !== undefined ? Number(econ.priceMultiplier) : 1;
+  // Global GM levers (Economy tab): domestic sale price and property expense
+  // multipliers. Records keep their authored values; the engine scales here.
+  const domMult = econ.domesticMultiplier !== undefined ? Number(econ.domesticMultiplier) : 1;
   const expMult = econ.expensesMultiplier !== undefined ? Number(econ.expensesMultiplier) : 1;
   const scale = g.gdpScale || 1;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
@@ -787,7 +788,7 @@ function runEconomy(db, actor) {
             ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct);
         const keep = cleanQty(produced * itemKeepPct / 100);
         if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
-        o.dom += (produced - keep) * retail * priceMult;
+        o.dom += (produced - keep) * retail * domMult;
       }
     } else if (pr.prodMode === 'cash') {
       o.dom += (pr.cashPerTurn || 0) * f;
@@ -1083,9 +1084,11 @@ function repriceAllShares(db, a, b, c, e, actor) {
 function generateTradeOrders(db) {
   const trade = db.settings.trade;
   if (!trade || !Array.isArray(trade.partners)) return;
-  // Global GM price lever (Economy tab) applies to the foreign order book too.
+  // Global GM price levers (Economy tab): demand orders are OUR EXPORTS
+  // (partners buying from us), supply orders OUR IMPORTS (we buy from them).
   const econ = db.settings.economy || {};
-  const priceMult = econ.priceMultiplier !== undefined ? Number(econ.priceMultiplier) : 1;
+  const exportMult = econ.exportMultiplier !== undefined ? Number(econ.exportMultiplier) : 1;
+  const importMult = econ.importMultiplier !== undefined ? Number(econ.importMultiplier) : 1;
   // the previous turn's executed trades were archived by recordTradeHistory —
   // reset the per-turn accumulators the moment the new order book opens
   trade.lastFlows = [];
@@ -1103,14 +1106,14 @@ function generateTradeOrders(db) {
       // MULTIPLIER (1 = at retail; >1 pays a premium, <1 a discount). Legacy
       // absolute prices are honoured as an implied multiplier so old worlds
       // keep their numbers until re-authored.
-      const retail = (item.marketValue || 0) * priceMult;
+      const retail = item.marketValue || 0;
       const mult = (p.priceMult && p.priceMult[iid] > 0) ? p.priceMult[iid]
         : (p.prices && p.prices[iid] > 0 && retail > 0 ? p.prices[iid] / retail : 1);
       // Diplomacy (Phase 25): warm partners bid over the odds for our goods
       // and undercut when selling to us; frosty ones do the reverse. ±10%
       // across the whole 0-100 relations range — see relationsPriceMult.
       const relMult = kind === 'demand' ? relationsPriceMult(db, p.entityId) : 1 / relationsPriceMult(db, p.entityId);
-      const base = retail * mult * relMult;
+      const base = retail * mult * relMult * (kind === 'demand' ? exportMult : importMult);
       if (!(base > 0)) return null;
       const lvl = ((kind === 'demand' ? p.demand : p.supply) || {})[iid] || 'Med';
       // demand level scales the ask/bid: eager buyers bid over the odds,

@@ -142,10 +142,16 @@ function migrate(world) {
   }
   // GM Economy tab — global price/expense levers (1 = authored values).
   // Ungated (not phase-locked) so live worlds of any schema pick them up.
+  // The original single priceMultiplier was split into domestic/export/import
+  // levers; a legacy value carries over to all three so no world silently
+  // resets to 1× when it upgrades.
   if (world.settings) {
     const e = world.settings.economy = world.settings.economy || {};
-    if (e.priceMultiplier === undefined) { e.priceMultiplier = 1; changed = true; }
     if (e.expensesMultiplier === undefined) { e.expensesMultiplier = 1; changed = true; }
+    const legacy = e.priceMultiplier;
+    for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier']) {
+      if (e[k] === undefined) { e[k] = legacy !== undefined ? legacy : 1; changed = true; }
+    }
   }
 
   // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded

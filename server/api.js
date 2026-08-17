@@ -1729,8 +1729,11 @@ async function handle(req, res, pathname, method) {
         if (b.economy) { // Phase 13 economy tunables — merge so a partial save (e.g. the GM Economy tab) never wipes sibling knobs
           const e = s.economy = s.economy || {};
           for (const k in b.economy) e[k] = b.economy[k];
-          if (e.priceMultiplier !== undefined) e.priceMultiplier = Math.max(0.1, Math.min(10, Number(e.priceMultiplier) || 1));
-          if (e.expensesMultiplier !== undefined) e.expensesMultiplier = Math.max(0.1, Math.min(10, Number(e.expensesMultiplier) || 1));
+          // GM levers are unbounded above — a GM may type any multiplier they
+          // want; only a safety floor keeps values from going negative/zero.
+          for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier', 'expensesMultiplier']) {
+            if (e[k] !== undefined) e[k] = Math.max(0.05, Number(e[k]) || 0.05);
+          }
         }
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);

@@ -1695,11 +1695,12 @@ const Views = {
 
     // what the world pays (partner price comparison per item)
     // partner base price = item retail × partner multiplier (legacy absolute
-    // prices honoured as an implied multiplier), mirroring the trade engine
+    // prices honoured as an implied multiplier) × the GM export lever,
+    // mirroring the trade engine's demand orders
     const partnerBase = (p, it) => {
       const mult = (p.priceMult && p.priceMult[it.id] > 0) ? p.priceMult[it.id]
         : (p.prices && p.prices[it.id] > 0 && it.marketValue > 0 ? p.prices[it.id] / it.marketValue : 1);
-      return Math.round(effPrice(it) * mult * 100) / 100;
+      return Math.round((it.marketValue || 0) * mult * econMult('exportMultiplier') * 100) / 100;
     };
     const priced = {};
     partners.forEach(p => new Set([...(p.exports || []), ...Object.keys(p.demand || {})]).forEach(iid => {

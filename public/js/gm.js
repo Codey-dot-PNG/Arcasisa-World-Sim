@@ -380,7 +380,10 @@ const GM = {
         if (on) {
           if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
           const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
-          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(effPrice(it) * (p.priceMult[it.id] || 1) * 100) / 100); };
+          // demand orders are our EXPORTS, supply orders our IMPORTS — each
+          // scaled by its own GM lever on top of the partner multiplier
+          const kindMult = econMult(lvlKey === 'demand' ? 'exportMultiplier' : 'importMultiplier');
+          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round((it.marketValue || 0) * (p.priceMult[it.id] || 1) * kindMult * 100) / 100); };
           paint();
           const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', allowBeyondRange: true, onInput: () => { delete p.prices[it.id]; paint(); } });
           const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
@@ -1156,19 +1159,20 @@ const GM = {
           const it = itemById(iid); if (!it) return 0;
           const m = (partner.priceMult && partner.priceMult[iid] > 0) ? partner.priceMult[iid]
             : (partner.prices && partner.prices[iid] > 0 && it.marketValue > 0 ? partner.prices[iid] / it.marketValue : 1);
-          return Math.round(effPrice(it) * m * 100) / 100;
+          return Math.round((it.marketValue || 0) * m * 100) / 100;
         };
-        const profile = (title, ids, lvlMap) => {
+        const profile = (title, ids, lvlMap, kind) => {
           const wrap = el('div', { style: 'margin-bottom:8px;' });
           wrap.appendChild(el('div.mono-label', title));
           if (!ids.length) { wrap.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint);' }, '— none —')); return wrap; }
           const tbl = el('table.data', el('thead', el('tr', el('th', 'Good'), el('th', 'Level'), el('th.num', 'Price'))));
           const body = el('tbody');
-          ids.forEach(iid => { const it = itemById(iid); if (!it) return; body.appendChild(el('tr', el('td', it.name), el('td', (lvlMap || {})[iid] || 'Med'), el('td.num', CUR() + fmtNum(priceOf(iid))))); });
+          const kindMult = econMult(kind === 'demand' ? 'exportMultiplier' : 'importMultiplier');
+          ids.forEach(iid => { const it = itemById(iid); if (!it) return; body.appendChild(el('tr', el('td', it.name), el('td', (lvlMap || {})[iid] || 'Med'), el('td.num', CUR() + fmtNum(priceOf(iid) * kindMult)))); });
           tbl.appendChild(body); wrap.appendChild(tbl); return wrap;
         };
-        main.appendChild(profile('Buys from Arcasia — our exports', partner.exports || [], partner.demand));
-        main.appendChild(profile('Sells to Arcasia — our imports', partner.imports || [], partner.supply));
+        main.appendChild(profile('Buys from Arcasia — our exports', partner.exports || [], partner.demand, 'demand'));
+        main.appendChild(profile('Sells to Arcasia — our imports', partner.imports || [], partner.supply, 'supply'));
         main.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'trade'; this.draftKey = null; App.renderView(); } }, 'Edit on the Trade Desk →'));
       }
     }
@@ -1216,24 +1220,39 @@ const GM = {
   tabEconomy(main) {
     const e = (S().settings.economy) || {};
     const d = this.getDraft('economy', {
-      priceMultiplier: e.priceMultiplier === undefined ? 1 : e.priceMultiplier,
+      domesticMultiplier: e.domesticMultiplier === undefined ? 1 : e.domesticMultiplier,
+      exportMultiplier: e.exportMultiplier === undefined ? 1 : e.exportMultiplier,
+      importMultiplier: e.importMultiplier === undefined ? 1 : e.importMultiplier,
       expensesMultiplier: e.expensesMultiplier === undefined ? 1 : e.expensesMultiplier
     });
     main.appendChild(el('div.doc-title', 'Economy'));
     main.appendChild(el('div.doc-sub', 'global levers over sale prices and running costs'));
-    main.appendChild(Views.secLabel('Global prices'));
-    main.appendChild(this.field('Prices multiplier',
-      Forms.sliderNum(d, 'priceMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-      'Scales the sale price of all items: domestic retail sales, foreign trade orders and the values shown on every desk. Records keep their authored price; share prices and deeds are unaffected.'));
-    main.appendChild(Views.secLabel('Global expenses'));
+    main.appendChild(Views.secLabel('Prices'));
+    main.appendChild(this.field('Domestic sale ×',
+      Forms.sliderNum(d, 'domesticMultiplier', 0.05, 10, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'What companies and properties receive when their goods sell on the domestic market. Every desk shows this × the authored retail.'));
+    main.appendChild(this.field('Export ×',
+      Forms.sliderNum(d, 'exportMultiplier', 0.05, 10, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'What foreign partners pay for Arcasian goods (their buy orders). Type any value — not capped.'));
+    main.appendChild(this.field('Import ×',
+      Forms.sliderNum(d, 'importMultiplier', 0.05, 10, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'What Arcasia pays for foreign goods (their sell orders). Type any value — not capped.'));
+    main.appendChild(Views.secLabel('Expenses'));
     main.appendChild(this.field('Expenses multiplier',
-      Forms.sliderNum(d, 'expensesMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-      'Scales all property expenses (upkeep) — the amount actually debited each turn and shown as “Upkeep / turn” on every desk. Property records keep their authored value.'));
-    main.appendChild(el('div.btn-row', { style: 'margin-top:20px;' }, el('button.solid-btn', {
+      Forms.sliderNum(d, 'expensesMultiplier', 0.05, 10, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'Scales all property expenses (upkeep) — the amount actually debited each turn and shown as “Upkeep / turn” on every desk. Type any value — not capped.'));
+    main.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint); margin-top:12px;' },
+      'Records keep their authored values; the levers above scale what actually happens. Share prices and deeds are unaffected.'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:12px;' }, el('button.solid-btn', {
       onclick: async () => {
         try {
           await PATCH('/api/gm/settings', {
-            economy: { priceMultiplier: d.priceMultiplier, expensesMultiplier: d.expensesMultiplier }
+            economy: {
+              domesticMultiplier: d.domesticMultiplier,
+              exportMultiplier: d.exportMultiplier,
+              importMultiplier: d.importMultiplier,
+              expensesMultiplier: d.expensesMultiplier
+            }
           });
           this.draftKey = null;
           toast('Economy settings saved.');

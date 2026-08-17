@@ -94,9 +94,17 @@ scripts a province's vote outright, bypassing the demographic election model.
 ## Properties (Phase 13 production model)
 
 `{ id, name, type (commercial|industrial|government|military|…), kind (factory|mine|farm|
-office|bank|…), provinceId, pos [x,y on 3840×2160 grid], ownerId, value, employees, expenses
-(per-turn upkeep), texture, inventory, vars, prodMode: 'goods'|'cash'|'none',
+office|bank|…), provinceId, pos [x,y on 3840×2160 grid], ownerId, value, employees,
+maxEmployees (employee cap — GM-only lever; seeded from the authored headcount, never
+derived from live staffing), expenses (per-turn upkeep), texture, inventory, vars,
+prodMode: 'goods'|'cash'|'none',
 produces: [{itemId, perTurn}], cashPerTurn, targetRevenue? }`.
+
+**Staffing vs employee cap (Phase 28b):** `employees` (staffing) is CEO-editable and may
+EXCEED `maxEmployees` (the cap) — over-staffing raises output linearly (capped at 5× rated)
+while doubling accident risk per extra 100% of capacity on the payroll. Only the GM may
+change `maxEmployees` (GM Studio property editors, or `PATCH /api/property/:id/controls`
+with `maxEmployees`).
 `type: 'military'` sites are hidden from operators without the `military` map layer.
 
 War-related notes (Phase 27): `prop_arc_arms` (ARC Arms Works, `type:'military'`) is seeded

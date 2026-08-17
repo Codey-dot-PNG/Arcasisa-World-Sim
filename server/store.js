@@ -948,6 +948,22 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 28b — staffing vs employee cap split (self-heal, rides every
+  // load; idempotent + additive). Properties written before the split (or
+  // created through an editor that predates it) carry no maxEmployees; the
+  // engine used to DERIVE the cap from live staffing, so a CEO's layoffs
+  // permanently shrank the cap and hiring could never recover. Seed the cap
+  // once from the authored/current employee count (worlds start fully
+  // staffed); afterwards only the GM may move it — staffing is CEO-editable.
+  let capSeeded = false;
+  for (const pr of (world.properties || [])) {
+    if (pr.maxEmployees === undefined) {
+      pr.maxEmployees = Math.max(1, Math.round(pr.employees || 1));
+      capSeeded = true;
+    }
+  }
+  if (capSeeded) changed = true;
+
   // ---- Phase 29 — company-owned sites inherit company policy (schema < 8) --
   // Phase 28 seeded EVERY property with concrete workHours=8 / safety='standard'.
   // Those constants sit on the property, so they shadow the company desk's

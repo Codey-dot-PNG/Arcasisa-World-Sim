@@ -524,7 +524,7 @@ const Views = {
     wrap.appendChild(this.secLabel('Record'));
     wrap.appendChild(this.kv('Owner', this.ownerLink(pr.ownerId)));
     wrap.appendChild(this.kv('Assessed Value', fmtMoney(pr.value)));
-    wrap.appendChild(this.kv('Employees', fmtNum(pr.employees)));
+    wrap.appendChild(this.kv('Employees', fmtNum(pr.employees) + (pr.maxEmployees !== undefined ? ' / ' + fmtNum(pr.maxEmployees) + ' cap' : '')));
     // Phase 13 — per-turn production. Goods mint items the owner sells; cash
     // props pay money directly; pure-cost props are upkeep only.
     const priceOf = (iid) => effPrice(itemById(iid));
@@ -1240,7 +1240,7 @@ const Views = {
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
           (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—')))));
     inner.appendChild(this.statStrip([
-      ['Employees', fmtNum(pr.employees || 0)], ['Output value / turn', fmtMoney(revenue * wf)],
+      ['Employees', fmtNum(pr.employees || 0) + ' / ' + fmtNum(maxEmp)], ['Output value / turn', fmtMoney(revenue * wf)],
       ['Output multiplier', wf.toFixed(2) + '×'], ['Upkeep / turn', fmtMoney(upkeep)],
       ['Wages / turn', fmtMoney(wages)],
       ['Net / turn', fmtMoney(revenue * wf - upkeep - wages)], ['Stock on site', fmtMoney((pr.inventory || []).reduce((s, r) => s + (r.qty || 0) * priceOf(r.itemId), 0))]
@@ -1261,9 +1261,10 @@ const Views = {
         [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
         'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and hit the province’s population.' +
         (owner && owner.type === 'company' ? ' The company policy default is ' + coSafety + '.' : '')),
-      Forms.field('Staffing', Forms.slider(dr, 'employees', 0, maxEmp,
-        { format: (v) => v + ' / ' + maxEmp + ' — fulfilment ' + Math.round((v / maxEmp) * 100) + '%' }),
-        'Hiring cap: ' + maxEmp + '. Production scales with fulfilment — fully staffed means full output.')));
+      Forms.field('Staffing', Forms.sliderNum(dr, 'employees', 0, maxEmp * 2,
+        { suffix: ' / cap ' + maxEmp, allowBeyondRange: true }),
+        'The employee cap (GM-set) is a hard facility limit only for the slider — type any number into the box to over-staff beyond it. The slider runs to double the cap. Production scales linearly with staffing (output is capped at 5× rated); accident risk DOUBLES for every extra 100% of capacity on the payroll — ' +
+        'over-staffing is a gamble on the safety policy.')));
     if (owner && owner.type === 'company') {
       inner.appendChild(Forms.check(dr, 'inherit', 'Follow the company policy for work hours & safety (uncheck to fix this site’s own schedule)'));
     }
@@ -1403,12 +1404,14 @@ const Views = {
         el('span', '◀ KEEP IN STOCK'), el('span', 'SELL DOMESTICALLY ▶')));
   },
   // Client mirror of the engine's workforce multiplier (sim.js runEconomy,
-  // Phase 28): hours/8 × safety × staffing fulfilment × upgrade. The live
+  // Phase 28/28b): hours/8 × safety × staffing fulfilment × upgrade. The live
   // world adds a small per-turn wobble; this is the exact promised factor.
+  // Staffing fulfilment is LINEAR past full capacity (over-staffing), capped
+  // at 5× rated output — mirror of the engine's staffMult.
   wfMult(o) {
     const h = Number.isFinite(Number(o.hours)) ? Math.max(0, Math.min(24, Number(o.hours))) : 8;
     const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
-    const staffMult = o.cap > 0 ? Math.max(0, Math.min(1, (o.employees || 0) / o.cap)) : 1;
+    const staffMult = o.cap > 0 ? Math.max(0, Math.min(5, (o.employees || 0) / o.cap)) : 1;
     const upgradeMult = 1 + ((o.invested || 0) / Math.max(50, o.value || 100));
     return (h / 8) * (SAFETY_MULT[o.safety] || 1) * staffMult * upgradeMult;
   },
@@ -1781,7 +1784,7 @@ const Views = {
     // site's own capacity, so the numbers move while dragging.
     const wfFor = (pr) => {
       const cap = maxEmpOf(pr);
-      const prevEmp = Math.round(cap * Math.max(0, Math.min(100, Number(dr.staffingPct) || 0)) / 100);
+      const prevEmp = Math.round(cap * Math.max(0, Math.min(200, Number(dr.staffingPct) || 0)) / 100);
       return this.wfMult({
         hours: pr.workHours !== undefined ? pr.workHours : dr.workHours,
         safety: pr.safety !== undefined ? pr.safety : dr.safety,
@@ -1807,8 +1810,9 @@ const Views = {
       Forms.field('Onsite safety (policy default)', Forms.sel(dr, 'safety',
         [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
         'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and thin the province’s population.'),
-      Forms.field('Staffing (company-wide)', Forms.slider(dr, 'staffingPct', 0, 100, { suffix: '% of capacity' }),
-        totalEmp + ' of ' + totalCap + ' workers employed now. Saving staffs every site to this share of its capacity (site-level overrides are clobbered).')));
+      Forms.field('Staffing (company-wide)', Forms.sliderNum(dr, 'staffingPct', 0, 200,
+        { suffix: '% of capacity', allowBeyondRange: true }),
+        totalEmp + ' of ' + totalCap + ' workers employed now (100% = full capacity). Saving staffs every site to this share of its capacity — over 100% over-staffs every site (site-level overrides are clobbered). Accident risk doubles per 100% over capacity.')));
 
     // ---- per-product table: retail value, output and where it goes ----
     const producedItems = [...new Set(props.flatMap(pr => (pr.produces || []).map(e => e.itemId)))].filter(iid => itemById(iid));
@@ -1914,7 +1918,7 @@ const Views = {
         return el('tr',
           el('td', { style: 'white-space:normal;' }, pr.name),
           el('td', { style: 'min-width:230px; white-space:nowrap;' },
-            Forms.sliderNum(staffN, 'n', 0, cap, { suffix: ' / ' + cap }), ' ',
+            Forms.sliderNum(staffN, 'n', 0, cap * 2, { suffix: ' / cap ' + cap, allowBeyondRange: true }), ' ',
             el('button.dash-btn', {
               onclick: async () => {
                 const want = Math.max(0, Math.round(Number(staffN.n) || 0));

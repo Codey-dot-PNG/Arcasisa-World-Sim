@@ -851,11 +851,17 @@ async function handle(req, res, pathname, method) {
         if (!['none', 'relaxed', 'standard', 'strict'].includes(b.safety)) return bad('Invalid safety policy.');
         pr.safety = b.safety;
       } else if (b.safety === 'inherit') delete pr.safety;
+      // staffing vs employee cap (Phase 28b): `employees` is CEO-set staffing
+      // and may EXCEED the cap (over-staffing — more output, exponentially more
+      // accident risk); `maxEmployees` is the site's permanent capacity and a
+      // Game Master lever. The cap is never derived from live staffing, so a
+      // layoff can never shrink it.
+      if (b.maxEmployees !== undefined) {
+        if (!gm) return deny('Only the Game Master may change the employee cap.');
+        pr.maxEmployees = Math.max(0, Math.round(Number(b.maxEmployees) || 0));
+      }
       if (b.employees !== undefined) {
-        const cap = pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, Math.round(pr.employees || 1));
-        const want = Math.max(0, Math.round(Number(b.employees) || 0));
-        if (want > cap) return bad('Hiring is capped at ' + cap + ' employees on this site.');
-        pr.employees = want;
+        pr.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
       }
       if (b.upgradeInvest !== undefined) {
         const amt = Math.round((Number(b.upgradeInvest) || 0) * 100) / 100;
@@ -883,11 +889,12 @@ async function handle(req, res, pathname, method) {
       if (b.cashPerTurn !== undefined) pr.cashPerTurn = Math.max(0, cleanQty(b.cashPerTurn));
       store.log('economy', `${pr.name} adjusts operations`,
         `${pr.prodMode || 'none'} · ${pr.keepPct || 0}% kept · wages ${pr.wagePerTurn || 0} per employee/turn`, u.user.displayName, [pr.id, pr.ownerId]);
-      if (b.workHours !== undefined || b.safety !== undefined || b.employees !== undefined || b.upgradeInvest !== undefined) {
+      if (b.workHours !== undefined || b.safety !== undefined || b.employees !== undefined || b.upgradeInvest !== undefined || b.maxEmployees !== undefined) {
         const wfBits = [];
         if (b.workHours !== undefined) wfBits.push(pr.workHours + 'h shifts');
         if (b.safety !== undefined) wfBits.push(pr.safety + ' safety');
         if (b.employees !== undefined) wfBits.push(pr.employees + ' staff');
+        if (b.maxEmployees !== undefined) wfBits.push('cap ' + pr.maxEmployees);
         if (b.upgradeInvest !== undefined) wfBits.push('invested ' + db.settings.currency + cleanQty(b.upgradeInvest) + ' in upgrades (total ' + db.settings.currency + (pr.upgradeInvested || 0) + ')');
         store.log('economy', `${pr.name} workforce & safety`, wfBits.join(' · '), u.user.displayName, [pr.id, pr.ownerId]);
       }
@@ -1177,9 +1184,11 @@ async function handle(req, res, pathname, method) {
       }
       // company-wide staffing: every site is (re)staffed to this share of its
       // own capacity. Rounded server-side; the desk mirrors the exact rows.
+      // Phase 28b: past 100% the company over-staffs every site (linear extra
+      // output, exponentially likelier accidents).
       let staffed = null;
       if (b.staffingPct !== undefined) {
-        const pct = clampPct(b.staffingPct);
+        const pct = Math.max(0, Math.min(200, Math.round(Number(b.staffingPct) || 0)));
         staffed = [];
         for (const pr2 of db.properties) {
           if (pr2.ownerId !== co.id) continue;
@@ -1191,7 +1200,7 @@ async function handle(req, res, pathname, method) {
       store.log('economy', `${co.name} adjusts operations`,
         `keep ${co.keepPct || 0}% in stock · wages ${co.wagePerTurn || 0} per employee/turn` +
         (b.workHours !== undefined || b.safety !== undefined || b.staffingPct !== undefined
-          ? ` · ${co.workHours}h shifts · ${co.safety} safety${b.staffingPct !== undefined ? ' · staffed to ' + (b.staffingPct === 100 ? 100 : Math.min(100, Math.max(0, Math.round(Number(b.staffingPct) || 0)))) + '% of capacity' : ''}`
+          ? ` · ${co.workHours}h shifts · ${co.safety} safety${b.staffingPct !== undefined ? ' · staffed to ' + (b.staffingPct === 200 ? 200 : Math.min(200, Math.max(0, Math.round(Number(b.staffingPct) || 0)))) + '% of capacity' : ''}`
           : ''), u.user.displayName, [co.id]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, company: {
@@ -1812,7 +1821,15 @@ async function handle(req, res, pathname, method) {
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
           if (coll === 'entities' && b.type === 'company' && b.wagePerTurn === undefined) b.wagePerTurn = 1;
-          if (coll === 'properties') buildings.assignTexture(b); // random variant for the kind
+          if (coll === 'properties') {
+            // staffing/cap split (Phase 28b): new sites start fully staffed —
+            // the cap is seeded from the authored headcount and stays a GM
+            // constant; staffing itself is CEO-editable afterwards.
+            if (b.employees !== undefined) b.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
+            if (b.maxEmployees !== undefined) b.maxEmployees = Math.max(0, Math.round(Number(b.maxEmployees) || 0));
+            else b.maxEmployees = Math.max(1, Math.round(b.employees || 1));
+            buildings.assignTexture(b); // random variant for the kind
+          }
           db[coll].push(b);
           if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
           if (coll === 'entities') market.syncAllCertificates(db); // mirror register edits into inventories
@@ -1824,6 +1841,12 @@ async function handle(req, res, pathname, method) {
           const obj = db[coll].find(x => x.id === m[2]);
           if (!obj) return bad('Not found: ' + m[2]);
           const b = await readBody(req);
+          if (coll === 'properties' && b.employees !== undefined) {
+            b.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
+          }
+          if (coll === 'properties' && b.maxEmployees !== undefined) {
+            b.maxEmployees = Math.max(0, Math.round(Number(b.maxEmployees) || 0));
+          }
           if (coll === 'entities' && (obj.type === 'company' || b.type === 'company') && b.wagePerTurn !== undefined) {
             b.wagePerTurn = Math.max(0, Math.min(1000000, Math.round((Number(b.wagePerTurn) || 0) * 100) / 100));
           }

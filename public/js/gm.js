@@ -688,7 +688,8 @@ const GM = {
     main.appendChild(el('div.form-grid',
       this.field('Name', this.text(d, 'name')),
       this.field('Assessed value', this.num(d, 'value')),
-      this.field('Employees', this.num(d, 'employees'))));
+      this.field('Employees', this.num(d, 'employees')),
+      this.field('Employee cap', this.num(d, 'maxEmployees'))));
     main.appendChild(this.productionEditor(d));
     main.appendChild(this.saveBar('properties', d, false));
   },
@@ -1034,7 +1035,8 @@ const GM = {
       this.field('Province', this.sel(d, 'provinceId', this.provOptions())),
       this.field('Position', this.placeButton(d, d.name)),
       this.field('Assessed value', this.num(d, 'value')),
-      this.field('Employees', this.num(d, 'employees'))));
+      this.field('Employees', this.num(d, 'employees')),
+      this.field('Employee cap (max staffing)', this.num(d, 'maxEmployees'))));
     main.appendChild(this.field('Description', this.area(d, 'description')));
     main.appendChild(this.productionEditor(d));
     main.appendChild(this.varsEditor(d, 'property'));

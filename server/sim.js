@@ -756,7 +756,13 @@ function runEconomy(db, actor) {
     const maxEmp = pr.maxEmployees !== undefined
       ? Math.max(0, Math.round(pr.maxEmployees))
       : Math.max(1, Math.round(pr.employees || 1));
-    const staffMult = maxEmp > 0 ? Math.max(0, Math.min(1, (pr.employees || 0) / maxEmp)) : 1;
+    // Staffing fulfilment (Phase 28b): production scales LINEARLY with the
+    // staffing ratio — over-staffing past capacity boosts output by the same
+    // margin (the wobble floor still binds below, and a 5× rated ceiling
+    // keeps an absurd crew from minting absurd GDP in a single turn). The
+    // exponential accident pricing below is the real brake on over-staffing.
+    const staffRatio = maxEmp > 0 ? (pr.employees || 0) / maxEmp : 0;
+    const staffMult = Math.max(0, Math.min(5, staffRatio));
     const upgradeMult = 1 + ((pr.upgradeInvested || 0) / Math.max(50, pr.value || 100));
     const active = pr.prodMode === 'goods' || pr.prodMode === 'cash';
     const f = active
@@ -802,7 +808,13 @@ function runEconomy(db, actor) {
       const target = 50 + clamp01((wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
       const h0 = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
       pr.workerHappiness = Math.round(clamp01(h0 + (target - h0) * 0.03 + (Math.random() * 2 - 1) * 0.5, 0, 100) * 10) / 10;
-      if (Math.random() < (SAFETY_RISK[safetyRaw] || 0.05)) {
+      // Accident odds (Phase 28b): the policy base is multiplied by a
+      // staffing factor that grows EXPONENTIALLY — every extra 100% of
+      // capacity on the payroll doubles the risk, so a 200%-over-staffed
+      // 'standard' site (5% base) rolls at 10%, 300% at 20%, and so on.
+      // Under-staffing halves risk per 100% below the cap (floor 10% of base).
+      const riskMult = Math.max(0.1, Math.min(1e6, Math.pow(2, staffRatio - 1)));
+      if (Math.random() < (SAFETY_RISK[safetyRaw] || 0.05) * riskMult) {
         const deaths = Math.min(
           Math.max(1, Math.round(pr.employees * (0.04 + Math.random() * 0.06))),
           Math.max(1, Math.round(pr.employees * 0.5)));
@@ -817,7 +829,7 @@ function runEconomy(db, actor) {
         }
         pr.accident = {
           turn: db.settings.time.turn, date: db.settings.time.date, safety: safetyRaw,
-          hours: Math.round(hoursMult * 8), deaths, injuries, fulfilment: Math.round(staffMult * 100)
+          hours: Math.round(hoursMult * 8), deaths, injuries, fulfilment: Math.round(staffRatio * 100)
         };
         store.log('accident', `Industrial accident at ${pr.name}`,
           `${fmtNum(deaths)} dead, ${fmtNum(injuries)} injured (${safetyRaw} safety)`, actor || 'ENGINE', [pr.id, pr.ownerId]);

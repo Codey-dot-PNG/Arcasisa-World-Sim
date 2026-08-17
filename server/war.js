@@ -1779,6 +1779,11 @@ function setProtestTuning(db, patch, actor) {
     protest.mods.dmg = engine.clamp(Number(patch.dmg), TUNING_MIN, TUNING_MAX);
     changes.push(`dmg=${protest.mods.dmg}×`);
   }
+  if (patch.bombDmg !== undefined && Number.isFinite(Number(patch.bombDmg))) {
+    protest.mods = protest.mods || { dmg: 1, hp: 1 };
+    protest.mods.bombDmg = engine.clamp(Number(patch.bombDmg), TUNING_MIN, TUNING_MAX);
+    changes.push(`bombDmg=${protest.mods.bombDmg}×`);
+  }
   if (patch.hp !== undefined && Number.isFinite(Number(patch.hp))) {
     const newHp = engine.clamp(Number(patch.hp), TUNING_MIN, TUNING_MAX);
     const oldHp = (protest.mods || {}).hp || 1;

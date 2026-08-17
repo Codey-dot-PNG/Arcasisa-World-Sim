@@ -2389,10 +2389,13 @@ const War = {
     const pid = war.startedAt || war.id || 'protest';
     let d = this._protestTuneDraft;
     if (!d || d.id !== pid) {
+      const tun = (war.protest || {}).tuning || {};
       d = this._protestTuneDraft = {
         id: pid,
-        t: Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, (war.protest || {}).tuning || {}),
-        mods: Object.assign({ dmg: 1, hp: 1 }, war.mods || {})
+        t: Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, tun),
+        mods: Object.assign({ dmg: 1, hp: 1 }, war.mods || {}),
+        // strikeFrac shown on a 0–100 scale in the number box; converted back to a fraction on post.
+        pct: { strikeFrac: Math.round((tun.strikeFrac !== undefined ? tun.strikeFrac : 0.5) * 100) }
       };
     }
     const box = el('div');
@@ -2404,19 +2407,22 @@ const War = {
       clearTimeout(this._protestTuneTimers[field]);
       this._protestTuneTimers[field] = setTimeout(() => post({ [field]: value }), 300);
     };
-    // Sliders write straight into the persistent draft (Forms.slider mutates
+    // Sliders write straight into the persistent draft (Forms.sliderNum mutates
     // obj[key] on input), so a re-render reseeds them from the user's own
-    // value — never from stale server state.
-    const sl = (field, obj, key, min, max, step, fmt) =>
-      Forms.field(field, Forms.slider(obj, key, min, max, {
-        step, format: fmt, onInput: (v) => debounced(key, v)
+    // value — never from stale server state. Each slider also carries a number
+    // box that accepts any value (allowBeyondRange) — the server clamps to
+    // sane bounds on save.
+    const sl = (field, obj, key, min, max, step, suffix, onInput) =>
+      Forms.field(field, Forms.sliderNum(obj, key, min, max, {
+        step, suffix, allowBeyondRange: true, onInput
       }));
-    box.appendChild(sl('Violence damage ×', d.mods, 'dmg', 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Unit HP ×', d.mods, 'hp', 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Strike output drop (0–100%)', d.t, 'strikeFrac', 0, 1, 0.05, (v) => Math.round(v * 100) + '%'));
-    box.appendChild(sl('Civilian deaths per fight tick (×)', d.t, 'civFrac', 0, 10, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Fleeing civilians fraction', d.t, 'refugeeFrac', 0, 0.5, 0.01, (v) => Number(v).toFixed(2)));
-    box.appendChild(sl('Refugee wave every N ticks', d.t, 'refugeeEvery', 2, 12, 1, (v) => String(Math.round(v))));
+    box.appendChild(sl('Violence damage ×', d.mods, 'dmg', 0.1, 5, 0.1, '×', (v) => debounced('dmg', v)));
+    box.appendChild(sl('Unit HP ×', d.mods, 'hp', 0.1, 5, 0.1, '×', (v) => debounced('hp', v)));
+    box.appendChild(sl('Aircraft bombing damage ×', d.mods, 'bombDmg', 0.1, 5, 0.1, '×', (v) => debounced('bombDmg', v)));
+    box.appendChild(sl('Strike output drop (0–100%)', d.pct, 'strikeFrac', 0, 100, 1, '%', (v) => debounced('strikeFrac', v / 100)));
+    box.appendChild(sl('Civilian deaths per fight tick (×)', d.t, 'civFrac', 0, 10, 0.1, '×', (v) => debounced('civFrac', v)));
+    box.appendChild(sl('Fleeing civilians fraction', d.t, 'refugeeFrac', 0, 0.5, 0.01, '', (v) => debounced('refugeeFrac', v)));
+    box.appendChild(sl('Refugee wave every N ticks', d.t, 'refugeeEvery', 2, 12, 1, ' ticks', (v) => debounced('refugeeEvery', v)));
     inner.appendChild(box);
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
       'Strike output: production in cities touched by the crowds is reduced by up to this fraction.'));

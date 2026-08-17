@@ -1573,7 +1573,8 @@ enforces the escalation ladder:
   flip pushes a milestone event, logs to the timeline and (for the escalation
   flips) drafts Wire Service news.
 - `POST /api/gm/protest/tuning { strikeFrac? 0–1, civFrac? 0–10,
-  refugeeFrac? 0–0.5, dmg? 0.1–10, hp? 0.1–10 }` — GM-only; `hp` rescales
+  refugeeFrac? 0–0.5, refugeeEvery? 2–12, dmg? 0.1–10, bombDmg? 0.1–10,
+  hp? 0.1–10 }` — GM-only; `hp` rescales
   live unit strengths by the ratio, exactly like `setWarTuning`.
 - `POST /api/gm/protest/end` — GM abort; refugees still on the road settle,
   strike flags clear next economy pass.

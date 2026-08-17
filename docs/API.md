@@ -80,7 +80,7 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `POST\|PATCH\|DELETE coll/:coll(/:id)` | generic CRUD for `entities, provinces, cities, properties, items, events, variables, roles, accounts, markers` — with cascade deletes, geometry-based province placement, deed/cert/texture sync hooks |
 | `POST war/start` · `POST war/control` · `POST war/end` · `POST war/tuning` · `GET war/scenarios` · `POST war/scenarios/custom` · `POST war/spawn` · `POST war/join` · `POST war/treaty` | war desk — see docs/WAR.md. Control/end/tuning/spawn accept `conflict: 'war'\|'protest'` (default `war`) |
 | `POST protest/start` | `{name?, organizerId, baseCities:[cityIds], policeCities:[cityIds], crowds?, perCity?}` — 409 while a protest is active |
-| `POST protest/tuning` | `{strikeFrac? 0–1, civFrac? 0–10, refugeeFrac? 0–0.5, dmg? 0.1–10, hp? 0.1–10}` — see docs/WAR.md "Protests & civil unrest" |
+| `POST protest/tuning` | `{strikeFrac? 0–1, civFrac? 0–10, refugeeFrac? 0–0.5, refugeeEvery? 2–12, dmg? 0.1–10, bombDmg? 0.1–10, hp? 0.1–10}` — see docs/WAR.md "Protests & civil unrest" |
 | `POST protest/end` | ends the protest (GM); refugees settle, strikes clear next economy pass |
 
 ## Permission filtering — `filterState(u)`

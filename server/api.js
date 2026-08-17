@@ -1432,7 +1432,7 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true });
     }
 
-    // Phase 33 — parties run campaigns during the election season. Any
+    // Phase 33/34 — parties run campaigns during the election season. Any
     // operator who controls the party (its leader chain) can spend the
     // treasury; the GM can too (checked inline — the route is player-facing).
     if (pathname === '/api/election/campaign' && method === 'POST') {
@@ -1444,6 +1444,31 @@ async function handle(req, res, pathname, method) {
       catch (e) { return bad(e.message); }
       store.save(); broadcast('sync');
       return json(res, 200, { election: db.election });
+    }
+
+    // Phase 34 — campaign investment: estimate support gain without spending.
+    if (pathname === '/api/election/estimate' && method === 'POST') {
+      const b = await readBody(req);
+      const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
+      if (!party || party.type !== 'party') return bad('Unknown party.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      try {
+        const est = election.investEstimate(db, party.id, Math.round(Number(b.money) || 0), b.materials || []);
+        return json(res, 200, { ok: true, ...est });
+      } catch (e) { return bad(e.message); }
+    }
+
+    // Phase 34 — campaign investment: commit money + materials, gain support.
+    if (pathname === '/api/election/invest' && method === 'POST') {
+      const b = await readBody(req);
+      const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
+      if (!party || party.type !== 'party') return bad('Unknown party.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      try {
+        const result = election.investCampaign(db, party.id, Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election, ...result });
+      } catch (e) { return bad(e.message); }
     }
 
     // ---- GM ----
@@ -1927,15 +1952,19 @@ async function handle(req, res, pathname, method) {
             if (e[k] !== undefined) e[k] = Math.max(0.05, Number(e[k]) || 0.05);
           }
         }
-        if (b.election) { // Phase 33 — Election Commission knobs + campaign
+        if (b.election) { // Phase 33/34 — Election Commission knobs + campaign
           // catalogue. Whole-object replace of the authored sub-fields (the
           // engine adds nothing live here), then applyTuning re-derives any
           // live count's unrevealed ballots from the new deviation.
           s.election = s.election || {};
           if (b.election.campaigns !== undefined) s.election.campaigns = b.election.campaigns;
-          if (b.election.durationTurns !== undefined) s.election.durationTurns = Math.max(1, Math.min(365, Math.round(Number(b.election.durationTurns) || 1)));
+          if (b.election.durationDays !== undefined) s.election.durationDays = Math.max(1, Math.min(365, Math.round(Number(b.election.durationDays) || 14)));
+          if (b.election.durationTurns !== undefined) s.election.durationDays = Math.max(1, Math.min(365, Math.round(Number(b.election.durationTurns) || 14)));
           if (b.election.deviationPct !== undefined) s.election.deviationPct = Math.max(0, Math.min(50, Number(b.election.deviationPct) || 0));
           if (b.election.supportToVotes !== undefined) s.election.supportToVotes = Math.max(0, Math.round(Number(b.election.supportToVotes) || 0));
+          if (b.election.moneySupportBase !== undefined) s.election.moneySupportBase = Math.max(1, Number(b.election.moneySupportBase) || 40000000);
+          if (b.election.supportScale !== undefined) s.election.supportScale = Math.max(0.1, Number(b.election.supportScale) || 3);
+          if (b.election.materialCampaignRate !== undefined) s.election.materialCampaignRate = Math.max(0, Number(b.election.materialCampaignRate) || 200);
           election.applyTuning(db, s.election);
         }
         sim.scheduleAuto();

@@ -1294,7 +1294,7 @@ const GM = {
       status.appendChild(el('div', { style: 'font-size:12.5px; line-height:1.9; color:var(--ink-soft);' },
         el('div', 'Phase: ', el('strong', { style: 'color:var(--accent);' }, elc.phase === 'campaign' ? 'CAMPAIGN SEASON' : 'COUNT IN PROGRESS')),
         el('div', 'Called: ' + fmtDate(elc.calledDate) + ' (turn ' + elc.calledTurn + ')' +
-          (elc.phase === 'voting' ? ' · polls closed ' + fmtDate(elc.votingDate) + ' · batch ' + (elc.step || 0) + ' / ' + elc.durationTurns + ' · ' + Math.round(elc.progress * 100) + '% counted' : '')),
+          (elc.phase === 'voting' ? ' · polls closed ' + fmtDate(elc.votingDate) + ' · day ' + Math.max(1, Math.max(S().settings.time.turn, elc._tickTurn || 0) - elc.startTurn) + ' / ' + elc.durationDays + ' · ' + Math.round(elc.progress * 100) + '% counted' : '')),
         el('div', 'Polls lead at call: ' + (pollLead ? (entName(pollLead[0]) + ' ' + pollLead[1] + '%') : '—')),
         el('div', 'Counted: ' + fmtNum(countedSum) + ' of ' + fmtNum(elc.totalBallots) + ' ballots' +
           (lead ? ' · leading ' + entName(lead[0]) + ' ' + fmtNum(Math.round(lead[1])) : '')),
@@ -1304,7 +1304,7 @@ const GM = {
       if (elc.phase === 'campaign') {
         buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/vote'); toast('The polls are open.'); } catch (e) { toast(e.message, true); } } }, '⚑ Open the Polls'));
       } else {
-        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, '⚡ Count One Batch Now'));
+        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, '⚡ Advance Count'));
       }
       buttons.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('parliament'); App.renderView(); } }, 'Watch the Count →'));
       buttons.appendChild(el('button.danger-btn', {
@@ -1317,7 +1317,7 @@ const GM = {
       status.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, 'No election is underway. The Republic sits with its ' + (S().settings.parliamentSeats || 150) + '-seat parliament.'));
       const buttons = el('div.btn-row', { style: 'margin-top:8px;' });
       buttons.appendChild(el('button.solid-btn', {
-        onclick: () => confirmModal('CALL ELECTION', 'Dissolve Parliament and open the campaign season? Parties will spend their treasuries on the trail; you open the polls when ready and the count runs one batch per world turn.', async () => {
+        onclick: () => confirmModal('CALL ELECTION', 'Dissolve Parliament and open the campaign season? Parties invest their treasuries and stock on the trail; you open the polls when ready and the count runs province by province in real time with the world clock.', async () => {
           try { await POST('/api/gm/election/campaign'); toast('Campaign season opens.'); } catch (e) { toast(e.message, true); }
         }, 'Call Election')
       }, '⚑ Call Election (live)'));
@@ -1332,27 +1332,42 @@ const GM = {
     // ---- Tuning ----
     main.appendChild(Views.secLabel('Tuning'));
     const tune = this.getDraft('election-tune', {
-      durationTurns: cfg.durationTurns === undefined ? 14 : cfg.durationTurns,
+      durationDays: cfg.durationDays === undefined ? 14 : cfg.durationDays,
       deviationPct: cfg.deviationPct === undefined ? 12 : cfg.deviationPct,
-      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes
+      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes,
+      moneySupportBase: cfg.moneySupportBase === undefined ? 40000000 : cfg.moneySupportBase,
+      supportScale: cfg.supportScale === undefined ? 3 : cfg.supportScale,
+      materialCampaignRate: cfg.materialCampaignRate === undefined ? 200 : cfg.materialCampaignRate
     });
-    main.appendChild(this.field('Count duration (world turns)',
-      Forms.sliderNum(tune, 'durationTurns', 1, 60, { step: 1, suffix: ' turns' }),
-      'One batch of ballots is released per world turn, calibrated to the world time system — 14 turns is a long slow night.'));
+    main.appendChild(this.field('Count duration (world days)',
+      Forms.sliderNum(tune, 'durationDays', 1, 60, { step: 1, suffix: ' days' }),
+      'Provinces report one at a time over this many world days; the count advances continuously with the world clock.'));
     main.appendChild(this.field('Deviation from polling',
       Forms.sliderNum(tune, 'deviationPct', 0, 40, { step: 0.5, suffix: '%' }),
       'How far the true result may depart from the public polls, per party and province (seeded draws, GM-only). Applies to a live count too — the unrevealed ballots re-derive.'));
     main.appendChild(this.field('Late votes per campaign support point',
       Forms.sliderNum(tune, 'supportToVotes', 0, 10000, { step: 250 }),
       'What campaign strength is worth in ballots once the count is running.'));
+    main.appendChild(this.field('Support base (Koren per sqrt-unit)',
+      Forms.sliderNum(tune, 'moneySupportBase', 1000000, 100000000, { step: 1000000 }),
+      'Support = scale × √(value ÷ base). At current settings, a ' + CUR() + '10M war-chest lands ≈ +' + (Math.round(Math.sqrt(10000000 / (tune.moneySupportBase || 40000000)) * (tune.supportScale || 6) * 10) / 10) + ' support.'));
+    main.appendChild(this.field('Support scale multiplier',
+      Forms.sliderNum(tune, 'supportScale', 0.5, 10, { step: 0.5, suffix: '×' }),
+      'Overall strength of campaign spending.'));
+    main.appendChild(this.field(CUR() + ' value per unit of material',
+      Forms.sliderNum(tune, 'materialCampaignRate', 0, 2000, { step: 25 }),
+      'What one unit of stock (grain etc.) is worth for campaigning when the item has no market price.'));
     main.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async () => {
         try {
           await PATCH('/api/gm/settings', {
             election: {
-              durationTurns: tune.durationTurns,
+              durationDays: tune.durationDays,
               deviationPct: tune.deviationPct,
-              supportToVotes: tune.supportToVotes
+              supportToVotes: tune.supportToVotes,
+              moneySupportBase: tune.moneySupportBase,
+              supportScale: tune.supportScale,
+              materialCampaignRate: tune.materialCampaignRate
             }
           });
           this.draftKey = null;

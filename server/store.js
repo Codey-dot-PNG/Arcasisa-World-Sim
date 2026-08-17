@@ -161,15 +161,19 @@ function migrate(world) {
     }
   }
 
-  // Phase 33 — live elections. settings.election carries the GM's Election
-  // tab levers (count duration in world turns, polling deviation, campaign
-  // tuning) plus the campaign templates parties can buy. Additive: GMs may
-  // add or rename campaigns afterwards, so re-running must not clobber them.
+  // Phase 33/34 — live elections. settings.election carries the GM's Election
+  // tab levers (count duration in world days, polling deviation, campaign
+  // tuning). Additive: GMs may edit campaigns afterwards, so re-running must
+  // not clobber them.
   if (world.settings) {
     const el = world.settings.election = world.settings.election || {};
-    if (el.durationTurns === undefined) { el.durationTurns = 14; changed = true; }
+    if (el.durationDays === undefined) { el.durationDays = el.durationTurns !== undefined ? el.durationTurns : 14; changed = true; }
+    if (el.durationTurns !== undefined) { delete el.durationTurns; changed = true; }
     if (el.deviationPct === undefined) { el.deviationPct = 12; changed = true; }
     if (el.supportToVotes === undefined) { el.supportToVotes = 2500; changed = true; }
+    if (el.moneySupportBase === undefined) { el.moneySupportBase = 40000000; changed = true; }
+    if (el.supportScale === undefined) { el.supportScale = 6; changed = true; }
+    if (el.materialCampaignRate === undefined) { el.materialCampaignRate = 200; changed = true; }
     if (!Array.isArray(el.campaigns)) {
       el.campaigns = [
         { id: 'camp_soup', name: 'Soup Kitchen Initiative', description: 'Open community soup kitchens with party-branded ingredients. Feeds the needy, feeds your polling.', moneyCost: 12000, itemCosts: [{ itemId: 'item_grain', qty: 150 }], strength: 3 },

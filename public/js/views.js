@@ -534,21 +534,32 @@ const Views = {
     wrap.appendChild(this.kv('Assessed Value', fmtMoney(pr.value)));
     wrap.appendChild(this.kv('Employees', fmtNum(pr.employees) + (pr.maxEmployees !== undefined ? ' / ' + fmtNum(pr.maxEmployees) + ' cap' : '')));
     // Phase 13 — per-turn production. Goods mint items the owner sells; cash
-    // props pay money directly; pure-cost props are upkeep only.
+    // props pay money directly; pure-cost props are upkeep only. Figures are
+    // scaled by the same workforce factor as the ops desks (hours/safety/
+    // staffing/upgrade), so the file matches the company tab's made/turn.
     const priceOf = (iid) => effPrice(itemById(iid));
-    const grossPerTurn = pr.prodMode === 'goods'
-      ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
-      : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
     const owner = entById(pr.ownerId);
+    const wf = this.wfMult({
+      hours: pr.workHours !== undefined ? pr.workHours : (owner && owner.type === 'company' && owner.workHours !== undefined ? owner.workHours : 8),
+      safety: pr.safety !== undefined ? pr.safety : (owner && owner.type === 'company' && owner.safety !== undefined ? owner.safety : 'standard'),
+      employees: pr.employees || 0,
+      cap: pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, pr.employees || 1),
+      invested: pr.upgradeInvested, value: pr.value
+    });
+    const grossPerTurn = (pr.prodMode === 'goods'
+      ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
+      : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0) * wf;
     const wagePerTurn = owner && owner.type === 'company' ? Math.max(0, Number(owner.wagePerTurn === undefined ? 1 : owner.wagePerTurn) || 0) : 0;
     const wages = (pr.employees || 0) * wagePerTurn;
     const upkeep = effUpkeep(pr);
     const totalExpenses = upkeep + wages;
-    wrap.appendChild(this.secLabel('Production (per turn)'));
+    wrap.appendChild(this.secLabel('Production (per turn)', el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:-6px;' },
+      'SHOWN AT WORKFORCE FACTOR ×' + wf.toFixed(2) + ' — MATCHES THE COMPANY TAB MADE/TURN.')));
     if (pr.prodMode === 'goods' && (pr.produces || []).length) {
       (pr.produces || []).forEach(e => {
         const it = itemById(e.itemId);
-        wrap.appendChild(this.kv(it ? it.name : e.itemId, fmtNum(e.perTurn) + ' / turn · ' + fmtMoney((e.perTurn || 0) * priceOf(e.itemId))));
+        const qty = (e.perTurn || 0) * wf;
+        wrap.appendChild(this.kv(it ? it.name : e.itemId, fmtNum(qty, 4) + ' / turn · ' + fmtMoney(qty * priceOf(e.itemId))));
       });
     } else if (pr.prodMode === 'cash') {
       wrap.appendChild(this.kv('Cash generated', fmtMoney(grossPerTurn) + ' / turn'));

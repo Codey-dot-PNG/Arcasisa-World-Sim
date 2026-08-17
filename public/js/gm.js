@@ -376,11 +376,11 @@ const GM = {
         });
         const row = el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap;' },
           el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 200px; font-size:12.5px; cursor:pointer;' }, cb,
-            el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(it.marketValue)))));
+            el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(effPrice(it))))));
         if (on) {
           if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
           const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
-          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(it.marketValue * (p.priceMult[it.id] || 1) * 100) / 100); };
+          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round(effPrice(it) * (p.priceMult[it.id] || 1) * 100) / 100); };
           paint();
           const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', allowBeyondRange: true, onInput: () => { delete p.prices[it.id]; paint(); } });
           const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
@@ -498,7 +498,7 @@ const GM = {
     const accts = (S().accounts || []).filter(a => a.ownerId === e.id);
     const skipCat = new Set(['Securities', 'Deeds', 'Honours']);
     const cash = accts.reduce((s, a) => s + a.balance, 0);
-    const goodsVal = (e.inventory || []).reduce((s, r) => { const it = itemById(r.itemId); return it && !skipCat.has(it.category) ? s + r.qty * (it.marketValue || 0) : s; }, 0);
+    const goodsVal = (e.inventory || []).reduce((s, r) => { const it = itemById(r.itemId); return it && !skipCat.has(it.category) ? s + r.qty * effPrice(it) : s; }, 0);
     const propVal = (S().properties || []).filter(p => p.ownerId === e.id).reduce((s, p) => s + (p.value || 0), 0);
     const shareVal = S().entities.filter(c => c.type === 'company' && (c.shareholders || []).some(sh => sh.entityId === e.id))
       .reduce((s, c) => { const sh = c.shareholders.find(x => x.entityId === e.id); return s + sh.shares * (c.sharePrice || 0); }, 0);
@@ -549,7 +549,7 @@ const GM = {
      A value chart, a quick "move an item out" (give-item) and the full
      inventory editor saved back through the entities collection. */
   geInventory(main, e) {
-    const rows = (e.inventory || []).map(r => { const it = itemById(r.itemId); return it ? { label: it.name, value: r.qty * (it.marketValue || 0), color: 'var(--accent)' } : null; })
+    const rows = (e.inventory || []).map(r => { const it = itemById(r.itemId); return it ? { label: it.name, value: r.qty * effPrice(it), color: 'var(--accent)' } : null; })
       .filter(Boolean).sort((a, b) => b.value - a.value).slice(0, 10);
     if (rows.length) {
       main.appendChild(Views.secLabel('Holdings by value'));
@@ -667,7 +667,7 @@ const GM = {
   geProperties(main, e) {
     const props = (S().properties || []).filter(p => p.ownerId === e.id);
     const wage = e.type === 'company' ? Math.max(0, Number(e.wagePerTurn === undefined ? 1 : e.wagePerTurn) || 0) : 0;
-    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - (p.expenses || 0) - (p.employees || 0) * wage, color: 'var(--accent)' }));
+    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - effUpkeep(p) - (p.employees || 0) * wage, color: 'var(--accent)' }));
     if (rows.length) {
       main.appendChild(Views.secLabel('Net cash / turn by property'));
       main.appendChild(Charts.chartBars(rows, { horizontal: true, width: 520, height: Math.max(90, rows.length * 24 + 30), valueFormat: v => fmtMoney(v) }));
@@ -1156,7 +1156,7 @@ const GM = {
           const it = itemById(iid); if (!it) return 0;
           const m = (partner.priceMult && partner.priceMult[iid] > 0) ? partner.priceMult[iid]
             : (partner.prices && partner.prices[iid] > 0 && it.marketValue > 0 ? partner.prices[iid] / it.marketValue : 1);
-          return Math.round((it.marketValue || 0) * m * 100) / 100;
+          return Math.round(effPrice(it) * m * 100) / 100;
         };
         const profile = (title, ids, lvlMap) => {
           const wrap = el('div', { style: 'margin-bottom:8px;' });
@@ -1224,11 +1224,11 @@ const GM = {
     main.appendChild(Views.secLabel('Global prices'));
     main.appendChild(this.field('Prices multiplier',
       Forms.sliderNum(d, 'priceMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-      'Modifies the sale price of all items globally — domestic retail sales and foreign trade orders.'));
+      'Scales the sale price of all items: domestic retail sales, foreign trade orders and the values shown on every desk. Records keep their authored price; share prices and deeds are unaffected.'));
     main.appendChild(Views.secLabel('Global expenses'));
     main.appendChild(this.field('Expenses multiplier',
       Forms.sliderNum(d, 'expensesMultiplier', 0.1, 5, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-      'Modifies all property expenses (upkeep) by this amount.'));
+      'Scales all property expenses (upkeep) — the amount actually debited each turn and shown as “Upkeep / turn” on every desk. Property records keep their authored value.'));
     main.appendChild(el('div.btn-row', { style: 'margin-top:20px;' }, el('button.solid-btn', {
       onclick: async () => {
         try {

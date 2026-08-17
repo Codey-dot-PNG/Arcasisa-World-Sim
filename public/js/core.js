@@ -97,6 +97,21 @@ const propById = (id) => S() && S().properties.find(p => p.id === id);
 const markerById = (id) => S() && (S().markers || []).find(m => m.id === id);
 const itemById = (id) => S() && S().items.find(i => i.id === id);
 const acctById = (id) => S() && S().accounts.find(a => a.id === id);
+// Global GM economy levers (Economy tab): records keep their authored values,
+// so these return the EFFECTIVE numbers the engine actually charges/pays this
+// turn. Securities/deeds are market-driven instruments (day price / property
+// value) — the price lever deliberately does not touch them.
+const econMult = (key) => {
+  const e = (S() && S().settings && S().settings.economy) || {};
+  const v = e[key];
+  return v !== undefined && isFinite(Number(v)) ? Number(v) : 1;
+};
+const effPrice = (it) => {
+  if (!it) return 0;
+  if (it.category === 'Securities' || it.category === 'Deeds') return it.marketValue || 0;
+  return (it.marketValue || 0) * econMult('priceMultiplier');
+};
+const effUpkeep = (pr) => (pr && pr.expenses || 0) * econMult('expensesMultiplier');
 const entName = (id) => { const e = entById(id); return e ? e.name : '—'; };
 const perms = () => (W.me ? W.me.role.perms : { pages: [], mapLayers: [] });
 const can = (page) => perms().pages && perms().pages.includes(page);

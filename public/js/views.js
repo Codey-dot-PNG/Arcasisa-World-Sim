@@ -107,7 +107,7 @@ const Views = {
           el('td', this.itemIcon(it)),
           el('td', it.name),
           el('td.num', fmtNum(row.qty)),
-          el('td.num', fmtMoney(row.qty * it.marketValue)),
+          el('td.num', fmtMoney(row.qty * effPrice(it))),
           mine ? el('td', el('button.outline-btn', { onclick: (e) => { e.stopPropagation(); Views.tradeModal(it.id); } }, 'Trade')) : null
         );
       })));
@@ -527,14 +527,14 @@ const Views = {
     wrap.appendChild(this.kv('Employees', fmtNum(pr.employees)));
     // Phase 13 — per-turn production. Goods mint items the owner sells; cash
     // props pay money directly; pure-cost props are upkeep only.
-    const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const priceOf = (iid) => effPrice(itemById(iid));
     const grossPerTurn = pr.prodMode === 'goods'
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
     const owner = entById(pr.ownerId);
     const wagePerTurn = owner && owner.type === 'company' ? Math.max(0, Number(owner.wagePerTurn === undefined ? 1 : owner.wagePerTurn) || 0) : 0;
     const wages = (pr.employees || 0) * wagePerTurn;
-    const upkeep = pr.expenses || 0;
+    const upkeep = effUpkeep(pr);
     const totalExpenses = upkeep + wages;
     wrap.appendChild(this.secLabel('Production (per turn)'));
     if (pr.prodMode === 'goods' && (pr.produces || []).length) {
@@ -720,13 +720,13 @@ const Views = {
     wrap.appendChild(el('div.insp-sub', it.category + (it.tradable ? ' · tradable' : ' · restricted')));
     if (it.description) wrap.appendChild(el('div.insp-desc', it.description));
     wrap.appendChild(this.secLabel('Market'));
-    wrap.appendChild(this.kv('Market Value', fmtMoney(it.marketValue)));
+    wrap.appendChild(this.kv('Market Value', fmtMoney(effPrice(it))));
     // circulation visible to this operator
     let qty = 0;
     for (const e of S().entities) if (e.inventory) for (const r of e.inventory) if (r.itemId === id) qty += r.qty;
     for (const pr of S().properties) if (pr.inventory) for (const r of pr.inventory) if (r.itemId === id) qty += r.qty;
     wrap.appendChild(this.kv('In circulation (visible)', fmtNum(qty)));
-    wrap.appendChild(this.kv('Combined value', fmtMoney(qty * it.marketValue)));
+    wrap.appendChild(this.kv('Combined value', fmtMoney(qty * effPrice(it))));
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
     wrap.appendChild(el('div.insp-actions', this.gmJump('item', id)));
@@ -1200,7 +1200,7 @@ const Views = {
     if (!pr) return;
     const owner = entById(pr.ownerId);
     const province = provById(pr.provinceId);
-    const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const priceOf = (iid) => effPrice(itemById(iid));
     const prodMode = pr.prodMode || 'none';
     const produces = pr.produces || [];
     const baseKeep = pr.keepPct !== undefined ? pr.keepPct : (owner && owner.type === 'company' ? (owner.keepPct || 0) : 0);
@@ -1213,7 +1213,7 @@ const Views = {
       ? produces.reduce((s, e) => s + (Number(e.perTurn) || 0) * priceOf(e.itemId), 0)
       : prodMode === 'cash' ? (Number(pr.cashPerTurn) || 0) : 0;
     const wages = (pr.employees || 0) * (Number(baseWage) || 0);
-    const upkeep = pr.expenses || 0;
+    const upkeep = effUpkeep(pr);
     // Operations draft (survives re-renders until saved) — sales & payroll
     // policy only; the production line itself is a Game Master lever.
     const draftedOverride = pr.workHours !== undefined || pr.safety !== undefined;
@@ -1663,8 +1663,8 @@ const Views = {
         el('thead', el('tr', el('th', 'Item'), el('th.num', 'In stock'), el('th.num', 'Retail'), el('th.num', 'Value'))),
         el('tbody', stockRows.map(r => {
           const it = itemById(r.itemId);
-          return el('tr', el('td', it.name), el('td.num', fmtNum(r.qty)), el('td.num', fmtMoney(it.marketValue || 0)),
-            el('td.num', fmtMoney(r.qty * (it.marketValue || 0))));
+          return el('tr', el('td', it.name), el('td.num', fmtNum(r.qty)), el('td.num', fmtMoney(effPrice(it))),
+            el('td.num', fmtMoney(r.qty * effPrice(it))));
         }))));
     } else inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' },
       'The national stockpile is empty. Import goods on the open market, or buy from domestic companies through trade offers.'));
@@ -1688,7 +1688,7 @@ const Views = {
         const p = producers[it.id];
         return el('tr.row-link', { onclick: () => select('item', it.id) },
           el('td', it.name), el('td', { style: 'color:var(--ink-soft); font-size:12px;' }, it.category),
-          el('td.num', fmtMoney(it.marketValue || 0)),
+          el('td.num', fmtMoney(effPrice(it))),
           el('td.num', p ? fmtNum(p.perTurn) : '—'),
           el('td', { style: 'font-size:11.5px; color:var(--ink-soft);' }, p ? [...p.names].join(', ') : '—'));
       }))));
@@ -1699,7 +1699,7 @@ const Views = {
     const partnerBase = (p, it) => {
       const mult = (p.priceMult && p.priceMult[it.id] > 0) ? p.priceMult[it.id]
         : (p.prices && p.prices[it.id] > 0 && it.marketValue > 0 ? p.prices[it.id] / it.marketValue : 1);
-      return Math.round((it.marketValue || 0) * mult * 100) / 100;
+      return Math.round(effPrice(it) * mult * 100) / 100;
     };
     const priced = {};
     partners.forEach(p => new Set([...(p.exports || []), ...Object.keys(p.demand || {})]).forEach(iid => {
@@ -1713,7 +1713,7 @@ const Views = {
       inner.appendChild(el('div.chip-row', pItems.map(iid => el('button.chip', { class: W.tradeItem === iid ? 'active' : '', onclick: () => { W.tradeItem = iid; App.renderView(); } }, (itemById(iid) || { name: iid }).name))));
       const mkt = itemById(W.tradeItem);
       inner.appendChild(Charts.chartBars((priced[W.tradeItem] || []).map(r => ({ label: (entById(r.partnerId) || { name: r.partnerId }).name, value: r.price, color: (entById(r.partnerId) || {}).color || 'var(--stk-up)' })),
-        { width: 560, height: 180, title: (mkt ? mkt.name.toUpperCase() : '') + ' — BASE PRICE BY PARTNER' + (mkt ? ' (retail ' + CUR() + fmtNum(mkt.marketValue) + ')' : ''), valueFormat: v => CUR() + fmtNum(v) }));
+        { width: 560, height: 180, title: (mkt ? mkt.name.toUpperCase() : '') + ' — BASE PRICE BY PARTNER' + (mkt ? ' (retail ' + CUR() + fmtNum(effPrice(mkt)) + ')' : ''), valueFormat: v => CUR() + fmtNum(v) }));
     }
   },
   /* ---- Company Operations (CEO desk) ---- */
@@ -1730,14 +1730,14 @@ const Views = {
     }
     const c = entById(W.opsCo);
     if (!c) return;
-    const priceOf = (iid) => { const it = itemById(iid); return it ? (it.marketValue || 0) : 0; };
+    const priceOf = (iid) => effPrice(itemById(iid));
     const props = S().properties.filter(pr => pr.ownerId === c.id);
     const propRev = (pr) => pr.prodMode === 'goods'
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
     const employees = props.reduce((s, pr) => s + (pr.employees || 0), 0);
     const wagePerTurn = Math.max(0, Number(c.wagePerTurn === undefined ? 1 : c.wagePerTurn) || 0);
-    const upkeepPerTurn = props.reduce((s, pr) => s + (pr.expenses || 0), 0);
+    const upkeepPerTurn = props.reduce((s, pr) => s + effUpkeep(pr), 0);
     const wagesPerTurn = employees * wagePerTurn;
     const cash = this.accountsOf(c.id).reduce((s, a) => s + a.balance, 0);
 
@@ -1827,7 +1827,7 @@ const Views = {
         body.appendChild(el('tr',
           el('td', it.name),
           el('td', this.mixSlider(dr.keepPctByItem, iid)),
-          el('td.num', fmtMoney(it.marketValue || 0)),
+          el('td.num', fmtMoney(effPrice(it))),
           el('td.num', fmtNum(made)),
           el('td.num', fmtNum(made - kept)),
           el('td.num', fmtNum(kept)),
@@ -1885,7 +1885,7 @@ const Views = {
         el('thead', el('tr', el('th', 'Property'), el('th', 'Province'), el('th.num', 'Employees'), el('th', 'Production / turn'), el('th.num', 'Revenue'), el('th.num', 'Upkeep'), el('th.num', 'Wages'), el('th.num', 'Total expenses'), el('th.num', 'Net'))),
         el('tbody', props.map(pr => {
           const wfp = wfFor(pr);
-          const rev = propRev(pr) * wfp, upk = pr.expenses || 0, wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0), total = upk + wages;
+          const rev = propRev(pr) * wfp, upk = effUpkeep(pr), wages = (pr.employees || 0) * (Number(dr.wagePerTurn) || 0), total = upk + wages;
           const prodText = pr.prodMode === 'goods'
             ? (pr.produces || []).map(e => fmtNum(e.perTurn * wfp) + ' × ' + (itemById(e.itemId) || { name: e.itemId }).name).join(', ')
             : pr.prodMode === 'cash' ? 'cash operation' : 'upkeep only';
@@ -2147,7 +2147,7 @@ const Views = {
 
     // grand total across everything listed
     let grand = 0;
-    const rowsValue = (inv) => inv.reduce((s, r) => { const it = itemById(r.itemId); return s + (it ? r.qty * it.marketValue : 0); }, 0);
+    const rowsValue = (inv) => inv.reduce((s, r) => { const it = itemById(r.itemId); return s + (it ? r.qty * effPrice(it) : 0); }, 0);
     holders.forEach(e => grand += rowsValue(e.inventory));
     sites.forEach(pr => grand += rowsValue(pr.inventory));
     inner.appendChild(this.statStrip([
@@ -2260,7 +2260,7 @@ const Views = {
     inner.appendChild(el('table.data',
       el('thead', el('tr', el('th', 'Item'), el('th', 'Category'), el('th.num', 'Market Value'), el('th', 'Tradable'))),
       el('tbody', S().items.map(it => el('tr.row-link', { onclick: () => select('item', it.id) },
-        el('td', it.name), el('td', it.category), el('td.num', fmtMoney(it.marketValue)), el('td', it.tradable ? 'yes' : 'no'))))));
+        el('td', it.name), el('td', it.category), el('td.num', fmtMoney(effPrice(it))), el('td', it.tradable ? 'yes' : 'no'))))));
   },
 
   /* ---- Exchange (Phase 4.4) ---- */

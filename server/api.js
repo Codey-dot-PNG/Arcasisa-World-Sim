@@ -33,7 +33,7 @@ setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 // heartbeat channel (docs/WAR.md) — attaching a full state payload to each
 // would undo the payload diet; auth precedes a full page boot;
 // stream/config/cron are not world mutations at all.
-const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$)/;
+const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$)/;
 
 // Response-sync (Phase 21): every successful world-mutating response carries
 // the freshly-mutated, permission-filtered world, so the client applies its

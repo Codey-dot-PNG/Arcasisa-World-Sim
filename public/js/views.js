@@ -29,7 +29,15 @@ const Views = {
   _newsBodies: {},
   async newsBody(id) {
     if (this._newsBodies[id] !== undefined) return this._newsBodies[id];
-    const r = await GET('/api/news/' + id);
+    let r;
+    try {
+      r = await GET('/api/news/' + id);
+    } catch (e) {
+      // Serverless first-loads and single-lambda hiccups can 500 once; one
+      // quick retry keeps the reader/editor from surfaceing a dead load.
+      await new Promise(res => setTimeout(res, 400));
+      r = await GET('/api/news/' + id);
+    }
     this._newsBodies[id] = (r.article && r.article.body) || '';
     return this._newsBodies[id];
   },
@@ -2881,12 +2889,14 @@ const Views = {
 
   viewNews(inner) {
     // Raise the news-read waterline (the "News (n)" tab badge): re-armed on
-    // every visit, but throttled so frequent sync re-renders of this same
-    // view don't spam the server. The response-sync payload refreshes W.me.
+    // every visit, throttled, and deferred past the first paint so the ping
+    // can NEVER race this page's own article-body loads. The route is in
+    // SYNC_SKIP (server), so the response carries no world sync — the ping
+    // must not swap state and re-render the page out from under the reader.
     if (!W._newsReadAt || Date.now() - W._newsReadAt > 15000) {
       W._newsReadAt = Date.now();
       W.me.lastReadNewsTs = Date.now();
-      POST('/api/news/read').catch(() => {});
+      setTimeout(() => POST('/api/news/read').catch(() => {}), 750);
     }
     const papers = this.papers();
     if (!W.newsPaper || !papers.some(p => p.id === W.newsPaper)) W.newsPaper = 'paper_today';

@@ -57,3 +57,41 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
   permission checks are all server-side. Client-side control checks exist only to show/hide
   UI affordances.
 - Charts/styles read CSS custom properties so they follow the active theme.
+
+## Live elections (Phase 33) — the Elections desk
+
+While `state.election` exists (the server ships it to every operator, redacted for
+non-GMs via `election.forPlayers` — never render `targets`/`deviationPct`/`supportToVotes`,
+GM-only), the **Parliament tab relabels to "Elections"** (`renderTabs` in app.js) and
+`views.js` dispatches to the Elections desk instead of the Parliament view:
+
+- **Campaign season** (`election.phase === 'campaign'`): `viewElection` renders the
+  polling snapshot (gated to `perms().statistics || isGM()`), a "Campaign Desk" section
+  per party — run buttons for the public campaign catalogue
+  (`state.settings.election.campaigns`), disabled unless the party treasury
+  (`state.accounts` owner = party) and inventory cover the cost (helpers
+  `campaignCostAffordable` / `campaignCostText`), controlled parties only
+  (`ownership_controlsClient` or GM) — plus the public election log and a GM strip
+  (Open the Polls, Election Commission → GM Studio, Call Off).
+- **The count** (`phase === 'voting'`): `electionCountView` — a hero (current leader,
+  votes, % counted, margin), a per-batch progress bar (`step / durationTurns`), the
+  national table (votes, share, and "polls said" from `pollingAtCall`), a live share
+  chart from `election.steps` (`Charts.chartLine`, `yFormat: v => fmtCompact(v)`), a
+  by-province table from `election.counted`, the "campaigning into the count" desk, and
+  the GM strip (Count One Batch Now, watch the count, Call Off).
+
+### GM Studio → Election tab (gm.js `tabElection`)
+
+- Status: phase, called date, polls-lead at call, counted totals; buttons to open the
+  polls / count a batch now / watch the count / call off; or **Call Election** (live)
+  when none is running. The legacy **Instant Election…** (gmbar.js) is refused while a
+  live election is underway.
+- Tuning (`getDraft('election-tune', …)`): `durationTurns`, `deviationPct`,
+  `supportToVotes` sliders → `PATCH /api/gm/settings {election}`.
+- Vote corrections (during the count): `_elAdj` draft — party, province (or "all"),
+  votes → `POST /api/gm/election/adjust`. The GM-only **OFFICIAL TOTALS (UNREVEALED)**
+  table reads `election.targets` directly.
+- Campaign catalogue: `_elCamps` deep clone with add/remove/OR-alternative rows →
+  `PATCH /api/gm/settings {election: {campaigns}}`.
+- Party treasuries: balance + stock per party; a Fund input (default ₳10,000) →
+  `POST /api/gm/mint` against the party's treasury account.

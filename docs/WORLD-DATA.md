@@ -24,6 +24,7 @@ mode). `store.get()` returns it; everything mutates it in place.
   news: [ ... ],           // articles (cap 400) — draft | published | retracted
   events: [ ... ],         // the GM-authored rulebook (triggers/conditions/effects)
   elections: [ ... ],      // past election records (cap 60)
+  election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
   history: [ ... ],        // per-turn time-series for charts (cap 1000)
@@ -67,7 +68,34 @@ cash (set by the Phase 27 profit-rebalance migration at 12% of its pre-rebalance
 expense footprint; see docs/SIMULATION.md "Zero-property companies bleed").
 
 **Party extras:** `ideology {econ, soc}`, `leaderId`, `inGovernment`, `mpCount`,
-`support { provId: { all|group: bonus } }`.
+`support { provId: { all|group: bonus } }`. During a live election: `vars.campaignPoints`
+(tracked campaigning, decays when the election ends/cancels).
+
+### Live election doc (Phase 33) — `db.election` or `null`
+
+Present only while an election is underway; every field is transient and lives on the
+world doc so it survives serverless restarts and rides turns (`sim.advanceTurn` calls
+`election.onTurn` — no timers).
+
+| Field | Phase | Meaning |
+|---|---|---|
+| `id` | both | `elec_…` |
+| `active`, `phase` | both | `'campaign'` | `'voting'` |
+| `calledTurn`, `calledDate` | both | when the GM called the election |
+| `pollingAtCall` | both | national polling snapshot the press uses as the "last poll" |
+| `durationTurns` | both | count length (days of the count, default 14) |
+| `deviationPct` | both | GM uncertainty dial (0–50); polls → true ballots |
+| `supportToVotes` | both | late-vote multiplier: `strength × supportToVotes` fed in during the count |
+| `rng` | voting | 32-bit xorshift state; all randomness (ballot roll, batch noise, late votes) derives from it — server-authoritative |
+| `votingTurn`, `votingDate`, `step` | voting | count position (one batch per turn) |
+| `electorate`, `totalBallots`, `progress` | voting | % of `totalBallots` counted |
+| `targets`, `baseTargets` | voting | per-province per-party true ballots: `{ provId: { partyId: votes } }`. **GM-only via `election.forPlayers`** — the unrevealed roll until the final step snaps to it |
+| `counted` | voting | per-province per-party ballots counted so far (public) |
+| `steps` | voting | per-batch `{turn, date, counted}` history (≤ durationTurns) — the count chart |
+| `log` | both | `{ts, turn, date, kind: 'campaign'|'adjust', …}` — public |
+
+When the count finishes, `db.election` becomes `null` and a record is appended to
+`db.elections` (`live: true`, national seat totals, province results).
 
 **Foreign-power extras (Phase 27):** `meta.military = { navy, army ('none'|'weak'|'medium'|
 'strong'), size ('tiny'|'small'|'medium'|'big'), focus ('size'|'quality'), alliance (e.g.
@@ -160,7 +188,16 @@ allowedPlaylists, lockPlaylist, forcedTrack, volume }, entertainment { venues: [
 lottery…] }, economy { baseDailyWage, wageHappinessK, wageEmploymentK, dailyVariance?,
 happinessOutputK?, happinessConfK?, dayTickMs? }, trade { partners, govBuyPrices, govBuy,
 exports, imports, lastFlows, lastExportFill, stockIn, history }, map { countries, labels,
-roads, rails }, mapDecor`.
+roads, rails }, mapDecor, election { durationTurns (14), deviationPct (12), supportToVotes
+(2500), campaigns: [{ id, name, description, moneyCost, itemCosts: [{itemId, qty,
+or?: [{itemId, qty}]}], strength, enabled }] }`.
+
+**Phase 33 migration** (flag `world._partyStockSeeded`, no schema bump): seeds the five
+default campaigns, creates a "Party Treasury" account (`acct_party_…`, owner = the party)
+for every party lacking one, and grants each party a campaign war-chest (grain ×150 +
+fuel ×60) so a fresh 1962 world can run its first election immediately. The party
+treasury is a normal account — funds it via `POST /api/gm/mint` (GM Studio → Election →
+Party Treasuries).
 
 ## Roles & users
 
@@ -192,5 +229,7 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
   `_arcArmsTank` / `_kradonShipyardWarship` (domestic tank/warship production lines),
   `_tankTradeSeeded` (Satrom/Qinal tank imports on the trade desk), `_armsWorksMoved2`
   (ARC Arms Works to Lachevan, derived from the capital's live position).
+- **Phase 33 (live elections, no schema bump):** `_partyStockSeeded` — default election
+  settings + campaign catalogue, per-party Party Treasury accounts, grain/fuel war-chest.
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino
   owner self-heal, certificate/deed reconciliation…). Follow the existing patterns when adding.

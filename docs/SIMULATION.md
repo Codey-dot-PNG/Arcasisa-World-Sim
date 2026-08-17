@@ -255,6 +255,39 @@ provinces by population (largest remainder, min 2), allocated by **D'Hondt**; wr
 election record, sets `party.mpCount`, publishes news. Manual entry supported
 (`/api/gm/election` with `manual: { rows, turnout }`). `GET /api/polling` is public.
 
+### Live elections (Phase 33) — `server/election.js`
+
+The GM calls an election (`POST /api/gm/election/campaign`) and the world doc gets a live
+`db.election` riding turns (no timers — serverless-safe). Two phases:
+
+- **campaign** — parties spend money + campaign stock on catalogue campaigns
+  (`POST /api/election/campaign`, any controller of the party or the GM; defaults
+  migrate into `settings.election.campaigns`). Each run adds `strength` to the party's
+  national support (visible in polling), charges `moneyCost` from the party treasury
+  account, consumes stock items (rows may offer `or` alternatives), and accrues
+  `party.vars.campaignPoints`.
+- **voting** — `POST /api/gm/election/vote` closes the polls and rolls the true ballots
+  per province: each party's polling share is nudged by `(rand×2−1) × deviationPct` and
+  renormalised per province (the renorm amplifies the swing — an 8 pp polling gap can
+  become ~12–27 pp of the true result; GMs dial this with `deviationPct`). The count
+  then advances **one batch per turn** (`el.durationTurns` turns total): per turn each
+  province reports `batch × provTotal / nationalTargetsTotal` votes with
+  `BATCH_NOISE=0.6` noise, so leads grow and shrink dramatically until the final step
+  snaps to the true totals (`el.targets`). `campaignPoints` translate into late votes
+  (`strength × supportToVotes`) fed in as the count runs. Finalize apportions
+  `el.targets` (the shared `sim.apportionSeats`), writes a `db.elections` record
+  (`live: true`), decays campaign support, and publishes Election Commission news.
+- Mid-count levers: `POST /api/gm/election/adjust` (per-party vote correction,
+  re-spread proportionally and logged), `POST /api/gm/election/tick-count` (count a
+  batch now), `POST /api/gm/election/cancel` (abort; support decays). Tuning
+  (`PATCH /api/gm/settings` `election: {durationTurns, deviationPct, supportToVotes,
+  campaigns}`) applies to the next call and re-derives an in-flight count's unrevealed
+  ballots from the new deviation.
+- Public spectacle: every operator sees the live doc via `election.forPlayers` —
+  counted batches, steps, progress, log — but `targets` (the unrevealed roll),
+  `baseTargets`, `rng`, `deviationPct` and `supportToVotes` stay GM-only. The GM Studio
+  Election tab exposes the true totals mid-count; the client never fabricates outcomes.
+
 ## Presidency
 
 `syncPresidency(db)` keeps `ent_gov.ceoId` + `executives` matching all users holding the

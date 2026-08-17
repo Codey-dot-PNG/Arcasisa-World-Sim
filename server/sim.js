@@ -1596,6 +1596,11 @@ function advanceTurn(steps, actor) {
     try { runForeignMilitary(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignMilitary failed:', e.message); }
     // Bank solvency check → economy-wide crash while its reserve is underwater.
     try { runBankCrisis(db, actor || 'ENGINE'); } catch (e) { console.error('runBankCrisis failed:', e.message); }
+    // Phase 33 — live elections: while the count runs, each turn reveals one
+    // more batch of ballots. Calibrated to the world time system (durationTurns
+    // is in turns — see server/election.js), never a process timer, so it is
+    // serverless-safe. Lazy require keeps the sim↔election cycle out of boot.
+    try { require('./election').onTurn(db, actor || 'ENGINE'); } catch (e) { console.error('election tick failed:', e.message); }
 
     const prevGdp = db.globalVars.gdp;
     updateDerived();
@@ -1791,11 +1796,12 @@ function runManualElection(actor, manual) {
   return rec;
 }
 
-function runElection(actor, manual) {
-  if (manual) return runManualElection(actor, manual);
+// Apportion the parliament's seats to provinces by population (largest
+// remainder, min 2) and allocate each province's seats by D'Hondt from the
+// per-province vote tallies. Shared by runElection (instant results) and the
+// live election count's finalize (server/election.js).
+function apportionSeats(byProvince, totalSeats) {
   const db = store.get();
-  const { parties, byProvince, national, totalVotes } = computePolling(true);
-  const totalSeats = db.settings.parliamentSeats || 150;
   const totalPop = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0) || 1;
 
   // apportion seats to provinces by population (largest remainder, min 2)
@@ -1808,13 +1814,22 @@ function runElection(actor, manual) {
   while (used < totalSeats) { seatsByProv[quotas[k % quotas.length].id]++; used++; k++; }
   while (used > totalSeats) { const q = quotas[quotas.length - 1 - (k % quotas.length)]; if (seatsByProv[q.id] > 2) { seatsByProv[q.id]--; used--; } k++; }
 
-  const seatTotals = {}; parties.forEach(p => seatTotals[p.id] = 0);
+  const seatTotals = {}; db.entities.filter(e => e.type === 'party').forEach(p => seatTotals[p.id] = 0);
   const provResults = {};
   for (const p of db.provinces) {
     const won = dhondt(byProvince[p.id], seatsByProv[p.id]);
     provResults[p.id] = { seats: won, votes: byProvince[p.id] };
     for (const pid in won) seatTotals[pid] += won[pid];
   }
+  return { seatTotals, provResults };
+}
+
+function runElection(actor, manual) {
+  if (manual) return runManualElection(actor, manual);
+  const db = store.get();
+  const { parties, byProvince, national, totalVotes } = computePolling(true);
+  const totalSeats = db.settings.parliamentSeats || 150;
+  const { seatTotals, provResults } = apportionSeats(byProvince, totalSeats);
 
   const electorate = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0);
   const turnoutPct = Math.round(totalVotes / (electorate || 1) * 1000) / 10;
@@ -1945,7 +1960,7 @@ function autoTick(actor) {
 
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
-  runElection, computePolling, txn, primaryAccount, draftNews, updateDerived,
+  runElection, apportionSeats, computePolling, txn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf, worldClockNow,

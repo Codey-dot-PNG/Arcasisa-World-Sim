@@ -38,7 +38,8 @@ const GMBar = {
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.assignOwnershipModal(); } }, 'Assign Ownership…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.influenceModal(); } }, 'Influence…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.partySupportModal(); } }, 'Party Support…'),
-      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.electionModal(); } }, 'Call Election…'),
+      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.electionModal(); } }, 'Instant Election…'),
+      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); W.gmTab = 'election'; App.go('gm'); App.renderView(); } }, 'Election Commission…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.announcementModal(); } }, 'Announcement…')
     );
 
@@ -351,8 +352,9 @@ const GMBar = {
     }
     renderTabs(); renderBody();
 
-    openModal('CALL ELECTION', body, [{
+    openModal('INSTANT ELECTION (legacy — no campaign, no count)', body, [{
       label: 'Run Election', onClick: async () => {
+        if (S().election && S().election.active) throw new Error('A live election is underway — end it first (GM Studio → Election).');
         if (tab === 'simulate') {
           const r = await POST('/api/gm/election', {});
           toast('Election held: ' + (r.election && r.election.national[0] ? r.election.national[0].partyId : 'result recorded') + '.');

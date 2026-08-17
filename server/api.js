@@ -14,6 +14,7 @@ const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
 const war = require('./war');
 const warScenarios = require('./war-scenarios');
+const election = require('./election');
 
 const COOKIE_EXTRA = process.env.VERCEL ? '; Secure' : '';
 const cleanQty = (v) => Math.round((Number(v) || 0) * 1000000) / 1000000;
@@ -254,6 +255,14 @@ function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
   const settings = { ...db.settings, time: { ...db.settings.time } };
+  // Phase 33 — the GM's live-election levers are confidential Commission
+  // business (the deviation and the campaign→votes exchange rate would spoil
+  // the count); everyone else gets the public knobs only.
+  if (!p.gm && settings.election) {
+    settings.election = { ...settings.election };
+    delete settings.election.deviationPct;
+    delete settings.election.supportToVotes;
+  }
   if (db.settings.time && db.settings.time.clock) {
     settings.time.clock = { ...db.settings.time.clock };
     settings.time.clock.nowMs = sim.worldClockNow(db.settings.time, Date.now());
@@ -339,6 +348,10 @@ function filterState(u) {
     history: histView(db, p).slice(-HIST_STATE_CAP),
     timeline, trades,
     elections: db.elections,
+    // Phase 33 — the live election is a public spectacle (everyone watches
+    // the count, like the war front), but the official totals and the count's
+    // seeded draws stay GM-only — see server/election.js forPlayers().
+    election: db.election ? (p.gm ? db.election : election.forPlayers(db.election)) : null,
     // War (fog of war): every logged-in operator sees the front — territory,
     // units, objectives, casualties — plus the AI's numeric plan state so
     // client prediction can replay replans; only ai.notes (the reasoning)
@@ -1419,6 +1432,20 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true });
     }
 
+    // Phase 33 — parties run campaigns during the election season. Any
+    // operator who controls the party (its leader chain) can spend the
+    // treasury; the GM can too (checked inline — the route is player-facing).
+    if (pathname === '/api/election/campaign' && method === 'POST') {
+      const b = await readBody(req);
+      const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
+      if (!party || party.type !== 'party') return bad('Unknown party.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      try { election.runCampaign(db, party.id, String(b.campaignId || ''), u.user.displayName); }
+      catch (e) { return bad(e.message); }
+      store.save(); broadcast('sync');
+      return json(res, 200, { election: db.election });
+    }
+
     // ---- GM ----
     if (pathname.startsWith('/api/gm/')) {
       if (!u.role.perms.gm) return deny('Gamemaster clearance required.');
@@ -1643,11 +1670,46 @@ async function handle(req, res, pathname, method) {
         return json(res, 200, { war: db.war, unitIds: result.unitIds });
       }
       if (pathname === '/api/gm/election' && method === 'POST') {
+        // Phase 33 — this legacy route stays as the "instant election" escape
+        // hatch, but refuses to run over a live campaign/count.
+        if (db.election && db.election.active) return bad('An election is already underway — end or cancel it first.');
         const b = await readBody(req);
         try {
           const rec = sim.runElection(actor, b && b.manual ? b.manual : undefined);
           return json(res, 200, { election: rec });
         } catch (e) { return bad(e.message); }
+      }
+      // Phase 33 — live elections (see server/election.js): the Election
+      // Commission's levers. The world-time calibration is the point — the
+      // count advances one batch per world turn, and the GM's durationTurns
+      // setting decides how long the suspense runs. Tuning knobs are saved as
+      // settings.election from the GM Election tab (applyTuning applies them
+      // to a live election too), so the routes here stay single-purpose.
+      if (pathname === '/api/gm/election/campaign' && method === 'POST') {
+        try { election.startCampaign(db, actor); } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election });
+      }
+      if (pathname === '/api/gm/election/vote' && method === 'POST') {
+        try { election.startVoting(db, actor); } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election });
+      }
+      if (pathname === '/api/gm/election/adjust' && method === 'POST') {
+        const b = await readBody(req);
+        try { election.adjustVotes(db, b || {}, actor); } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election });
+      }
+      if (pathname === '/api/gm/election/tick-count' && method === 'POST') {
+        try { election.tickCount(db, actor); } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election });
+      }
+      if (pathname === '/api/gm/election/cancel' && method === 'POST') {
+        try { election.cancel(db, actor); } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: null });
       }
       // Phase 3.3 — Influence dialog: a safe allow-list of one-off effects the
       // GM can fire without authoring a whole event.
@@ -1864,6 +1926,17 @@ async function handle(req, res, pathname, method) {
           for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier', 'expensesMultiplier']) {
             if (e[k] !== undefined) e[k] = Math.max(0.05, Number(e[k]) || 0.05);
           }
+        }
+        if (b.election) { // Phase 33 — Election Commission knobs + campaign
+          // catalogue. Whole-object replace of the authored sub-fields (the
+          // engine adds nothing live here), then applyTuning re-derives any
+          // live count's unrevealed ballots from the new deviation.
+          s.election = s.election || {};
+          if (b.election.campaigns !== undefined) s.election.campaigns = b.election.campaigns;
+          if (b.election.durationTurns !== undefined) s.election.durationTurns = Math.max(1, Math.min(365, Math.round(Number(b.election.durationTurns) || 1)));
+          if (b.election.deviationPct !== undefined) s.election.deviationPct = Math.max(0, Math.min(50, Number(b.election.deviationPct) || 0));
+          if (b.election.supportToVotes !== undefined) s.election.supportToVotes = Math.max(0, Math.round(Number(b.election.supportToVotes) || 0));
+          election.applyTuning(db, s.election);
         }
         sim.scheduleAuto();
         store.log('system', 'World settings updated', '', actor, []);

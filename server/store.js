@@ -161,6 +161,57 @@ function migrate(world) {
     }
   }
 
+  // Phase 33 — live elections. settings.election carries the GM's Election
+  // tab levers (count duration in world turns, polling deviation, campaign
+  // tuning) plus the campaign templates parties can buy. Additive: GMs may
+  // add or rename campaigns afterwards, so re-running must not clobber them.
+  if (world.settings) {
+    const el = world.settings.election = world.settings.election || {};
+    if (el.durationTurns === undefined) { el.durationTurns = 14; changed = true; }
+    if (el.deviationPct === undefined) { el.deviationPct = 12; changed = true; }
+    if (el.supportToVotes === undefined) { el.supportToVotes = 2500; changed = true; }
+    if (!Array.isArray(el.campaigns)) {
+      el.campaigns = [
+        { id: 'camp_soup', name: 'Soup Kitchen Initiative', description: 'Open community soup kitchens with party-branded ingredients. Feeds the needy, feeds your polling.', moneyCost: 12000, itemCosts: [{ itemId: 'item_grain', qty: 150 }], strength: 3 },
+        { id: 'camp_pamphlet', name: 'Pamphlet Blitz', description: 'Flood the mailboxes with glossy manifesto pamphlets. Cheap, cheerful, everywhere.', moneyCost: 8000, itemCosts: [], strength: 1.5 },
+        { id: 'camp_radio', name: 'Nationwide Radio Address', description: 'Prime-time radio speech beamed across the Republic. Reach the whole country in one sitting.', moneyCost: 25000, itemCosts: [], strength: 3 },
+        { id: 'camp_rally', name: 'Grand Rally Tour', description: 'A whistle-stop tour of motorcades and rallies in every province. Expensive, thirsty, unforgettable.', moneyCost: 45000, itemCosts: [{ itemId: 'item_fuel', qty: 120 }], strength: 5 },
+        { id: 'camp_youth', name: 'Youth Volunteer Brigades', description: 'Mobilise the young: door-knocking, flag-waving and boundless enthusiasm.', moneyCost: 15000, itemCosts: [], strength: 2 }
+      ];
+      changed = true;
+    }
+  }
+  // Phase 33 — party treasuries. Every party gets an account it owns so
+  // campaigns can be paid for (and the GM Election tab can top it up).
+  // Applied to any party entity in any live world, not just the seed ones.
+  if (Array.isArray(world.entities) && Array.isArray(world.accounts)) {
+    for (const pt of world.entities) {
+      if (pt.type !== 'party') continue;
+      if (world.accounts.some(a => a.ownerId === pt.id)) continue;
+      const short = String(pt.id).replace(/^party_/, '') || 'party';
+      let id = 'acct_party_' + short;
+      let n = 1;
+      while (world.accounts.some(a => a.id === id)) id = 'acct_party_' + short + '_' + (++n);
+      world.accounts.push({ id, ownerId: pt.id, name: 'Party Treasury', balance: 0 });
+      changed = true;
+    }
+    // Campaign war-chest: parties start with enough grain and fuel for the
+    // flagship campaigns (Soup Kitchen, Rally Tour). Flag-gated — a GM who
+    // sells the stock off never gets it quietly re-granted.
+    if (!world._partyStockSeeded) {
+      for (const pt of world.entities) {
+        if (pt.type !== 'party') continue;
+        pt.inventory = pt.inventory || [];
+        for (const [itemId, qty] of [['item_grain', 150], ['item_fuel', 60]]) {
+          const row = pt.inventory.find(r => r.itemId === itemId);
+          if (row) row.qty = (row.qty || 0) + qty; else pt.inventory.push({ qty, itemId });
+        }
+      }
+      world._partyStockSeeded = true;
+      changed = true;
+    }
+  }
+
   // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded
   // once (flag-gated); the GM freely edits stats/names or mints new models
   // from the template afterwards, so re-running must never re-add or reset.

@@ -39,6 +39,7 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |
 | `PATCH /api/trade/controls` | President (controls `ent_gov`) or GM: `govBuy`, `exports`, `imports` |
 | `POST /api/protest/control` | active-protest toggles, side-gated by `cmdAccessOf`: `protestorsViolent`/`captureMode` need `att` (organizer's controller or GM), `govViolent` needs `def` (government/military operator or GM). Response includes the fresh protest doc; responds-sync so the flip lands instantly |
+| `POST /api/election/campaign` | run a party campaign during the election season: `{partyId, campaignId}`. Anyone who controls the party (its leader chain) or the GM; spends the party treasury + campaign stock, adds support (and late votes once the count is live). Responds-sync |
 
 ## Market (Phase 4.4 / Workstream A)
 
@@ -66,7 +67,12 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 |---|---|
 | `POST advance` | `{steps}` → `sim.advanceTurn` |
 | `POST run-event` | `{id, dryRun?}` — dryRun deep-snapshots db, runs, diffs, restores (cloud caveat: pending log rows still flush) |
-| `POST election` | optional `{manual: {rows, turnout}}` |
+| `POST election` | legacy instant election (no campaign, no count); **409** while a live election is underway |
+| `POST election/campaign` | call the election: opens the campaign season (`phase: 'campaign'`) |
+| `POST election/vote` | close the polls, open the live count (`phase: 'voting'`); unrevealed per-party ballots are pre-rolled from the polling gap + `deviationPct` |
+| `POST election/adjust` | `{partyId, votes, province?}` — mid-count vote correction (re-spreads proportionally), logged in `election.log` |
+| `POST election/tick-count` | count one batch right now (one "day" of the count) |
+| `POST election/cancel` | abort the election; campaign support and `campaignPoints` decay away |
 | `POST effect` | one-off safe effects: `adjust_demo, adjust_var, adjust_support` |
 | `POST test-expr` | evaluate an expression against global/province/entity scope |
 | `POST mint` | `{accountId, amount}` — positive deposits, negative withdraws |
@@ -75,7 +81,7 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `GET snapshots` · `POST rollback` `{turn}` | |
 | `GET export` · `POST import` | full world JSON archive |
 | `POST reset` | reseed |
-| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy |
+| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns) |
 | `POST users` · `PATCH\|DELETE users/:id` | user CRUD; calls `sim.syncPresidency` |
 | `POST\|PATCH\|DELETE coll/:coll(/:id)` | generic CRUD for `entities, provinces, cities, properties, items, events, variables, roles, accounts, markers` — with cascade deletes, geometry-based province placement, deed/cert/texture sync hooks |
 | `POST war/start` · `POST war/control` · `POST war/end` · `POST war/tuning` · `GET war/scenarios` · `POST war/scenarios/custom` · `POST war/spawn` · `POST war/join` · `POST war/treaty` | war desk — see docs/WAR.md. Control/end/tuning/spawn accept `conflict: 'war'\|'protest'` (default `war`) |
@@ -103,5 +109,11 @@ The single place the world is narrowed per operator. Key rules:
 - `db.war` **and** `db.protest` ship to every logged-in operator (both conflicts are
   public spectacle), redacted like war docs (`command.notes` emptied; each doc carries
   the caller's `cmdAccess {att, def}` — see docs/WAR.md "Command authority").
+- `db.election` (live election doc, Phase 33) ships to every operator — the count is a
+  public spectacle — but `election.forPlayers()` deletes `targets` (the unrevealed
+  per-province ballot roll), `baseTargets`, `rng`, `deviationPct`, `supportToVotes`
+  for non-GMs. The GM sees everything, including the true totals mid-count.
+- `settings.election` is GM-authored: non-GMs also get it (campaign catalogue is
+  public) with `deviationPct` and `supportToVotes` deleted.
 
 **When adding state, decide its visibility here** — never rely on the client to hide data.

@@ -173,9 +173,14 @@ const App = {
   renderTabs() {
     const tabs = document.getElementById('tabs');
     clear(tabs);
+    const elc = S() && S().election;
     for (const [id, label] of this.PAGES) {
       if (!can(id)) continue;
       let text = label;
+      // Phase 33 — while an election is live the Parliament page becomes the
+      // Elections desk: campaign trail during the season, live count once the
+      // polls open. The tab reverts to "Parliament" the moment it ends.
+      if (id === 'parliament' && elc && elc.active) text = 'Elections';
       if (id === 'news') {
         const unread = this.unreadNews();
         if (unread > 0) text = label + ' (' + unread + ')';

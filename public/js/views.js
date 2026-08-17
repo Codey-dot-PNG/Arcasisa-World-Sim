@@ -972,7 +972,14 @@ const Views = {
     const doc = el('div.doc-view', el('div.doc-inner'));
     clear(container).appendChild(doc);
     const inner = doc.firstChild;
-    if (W.view === 'parliament') this.viewParliament(inner);
+    if (W.view === 'parliament') {
+      // Phase 33 — while an election is live, Parliament becomes the
+      // Elections desk (campaign trail, then the live count). The full
+      // chamber page returns the moment the election ends.
+      const elc = S().election;
+      if (elc && elc.active) this.viewElection(inner, elc);
+      else this.viewParliament(inner);
+    }
     else if (W.view === 'companies') this.viewCompanies(inner);
     else if (W.view === 'economy') this.viewEconomy(inner);
     else if (W.view === 'population') this.viewPopulation(inner);
@@ -1150,6 +1157,267 @@ const Views = {
         };
       }), { title: 'Seats by Party', width: 380, height: 190, valueFormat: v => v + ' seats' }));
     }
+  },
+
+  /* ---- Elections (Phase 33) ------------------------------------------- */
+  // The live-election desk: while S().election is active the Parliament page
+  // shows the campaign trail during the season and the live count once the
+  // polls open. All numbers come from the server (server/election.js); the
+  // client only renders. The GM sees the confidential knobs; players watch
+  // the same spectacle with the unrevealed totals redacted.
+
+  // National totals from the live doc's counting history (last step wins).
+  electionNational(elc) {
+    const st = elc.steps && elc.steps[elc.steps.length - 1];
+    return (st && st.counted) || {};
+  },
+
+  electionLeadRow(elc) {
+    const nat = this.electionNational(elc);
+    const rows = Object.entries(nat).sort((a, b) => b[1] - a[1]);
+    return rows.map(([pid, v]) => ({ party: entById(pid), votes: v }));
+  },
+
+  async viewElection(inner, elc) {
+    if (elc.phase === 'voting') this.electionCountView(inner, elc);
+    else this.electionCampaignView(inner, elc);
+  },
+
+  // ---- Campaign season ----
+  async electionCampaignView(inner, elc) {
+    const parties = S().entities.filter(e => e.type === 'party');
+    const cfg = S().settings.election || {};
+    inner.appendChild(el('div.doc-title', 'Election Season — Campaign Trail'));
+    inner.appendChild(el('div.doc-sub', 'Parliament dissolved · polling day announced by the Election Commission · the party treasuries are open'));
+
+    const leading = Object.entries(elc.pollingAtCall || {}).sort((a, b) => b[1] - a[1])[0];
+    inner.appendChild(this.statStrip([
+      ['Campaign Phase', 'Open', 'count begins when the Commission opens the polls'],
+      ['Count Duration', elc.durationTurns + ' turns', 'one batch of ballots per world turn'],
+      ['Polls Lead', leading ? (entById(leading[0]) || { name: '—' }).name + ' ' + leading[1] + '%' : '—', 'at the moment of dissolution'],
+      ['Campaigns', fmtNum((cfg.campaigns || []).filter(c => c.enabled !== false).length) + ' on offer', 'money + stock from the party treasury']
+    ]));
+
+    // Public polling (statistics clearance — same gate as the Parliament page)
+    if (perms().statistics || isGM()) {
+      inner.appendChild(this.secLabel('Current Polling (national)'));
+      const pollBox = el('div.stage', { style: 'margin-top:4px;' });
+      inner.appendChild(pollBox);
+      try {
+        const poll = await GET('/api/polling');
+        for (const p of [...parties].sort((a, b) => (poll.national[b.id] || 0) - (poll.national[a.id] || 0))) {
+          pollBox.appendChild(this.barRow(p.name, poll.national[p.id] || 0, p.color));
+        }
+      } catch (e) { pollBox.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Polling unavailable: ' + e.message)); }
+    }
+
+    // Campaign desk — every party's war-chest and the campaigns on offer.
+    inner.appendChild(this.secLabel('The Campaign Trail'));
+    const desk = el('div');
+    inner.appendChild(desk);
+    for (const p of parties) {
+      const controlled = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, p.id));
+      const acct = (S().accounts || []).find(a => a.ownerId === p.id);
+      const box = el('div.party-row', { style: 'align-items:flex-start;' },
+        p.logo ? el('img', { src: p.logo, alt: '' }) : el('span.exp-dot', { style: 'background:' + p.color }),
+        el('div', { style: 'flex:1;' },
+          el('div.pr-name', p.name),
+          el('div.pr-meta', `${p.leaderId ? entName(p.leaderId) + ' · ' : ''}${this.ideologyLabel(p.ideology)}`),
+          el('div.pr-meta', 'Treasury ' + (acct ? fmtMoney(acct.balance) : '—') +
+            (p.vars && p.vars.campaignPoints ? ' · ' + p.vars.campaignPoints + ' campaign support active' : ''))));
+      if (controlled) {
+        const rows = el('div', { style: 'flex:1; margin-top:8px;' });
+        for (const c of (cfg.campaigns || [])) {
+          if (c.enabled === false) continue;
+          const money = Number(c.moneyCost) || 0;
+          const lacks = (c.itemCosts || []).filter(row => !this.campaignCostAffordable(p, row));
+          const afford = (!acct || acct.balance >= money) && !lacks.length;
+          const costTxt = (c.itemCosts || []).map(row => this.campaignCostText(row)).join(' + ') || 'no stock needed';
+          rows.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid var(--rule-faint);' },
+            el('div', { style: 'flex:1;' },
+              el('div', { style: 'font-size:13px;' }, c.name),
+              el('div', { style: 'font-size:11px; color:var(--ink-faint);' }, c.description || '')),
+            el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); text-align:right;' },
+              fmtMoney(money) + (money ? ' · ' : '') + costTxt + ' → +' + (Number(c.strength) || 0) + ' support' +
+              (elc.phase === 'voting' ? ' · late votes' : '')),
+            el('button.solid-btn', {
+              disabled: !afford,
+              title: afford ? '' : (lacks.length ? 'Missing ' + lacks.map(x => this.campaignCostText(x)).join(', ') : 'Insufficient treasury funds'),
+              onclick: async (ev) => {
+                const b = ev.currentTarget; b.disabled = true;
+                try { await POST('/api/election/campaign', { partyId: p.id, campaignId: c.id }); toast(p.abbrev + ' runs “' + c.name + '”.'); }
+                catch (err) { toast(err.message, true); b.disabled = false; }
+              }
+            }, 'Run')));
+        }
+        box.appendChild(rows);
+      }
+      desk.appendChild(box);
+    }
+
+    this.electionLog(inner, elc);
+
+    // GM strip — open the polls or hand over to the Commission desk.
+    if (isGM()) {
+      inner.appendChild(el('div.btn-row',
+        el('button.solid-btn', {
+          onclick: async () => {
+            try { await POST('/api/gm/election/vote'); toast('The polls are open — the count begins.'); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, '⚑ Open the Polls'),
+        el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('gm'); App.renderView(); } }, 'Election Commission → GM Studio'),
+        el('button.dash-btn', {
+          onclick: () => confirmModal('CALL OFF ELECTION', 'Suspend the election and return to the previous parliament? Campaign spending and support shifts are reversed.', async () => {
+            try { await POST('/api/gm/election/cancel'); toast('Election called off.'); }
+            catch (e) { toast(e.message, true); }
+          }, 'Call Off')
+        }, 'Call Off Election')));
+    }
+  },
+
+  // Can this party pay one item-cost row (with its "or" alternatives)?
+  campaignCostAffordable(party, row) {
+    if (!row || !row.itemId) return true;
+    const qty = Math.max(1, Number(row.qty) || 1);
+    const have = (inv) => (inv || []).find(r => r.itemId === (row.or && row.or.length ? null : row.itemId)) ||
+      (inv || []).find(r => r.itemId === row.itemId);
+    const stock = have(party.inventory);
+    if (stock && stock.qty >= qty) return true;
+    return (row.or || []).some(o => o && o.itemId && ((party.inventory || []).find(r => r.itemId === o.itemId) || {}).qty >= Math.max(1, Number(o.qty) || 1));
+  },
+  campaignCostText(row) {
+    if (!row || !row.itemId) return '';
+    const it = itemById(row.itemId);
+    const base = (it ? it.name : row.itemId) + ' ×' + (Number(row.qty) || 1);
+    const ors = (row.or || []).map(o => {
+      const oi = itemById(o.itemId);
+      return (oi ? oi.name : o.itemId) + ' ×' + (Number(o.qty) || 1);
+    });
+    return ors.length ? base + ' or ' + ors.join(' or ') : base;
+  },
+
+  // ---- Live count ----
+  electionCountView(inner, elc) {
+    const parties = S().entities.filter(e => e.type === 'party');
+    const nat = this.electionNational(elc);
+    const sorted = Object.entries(nat).sort((a, b) => b[1] - a[1]);
+    const countedSum = Object.values(nat).reduce((s, v) => s + v, 0);
+    const lead = sorted[0];
+    const second = sorted[1];
+    const leadParty = lead ? entById(lead[0]) : null;
+
+    inner.appendChild(el('div.doc-title', 'Election Night — The Count'));
+    inner.appendChild(el('div.doc-sub',
+      'Polls closed ' + fmtDate(elc.votingDate) + ' · ' + fmtNum(elc.electorate) + ' ballots expected · counted in ' + elc.durationTurns + ' batches'));
+
+    // Hero: the current leader, live.
+    const hero = el('div', { style: 'display:flex; align-items:center; gap:18px; padding:18px; border:1px solid var(--rule-strong); background:var(--paper-tint); margin-top:14px; flex-wrap:wrap;' });
+    if (leadParty) {
+      hero.appendChild(leadParty.logo ? el('img', { src: leadParty.logo, style: 'width:46px; height:46px;' }) : el('span.exp-dot', { style: 'background:' + (leadParty.color || 'var(--ink-faint)' ) }));
+      hero.appendChild(el('div', { style: 'flex:1; min-width:180px;' },
+        el('div', { style: 'font-size:10px; font-family:var(--font-mono); color:var(--ink-faint); letter-spacing:.12em;' }, 'CURRENTLY LEADING'),
+        el('div', { style: 'font-size:22px; font-family:var(--font-voice);' }, leadParty.name),
+        el('div', { style: 'font-size:12px; color:var(--ink-soft);' },
+          fmtNum(lead[1]) + ' votes · ' + (countedSum ? Math.round(lead[1] / countedSum * 1000) / 10 : 0) + '% counted' +
+          (second ? ' · ' + fmtNum(Math.round(lead[1] - second[1])) + ' ahead of ' + ((entById(second[0]) || {}).abbrev || second[0]) : ''))));
+    }
+    hero.appendChild(el('div', { style: 'min-width:190px;' },
+      el('div', { style: 'display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+        el('span', Math.round(elc.progress * 100) + '% COUNTED'),
+        el('span', 'BATCH ' + (elc.step || 0) + ' / ' + elc.durationTurns)),
+      el('div.bar-track', { style: 'height:10px; margin-top:4px;' }, el('div.bar-fill', { style: 'width:' + Math.min(100, Math.round(elc.progress * 100)) + '%; background:var(--accent);' })),
+      el('div', { style: 'font-size:10px; color:var(--ink-faint); margin-top:4px;' }, 'Next batch arrives on the next world turn')));
+    inner.appendChild(hero);
+
+    // National table — the drama: counted share vs what the polls said.
+    inner.appendChild(this.secLabel('National Count'));
+    const tbl = el('table.data',
+      el('thead', el('tr', el('th', 'Party'), el('th.num', 'Votes'), el('th.num', 'Share'), el('th.num', 'Polls said'))),
+      el('tbody', sorted.map(([pid, v]) => {
+        const p = entById(pid);
+        const polled = elc.pollingAtCall && elc.pollingAtCall[pid];
+        return el('tr',
+          el('td', (p ? p.name : pid) + (lead[0] === pid ? ' ⚑' : '')),
+          el('td.num', fmtNum(Math.round(v))),
+          el('td.num', (countedSum ? Math.round(v / countedSum * 1000) / 10 : 0) + '%'),
+          el('td.num', polled !== undefined ? polled + '%' : '—'));
+      })));
+    inner.appendChild(tbl);
+
+    // The count as it unfolded — every party, every batch.
+    if (elc.steps && elc.steps.length >= 2) {
+      inner.appendChild(this.secLabel('The Count Unfolds'));
+      inner.appendChild(Charts.chartLine(parties.map(p => ({
+        name: p.abbrev || p.name, color: p.color,
+        points: elc.steps.map((st, i) => ({ x: i + 1, y: Math.round(st.counted[p.id] || 0) }))
+      })), { title: 'BALLOTS COUNTED PER BATCH', yFormat: v => fmtCompact(v), xLabels: true, width: 720, height: 260 }));
+    }
+
+    // Per-province tallies (the count, live).
+    inner.appendChild(this.secLabel('By Province'));
+    const ptbl = el('table.data',
+      el('thead', el('tr', el('th', 'Province'), ...parties.map(p => el('th.num', p.abbrev || p.name)))),
+      el('tbody', S().provinces.map(pr => {
+        const provCount = (elc.counted && elc.counted[pr.id]) || {};
+        return el('tr',
+          el('td', pr.name),
+          ...parties.map(p => el('td.num', fmtNum(Math.round(provCount[p.id] || 0)))));
+      })));
+    inner.appendChild(ptbl);
+
+    // Campaigning continues into the count — the desk rides along.
+    inner.appendChild(this.secLabel('Campaigning Into the Count'));
+    const cfg = S().settings.election || {};
+    const desk = el('div');
+    inner.appendChild(desk);
+    for (const p of parties) {
+      const controlled = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, p.id));
+      if (!controlled) continue;
+      const acct = (S().accounts || []).find(a => a.ownerId === p.id);
+      const rows = el('div');
+      for (const c of (cfg.campaigns || [])) {
+        if (c.enabled === false) continue;
+        const money = Number(c.moneyCost) || 0;
+        const lacks = (c.itemCosts || []).filter(row => !this.campaignCostAffordable(p, row));
+        const afford = (!acct || acct.balance >= money) && !lacks.length;
+        rows.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; padding:6px 0; border-top:1px solid var(--rule-faint);' },
+          el('span', { style: 'flex:1; font-size:12.5px;' }, c.name + ' — ' + fmtMoney(money) + (c.itemCosts && c.itemCosts.length ? ' + stock' : '') + ' → late votes'),
+          el('button.solid-btn', {
+            disabled: !afford,
+            onclick: async (ev) => {
+              const b = ev.currentTarget; b.disabled = true;
+              try { await POST('/api/election/campaign', { partyId: p.id, campaignId: c.id }); toast(p.abbrev + ' campaigns into the count.'); }
+              catch (err) { toast(err.message, true); b.disabled = false; }
+            }
+          }, 'Run')));
+      }
+      desk.appendChild(el('div.party-row',
+        p.logo ? el('img', { src: p.logo, alt: '' }) : el('span.exp-dot', { style: 'background:' + p.color }),
+        el('div', { style: 'flex:1;' }, el('div.pr-name', p.name),
+          el('div.pr-meta', 'Treasury ' + (acct ? fmtMoney(acct.balance) : '—'))),
+        rows));
+    }
+
+    this.electionLog(inner, elc);
+
+    // GM strip — pace the suspense.
+    if (isGM()) {
+      inner.appendChild(el('div.btn-row',
+        el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, '⚡ Count One Batch Now'),
+        el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('gm'); App.renderView(); } }, 'Election Commission → GM Studio')));
+    }
+  },
+
+  electionLog(inner, elc) {
+    if (!elc.log || !elc.log.length) return;
+    inner.appendChild(this.secLabel('Election Record'));
+    inner.appendChild(el('div', { style: 'font-size:11.5px; line-height:1.7; color:var(--ink-soft);' },
+      elc.log.slice(-14).reverse().map(e => el('div',
+        el('span.when', `T${e.turn} · ${fmtDate(e.date)}`),
+        e.kind === 'adjust'
+          ? `Election Commission ${e.votes > 0 ? 'added' : 'removed'} ${fmtNum(Math.abs(e.votes))} votes ${e.votes > 0 ? 'to' : 'from'} ${entName(e.partyId)}${e.province ? ' (' + ((provById(e.province) || {}).name || e.province) + ')' : ''}`
+          : `${entName(e.partyId)} ran “${e.campaignName}”` + (e.money ? ' — ' + fmtMoney(e.money) : '') + (e.votes ? ' — ' + fmtNum(e.votes) + ' late votes' : '') + (e.strength ? ' — +' + e.strength + ' support' : '')))));
   },
 
   /* ---- Companies ---- */

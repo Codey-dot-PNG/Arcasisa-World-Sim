@@ -187,6 +187,7 @@ const GM = {
     ['assets', 'Assets & Ownership'],
     ['items', 'Items & Market'],
     ['trade', 'Trade Desk'],
+    ['election', 'Election'],
     ['variables', 'Variables'],
     ['events', 'Event Engine'],
     ['population', 'Population'],
@@ -220,6 +221,7 @@ const GM = {
       world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
       registry: this.tabRegistry, economy: this.tabEconomy, money: this.tabMoney, assets: this.tabAssets, items: this.tabItems,
       trade: this.tabTrade,
+      election: this.tabElection,
       variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
       presentation: this.tabPresentation,
       roles: this.tabRoles, danger: this.tabDanger
@@ -1261,6 +1263,211 @@ const GM = {
         } catch (e) { toast(e.message, true); }
       }
     }, 'Save Economy Settings')));
+  },
+
+  /* ═══════════ ELECTION (Phase 33) ═══════════
+     The Election Commission's desk. The live election engine lives in
+     server/election.js; this tab controls the whole show:
+     · call the election / open the polls / count one batch / call off
+     · the count's duration (in world turns), its deviation from the public
+       polls, and the campaign→late-votes exchange rate
+     · the campaign catalogue parties can buy (money + stock, with "or"
+       alternatives per item row)
+     · party treasuries (the money they spend) with a quick mint
+     · mid-count corrections: add or remove votes, nationally or by province */
+  tabElection(main) {
+    const elc = S().election;
+    const cfg = (S().settings.election) || {};
+    const parties = S().entities.filter(e => e.type === 'party');
+    main.appendChild(el('div.doc-title', 'Election'));
+    main.appendChild(el('div.doc-sub', 'the Commission: call it, tune the count, watch it land'));
+
+    // ---- Live status ----
+    main.appendChild(Views.secLabel('Status'));
+    const status = el('div');
+    main.appendChild(status);
+    if (elc && elc.active) {
+      const nat = (elc.steps && elc.steps[elc.steps.length - 1]) ? elc.steps[elc.steps.length - 1].counted : {};
+      const countedSum = Object.values(nat).reduce((s, v) => s + v, 0);
+      const lead = Object.entries(nat).sort((a, b) => b[1] - a[1])[0];
+      const pollLead = Object.entries(elc.pollingAtCall || {}).sort((a, b) => b[1] - a[1])[0];
+      status.appendChild(el('div', { style: 'font-size:12.5px; line-height:1.9; color:var(--ink-soft);' },
+        el('div', 'Phase: ', el('strong', { style: 'color:var(--accent);' }, elc.phase === 'campaign' ? 'CAMPAIGN SEASON' : 'COUNT IN PROGRESS')),
+        el('div', 'Called: ' + fmtDate(elc.calledDate) + ' (turn ' + elc.calledTurn + ')' +
+          (elc.phase === 'voting' ? ' · polls closed ' + fmtDate(elc.votingDate) + ' · batch ' + (elc.step || 0) + ' / ' + elc.durationTurns + ' · ' + Math.round(elc.progress * 100) + '% counted' : '')),
+        el('div', 'Polls lead at call: ' + (pollLead ? (entName(pollLead[0]) + ' ' + pollLead[1] + '%') : '—')),
+        el('div', 'Counted: ' + fmtNum(countedSum) + ' of ' + fmtNum(elc.totalBallots) + ' ballots' +
+          (lead ? ' · leading ' + entName(lead[0]) + ' ' + fmtNum(Math.round(lead[1])) : '')),
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+          'Count deviation ±' + (elc.deviationPct || cfg.deviationPct || 0) + '% · late votes per support point ' + (elc.supportToVotes !== undefined ? elc.supportToVotes : cfg.supportToVotes || 0))));
+      const buttons = el('div.btn-row', { style: 'margin-top:8px;' });
+      if (elc.phase === 'campaign') {
+        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/vote'); toast('The polls are open.'); } catch (e) { toast(e.message, true); } } }, '⚑ Open the Polls'));
+      } else {
+        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, '⚡ Count One Batch Now'));
+      }
+      buttons.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('parliament'); App.renderView(); } }, 'Watch the Count →'));
+      buttons.appendChild(el('button.danger-btn', {
+        onclick: () => confirmModal('CALL OFF ELECTION', 'Suspend the election entirely? Campaign spending and support shifts are reversed, and the previous parliament stands.', async () => {
+          try { await POST('/api/gm/election/cancel'); toast('Election called off.'); } catch (e) { toast(e.message, true); }
+        }, 'Call Off')
+      }, 'Call Off Election'));
+      status.appendChild(buttons);
+    } else {
+      status.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, 'No election is underway. The Republic sits with its ' + (S().settings.parliamentSeats || 150) + '-seat parliament.'));
+      const buttons = el('div.btn-row', { style: 'margin-top:8px;' });
+      buttons.appendChild(el('button.solid-btn', {
+        onclick: () => confirmModal('CALL ELECTION', 'Dissolve Parliament and open the campaign season? Parties will spend their treasuries on the trail; you open the polls when ready and the count runs one batch per world turn.', async () => {
+          try { await POST('/api/gm/election/campaign'); toast('Campaign season opens.'); } catch (e) { toast(e.message, true); }
+        }, 'Call Election')
+      }, '⚑ Call Election (live)'));
+      buttons.appendChild(el('button.dash-btn', {
+        onclick: () => confirmModal('INSTANT ELECTION', 'Skip the campaign and count entirely — compute the result from the simulated population right now (legacy instant election).', async () => {
+          try { await POST('/api/gm/election'); toast('The Republic has voted.'); } catch (e) { toast(e.message, true); }
+        }, 'Run Instant Election')
+      }, 'Instant Election…'));
+      status.appendChild(buttons);
+    }
+
+    // ---- Tuning ----
+    main.appendChild(Views.secLabel('Tuning'));
+    const tune = this.getDraft('election-tune', {
+      durationTurns: cfg.durationTurns === undefined ? 14 : cfg.durationTurns,
+      deviationPct: cfg.deviationPct === undefined ? 12 : cfg.deviationPct,
+      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes
+    });
+    main.appendChild(this.field('Count duration (world turns)',
+      Forms.sliderNum(tune, 'durationTurns', 1, 60, { step: 1, suffix: ' turns' }),
+      'One batch of ballots is released per world turn, calibrated to the world time system — 14 turns is a long slow night.'));
+    main.appendChild(this.field('Deviation from polling',
+      Forms.sliderNum(tune, 'deviationPct', 0, 40, { step: 0.5, suffix: '%' }),
+      'How far the true result may depart from the public polls, per party and province (seeded draws, GM-only). Applies to a live count too — the unrevealed ballots re-derive.'));
+    main.appendChild(this.field('Late votes per campaign support point',
+      Forms.sliderNum(tune, 'supportToVotes', 0, 10000, { step: 250 }),
+      'What campaign strength is worth in ballots once the count is running.'));
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', {
+            election: {
+              durationTurns: tune.durationTurns,
+              deviationPct: tune.deviationPct,
+              supportToVotes: tune.supportToVotes
+            }
+          });
+          this.draftKey = null;
+          toast('Election tuning saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Tuning')));
+
+    // ---- Mid-count corrections ----
+    if (elc && elc.active && elc.phase === 'voting') {
+      main.appendChild(Views.secLabel('Election Commission — Vote Corrections'));
+      main.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint); margin-bottom:8px;' },
+        'The revealed count and the official totals both absorb every correction; the count converges to whatever you amend.'));
+      const adj = this._elAdj || (this._elAdj = { partyId: (parties[0] || {}).id, province: 'all', votes: 1000 });
+      const adjProvOpts = [['all', '— the nation —'], ...this.provOptions()];
+      main.appendChild(el('div.form-grid',
+        this.field('Party', this.sel(adj, 'partyId', parties.map(p => [p.id, p.name]))),
+        this.field('Scope', this.sel(adj, 'province', adjProvOpts)),
+        this.field('Votes (negative to remove)', this.num(adj, 'votes'))));
+      main.appendChild(el('div.btn-row', el('button.solid-btn', {
+        onclick: async () => { try { await POST('/api/gm/election/adjust', adj); toast('Commission ruling recorded.'); } catch (e) { toast(e.message, true); } }
+      }, 'Apply Correction')));
+
+      // The official unrevealed totals — the Commission's eyes only.
+      const tgt = {};
+      for (const pid in (elc.targets || {})) for (const pt in elc.targets[pid]) tgt[pt] = (tgt[pt] || 0) + elc.targets[pid][pt];
+      main.appendChild(el('div', { style: 'font-size:11px; font-family:var(--font-mono); color:var(--ink-faint); margin-top:10px; line-height:1.7;' },
+        'OFFICIAL TOTALS (UNREVEALED): ' + (Object.keys(tgt).length
+          ? Object.entries(tgt).sort((a, b) => b[1] - a[1]).map(([pid, v]) => (entById(pid) || {}).abbrev + ' ' + fmtNum(Math.round(v))).join(' · ')
+          : 'not yet derived')));
+    }
+
+    // ---- Campaign catalogue ----
+    main.appendChild(Views.secLabel('Campaign Catalogue'));
+    const camps = this._elCamps || (this._elCamps = JSON.parse(JSON.stringify(cfg.campaigns || [])));
+    const campBox = el('div');
+    main.appendChild(campBox);
+    const itemOpts = this.itemOptions();
+    const renderCamp = (c) => {
+      const row = el('div', { style: 'border:1px solid var(--rule-strong); padding:10px 12px; margin-bottom:10px; background:var(--paper-tint);' });
+      row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-start; flex-wrap:wrap;' },
+        el('div', { style: 'flex:1; min-width:200px;' }, this.field('Name', this.text(c, 'name'))),
+        el('div', { style: 'flex:0 0 130px;' }, this.field('Money cost (' + CUR() + ')', this.num(c, 'moneyCost'))),
+        el('div', { style: 'flex:0 0 130px;' }, this.field('Support strength', this.num(c, 'strength'))),
+        el('div', { style: 'flex:0 0 90px;' }, this.field('Enabled', this.check(c, 'enabled', ''))),
+        el('button.icon-btn', { onclick: () => { camps.splice(camps.indexOf(c), 1); App.renderView(); }, title: 'Remove campaign' }, '✕')));
+      row.appendChild(el('div', { style: 'margin-top:4px;' }, this.field('Description', this.text(c, 'description'))));
+      row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em; margin-top:8px;' }, 'STOCK COSTS — ONE ROW PER REQUIRED GOOD, “or” ALTERNATIVES ACCEPTED'));
+      const costBox = el('div');
+      row.appendChild(costBox);
+      c.itemCosts = c.itemCosts || [];
+      const renderCostRow = (rc, isAlt, costRow, altIdx) => {
+        const alt = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:4px;' });
+        alt.appendChild(el('span', { style: 'font-size:10px; color:var(--ink-faint); width:70px;' }, isAlt ? 'or' : 'needs'));
+        alt.appendChild(this.sel(rc, 'itemId', itemOpts));
+        alt.appendChild(el('span', { style: 'font-size:11px; color:var(--ink-soft);' }, '×'));
+        alt.appendChild(el('div', { style: 'width:90px;' }, this.num(rc, 'qty')));
+        alt.appendChild(el('button.icon-btn', {
+          onclick: () => { if (isAlt) costRow.or.splice(altIdx, 1); else { if (!costRow.or) costRow.or = []; costRow.or.push({ itemId: (itemOpts[1] || [null])[0], qty: 1 }); } App.renderView(); }
+        }, isAlt ? '✕' : '+ alt'));
+        return alt;
+      };
+      const paintCosts = () => {
+        clear(costBox);
+        for (const rc of c.itemCosts) {
+          costBox.appendChild(renderCostRow(rc, false, rc, 0));
+          (rc.or || []).forEach((o, i) => costBox.appendChild(renderCostRow(o, true, rc, i)));
+          costBox.appendChild(el('button.dash-btn', { style: 'margin:4px 0; padding:2px 8px; font-size:11px;', onclick: () => { c.itemCosts.splice(c.itemCosts.indexOf(rc), 1); App.renderView(); } }, 'remove this good'));
+        }
+      };
+      paintCosts();
+      row.appendChild(el('div.btn-row', { style: 'margin-top:6px;' }, el('button.dash-btn', { style: 'padding:3px 10px; font-size:11px;', onclick: () => { c.itemCosts.push({ itemId: (itemOpts[0] || [null])[0], qty: 1 }); App.renderView(); } }, '+ add required good')));
+      return row;
+    };
+    for (const c of camps) campBox.appendChild(renderCamp(c));
+    campBox.appendChild(el('div.btn-row',
+      el('button.dash-btn', { onclick: () => { camps.push({ id: 'camp_' + Date.now().toString(36), name: 'New Campaign', description: '', moneyCost: 10000, itemCosts: [], strength: 1 }); App.renderView(); } }, '+ Add Campaign'),
+      el('button.solid-btn', {
+        onclick: async () => {
+          try {
+            await PATCH('/api/gm/settings', { election: { campaigns: camps } });
+            this._elCamps = null;
+            toast('Campaign catalogue saved.');
+          } catch (e) { toast(e.message, true); }
+        }
+      }, 'Save Campaign Catalogue')));
+
+    // ---- Party treasuries ----
+    main.appendChild(Views.secLabel('Party Treasuries'));
+    const topDraft = this._elTop || (this._elTop = {});
+    const trTbl = el('table.data',
+      el('thead', el('tr', el('th', 'Party'), el('th.num', 'Treasury'), el('th', 'War chest (stock)'), el('th.num', 'Top up (' + CUR() + ')'), el('th'))),
+      el('tbody', parties.map(p => {
+        const acct = (S().accounts || []).find(a => a.ownerId === p.id);
+        const stock = (p.inventory || []).filter(r => itemById(r.itemId)).map(r => (itemById(r.itemId) || {}).name + ' ×' + fmtNum(r.qty)).join(', ') || '—';
+        if (topDraft[p.id] === undefined) topDraft[p.id] = 10000;
+        const tr = el('tr',
+          el('td', p.name),
+          el('td.num', acct ? fmtMoney(acct.balance) : '—'),
+          el('td', { style: 'font-size:11px; color:var(--ink-faint);' }, stock),
+          el('td', { style: 'width:120px;' }, this.num(topDraft, p.id)),
+          el('td', el('button.dash-btn', {
+            style: 'padding:2px 10px; font-size:11px;',
+            onclick: async () => {
+              const amt = Number(topDraft[p.id]);
+              if (!amt) return toast('Enter an amount first.', true);
+              try { await POST('/api/gm/mint', { accountId: acct.id, amount: amt, memo: 'Election Commission funding' }); topDraft[p.id] = 0; toast(p.abbrev + ' funded ' + fmtMoney(amt) + '.'); }
+              catch (e) { toast(e.message, true); }
+            }
+          }, 'Fund')));
+        return tr;
+      })));
+    main.appendChild(trTbl);
+    main.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
+      el('button.dash-btn', { onclick: () => { W.gmTab = 'money'; App.renderView(); } }, 'Money & Accounts →')));
   },
 
   /* ═══════════ ASSETS & OWNERSHIP (Workstream C) ═══════════

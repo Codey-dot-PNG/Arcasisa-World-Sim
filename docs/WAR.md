@@ -524,7 +524,7 @@ population teleport — each wave's shares travel the map as VISIBLE columns:
 - **Determinism/perf**: array-order iteration, no rng draws (the per-tick
   PRNG stream is untouched), never in combat rosters/AI pools/territory or
   the O(n²) separation pass — a predicting client walks them tick-for-tick.
-- **Client**: neutral ivory pill markers (🚶 + "≈12k" head count) under the
+- **Client**: neutral ivory pill markers (☷ + "≈12k" head count) under the
   unit layer, tweened by the shared rAF loop with a per-frame fade (in over
   ~1.5 ticks from `spawnedTick`, out over `REFUGEE_FADE_TICKS` after
   `arrived`/`deadTick`). Clickable → the unit info card shows head count,
@@ -1536,7 +1536,7 @@ for every engine call, and every route/command takes a `conflict:
 - No `war.command`/`war.ai` — crowds and police are player-driven; the
   commander-hierarchy AI no-ops on a protest.
 
-Units: crowds (`side:'att'`, `kind:'protestor'`, glyph ✊) spawn around the
+Units: crowds (`side:'att'`, `kind:'protestor'`, glyph ⚒) spawn around the
 base cities (`crowds` per city, each `perCity` strong, speed 2.5, atk 0.35);
 police detachments (`side:'def'`, `kind:'police'`, glyph 🚓, `garrison:true`,
 speed 0 until the first order, strength scaled with city size) spawn 2 per
@@ -1558,8 +1558,9 @@ enforces the escalation ladder:
   units remain** (`result.winner:'def'`, "Protests dispersed"): a protest can
   never formally win — a concession is a GM end. Capture mode records cells
   but cannot end the protest.
-- Airstrikes are defender-only AND only once the protest is violent
-  (`isProtestViolent` in `dropBomb` and the `/api/war/bomb` route).
+- Airstrikes are defender-only (same `dropBomb`/`/api/war/bomb` path as a
+  war — no violence requirement; a protest is a normal air target at any
+  stage).
 
 ### Lifecycle & commands
 
@@ -1618,7 +1619,7 @@ like war refugees; civilian deaths and refugee counts feed
 `public/js/war.js` predicts and renders **both** docs at once on the War
 layer (one shared `_preds` map keyed by conflict, one heartbeat polling
 `GET /api/war/state` returning `{war, protest, v}`). The floating toolbar
-gains a ⚔ / ✊ conflict switch (commands, selection and the GM side toggle
+gains a ⚔ / ⚒ conflict switch (commands, selection and the GM side toggle
 target the active conflict); the War Room stacks a section per conflict with
 protest-specific status chips, side toggles, tuning sliders and a GM start
 form (organizer picker, city check-lists, crowd sizing). The map layer label
@@ -1663,8 +1664,8 @@ and registration trigger on `S().war || S().protest`.
   and `POST /api/war/bomb { side?, pos:[x,y], conflict? }` —
   **player-accessible** (any logged-in operator with `cmdAccess` for that
   side, not GM-gated); see "Interactive War layer" above for the authority
-  model and validation, and "Manual paths" for the `path` order shape. In a
-  protest, bombs are additionally rejected while the protest is peaceful.
+  model and validation, and "Manual paths" for the `path` order shape. Bombs
+  work the same way over a protest as over a war — no violence requirement.
 - `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
   18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
   `{war, protest, v}` only, with `war.command`/`protest.command` redacted for

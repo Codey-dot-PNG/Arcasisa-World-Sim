@@ -1253,7 +1253,7 @@ const Views = {
       const st = pr.vars.strike;
       const out = Math.round((1 - Math.min(1, st.degree)) * 100);
       inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
-        '⛔ ON STRIKE — the workforce has downed tools since turn ' + st.sinceTurn + '. Production runs at ' + out + '% of normal while the protest crowds hold the area; workers stay employed and return to the line once the streets clear.'));
+        '☒ ON STRIKE — the workforce has downed tools since turn ' + st.sinceTurn + '. Production runs at ' + out + '% of normal while the protest crowds hold the area; workers stay employed and return to the line once the streets clear.'));
     }
     inner.appendChild(this.statStrip([
       ['Employees', fmtNum(pr.employees || 0) + ' / ' + fmtNum(maxEmp)], ['Output value / turn', fmtMoney(revenue * wf)],
@@ -1774,7 +1774,7 @@ const Views = {
       const worst = struckSites.reduce((a, pr) => (pr.vars.strike.degree || 0) > (a.vars.strike.degree || 0) ? pr : a, struckSites[0]);
       const out = Math.round((1 - Math.min(1, worst.vars.strike.degree)) * 100);
       inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
-        '⛔ ' + (struckSites.length === 1 ? 'ON STRIKE: ' + struckSites[0].name : struckSites.length + ' SITES ON STRIKE: ' + struckSites.map(pr => pr.name).join(', ')) +
+        '☒ ' + (struckSites.length === 1 ? 'ON STRIKE: ' + struckSites[0].name : struckSites.length + ' SITES ON STRIKE: ' + struckSites.map(pr => pr.name).join(', ')) +
         ' — output is down to ' + out + '% at the worst-hit site while protest crowds hold the area. Workers stay employed and return once the streets clear.'));
     }
     inner.appendChild(this.statStrip([

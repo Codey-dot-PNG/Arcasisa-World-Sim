@@ -1605,7 +1605,7 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         if (!db.protest || !db.protest.active) return bad('No protest is active.');
         const patch = {};
-        for (const k of ['strikeFrac', 'civFrac', 'refugeeFrac', 'dmg', 'hp']) {
+        for (const k of ['strikeFrac', 'civFrac', 'refugeeFrac', 'refugeeEvery', 'dmg', 'hp']) {
           if (b[k] === undefined) continue;
           const v = Number(b[k]);
           if (!Number.isFinite(v)) return bad(`Invalid ${k}.`);

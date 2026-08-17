@@ -32,7 +32,7 @@
    from-scratch DOM rebuilds because the interpolation state (_anim) lives
    in this module, not in the DOM. */
 
-const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '✊', police: '⛨' };
+const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '⚒', police: '⛨' };
 // Transport ships & Boats feature: a land unit whose state reads 'transport'
 // (drifting/stranded over water — see war-engine.js's stepTransportState)
 // renders with this glyph instead of its normal kind glyph, so a column
@@ -1197,7 +1197,7 @@ const War = {
         const glyph = document.createElementNS(NS, 'text');
         glyph.setAttribute('class', 'war-refugee-glyph');
         glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 4);
-        glyph.textContent = '🚶\uFE0E';
+        glyph.textContent = '☷';
         g.appendChild(glyph);
         const label = document.createElementNS(NS, 'text');
         label.setAttribute('class', 'war-refugee-count');
@@ -1231,7 +1231,7 @@ const War = {
   // Protestors march under the organizing entity's own flag: whenever the
   // organizer ships a logo (party/company/nation), crowd markers and unit
   // cards show that emblem instead of the generic protest glyph — falling
-  // back to '✊' for persons/orgs without one. Dead protestors keep the
+  // back to '⚒' for persons/orgs without one. Dead protestors keep the
   // emblem too; the corpse styling's grayscale filter takes the colour out.
   _protestorFlag(war, u) {
     if (!u || u.kind !== 'protestor' || u.state === 'transport') return null;
@@ -1763,10 +1763,6 @@ const War = {
     // authoritative doc — same reasoning as every other tick-driven readout.
     const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
     const protest = war.kind === 'protest';
-    // Airstrikes over a PROTEST are defender-only AND only once the fighting
-    // has turned violent (server-enforced in dropBomb / the /api/war/bomb
-    // route) — surface that in the button instead of bouncing off the server.
-    const peacefulProtest = protest && !((war.protest || {}).protestorsViolent);
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
       ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
@@ -1777,7 +1773,7 @@ const War = {
     const other = this.authDocs().find(d => d !== war);
     if (other) {
       row.appendChild(el('div.chip' + (key === 'war' ? '.active' : ''), { onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚔ War'));
-      row.appendChild(el('div.chip' + (key === 'protest' ? '.active' : ''), { onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '✊ Protest'));
+      row.appendChild(el('div.chip' + (key === 'protest' ? '.active' : ''), { onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚒ Protest'));
     }
     // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
     // /api/war/bomb route) — a GM commanding the attacker gets a disabled
@@ -1785,10 +1781,9 @@ const War = {
     const bombBtn = (side === 'att')
       ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '✈ No air arm')
       : el('button.dash-btn', {
-          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live || peacefulProtest) ? 'disabled' : undefined,
-          title: peacefulProtest ? 'Airstrikes are only available once the protest turns violent.' : undefined,
-          onclick: () => { if (!live || peacefulProtest) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-        }, peacefulProtest ? '✈ No airstrikes while peaceful' : (!live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
+          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live) ? 'disabled' : undefined,
+          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
+        }, (!live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
     row.appendChild(bombBtn);
     if (side === 'def' && aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' F55 available'));
     if (side === 'att') this._bombArmed = false; // never leave an airstrike armed while commanding the side that has none
@@ -1810,23 +1805,30 @@ const War = {
     // cmdAccessOf on /api/protest/control), so operators never have to leave
     // the battlefield to authorize force or seize districts. Only offered
     // while the protest is live and the caller holds that side's access.
+    // Optimistic paint (same as the panel toggles): the flip lands in W.state
+    // the moment the click lands, so the toolbar's own 1s re-render loop can
+    // never show a stale state while the POST round-trips.
     if (protest && live) {
       const ca = war.cmdAccess || {};
       const p = war.protest || {};
+      const flip = (prop) => (s) => {
+        const d = s && s[key]; // 'war'|'protest' — authoritative doc for the active conflict
+        if (d && d.protest) d.protest[prop] = !d.protest[prop];
+      };
       if (ca.att) {
         row.appendChild(el('button.dash-btn', {
           class: p.captureMode ? 'active' : '',
           onclick: async () => {
-            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }); this.renderToolbar(); }
+            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); this.renderToolbar(); }
             catch (e) { toast(e.message, true); }
           }
-        }, p.captureMode ? '🏁 Seizing territory' : '🏁 Seize territory'));
+        }, p.captureMode ? '⚑ Seizing territory' : '⚑ Seize territory'));
       }
       if (ca.def) {
         row.appendChild(el('button.danger-btn', {
           class: p.govViolent ? 'active' : '',
           onclick: async () => {
-            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }); this.renderToolbar(); }
+            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); this.renderToolbar(); }
             catch (e) { toast(e.message, true); }
           }
         }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
@@ -1894,7 +1896,7 @@ const War = {
       } else {
         const n = Math.max(0, Math.round(r.count || 0));
         const lost = Math.max(0, Math.round((r.startCount || n) - n));
-        card0.appendChild(el('div.war-card-title', `🚶\uFE0E Refugee Column`));
+        card0.appendChild(el('div.war-card-title', `☷ Refugee Column`));
         card0.appendChild(el('div.war-card-sub', `Civilians fleeing ${r.fromName || r.from}`));
         card0.appendChild(el('div.war-card-row', `≈${n.toLocaleString('en-US')} people on the road`));
         if (lost > 0) card0.appendChild(el('div.war-card-row', el('span.war-card-cutoff', `${lost.toLocaleString('en-US')} lost on the way`)));
@@ -1997,7 +1999,7 @@ const War = {
   renderDocPanel(inner, war, key) {
     const protest = war.kind === 'protest';
     inner.appendChild(Views.secLabel(protest
-      ? `✊ Protest — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`
+      ? `⚒ Protest — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`
       : `⚔ War — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`));
 
     const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
@@ -2059,11 +2061,11 @@ const War = {
       inner.appendChild(el('div.doc-sub',
         `Organized by ${org ? org.name : war.attackerId} · ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
       const chips = el('div.btn-row');
-      chips.appendChild(el('div.chip', p.protestorsViolent ? '✊ Crowds violent' : '✊ Peaceful crowds'));
+      chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
       chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
-      chips.appendChild(el('div.chip', p.captureMode ? '🏁 Seizing territory' : '🏁 No territory claims'));
+      chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
       const t = p.tuning || {};
-      if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `⛔ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
+      if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
       inner.appendChild(chips);
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
         'Strike-hit industries:' + (((p.strikeCityNames || []).length) ? ' ' + p.strikeCityNames.join(', ') : ' none — production running normally.')));
@@ -2217,7 +2219,7 @@ const War = {
         try { await POST('/api/gm/protest/start', d); toast('The crowds take to the streets.'); }
         catch (e) { toast(e.message, true); }
       }
-    }, '✊ Start Protest')));
+    }, '⚒ Start Protest')));
   },
 
   // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/
@@ -2288,7 +2290,7 @@ const War = {
 
   renderControls(inner, war, key) {
     const protest = war.kind === 'protest';
-    if (!protest && war.active) this.renderProtestActions(inner, war, key);
+    if (protest && war.active) this.renderProtestActions(inner, war, key);
     const row = el('div.btn-row');
     if (!war.result) {
       row.appendChild(el('button.solid-btn', {
@@ -2325,33 +2327,42 @@ const War = {
   // Protest side toggles — offered to whoever the server granted `cmdAccess`
   // for (see api.js cmdAccessOf): the organizer's controllers manage the
   // crowd ('att'), government/military operators manage the police ('def').
+  // Each POST paints its flip into W.state optimistically (core.js's
+  // Optimistic helper — the same 0ms-feedback pattern transfers/market orders
+  // use) so the button answers the click instantly and stays flipped through
+  // intervening syncs until the response-sync confirms it; a rejection rolls
+  // the guess back to server truth.
   renderProtestActions(inner, war, key) {
     if (!war.active) return;
     const ca = war.cmdAccess || {};
     const p = war.protest || {};
+    const flip = (prop) => (s) => {
+      const d = s && s[key]; // the authoritative doc for this conflict ('war'|'protest')
+      if (d && d.protest) d.protest[prop] = !d.protest[prop];
+    };
     inner.appendChild(Views.secLabel('Protest Control'));
     const row = el('div.btn-row');
     if (ca.att) {
       row.appendChild(el('button.solid-btn', {
         class: p.protestorsViolent ? 'active' : '',
         onclick: async () => {
-          try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }); }
+          try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); }
           catch (e) { toast(e.message, true); }
         }
-      }, p.protestorsViolent ? '✊ Crowds turn violent' : '✊ Allow fighting'));
+      }, p.protestorsViolent ? '⚒ Crowds turn violent' : '⚒ Allow fighting'));
       row.appendChild(el('button.dash-btn', {
         class: p.captureMode ? 'active' : '',
         onclick: async () => {
-          try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }); }
+          try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); }
           catch (e) { toast(e.message, true); }
         }
-      }, p.captureMode ? '🏁 Seizing territory' : '🏁 Capture territory'));
+      }, p.captureMode ? '⚑ Seizing territory' : '⚑ Capture territory'));
     }
     if (ca.def) {
       row.appendChild(el('button.danger-btn', {
         class: p.govViolent ? 'active' : '',
         onclick: async () => {
-          try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }); }
+          try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); }
           catch (e) { toast(e.message, true); }
         }
       }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
@@ -2359,17 +2370,31 @@ const War = {
     inner.appendChild(row);
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
       p.protestorsViolent
-        ? 'The crowds are fighting — government airstrikes are now permitted (defender side).'
-        : 'The demonstration is peaceful: neither side can attack, and no airstrikes may be called.'));
+        ? 'The crowds are fighting — the government air arm (defender side) can strike them from the sky.'
+        : 'The demonstration is peaceful: neither side can attack until force is authorized.'));
   },
 
   // GM tuning for an active protest — violence damage, strike economic impact,
   // civilian casualties and refugee scale (see server/war.js setProtestTuning).
+  // The sliders bind to a PERSISTENT draft (_protestTuneDraft, same pattern as
+  // the treaty desk's _treatyDraft): seeded from the authoritative doc once per
+  // protest and reused across re-renders, so an intervening sync (heartbeat
+  // tick, another player, the toolbar's 1s loop) rebuilding the panel can't
+  // snap a slider back to a not-yet-committed server value mid-edit — the
+  // debounced POST confirms it in the background and the slider never waits.
   _protestTuneTimers: {},
+  _protestTuneDraft: null, // { id, t, mods } of the protest currently being tuned
   renderProtestTuning(inner, war, key) {
     inner.appendChild(Views.secLabel('Protest Tuning'));
-    const t = Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, (war.protest || {}).tuning || {});
-    const mods = Object.assign({ dmg: 1, hp: 1 }, war.mods || {});
+    const pid = war.startedAt || war.id || 'protest';
+    let d = this._protestTuneDraft;
+    if (!d || d.id !== pid) {
+      d = this._protestTuneDraft = {
+        id: pid,
+        t: Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, (war.protest || {}).tuning || {}),
+        mods: Object.assign({ dmg: 1, hp: 1 }, war.mods || {})
+      };
+    }
     const box = el('div');
     const post = (patch) => {
       POST('/api/gm/protest/tuning', Object.assign({}, patch, { conflict: key }))
@@ -2379,16 +2404,19 @@ const War = {
       clearTimeout(this._protestTuneTimers[field]);
       this._protestTuneTimers[field] = setTimeout(() => post({ [field]: value }), 300);
     };
-    const sl = (field, value, min, max, step, fmt) =>
-      Forms.field(field, Forms.slider({ v: value }, 'v', min, max, {
-        step, format: fmt, onInput: (v) => debounced(field, v)
+    // Sliders write straight into the persistent draft (Forms.slider mutates
+    // obj[key] on input), so a re-render reseeds them from the user's own
+    // value — never from stale server state.
+    const sl = (field, obj, key, min, max, step, fmt) =>
+      Forms.field(field, Forms.slider(obj, key, min, max, {
+        step, format: fmt, onInput: (v) => debounced(key, v)
       }));
-    box.appendChild(sl('Violence damage ×', mods.dmg, 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Unit HP ×', mods.hp, 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Strike output drop (0–100%)', t.strikeFrac, 0, 1, 0.05, (v) => Math.round(v * 100) + '%'));
-    box.appendChild(sl('Civilian deaths per fight tick (×)', t.civFrac, 0, 10, 0.1, (v) => Number(v).toFixed(1) + '×'));
-    box.appendChild(sl('Fleeing civilians fraction', t.refugeeFrac, 0, 0.5, 0.01, (v) => Number(v).toFixed(2)));
-    box.appendChild(sl('Refugee wave every N ticks', t.refugeeEvery, 2, 12, 1, (v) => String(Math.round(v))));
+    box.appendChild(sl('Violence damage ×', d.mods, 'dmg', 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Unit HP ×', d.mods, 'hp', 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Strike output drop (0–100%)', d.t, 'strikeFrac', 0, 1, 0.05, (v) => Math.round(v * 100) + '%'));
+    box.appendChild(sl('Civilian deaths per fight tick (×)', d.t, 'civFrac', 0, 10, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Fleeing civilians fraction', d.t, 'refugeeFrac', 0, 0.5, 0.01, (v) => Number(v).toFixed(2)));
+    box.appendChild(sl('Refugee wave every N ticks', d.t, 'refugeeEvery', 2, 12, 1, (v) => String(Math.round(v))));
     inner.appendChild(box);
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
       'Strike output: production in cities touched by the crowds is reduced by up to this fraction.'));

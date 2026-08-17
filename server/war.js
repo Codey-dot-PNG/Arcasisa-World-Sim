@@ -85,10 +85,6 @@ function conflictDoc(db, key) {
     settings: db.settings, entities: db.entities, terrain: db.terrain
   };
 }
-function isProtestViolent(war) {
-  return !!(war && war.kind === 'protest' && war.protest &&
-    (war.protest.protestorsViolent || war.protest.govViolent));
-}
 
 // Population changes always move vars.population AND demographics together
 // (pro-rata), so the election model sees the same world the map does.
@@ -1774,6 +1770,10 @@ function setProtestTuning(db, patch, actor) {
     p.tuning.refugeeFrac = engine.clamp(Number(patch.refugeeFrac), 0, 0.5);
     changes.push(`refugeeFrac=${p.tuning.refugeeFrac}`);
   }
+  if (patch.refugeeEvery !== undefined && Number.isFinite(Number(patch.refugeeEvery))) {
+    p.tuning.refugeeEvery = Math.round(engine.clamp(Number(patch.refugeeEvery), 2, 12));
+    changes.push(`refugeeEvery=${p.tuning.refugeeEvery}`);
+  }
   if (patch.dmg !== undefined && Number.isFinite(Number(patch.dmg))) {
     protest.mods = protest.mods || { dmg: 1, hp: 1 };
     protest.mods.dmg = engine.clamp(Number(patch.dmg), TUNING_MIN, TUNING_MAX);
@@ -1942,11 +1942,6 @@ function dropBomb(db, side, pos, actor, key) {
   if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
   const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
-  // Protests: the air arm stays grounded until the unrest turns violent — a
-  // peaceful crowd is never tear-gassed from the sky.
-  if (war.kind === 'protest' && !isProtestViolent(war)) {
-    return { ok: false, error: 'Airstrikes are only available once the unrest has turned violent.' };
-  }
   war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };
   const bomb = war.bombs[side] = war.bombs[side] || { cooldownUntil: 0 };
   const now = Date.now();

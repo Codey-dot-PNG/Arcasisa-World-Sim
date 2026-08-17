@@ -761,7 +761,7 @@ function applyStrikes(db) {
   if (firstStruck && !protest._strikeNewsAt) {
     protest._strikeNewsAt = turn;
     draftNews(`${(protest.name || 'THE PROTESTS').toUpperCase()}: WORKERS DOWN TOOLS`,
-      `Workers at ${firstStruck.name} have joined the demonstrations, halting production. Management has been notified; owners are watching the crowds for signs of how long the stoppage may last.`, 'Business', true, 'Wire Service');
+      `Workers at ${firstStruck.name} have joined the demonstrations, halting production. Management has been notified; owners are watching the crowds for signs of how long the stoppage may last.`, 'Business', false, 'Wire Service');
   }
   // Clear strikes on sites the crowds have left (no unit within the radius).
   for (const pr of db.properties) {

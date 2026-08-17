@@ -32,7 +32,7 @@
    from-scratch DOM rebuilds because the interpolation state (_anim) lives
    in this module, not in the DOM. */
 
-const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '✊', police: '🚓' };
+const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '✊', police: '⛨' };
 // Transport ships & Boats feature: a land unit whose state reads 'transport'
 // (drifting/stranded over water — see war-engine.js's stepTransportState)
 // renders with this glyph instead of its normal kind glyph, so a column
@@ -1197,7 +1197,7 @@ const War = {
         const glyph = document.createElementNS(NS, 'text');
         glyph.setAttribute('class', 'war-refugee-glyph');
         glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 4);
-        glyph.textContent = '🚶';
+        glyph.textContent = '🚶\uFE0E';
         g.appendChild(glyph);
         const label = document.createElementNS(NS, 'text');
         label.setAttribute('class', 'war-refugee-count');
@@ -1228,6 +1228,35 @@ const War = {
     if (this._inspectRef && !liveIds.has(this._inspectRef)) this._inspectRef = null;
   },
 
+  // Protestors march under the organizing entity's own flag: whenever the
+  // organizer ships a logo (party/company/nation), crowd markers and unit
+  // cards show that emblem instead of the generic protest glyph — falling
+  // back to '✊' for persons/orgs without one. Dead protestors keep the
+  // emblem too; the corpse styling's grayscale filter takes the colour out.
+  _protestorFlag(war, u) {
+    if (!u || u.kind !== 'protestor' || u.state === 'transport') return null;
+    const orgId = war && war.protest && war.protest.organizerId;
+    if (!orgId) return null;
+    const ent = S() && S().entities && S().entities.find(e => e.id === orgId);
+    return (ent && ent.logo) || null;
+  },
+  _appendUnitEmblem(NS, g, war, u, glyphText) {
+    const flag = this._protestorFlag(war, u);
+    if (flag) {
+      const img = document.createElementNS(NS, 'image');
+      img.setAttribute('class', 'war-unit-flag');
+      img.setAttribute('href', flag);
+      img.setAttribute('x', -10); img.setAttribute('y', -10);
+      img.setAttribute('width', 20); img.setAttribute('height', 20);
+      g.appendChild(img);
+    } else {
+      const glyph = document.createElementNS(NS, 'text');
+      glyph.setAttribute('class', 'war-unit-glyph');
+      glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
+      glyph.textContent = glyphText;
+      g.appendChild(glyph);
+    }
+  },
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
     const seenIds = new Set(); // every unit id this pass, dead or alive — drives _lastStrength/_hitAt pruning
@@ -1298,11 +1327,7 @@ const War = {
         box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
         box.setAttribute('class', 'war-unit-box');
         g.appendChild(box);
-        const glyph = document.createElementNS(NS, 'text');
-        glyph.setAttribute('class', 'war-unit-glyph');
-        glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
-        glyph.textContent = WAR_KIND_GLYPH[u.kind] || '?';
-        g.appendChild(glyph);
+        this._appendUnitEmblem(NS, g, war, u, WAR_KIND_GLYPH[u.kind] || '?');
         const title = document.createElementNS(NS, 'title');
         title.textContent = `${u.name} — destroyed`;
         g.appendChild(title);
@@ -1385,16 +1410,12 @@ const War = {
         flash.setAttribute('class', 'war-hit-flash');
         inner.appendChild(flash);
       }
-      const glyph = document.createElementNS(NS, 'text');
-      glyph.setAttribute('class', 'war-unit-glyph');
-      glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
       // Transport ships & Boats feature: a land unit currently in 'transport'
       // state (drifting/stranded over water — see war-engine.js's
       // stepTransportState) draws the small transport-ship glyph instead of
       // its normal kind glyph, regardless of kind — it's the SAME unit, just
       // temporarily afloat.
-      glyph.textContent = u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?');
-      inner.appendChild(glyph);
+      this._appendUnitEmblem(NS, inner, war, u, u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?'));
 
       // Task 6: supply cut-off glyph, top-right corner of the symbol.
       if (u.supplied === false) {
@@ -1784,6 +1805,33 @@ const War = {
     row.appendChild(el('button.dash-btn', {
       onclick: () => { this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; if (GameMap.render) GameMap.render(); }
     }, 'Clear selection'));
+    // Protest toggles on the map command bar — the same side-gated controls
+    // as the War Room's Protest Control panel (server-enforced via
+    // cmdAccessOf on /api/protest/control), so operators never have to leave
+    // the battlefield to authorize force or seize districts. Only offered
+    // while the protest is live and the caller holds that side's access.
+    if (protest && live) {
+      const ca = war.cmdAccess || {};
+      const p = war.protest || {};
+      if (ca.att) {
+        row.appendChild(el('button.dash-btn', {
+          class: p.captureMode ? 'active' : '',
+          onclick: async () => {
+            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }); this.renderToolbar(); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, p.captureMode ? '🏁 Seizing territory' : '🏁 Seize territory'));
+      }
+      if (ca.def) {
+        row.appendChild(el('button.danger-btn', {
+          class: p.govViolent ? 'active' : '',
+          onclick: async () => {
+            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }); this.renderToolbar(); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
+      }
+    }
     // GM unit spawner (Feature: mid-war reinforcements) — the "Arm placement"
     // button lives in the War Room GM panel (renderSpawner), but the armed
     // state and its cancel action surface here too since arming happens on
@@ -1846,7 +1894,7 @@ const War = {
       } else {
         const n = Math.max(0, Math.round(r.count || 0));
         const lost = Math.max(0, Math.round((r.startCount || n) - n));
-        card0.appendChild(el('div.war-card-title', `🚶 Refugee Column`));
+        card0.appendChild(el('div.war-card-title', `🚶\uFE0E Refugee Column`));
         card0.appendChild(el('div.war-card-sub', `Civilians fleeing ${r.fromName || r.from}`));
         card0.appendChild(el('div.war-card-row', `≈${n.toLocaleString('en-US')} people on the road`));
         if (lost > 0) card0.appendChild(el('div.war-card-row', el('span.war-card-cutoff', `${lost.toLocaleString('en-US')} lost on the way`)));
@@ -1875,7 +1923,10 @@ const War = {
     const isDead = u.dead || u.state === 'dead';
     const glyph = u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?');
     const kindLabel = (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
-    card.appendChild(el('div.war-card-title', `${glyph} ${u.name}`));
+    const flag = this._protestorFlag(war, u);
+    card.appendChild(el('div.war-card-title',
+      flag ? el('img', { src: flag, alt: '', style: 'width:18px;height:18px;vertical-align:-4px;margin-right:6px;' }) : glyph,
+      u.name));
     card.appendChild(el('div.war-card-sub',
       `${kindLabel} · ${u.side === 'att' ? 'Attacker' : 'Defender'}` +
       (u.nationId ? ` · ${entName(u.nationId)} contingent` : '')));
@@ -2009,7 +2060,7 @@ const War = {
         `Organized by ${org ? org.name : war.attackerId} · ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
       const chips = el('div.btn-row');
       chips.appendChild(el('div.chip', p.protestorsViolent ? '✊ Crowds violent' : '✊ Peaceful crowds'));
-      chips.appendChild(el('div.chip', p.govViolent ? '🚓 Force authorized' : '🚓 Police holding line'));
+      chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
       chips.appendChild(el('div.chip', p.captureMode ? '🏁 Seizing territory' : '🏁 No territory claims'));
       const t = p.tuning || {};
       if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `⛔ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
@@ -2303,7 +2354,7 @@ const War = {
           try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }); }
           catch (e) { toast(e.message, true); }
         }
-      }, p.govViolent ? '🚓 Forces engaged' : '🚓 Use force'));
+      }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
     }
     inner.appendChild(row);
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },

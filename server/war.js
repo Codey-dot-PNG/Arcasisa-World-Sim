@@ -682,9 +682,11 @@ function rand(a, b) { return a + Math.random() * (b - a); }
 // The server ctx: engine milestones land on the real timeline and the news
 // wire. A predicting client passes no ctx and gets no-ops — that asymmetry
 // is the whole point of the split (predicted milestones never publish).
+// War/protest bulletins are always DRAFTS (publish=false) — the GM decides
+// which of them make it onto the wire from the Newsroom.
 const SERVER_CTX = {
   log: (kind, title, body, actor, refs) => store.log(kind, title, body, actor, refs),
-  news: (headline, body) => sim.draftNews(headline, body, 'Foreign', true, 'Wire Service')
+  news: (headline, body) => sim.draftNews(headline, body, 'Foreign', false, 'Wire Service')
 };
 
 function buildGrid(db) { return engine.buildGrid(db); }

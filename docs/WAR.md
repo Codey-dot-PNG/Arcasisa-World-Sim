@@ -301,8 +301,10 @@ One tick does, in order:
    60px of the city for `CAPTURE_HOLD_TICKS` (3) consecutive ticks with no
    defender unit in range; a `control_province` objective completes once its
    privince crosses `CITY_CONTROL_PCT` (65%). Each completion logs a
-   `store.log('event', …)` entry and publishes a news article via
-   `sim.draftNews` (the same mechanism `sim.js`'s `news` effect uses).
+   `store.log('event', …)` entry and drafts a news article via
+   `sim.draftNews` (the same mechanism `sim.js`'s `news` effect uses) —
+   war reports always land as DRAFTS for the GM to publish from the
+   Newsroom.
 10. **`checkVictory`** — all objectives done → attacker wins, war ends.
     (Defender victory is decided inside the AI step below, since it hinges on
     the attacker's total strength, not an objective.)
@@ -863,10 +865,10 @@ actor)`. Since Phase 27 the same pathway is also driven automatically at
   `"· <Nation> contingent"` to the unit tooltip.
 - Records the join in `war.allies = { att: [entityId, …], def: [entityId,
   …] }` (additive, defaults to `{att:[], def:[]}` at `startWar`), pushes a
-  `'milestone'` war event, `store.log`s a timeline entry, and publishes a
+  `'milestone'` war event, `store.log`s a timeline entry, and drafts a
   news article via `sim.draftNews` ("`<NATION> ENTERS THE WAR`" / "*has
   entered the conflict on the side of \<attacker/defender name\>*") — the
-  same mechanism war milestones already use.
+  same mechanism war milestones already use (all war reports are drafts).
 
 **UI** (`public/js/war.js`'s `renderIntervention`, War Room GM section): a
 nation select (every `foreign` entity not already the attacker, defender, or

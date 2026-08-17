@@ -2880,6 +2880,14 @@ const Views = {
   paperById(id) { return this.papers().find(p => p.id === id); },
 
   viewNews(inner) {
+    // Raise the news-read waterline (the "News (n)" tab badge): re-armed on
+    // every visit, but throttled so frequent sync re-renders of this same
+    // view don't spam the server. The response-sync payload refreshes W.me.
+    if (!W._newsReadAt || Date.now() - W._newsReadAt > 15000) {
+      W._newsReadAt = Date.now();
+      W.me.lastReadNewsTs = Date.now();
+      POST('/api/news/read').catch(() => {});
+    }
     const papers = this.papers();
     if (!W.newsPaper || !papers.some(p => p.id === W.newsPaper)) W.newsPaper = 'paper_today';
     const paper = this.paperById(W.newsPaper) || papers[0];

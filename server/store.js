@@ -153,6 +153,13 @@ function migrate(world) {
       if (e[k] === undefined) { e[k] = legacy !== undefined ? legacy : 1; changed = true; }
     }
   }
+  // News unread waterline — the "News (n)" badge's last-read marker on every
+  // user record. Ungated additive field so live worlds pick it up in place.
+  if (Array.isArray(world.users)) {
+    for (const u of world.users) {
+      if (u.lastReadNewsTs === undefined) { u.lastReadNewsTs = 0; changed = true; }
+    }
+  }
 
   // Phase 23 — weapons & fuel as tradable items with combat stats. Seeded
   // once (flag-gated); the GM freely edits stats/names or mints new models

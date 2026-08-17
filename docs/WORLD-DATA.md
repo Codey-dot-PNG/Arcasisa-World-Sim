@@ -170,7 +170,8 @@ Role: `{ id, name, perms: { pages: [...], inventories: 'all'|'own'|'none', accou
 judge, executive, president, minister, journalist, police, military.
 
 User: `{ id, username, displayName, salt, passHash (scrypt), roleId, entityId (their persona),
-newspaperId (journalists), created, lastLogin }`. Seeded users all use passphrase `arcasia`:
+newspaperId (journalists), lastReadNewsTs (news "News (n)" badge waterline, migrate-defaulted
+to 0), created, lastLogin }`. Seeded users all use passphrase `arcasia`:
 gm, president (Miron Valen), journalist (Jana Halden), executive (Kira Moss), citizen
 (Toma Rill), plus MPs/executives/judge/military/police personas (verenne, stahl, kandel, suri,
 hale, keller, odek, grazi, orn, krenn, voss, falk).

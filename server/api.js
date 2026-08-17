@@ -175,6 +175,7 @@ function userPayload(u) {
   return {
     id: u.user.id, username: u.user.username, displayName: u.user.displayName,
     entityId: u.user.entityId, roleId: u.user.roleId, newspaperId: u.user.newspaperId || null,
+    lastReadNewsTs: u.user.lastReadNewsTs || 0,
     role: { id: u.role.id, name: u.role.name, perms: u.role.perms }
   };
 }
@@ -1315,8 +1316,20 @@ async function handle(req, res, pathname, method) {
         if (!u.user.newspaperId || paperId !== u.user.newspaperId) return deny('You may only file to your own newspaper.');
       }
       const a = sim.draftNews(String(b.headline).slice(0, 200), String(b.body || '').slice(0, 8000), String(b.category || 'General').slice(0, 40), !!b.publish, u.user.displayName, paperId);
+      // The author's own badge shouldn't go unread on the story they just ran.
+      if (b.publish && (u.user.lastReadNewsTs || 0) < Date.now()) u.user.lastReadNewsTs = Date.now();
       store.save(); broadcast('sync');
       return json(res, 200, { article: a });
+    }
+    // Mark-news-as-read: one ping per News-tab visit that advances the user's
+    // news waterline (the "News (n)" badge's only source of truth). High-
+    // frequency like lastLogin, so no store.log and no broadcast — the
+    // response-sync payload carries the updated user record back.
+    if (pathname === '/api/news/read' && method === 'POST') {
+      const now = Date.now();
+      if ((u.user.lastReadNewsTs || 0) < now) u.user.lastReadNewsTs = now;
+      store.save();
+      return json(res, 200, { ok: true });
     }
     m = pathname.match(/^\/api\/news\/([\w-]+)$/);
     if (m && (method === 'PATCH' || method === 'DELETE')) {
@@ -1338,7 +1351,10 @@ async function handle(req, res, pathname, method) {
         }
         const a = db.news[idx];
         for (const k of ['headline', 'body', 'category', 'status', 'paperId']) if (b[k] !== undefined) a[k] = String(b[k]);
-        if (b.status === 'published') store.log('news', 'Published: ' + a.headline, a.category, u.user.displayName, [a.id]);
+        if (b.status === 'published') {
+          store.log('news', 'Published: ' + a.headline, a.category, u.user.displayName, [a.id]);
+          if ((u.user.lastReadNewsTs || 0) < Date.now()) u.user.lastReadNewsTs = Date.now();
+        }
       }
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });

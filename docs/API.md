@@ -56,6 +56,8 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 
 `POST /api/news` (needs `manageNews`; non-GM journalists may only file to their own
 `user.newspaperId`), `PATCH|DELETE /api/news/:id` (same paper restriction).
+`POST /api/news/read` — raise the caller's news-read waterline
+(`user.lastReadNewsTs`, the "News (n)" tab badge); one ping per News-tab visit.
 
 ## GM (`/api/gm/*`, requires `perms.gm`)
 

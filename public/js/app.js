@@ -160,12 +160,27 @@ const App = {
     }
   },
 
+  // News (n) unread badge — published articles newer than the user's
+  // news-read waterline (raised server-side by visiting the News tab or
+  // publishing). Re-counted on every renderAll, so an SSE sync that lands
+  // while the user is elsewhere re-arms the badge in place.
+  unreadNews() {
+    if (!W.me || !S() || !Array.isArray(S().news)) return 0;
+    const since = Number(W.me.lastReadNewsTs) || 0;
+    return S().news.reduce((c, n) => c + (n.status === 'published' && Number(n.ts) > since ? 1 : 0), 0);
+  },
+
   renderTabs() {
     const tabs = document.getElementById('tabs');
     clear(tabs);
     for (const [id, label] of this.PAGES) {
       if (!can(id)) continue;
-      tabs.appendChild(el('button.tab', { class: W.view === id ? 'active' : '', onclick: () => this.go(id) }, label));
+      let text = label;
+      if (id === 'news') {
+        const unread = this.unreadNews();
+        if (unread > 0) text = label + ' (' + unread + ')';
+      }
+      tabs.appendChild(el('button.tab', { class: W.view === id ? 'active' : '', onclick: () => this.go(id) }, text));
     }
   },
 

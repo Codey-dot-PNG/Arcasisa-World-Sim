@@ -1247,6 +1247,14 @@ const Views = {
         el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, pr.name),
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
           (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—')))));
+    // Strike banner (Phase 31) — pr.vars.strike is set by the engine's
+    // economy pass while crowds are near this site (see sim.js applyStrikes).
+    if (pr.vars && pr.vars.strike) {
+      const st = pr.vars.strike;
+      const out = Math.round((1 - Math.min(1, st.degree)) * 100);
+      inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
+        '⛔ ON STRIKE — the workforce has downed tools since turn ' + st.sinceTurn + '. Production runs at ' + out + '% of normal while the protest crowds hold the area; workers stay employed and return to the line once the streets clear.'));
+    }
     inner.appendChild(this.statStrip([
       ['Employees', fmtNum(pr.employees || 0) + ' / ' + fmtNum(maxEmp)], ['Output value / turn', fmtMoney(revenue * wf)],
       ['Output multiplier', wf.toFixed(2) + '×'], ['Upkeep / turn', fmtMoney(upkeep)],
@@ -1758,6 +1766,17 @@ const Views = {
       el('div',
         el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, c.name),
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, (c.industry || '') + ' · CEO ' + (c.ceoId ? entName(c.ceoId) : '—')))));
+    // Strike banner (Phase 31) — any controlled site with pr.vars.strike
+    // (engine's applyStrikes) is down: list them so the CEO knows what's off
+    // the line and why.
+    const struckSites = props.filter(pr => pr.vars && pr.vars.strike);
+    if (struckSites.length) {
+      const worst = struckSites.reduce((a, pr) => (pr.vars.strike.degree || 0) > (a.vars.strike.degree || 0) ? pr : a, struckSites[0]);
+      const out = Math.round((1 - Math.min(1, worst.vars.strike.degree)) * 100);
+      inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
+        '⛔ ' + (struckSites.length === 1 ? 'ON STRIKE: ' + struckSites[0].name : struckSites.length + ' SITES ON STRIKE: ' + struckSites.map(pr => pr.name).join(', ')) +
+        ' — output is down to ' + out + '% at the worst-hit site while protest crowds hold the area. Workers stay employed and return once the streets clear.'));
+    }
     inner.appendChild(this.statStrip([
       ['Value / share', c.sharePrice !== undefined ? fmtMoney(c.sharePrice) : '—'],
       ['Day price', c.dayPrice !== undefined ? fmtMoney(c.dayPrice) : '—'],

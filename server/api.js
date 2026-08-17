@@ -209,9 +209,10 @@ function warWithAircraftCapacity(w, db) {
   const aircraft = war.aircraftStock(db, w.defenderId || 'ent_gov', w);
   return { ...w, bombs: { ...w.bombs, def: { ...((w.bombs.def) || {}), aircraftRemaining: aircraft } } };
 }
-function warForPlayers(war, db) {
+function warForPlayers(war, db, u) {
   if (!war) return war;
   let out = warWithAircraftCapacity(war, db);
+  if (u) out = { ...out, cmdAccess: cmdAccessOf(db, war, u) };
   if (war.ai) {
     const { notes, ...aiRest } = war.ai;
     out = { ...out, ai: { ...aiRest, notes: [] } };
@@ -229,6 +230,25 @@ function warForPlayers(war, db) {
     out.command = { ...war.command, att: redactSide(war.command.att), def: redactSide(war.command.def) };
   }
   return out;
+}
+// Who may command what in a conflict (Phase 31 protests): attacker-side
+// commands belong to the GM or whichever operator CONTROLS the organizer
+// entity (a party leader commands their own party's crowds — the ownership
+// chain covers person → party leader); the defence belongs to the GM,
+// controllers of the defender entity, government-clearance operators and
+// anyone holding the 'military' map layer (the National Police file under
+// the military staff). Enforced server-side on every command/bomb route and
+// shipped inside warForPlayers so the client only offers command UI to
+// operators with a side to command.
+function cmdAccessOf(db, war, u) {
+  const perms = u.role.perms;
+  const def = !!(perms.gm || perms.government ||
+    (perms.mapLayers || []).includes('military') ||
+    (war && war.defenderId && ownership.controls(u.user.entityId, war.defenderId)));
+  const att = !!(perms.gm ||
+    (war && war.kind === 'protest' && war.protest && war.protest.organizerId &&
+      ownership.controls(u.user.entityId, war.protest.organizerId)));
+  return { att, def };
 }
 function filterState(u) {
   const db = store.get();
@@ -323,7 +343,11 @@ function filterState(u) {
     // units, objectives, casualties — plus the AI's numeric plan state so
     // client prediction can replay replans; only ai.notes (the reasoning)
     // stays GM-only. See warForPlayers above.
-    war: db.war ? (p.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db)) : null,
+    war: db.war ? (p.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db, u)) : null,
+    // Protests (Phase 31): a second conflict document — same fog-of-war
+    // treatment, and cmdAccess (att = organizer's control chain) rides along
+    // for every operator via warForPlayers.
+    protest: db.protest ? (p.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null,
     // Day Market tick clock — same "expose the wall-clock gate so the client
     // can predict the next tick" idea as war.tick/tickMs (see docs/WAR.md's
     // heartbeat), applied read-only to market.maybeDayTick's gate: not
@@ -692,13 +716,21 @@ async function handle(req, res, pathname, method) {
     // simulation onto. Same fog-of-war filtering as filterState.
     if (pathname === '/api/war/state' && method === 'GET') {
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
-      const w = db.war ? (u.role.perms.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db)) : null;
-      return json(res, 200, { war: w, v: store.getVersion() });
+      const w = db.war ? (u.role.perms.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db, u)) : null;
+      const pt = db.protest ? (u.role.perms.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null;
+      return json(res, 200, { war: w, protest: pt, v: store.getVersion() });
     }
     if (pathname === '/api/war/command' && method === 'POST') {
       const b = await readBody(req);
-      if (!db.war || !db.war.active) return bad('No war is active.');
-      const side = (u.role.perms.gm && b.side === 'att') ? 'att' : 'def';
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is active.');
+      // Attacker-side commands need the GM or the organizer's control chain
+      // (a party leader commands their party's protest); the defence needs
+      // government/military clearance or control of the defender entity.
+      const ca = cmdAccessOf(db, doc, u);
+      const side = b.side === 'att' ? (ca.att ? 'att' : null) : (ca.def ? 'def' : null);
+      if (!side) return deny('You cannot command that side of the conflict.');
       if (!Array.isArray(b.orders) || b.orders.length > 64) return bad('Invalid orders.');
       const inBounds = (p) => Array.isArray(p) && p.length === 2 &&
         Number.isFinite(p[0]) && Number.isFinite(p[1]) &&
@@ -716,7 +748,7 @@ async function handle(req, res, pathname, method) {
         if (typeof o.attackId === 'string') return true;
         return inBounds(o.dest);
       });
-      war.commandUnits(db, side, orders, u.user.displayName);
+      war.commandUnits(db, side, orders, u.user.displayName, key);
       // save WITHOUT broadcast: a move order only touches db.war.units, and
       // every war-watching client pulls that through its ~1s /api/war/state
       // heartbeat. A per-order broadcast forced EVERY client (war-watching or
@@ -728,7 +760,10 @@ async function handle(req, res, pathname, method) {
     }
     if (pathname === '/api/war/bomb' && method === 'POST') {
       const b = await readBody(req);
-      if (!db.war || !db.war.active) return bad('No war is active.');
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is active.');
+      if (!cmdAccessOf(db, doc, u).def) return deny('You cannot call in airstrikes.');
       // Bombs are defender-only (server/war.js's dropBomb also enforces this
       // itself) — even a GM commanding the attacker side has no air arm to
       // call in for this scenario, so unlike /api/war/command there is no
@@ -737,7 +772,7 @@ async function handle(req, res, pathname, method) {
       const pos = b.pos;
       if (!Array.isArray(pos) || pos.length !== 2 || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1]) ||
         pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');
-      const result = war.dropBomb(db, side, pos, u.user.displayName);
+      const result = war.dropBomb(db, side, pos, u.user.displayName, key);
       if (!result.ok) return bad(result.error);
       // save without broadcast — same reasoning as /api/war/command above:
       // the orderer splices the returned strike into its prediction, everyone
@@ -747,7 +782,31 @@ async function handle(req, res, pathname, method) {
       store.save();
       // strike is returned so the client can insert it into the predicted
       // war immediately (plane/countdown start before the next heartbeat).
-      return json(res, 200, { ok: true, cooldownUntil: db.war.bombs[side].cooldownUntil, aircraftRemaining: result.aircraftRemaining, strike: result.strike });
+      return json(res, 200, { ok: true, cooldownUntil: doc.bombs[side].cooldownUntil, aircraftRemaining: result.aircraftRemaining, strike: result.strike });
+    }
+
+    if (pathname === '/api/protest/control' && method === 'POST') {
+      const b = await readBody(req);
+      if (!db.protest || !db.protest.active) return bad('No protest is active.');
+      const ca = cmdAccessOf(db, db.protest, u);
+      const patch = {};
+      if (b.protestorsViolent !== undefined) {
+        if (!ca.att) return deny('Only the organizer or the GM may direct the protestors.');
+        patch.protestorsViolent = !!b.protestorsViolent;
+      }
+      if (b.captureMode !== undefined) {
+        if (!ca.att) return deny('Only the organizer or the GM may set capture mode.');
+        patch.captureMode = !!b.captureMode;
+      }
+      if (b.govViolent !== undefined) {
+        if (!ca.def) return deny('Only the government or the GM may order the security forces.');
+        patch.govViolent = !!b.govViolent;
+      }
+      if (!Object.keys(patch).length) return bad('Nothing to update.');
+      const result = war.setProtestControl(db, patch, u.user.displayName);
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, { protest: db.protest });
     }
 
     if (pathname === '/api/trade' && method === 'POST') {
@@ -1439,29 +1498,35 @@ async function handle(req, res, pathname, method) {
       }
       if (pathname === '/api/gm/war/control' && method === 'POST') {
         const b = await readBody(req);
-        if (!db.war) return bad('No war is active.');
-        if (b.paused !== undefined) db.war.paused = !!b.paused;
+        const doc = b.conflict === 'protest' ? db.protest : db.war;
+        if (!doc) return bad('No conflict is active.');
+        if (b.paused !== undefined) doc.paused = !!b.paused;
         if (b.speed !== undefined) {
           const speed = Number(b.speed);
           if (![1, 2, 4, 8].includes(speed)) return bad('Speed must be one of 1, 2, 4, 8.');
-          db.war.speed = speed;
+          doc.speed = speed;
         }
-        store.log('gm', 'War control updated', `paused=${db.war.paused} speed=${db.war.speed}×`, actor, []);
+        store.log('gm', 'Conflict control updated', `paused=${doc.paused} speed=${doc.speed}×`, actor, []);
         store.save(); broadcast('sync');
-        return json(res, 200, { war: db.war });
+        return json(res, 200, { war: db.war, protest: db.protest });
       }
       if (pathname === '/api/gm/war/end' && method === 'POST') {
-        if (!db.war) return bad('No war is active.');
-        war.endWar(db, actor, 'Ended by the Gamemaster');
+        const b = await readBody(req);
+        const key = (b && b.conflict === 'protest') ? 'protest' : 'war';
+        const doc = key === 'protest' ? db.protest : db.war;
+        if (!doc) return bad('No conflict is active.');
+        war.endWar(db, actor, key === 'protest' ? 'Protest ended by the Gamemaster' : 'Ended by the Gamemaster', key);
         store.save(); broadcast('sync');
-        return json(res, 200, { war: db.war });
+        return json(res, 200, { war: db.war, protest: db.protest });
       }
       // GM global tuning sliders — combat/bomb damage and unit HP multipliers
       // (war.mods). Validated here (finite number, clamped 0.1-10); the HP
       // rescale of every live unit happens inside war.setWarTuning.
       if (pathname === '/api/gm/war/tuning' && method === 'POST') {
         const b = await readBody(req);
-        if (!db.war) return bad('No war is active.');
+        const key = b.conflict === 'protest' ? 'protest' : 'war';
+        const doc = key === 'protest' ? db.protest : db.war;
+        if (!doc) return bad('No conflict is active.');
         const patch = {};
         for (const k of ['dmg', 'bombDmg', 'hp', 'warshipSpeed']) {
           if (b[k] === undefined) continue;
@@ -1469,10 +1534,12 @@ async function handle(req, res, pathname, method) {
           if (!Number.isFinite(v)) return bad(`Invalid ${k}.`);
           patch[k] = Math.max(0.1, Math.min(10, v));
         }
-        const result = war.setWarTuning(db, patch, actor);
+        let result;
+        if (key === 'protest') result = war.setProtestTuning(db, patch, actor);
+        else result = war.setWarTuning(db, patch, actor);
         if (!result.ok) return bad(result.error);
         store.save(); broadcast('sync');
-        return json(res, 200, { war: db.war });
+        return json(res, 200, { war: db.war, protest: db.protest });
       }
       // Scenario picker data — {id, name, attacker/defender ids+names} for
       // every scenario in server/war-scenarios.js, so the War Room's Start
@@ -1508,14 +1575,52 @@ async function handle(req, res, pathname, method) {
       // arbitrary point, with adjustable stats (see war.spawnUnits).
       if (pathname === '/api/gm/war/spawn' && method === 'POST') {
         const b = await readBody(req);
-        if (!db.war || !db.war.active) return bad('No war is active.');
+        const key = b.conflict === 'protest' ? 'protest' : 'war';
+        const doc = key === 'protest' ? db.protest : db.war;
+        if (!doc || !doc.active) return bad('No conflict is active.');
         const result = war.spawnUnits(db, {
           side: b.side, pos: b.pos, kind: b.kind, name: b.name,
           count: b.count, strength: b.strength, atk: b.atk, speed: b.speed
-        }, actor);
+        }, actor, key);
         if (!result.ok) return bad(result.error);
         store.save(); broadcast('sync');
-        return json(res, 200, { war: db.war, unitIds: result.unitIds });
+        return json(res, 200, { war: db.war, protest: db.protest, unitIds: result.unitIds });
+      }
+      // ---- Protests & mass strikes (Phase 31) ----
+      // A protest is a second conflict document (db.protest) sharing the war
+      // stack; these routes start/end it and let the ORGANIZER'S controller
+      // (via cmdAccessOf) or the GM flip the violence/capture-mode toggles
+      // server-side. Tuning (violence damage, strike economics, casualties)
+      // is GM-only.
+      if (pathname === '/api/gm/protest/start' && method === 'POST') {
+        const b = await readBody(req);
+        if (db.protest && db.protest.active) return json(res, 409, { error: 'A protest is already underway.' });
+        try {
+          war.startProtest(db, b || {}, actor);
+        } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { protest: db.protest });
+      }
+      if (pathname === '/api/gm/protest/tuning' && method === 'POST') {
+        const b = await readBody(req);
+        if (!db.protest || !db.protest.active) return bad('No protest is active.');
+        const patch = {};
+        for (const k of ['strikeFrac', 'civFrac', 'refugeeFrac', 'dmg', 'hp']) {
+          if (b[k] === undefined) continue;
+          const v = Number(b[k]);
+          if (!Number.isFinite(v)) return bad(`Invalid ${k}.`);
+          patch[k] = v;
+        }
+        const result = war.setProtestTuning(db, patch, actor);
+        if (!result.ok) return bad(result.error);
+        store.save(); broadcast('sync');
+        return json(res, 200, { protest: db.protest });
+      }
+      if (pathname === '/api/gm/protest/end' && method === 'POST') {
+        if (!db.protest) return bad('No protest is active.');
+        war.endWar(db, actor, 'Protest ended by the Gamemaster', 'protest');
+        store.save(); broadcast('sync');
+        return json(res, 200, { protest: db.protest });
       }
       // Peace treaty (Phase 24 — GM-only): reparations, province cession,
       // nation annexation, in any combination; an active war ends first.

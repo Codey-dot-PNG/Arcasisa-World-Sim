@@ -32,7 +32,7 @@
    from-scratch DOM rebuilds because the interpolation state (_anim) lives
    in this module, not in the DOM. */
 
-const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢' };
+const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '✊', police: '🚓' };
 // Transport ships & Boats feature: a land unit whose state reads 'transport'
 // (drifting/stranded over water — see war-engine.js's stepTransportState)
 // renders with this glyph instead of its normal kind glyph, so a column
@@ -43,7 +43,7 @@ const WAR_TRANSPORT_GLYPH = '⛴';
 // which is the source of truth so this file doesn't have to hardcode every
 // scenario id in server/war-scenarios.js.
 const WAR_SCENARIOS_FALLBACK = [{ id: 'valksland_invasion', name: 'The Valgos Crisis', attackerName: 'Valksland', defenderName: 'the Republic' }];
-const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['marine', 'Marine'], ['garrison', 'Garrison'], ['boat', 'Boat'], ['warship', 'Warship']];
+const WAR_SPAWN_KINDS = [['infantry', 'Infantry'], ['armored', 'Armored'], ['marine', 'Marine'], ['garrison', 'Garrison'], ['boat', 'Boat'], ['warship', 'Warship'], ['protestor', 'Protestor'], ['police', 'Police']];
 // Above this map zoom, unit markers render at a CONSTANT WORLD scale (scale 1
 // — a fixed 40×28 world-unit symbol whose on-screen size grows as you zoom,
 // exactly matching the server's 40px collision/combat range, so "what touches
@@ -107,19 +107,46 @@ const War = {
   _scenarioFetchInFlight: false,
 
   // ---- client-side prediction state (Phase 18) ----
-  _pred: null,       // { war: <deep copy>, authRef: <the S().war object it was rebased from>, baseTick, outbox: [{side,unitId,dest,exp}] }
+  // Phase 31 — a protest is a SECOND conflict doc (S().protest), predicted
+  // and commanded exactly like the war. `_preds` holds one prediction state
+  // per conflict key ('war'|'protest'); `_activeKey` is the conflict the
+  // toolbar/commands currently target (the map renders BOTH at once).
+  _preds: {},      // key -> { war: <deep copy>, authRef, baseTick, lastAuthTick, outbox, strikeOutbox }
+  _activeKey: 'war',
   _warV: 0,          // last /api/war/state version applied — rejects out-of-order heartbeat responses
   _rtTimer: null,    // 250ms realtime driver (local predicted ticks + heartbeat gate)
   _hbDue: 0,         // epoch ms the next heartbeat poll is due
   _hbBusy: false,    // a heartbeat fetch is in flight
   _lastDraw: 0,      // performance.now() of the last prediction-triggered map redraw (throttle)
 
-  active() { return !!(S() && S().war); },
-  // A war OBJECT lingers after the fighting ends (active:false) so players can
-  // review the final front — but its units are no longer commandable. Orders
-  // against an inactive war are rejected server-side ("No war is active."), so
-  // gate the command/bomb affordances on this, not on active() (= war exists).
-  commandable() { const w = S() && S().war; return !!(w && w.active); },
+  docKeyOf(doc) { return (doc && doc.kind === 'protest') ? 'protest' : 'war'; },
+  authDocs() {
+    const s = S() || {};
+    const out = [];
+    if (s.war) out.push(s.war);
+    if (s.protest) out.push(s.protest);
+    return out;
+  },
+  activeAuth() {
+    const s = S() || {};
+    this._ensureActiveKey();
+    if (this._activeKey === 'protest' && s.protest) return s.protest;
+    if (s.war) return s.war;
+    return s.protest || null;
+  },
+  _ensureActiveKey() {
+    const s = S() || {};
+    if (this._activeKey === 'protest' && s.protest) return;
+    if (this._activeKey === 'war' && s.war) return;
+    this._activeKey = s.war ? 'war' : (s.protest ? 'protest' : 'war');
+  },
+  active() { const s = S(); return !!((s && (s.war || s.protest))); },
+  // A conflict OBJECT lingers after the fighting ends (active:false) so
+  // players can review the final front — but its units are no longer
+  // commandable. Orders against an inactive conflict are rejected
+  // server-side, so gate the command/bomb affordances on this, not on
+  // active() (= a conflict exists).
+  commandable(doc) { const w = doc || this.activeAuth(); return !!(w && w.active); },
 
   // Clamp a world point to the map so orders/bombs never land out of bounds
   // — the ocean rect extends far past the map frame, so a click in open
@@ -135,16 +162,25 @@ const War = {
   // (harmless — both sides converged on the same final position — but wasted
   // cycles and could show a flickering arrow near the map edge).
   _clamp(pt) {
-    const war = window.WarEngine && this._pred && this._pred.war;
+    const war = window.WarEngine && this.activePred();
     if (war) return WarEngine.clampToWorld(war, pt);
     return [Math.max(0, Math.min(3840, pt[0])), Math.max(0, Math.min(2160, pt[1]))];
   },
 
   /* ═══════════ AUTHORITY ═══════════
-     Non-GM operators always command the defender — the server enforces this
-     regardless of what the client sends, but the client mirrors it so the UI
-     never even offers an 'att' toggle to a non-GM. */
-  commandableSide() { return (isGM() && this._gmSide === 'att') ? 'att' : 'def'; },
+     Who commands what is decided SERVER-side and shipped per conflict as
+     doc.cmdAccess { att, def } (see api.js cmdAccessOf): GM commands either
+     side (via the toolbar toggle); otherwise a protest's organizer
+     controllers command 'att' and government/military operators command
+     'def'. The client mirrors it so the UI never offers a side the server
+     would refuse. */
+  commandableSide(doc) {
+    doc = doc || this.activeAuth();
+    if (!doc) return 'def';
+    const ca = doc.cmdAccess || {};
+    if (isGM()) return this._gmSide === 'att' ? 'att' : 'def';
+    return ca.att ? 'att' : (ca.def ? 'def' : null);
+  },
 
   /* ═══════════ CLIENT-SIDE PREDICTION (Phase 18) ═══════════
      The predicted war is a deep copy of the last authoritative snapshot,
@@ -165,15 +201,23 @@ const War = {
   // The war doc the MAP renders: predicted when available, else authoritative.
   // Rebases lazily whenever the authoritative object identity changed (every
   // state refetch swaps W.state wholesale, so identity is a reliable signal).
-  predictedWar() {
-    const auth = S() && S().war;
-    if (!auth) { this._pred = null; return null; }
-    if (!this._pred || this._pred.authRef !== auth) this._rebase(auth);
-    return this._pred.war;
+  predictedDoc(auth) {
+    if (!auth) { delete this._preds[this.docKeyOf(auth)]; return null; }
+    const key = this.docKeyOf(auth);
+    const st = this._preds[key];
+    if (!st || st.authRef !== auth) this._rebase(key, auth);
+    return this._preds[key].war;
+  },
+  predictedWar() { return this.predictedDoc(S() && S().war); },
+  predictedProtest() { return this.predictedDoc(S() && S().protest); },
+  // Predicted doc of whichever conflict the toolbar/commands target.
+  activePred() {
+    const auth = this.activeAuth();
+    return auth ? this.predictedDoc(auth) : null;
   },
 
-  _rebase(auth) {
-    const prev = this._pred;
+  _rebase(key, auth) {
+    const prev = this._preds[key];
     // Ignore a STALE snapshot of the same war (overlapping refetches can
     // resolve out of order; core.js guards its own path, but the heartbeat
     // and full-state fetches race each other). Ticks only move forward.
@@ -232,7 +276,7 @@ const War = {
     if (!phase || now - phase > interval * 2) phase = now;
     war._lastTick = phase;
     const outbox = (prev ? prev.outbox : []).filter(o => o.exp > now);
-    this._pred = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [], strikeOutbox };
+    this._preds[key] = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [], strikeOutbox };
     // Re-apply optimistic orders the server hasn't reflected yet, so an
     // in-flight command's arrow doesn't flicker away on an older snapshot.
     // `o.dest` is always populated (for a path order it's the path's LAST
@@ -247,13 +291,15 @@ const War = {
       const order = o.path ? { unitId: o.unitId, path: o.path } : { unitId: o.unitId, dest: o.dest };
       WarEngine.applyOrders(this._dbLike(war), o.side, [order]);
     }
-    this._pred.outbox = unconfirmed;
+    this._preds[key].outbox = unconfirmed;
   },
 
   // Apply orders to the predicted war IMMEDIATELY (the POST confirms later);
   // remember them so rebases re-apply until the server state shows them.
-  _optimistic(side, orders) {
-    const war = this.predictedWar();
+  _optimistic(side, orders, key) {
+    key = key || this._activeKey;
+    const auth = S() && S()[key === 'protest' ? 'protest' : 'war'];
+    const war = this.predictedDoc(auth);
     if (!war) return;
     WarEngine.applyOrders(this._dbLike(war), side, orders);
     const exp = Date.now() + 5000; // a write refetch lands well inside this
@@ -261,7 +307,7 @@ const War = {
       // A path order's effective "confirmed yet?" anchor is its last
       // waypoint (see the comment in _rebase) — dest is always populated.
       const dest = (Array.isArray(o.path) && o.path.length) ? o.path[o.path.length - 1] : o.dest;
-      this._pred.outbox.push({ side, unitId: o.unitId, dest, path: o.path || null, exp });
+      this._preds[this.docKeyOf(war)].outbox.push({ side, unitId: o.unitId, dest, path: o.path || null, exp });
     }
     this.refreshLayer(true);
   },
@@ -291,22 +337,27 @@ const War = {
     return W.view === 'war' || (W.view === 'map' && W.layer === 'war');
   },
   _realtimeStep() {
-    const auth = S() && S().war;
-    if (!auth) { this._stopRealtime(); this._pred = null; return; }
-    if (!auth.active || auth.paused || document.hidden) return;
+    const docs = this.authDocs();
+    if (!docs.length) { this._stopRealtime(); this._preds = {}; return; }
+    if (document.hidden) return;
     if (!this._watchingWar()) return;
     // 1. local predicted tick(s) — but never run unboundedly ahead of the
     //    last authoritative tick (if heartbeats stall, divergence would grow
     //    and every eventual reconciliation would be a visible teleport).
-    const war = this.predictedWar();
-    if (war && window.WarEngine &&
-        war.tick - (this._pred.lastAuthTick || 0) < 10 &&
-        WarEngine.maybeWarTick(this._dbLike(war))) {
-      this.refreshLayer();
+    //    Each conflict doc has its OWN wall-clock gate + divergence bound.
+    for (const auth of docs) {
+      if (!auth.active || auth.paused) continue;
+      const key = this.docKeyOf(auth);
+      const war = this.predictedDoc(auth);
+      if (war && window.WarEngine &&
+          war.tick - (this._preds[key].lastAuthTick || 0) < 10 &&
+          WarEngine.maybeWarTick(this._dbLike(war))) {
+        this.refreshLayer();
+      }
     }
     // 2. authoritative heartbeat, one tick interval apart (never below 1s —
     //    at 8× speed prediction carries the smoothness, not the network)
-    const interval = Math.max(1000, (auth.tickMs || 2000) / (auth.speed || 1));
+    const interval = Math.max(1000, (docs[0].tickMs || 2000) / (docs[0].speed || 1));
     const now = Date.now();
     if (now >= this._hbDue && !this._hbBusy) {
       this._hbDue = now + interval;
@@ -323,8 +374,12 @@ const War = {
         // older than one already applied (out-of-order responses).
         if (data && data.v !== undefined && !(data.v <= this._warV)) {
           this._warV = data.v;
-          if (W.state && data.war) {
-            W.state.war = data.war; // identity change → predictedWar() rebases
+          let touched = false;
+          if (W.state) {
+            if (data.war && W.state.war !== data.war) { W.state.war = data.war; touched = true; } // identity change → predictedWar() rebases
+            if (data.protest && W.state.protest !== data.protest) { W.state.protest = data.protest; touched = true; }
+          }
+          if (touched) {
             this.refreshLayer(true);
             this._maybeRefreshPanel();
           }
@@ -487,8 +542,8 @@ const War = {
       } else {
         const x0 = Math.min(start[0], world[0]), x1 = Math.max(start[0], world[0]);
         const y0 = Math.min(start[1], world[1]), y1 = Math.max(start[1], world[1]);
-        const side = this.commandableSide();
-        const war = (window.WarEngine && this.predictedWar()) || S().war;
+        const war = (window.WarEngine && this.activePred()) || this.activeAuth();
+        const side = this.commandableSide(war);
         this._sel.clear();
         for (const u of (war ? war.units : [])) {
           if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0)) continue;
@@ -608,14 +663,14 @@ const War = {
     });
     const side = this.commandableSide();
     if (window.WarEngine) this._optimistic(side, orders); // arrows + movement start NOW; the POST confirms
-    try { await POST('/api/war/command', { side, orders }); }
+    try { await POST('/api/war/command', { side, orders, conflict: this._activeKey }); }
     catch (e) { toast(e.message, true); }
   },
   // Ctrl-drag formation: distribute the current selection along the line A→B,
   // nearest-in-order (sort both units and slots by their projection onto the
   // line direction, then pair them up 1:1) so units don't cross paths.
   async _issueFormation(a, b) {
-    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    const war = (window.WarEngine && this.activePred()) || this.activeAuth();
     if (!war) return;
     const ids = [...this._sel];
     const n = ids.length;
@@ -632,7 +687,7 @@ const War = {
     const orders = units.map((u, i) => ({ unitId: u.id, dest: this._clamp(slots[i]) }));
     const side = this.commandableSide();
     if (window.WarEngine) this._optimistic(side, orders);
-    try { await POST('/api/war/command', { side, orders }); }
+    try { await POST('/api/war/command', { side, orders, conflict: this._activeKey }); }
     catch (e) { toast(e.message, true); }
   },
   // Right-drag custom path: every selected unit gets the SAME hand-drawn
@@ -647,7 +702,7 @@ const War = {
     const orders = ids.map(id => ({ unitId: id, path }));
     const side = this.commandableSide();
     if (window.WarEngine) this._optimistic(side, orders); // arrows + movement start NOW; the POST confirms
-    try { await POST('/api/war/command', { side, orders }); }
+    try { await POST('/api/war/command', { side, orders, conflict: this._activeKey }); }
     catch (e) { toast(e.message, true); }
   },
   // Task 5: hit-test a world point against ENEMY live units of the predicted
@@ -655,9 +710,9 @@ const War = {
   // (30 world px base radius, counter-scaled below WAR_FIXED_MODE_K) so "did
   // I click the enemy soldier" agrees with what's actually drawn on screen.
   _hitEnemyAt(pt) {
-    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    const war = (window.WarEngine && this.activePred()) || this.activeAuth();
     if (!war) return null;
-    const side = this.commandableSide();
+    const side = this.commandableSide(war);
     const k = GameMap.view ? GameMap.view.k : 1;
     const threshold = 30 * warMarkerScale(k);
     let best = null, bestD = threshold;
@@ -685,26 +740,28 @@ const War = {
     const orders = ids.map(id => ({ unitId: id, attackId: targetId }));
     const side = this.commandableSide();
     if (window.WarEngine) {
-      const w = this.predictedWar();
+      const w = this.activePred();
       if (w) WarEngine.applyOrders(this._dbLike(w), side, orders);
       this.refreshLayer(true);
     }
-    try { await POST('/api/war/command', { side, orders }); }
+    try { await POST('/api/war/command', { side, orders, conflict: this._activeKey }); }
     catch (e) { toast(e.message, true); }
   },
   async _dropBomb(pos) {
     try {
-      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos) });
+      const key = this._activeKey;
+      const auth = S() && S()[key === 'protest' ? 'protest' : 'war'];
+      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos), conflict: key });
       // Insert the server-created strike into the predicted war IMMEDIATELY
       // (same optimistic-order spirit as _issueMove) — the plane and the
       // toolbar countdown start now instead of waiting for the next
       // heartbeat; the engine's deterministic stepAirstrikes then predicts
       // the blast locally at strikeTick, and rebases reconcile as usual.
       if (window.WarEngine && r && r.strike) {
-        if (r.aircraftRemaining !== undefined && S().war && S().war.bombs && S().war.bombs.def) {
-          S().war.bombs.def.aircraftRemaining = r.aircraftRemaining;
+        if (r.aircraftRemaining !== undefined && auth && auth.bombs && auth.bombs.def) {
+          auth.bombs.def.aircraftRemaining = r.aircraftRemaining;
         }
-        const war = this.predictedWar();
+        const war = this.predictedDoc(auth);
         if (war) {
           war.airstrikes = war.airstrikes || [];
           if (!war.airstrikes.some(s => s.id === r.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(r.strike)));
@@ -712,8 +769,9 @@ const War = {
           // so a heartbeat that was already in flight when this order landed
           // (and therefore resolves with a snapshot from just before it)
           // doesn't silently drop the strike for a whole interval.
-          if (this._pred) {
-            (this._pred.strikeOutbox = this._pred.strikeOutbox || [])
+          const st = this._preds[key];
+          if (st) {
+            (st.strikeOutbox = st.strikeOutbox || [])
               .push({ strike: JSON.parse(JSON.stringify(r.strike)), exp: Date.now() + 8000 });
           }
           this.refreshLayer(true);
@@ -732,7 +790,8 @@ const War = {
       const name = (d.name || '').trim();
       await POST('/api/gm/war/spawn', {
         side: d.side, pos: this._clamp(pos), kind: d.kind, name: name || undefined,
-        count: d.count, strength: d.strength, atk: d.atk, speed: d.speed
+        count: d.count, strength: d.strength, atk: d.atk, speed: d.speed,
+        conflict: d.conflict || this._activeKey
       });
       toast(`${d.count} ${d.kind} unit${d.count === 1 ? '' : 's'} deployed${name ? ` as ${name}` : ''}.`);
     } catch (e) { toast(e.message, true); }
@@ -742,8 +801,9 @@ const War = {
   // each new simulated position instead of the old fixed 900ms ease that left
   // it parked for the back half of every 2s tick (visible stop-start motion).
   _tweenMs() {
-    const w = S() && S().war;
-    const interval = ((w && w.tickMs) || 2000) / ((w && w.speed) || 1);
+    const docs = this.authDocs();
+    const w = docs[0] || {};
+    const interval = (w.tickMs || 2000) / (w.speed || 1);
     return Math.min(2200, Math.max(250, interval));
   },
 
@@ -829,46 +889,58 @@ const War = {
   },
 
   /* ═══════════ MAP LAYER ═══════════ */
+  // Phase 31: a protest is a SECOND conflict doc, so the layer renders both
+  // the invasion war and the protest (crowds/police, territory fractures,
+  // craters, planes) — each from its OWN predicted doc at full cadence, the
+  // two stacked in the same map.warLayer group.
   renderMapLayer(map, mk, NS) {
-    // Render the PREDICTED war (rebased-on-authority + locally ticked), so
-    // the front line the player sees is always at full cadence. Falls back
-    // to the raw authoritative doc if the engine script failed to load.
-    const war = (window.WarEngine && this.predictedWar()) || S().war;
-    if (!war) {
+    const docs = this.authDocs();
+    if (!docs.length) {
       this._anim = {}; this._flashAnim = {};
       this._airstrikeAnim = {}; this._explosionAnim = {}; this._strikeImpactAt = {};
       this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {};
       this._removeToolbar(); this._removeUnitCard(); this._inspect = null;
-      this._stopRealtime(); this._pred = null; return;
+      this._stopRealtime(); this._preds = {}; return;
     }
     if (window.WarEngine) this._ensureRealtime();
     map.warLayer = document.createElementNS(NS, 'g');
     map.warLayer.setAttribute('class', 'war-layer');
     map.world.appendChild(map.warLayer);
-
-    this.renderCraters(map, mk, NS, war);
-    this.renderTerritory(map, mk, NS, war);
-    // Once a war concludes the soldiers leave the field — draw the move/attack
-    // arrows and unit markers only while the war is still active. The craters
-    // and captured territory above remain so the final front can be reviewed.
-    if (war.active) {
-      this.renderMoveArrows(map, mk, NS, war);
-      this.renderAttackArrows(map, mk, NS, war);
-      this.renderWarshipFire(map, mk, NS, war);
-      this.renderRefugees(map, mk, NS, war); // under the unit markers — a column never occludes a formation
-      this.renderUnits(map, mk, NS, war);
-    } else {
-      // Drop any lingering per-unit animation/selection state so a re-render
-      // (or a later war) doesn't try to tween ghosts of the departed units.
+    // The defs (patterns/markers/clipPaths) are id-referenced by url(#…);
+    // both docs draw the SAME named defs with identical content, so they
+    // resolve to whichever was created first — visually indistinguishable.
+    for (const auth of docs) {
+      // Render the PREDICTED doc (rebased-on-authority + locally ticked), so
+      // the front line the player sees is always at full cadence. Falls back
+      // to the raw authoritative doc if the engine script failed to load.
+      const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
+      this.renderCraters(map, mk, NS, war);
+      this.renderTerritory(map, mk, NS, war);
+      // Once a conflict concludes the soldiers leave the field — draw the
+      // move/attack arrows and unit markers only while it's still active. The
+      // craters and captured territory above remain so the final front can be
+      // reviewed.
+      if (war.active) {
+        this.renderMoveArrows(map, mk, NS, war);
+        this.renderAttackArrows(map, mk, NS, war);
+        this.renderWarshipFire(map, mk, NS, war);
+        this.renderRefugees(map, mk, NS, war); // under the unit markers — a column never occludes a formation
+        this.renderUnits(map, mk, NS, war);
+      }
+      this._checkAirstrikeLandings(war);
+      this.renderAirstrikePlanes(map, mk, NS, war);
+      this.renderExplosions(map, mk, NS, war);
+      this.renderFlashes(map, mk, NS, war);
+    }
+    // All conflicts concluded: drop any lingering per-unit animation/selection
+    // state so a re-render doesn't tween ghosts of the departed units. (Only
+    // when NONE are active — the registries are shared across docs.)
+    if (!docs.some(d => d.active)) {
       this._anim = {}; this._flashAnim = {}; this._arrowAnim = {};
       this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {}; this._sel.clear();
     }
-    this._checkAirstrikeLandings(war);
-    this.renderAirstrikePlanes(map, mk, NS, war);
-    this.renderExplosions(map, mk, NS, war);
-    this.renderFlashes(map, mk, NS, war);
     this.ensureLoop();
     this.bindKeys();
     if (W.layer === 'war') { this.renderToolbar(); this.renderUnitCard(); }
@@ -962,7 +1034,7 @@ const War = {
   // drawn — fog of war on where the other side is headed. Static per render
   // (the tweened marker chases the arrow's tail slightly — acceptable).
   renderMoveArrows(map, mk, NS, war) {
-    const side = this.commandableSide();
+    const side = this.commandableSide(war);
     // Arrowhead <marker> defs — recreated per render, same reasoning as the
     // territory hatch <pattern> (the whole SVG is torn down every render).
     const defs = document.createElementNS(NS, 'defs');
@@ -1159,8 +1231,8 @@ const War = {
   renderUnits(map, mk, NS, war) {
     const liveIds = new Set();
     const seenIds = new Set(); // every unit id this pass, dead or alive — drives _lastStrength/_hitAt pruning
-    const cmdSide = this.commandableSide();
-    const canCommand = this.commandable();
+    const cmdSide = this.commandableSide(war);
+    const canCommand = this.commandable(war);
     const scaleNow = warMarkerScale(map.view ? map.view.k : 1);
     // Task 5: units currently being chased (attackId points at them) get a
     // pulsing red ring, regardless of which side is doing the chasing.
@@ -1655,10 +1727,11 @@ const War = {
   renderToolbar() {
     const bar0 = document.getElementById('war-toolbar');
     if (bar0 && bar0.parentNode) bar0.parentNode.removeChild(bar0);
-    const war = S().war;
+    const war = this.activeAuth();
     if (!war) return;
-    const live = this.commandable(); // false once the war has concluded
-    const side = this.commandableSide();
+    const key = this.docKeyOf(war);
+    const live = this.commandable(war); // false once the conflict has concluded
+    const side = this.commandableSide(war);
     const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
     const now = Date.now();
     const onCooldown = now < bomb.cooldownUntil;
@@ -1667,21 +1740,34 @@ const War = {
     const noAircraft = side === 'def' && aircraftKnown && aircraftRemaining <= 0;
     // The predicted war (when available) gives a smoother countdown than the
     // authoritative doc — same reasoning as every other tick-driven readout.
-    const predWar = (window.WarEngine && this.predictedWar()) || war;
+    const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
+    const protest = war.kind === 'protest';
+    // Airstrikes over a PROTEST are defender-only AND only once the fighting
+    // has turned violent (server-enforced in dropBomb / the /api/war/bomb
+    // route) — surface that in the button instead of bouncing off the server.
+    const peacefulProtest = protest && !((war.protest || {}).protestorsViolent);
     const bar = el('div#war-toolbar.war-toolbar');
     bar.appendChild(el('div.war-toolbar-hint', live
       ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
-      : 'This war has concluded — units can be reviewed but no longer commanded.'));
+      : 'This conflict has concluded — units can be reviewed but no longer commanded.'));
     const row = el('div.btn-row');
+    // Both conflicts present → a switch, so commands/selection target the
+    // other one without leaving the map layer.
+    const other = this.authDocs().find(d => d !== war);
+    if (other) {
+      row.appendChild(el('div.chip' + (key === 'war' ? '.active' : ''), { onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚔ War'));
+      row.appendChild(el('div.chip' + (key === 'protest' ? '.active' : ''), { onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '✊ Protest'));
+    }
     // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
     // /api/war/bomb route) — a GM commanding the attacker gets a disabled
     // button + hint instead of a call that would only bounce off the server.
     const bombBtn = (side === 'att')
       ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '✈ No air arm')
       : el('button.dash-btn', {
-          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live) ? 'disabled' : undefined,
-          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-        }, !live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike'));
+          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live || peacefulProtest) ? 'disabled' : undefined,
+          title: peacefulProtest ? 'Airstrikes are only available once the protest turns violent.' : undefined,
+          onclick: () => { if (!live || peacefulProtest) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
+        }, peacefulProtest ? '✈ No airstrikes while peaceful' : (!live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
     row.appendChild(bombBtn);
     if (side === 'def' && aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' F55 available'));
     if (side === 'att') this._bombArmed = false; // never leave an airstrike armed while commanding the side that has none
@@ -1711,11 +1797,11 @@ const War = {
       row.appendChild(el('button.dash-btn', {
         class: this._gmSide === 'def' ? 'active' : '',
         onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.renderToolbar(); }
-      }, 'Command: Defender'));
+      }, protest ? 'Command: Government' : 'Command: Defender'));
       row.appendChild(el('button.dash-btn', {
         class: this._gmSide === 'att' ? 'active' : '',
         onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.renderToolbar(); }
-      }, 'Command: Attacker'));
+      }, protest ? 'Command: Protestors' : 'Command: Attacker'));
     }
     bar.appendChild(row);
     const wrap = document.getElementById('map-wrap');
@@ -1746,7 +1832,7 @@ const War = {
   renderUnitCard() {
     const old = document.getElementById('war-unit-card');
     if (old && old.parentNode) old.parentNode.removeChild(old);
-    const war = (window.WarEngine && this.predictedWar()) || S().war;
+    const war = (window.WarEngine && this.activePred()) || this.activeAuth();
     if (!war) return;
     // Refugee column under inspection — its own compact card (checked first:
     // it's the most recent click; selecting a unit clears it again).
@@ -1829,36 +1915,70 @@ const War = {
   },
 
   /* ═══════════ WAR ROOM PANEL ═══════════ */
+  // Phase 31: the War Room covers BOTH conflict docs — the invasion war and
+  // any protest — each with its own status strip, controls and front-line
+  // report, stacked in one panel.
   renderPanel(inner) {
-    const war = S().war;
     inner.appendChild(el('div.doc-title', 'War Room'));
-    if (!war) {
+    const docs = this.authDocs();
+    if (!docs.length) {
       inner.appendChild(el('div.doc-sub', 'No conflict is currently active.'));
-      if (isGM()) this.renderStartForm(inner);
+      if (isGM()) {
+        this.renderStartForm(inner);
+        this.renderProtestStartForm(inner);
+      }
       return;
     }
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:6px;' },
       'Command your forces directly on the map — switch to the ⚔ War layer.'));
     // A viewer parked on this panel (map not mounted) still drives the
-    // heartbeat, keeping the authoritative war ticking and the counters live.
-    if (war.active && window.WarEngine) this._ensureRealtime();
+    // heartbeat, keeping the authoritative docs ticking and the counters live.
+    if (docs.some(d => d.active) && window.WarEngine) this._ensureRealtime();
+    for (const auth of docs) this.renderDocPanel(inner, auth, this.docKeyOf(auth));
+    // Both conflicts run simultaneously — the GM can start the OTHER kind
+    // even while one is live (a protest mid-invasion, or a war mid-strike).
+    if (isGM()) {
+      if (!S().war) this.renderStartForm(inner);
+      if (!S().protest) this.renderProtestStartForm(inner);
+    }
+  },
+
+  renderDocPanel(inner, war, key) {
+    const protest = war.kind === 'protest';
+    inner.appendChild(Views.secLabel(protest
+      ? `✊ Protest — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`
+      : `⚔ War — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`));
 
     const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
     const mm = Math.floor(elapsed / 60), ss = elapsed % 60;
-    const statusText = war.result ? (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED') : (war.paused ? 'PAUSED' : (war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS'));
+    const p = war.protest || {};
+    const statusText = war.result
+      ? (protest ? (war.result.winner === 'def' ? 'ENDED — CROWDS DISPERSED' : 'ENDED') : (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED'))
+      : (war.paused ? 'PAUSED'
+          : protest ? (p.protestorsViolent ? 'VIOLENT UNREST' : p.govViolent ? 'SECURITY FORCES MOBILISED' : 'PEACEFUL DEMONSTRATION')
+            : war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS');
     inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${mm}m ${ss}s elapsed · ${statusText}`));
 
     // Alliance-aware wars (Task 4): list allied belligerents on each side,
     // whether they auto-joined at startWar (Task 3) or intervened mid-war via
     // the existing joinWar flow — both land in war.allies the same way.
-    const allyLists = war.allies || { att: [], def: [] };
-    if ((allyLists.att || []).length || (allyLists.def || []).length) {
-      const sideLine = (label, ids) => ids && ids.length ? `${label}: ${ids.map(entName).join(', ')}` : null;
-      const lines = [sideLine('Also attacking', allyLists.att), sideLine('Also defending', allyLists.def)].filter(Boolean);
-      if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
+    if (!protest) {
+      const allyLists = war.allies || { att: [], def: [] };
+      if ((allyLists.att || []).length || (allyLists.def || []).length) {
+        const sideLine = (label, ids) => ids && ids.length ? `${label}: ${ids.map(entName).join(', ')}` : null;
+        const lines = [sideLine('Also attacking', allyLists.att), sideLine('Also defending', allyLists.def)].filter(Boolean);
+        if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
+      }
     }
 
-    inner.appendChild(Views.statStrip([
+    inner.appendChild(Views.statStrip(protest ? [
+      ['Crowd Losses', fmtNum(Math.round(war.stats.attLosses))],
+      ['Police Losses', fmtNum(Math.round(war.stats.defLosses))],
+      ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
+      ['Refugees', fmtCompact(war.stats.refugees || 0)],
+      ['Cities In Unrest', String((war.stats.citiesHeld || []).length)],
+      ['Speed', war.speed + '×']
+    ] : [
       ['Attacker Losses', fmtNum(Math.round(war.stats.attLosses))],
       ['Defender Losses', fmtNum(Math.round(war.stats.defLosses))],
       ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
@@ -1870,29 +1990,56 @@ const War = {
     // Equipment quality (Phase 26) — the strength-weighted average of every
     // unit's own kit (war.equip, server-computed): a fleet-wide readout of
     // what each army's packs are worth. Per-unit detail lives on the unit card.
-    if (war.equip && (war.equip.att || war.equip.def)) {
+    if (!protest && war.equip && (war.equip.att || war.equip.def)) {
       const fmtEq = (e) => e ? `dmg ${e.dmg}× · armour ${e.hp}× · morale ${e.morale}× · speed ${e.speed}×` : '—';
       inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); margin:4px 0 8px; letter-spacing:.04em;' },
         el('div', 'ATTACKER ARSENAL  ' + fmtEq(war.equip.att)),
         el('div', 'DEFENDER ARSENAL  ' + fmtEq(war.equip.def))));
     }
 
-    if (isGM()) this.renderControls(inner, war);
+    if (isGM()) this.renderControls(inner, war, key);
+    else if (protest && war.active) this.renderProtestActions(inner, war, key);
 
-    inner.appendChild(Views.secLabel('Objectives'));
-    const objTbl = el('table.data',
-      el('thead', el('tr', el('th', 'Objective'), el('th', 'Target'), el('th', 'Status'))),
-      el('tbody', [...war.objectives].sort((a, b) => a.priority - b.priority).map(o => el('tr',
-        el('td', this.objLabel(o)),
-        el('td', this.objTarget(o)),
-        el('td', el('span.chip', { class: o.status === 'done' ? 'active' : '' }, o.status.toUpperCase()))
-      ))));
-    inner.appendChild(objTbl);
+    // Protest-specific readout: who organized this, where it is, and — most
+    // importantly — what the strike is doing to the economy.
+    if (protest) {
+      const org = S().entities.find(e => e.id === war.attackerId);
+      inner.appendChild(Views.secLabel('The Unrest'));
+      inner.appendChild(el('div.doc-sub',
+        `Organized by ${org ? org.name : war.attackerId} · ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
+      const chips = el('div.btn-row');
+      chips.appendChild(el('div.chip', p.protestorsViolent ? '✊ Crowds violent' : '✊ Peaceful crowds'));
+      chips.appendChild(el('div.chip', p.govViolent ? '🚓 Force authorized' : '🚓 Police holding line'));
+      chips.appendChild(el('div.chip', p.captureMode ? '🏁 Seizing territory' : '🏁 No territory claims'));
+      const t = p.tuning || {};
+      if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `⛔ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
+      inner.appendChild(chips);
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
+        'Strike-hit industries:' + (((p.strikeCityNames || []).length) ? ' ' + p.strikeCityNames.join(', ') : ' none — production running normally.')));
+    }
 
-    inner.appendChild(Views.secLabel('Province Control'));
+    // Objectives — protests have none (they can't formally "win"; a concession
+    // is a GM end).
+    if (!protest) {
+      inner.appendChild(Views.secLabel('Objectives'));
+      const objTbl = el('table.data',
+        el('thead', el('tr', el('th', 'Objective'), el('th', 'Target'), el('th', 'Status'))),
+        el('tbody', [...war.objectives].sort((a, b) => a.priority - b.priority).map(o => el('tr',
+          el('td', this.objLabel(o)),
+          el('td', this.objTarget(o)),
+          el('td', el('span.chip', { class: o.status === 'done' ? 'active' : '' }, o.status.toUpperCase()))
+        ))));
+      inner.appendChild(objTbl);
+    }
+
+    inner.appendChild(Views.secLabel(protest ? 'Districts Under Protest Control' : 'Province Control'));
     const provBox = el('div');
     const control = war.stats.provinceControl || {};
     const provIds = Object.keys((war.grid || {}).provinceLandCells || control);
+    if (protest && !p.captureMode && !provIds.length) {
+      provBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+        'Protestors hold no ground — the crowds are gathered in the streets.'));
+    }
     for (const pid of provIds) {
       const prov = provById(pid);
       if (!prov) continue;
@@ -1900,18 +2047,20 @@ const War = {
     }
     inner.appendChild(provBox);
 
-    // Defender counter-invasion of attacker home soil (Phase 22)
-    const enemyCtl = war.stats.enemyControl || {};
-    const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
-    if (enemyIds.length) {
-      inner.appendChild(Views.secLabel('Enemy Homeland Occupied'));
-      const box = el('div');
-      const countries = ((S().settings || {}).map || {}).countries || [];
-      for (const cid of enemyIds) {
-        const c = countries.find(x => x.id === cid);
-        box.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
+    // Defender counter-invasion of attacker home soil (Phase 22) — wars only.
+    if (!protest) {
+      const enemyCtl = war.stats.enemyControl || {};
+      const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
+      if (enemyIds.length) {
+        inner.appendChild(Views.secLabel('Enemy Homeland Occupied'));
+        const box = el('div');
+        const countries = ((S().settings || {}).map || {}).countries || [];
+        for (const cid of enemyIds) {
+          const c = countries.find(x => x.id === cid);
+          box.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
+        }
+        inner.appendChild(box);
       }
-      inner.appendChild(box);
     }
 
     inner.appendChild(Views.secLabel('Front-Line Report'));
@@ -1972,12 +2121,60 @@ const War = {
     } }, 'Create Custom Scenario')));
   },
 
+  // GM protest starter — pick an organizer (party / person / company / org /
+  // foreign power), name the movement, choose the cities where crowds gather
+  // and where police deploy. POSTs /api/gm/protest/start (server/war.js
+  // startProtest); both conflict docs run simultaneously, so a protest can
+  // begin mid-war.
+  _protestDraft: null,
+  renderProtestStartForm(inner) {
+    inner.appendChild(Views.secLabel('Start a Protest'));
+    const d = this._protestDraft = this._protestDraft || {
+      name: 'Popular unrest', organizerId: '', baseCities: [], policeCities: [],
+      crowds: 2, perCity: 2000
+    };
+    const organizerOpts = (S().entities || [])
+      .filter(e => ['party', 'person', 'company', 'org', 'foreign'].includes(e.type))
+      .map(e => [e.id, e.name + ' (' + e.type + ')']);
+    if (!d.organizerId && organizerOpts.length) d.organizerId = organizerOpts[0][0];
+    const cities = S().cities || [];
+    const cityGrid = (key) => {
+      const g = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:2px 8px; font-size:12px;' });
+      for (const c of cities) {
+        const lab = el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
+          el('input', { type: 'checkbox', checked: d[key].includes(c.id) ? 'checked' : undefined,
+            onchange: (e) => {
+              const set = new Set(d[key]);
+              if (e.target.checked) set.add(c.id); else set.delete(c.id);
+              d[key] = [...set];
+            } }), c.name);
+        g.appendChild(lab);
+      }
+      return g;
+    };
+    const box = el('div.form-grid',
+      Forms.field('Movement name', Forms.text(d, 'name')),
+      Forms.field('Organizer', Forms.sel(d, 'organizerId', organizerOpts)),
+      Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 6, { step: 1, suffix: ' crowds' })),
+      Forms.field('Crowd strength each', Forms.sliderNum(d, 'perCity', 500, 20000, { step: 500 })));
+    inner.appendChild(box);
+    inner.appendChild(Forms.field('Cities where crowds gather', cityGrid('baseCities')));
+    inner.appendChild(Forms.field('Cities with police detachments', cityGrid('policeCities')));
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        if (!d.baseCities.length) return toast('Choose at least one base city.', true);
+        try { await POST('/api/gm/protest/start', d); toast('The crowds take to the streets.'); }
+        catch (e) { toast(e.message, true); }
+      }
+    }, '✊ Start Protest')));
+  },
+
   // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/
   // damage/speed controls, then "Arm placement" hands off to a map click
   // (see onMapPointerDown's _spawnArmed branch and _doSpawn). Mirrors the
   // bomb-arming flow: armed state shows on the floating war toolbar too, and
   // Esc disarms it (see bindKeys).
-  renderSpawner(inner, war) {
+  renderSpawner(inner, war, key) {
     inner.appendChild(Views.secLabel('Spawn Units'));
     const d = this._spawnDraft;
     const box = el('div');
@@ -1997,6 +2194,7 @@ const War = {
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       class: this._spawnArmed ? 'active' : '',
       onclick: () => {
+        this._spawnDraft.conflict = key; // placement lands in THIS conflict's doc
         this._spawnArmed = !this._spawnArmed;
         if (this._spawnArmed) this._bombArmed = false;
         this._reRenderPanel();
@@ -2037,35 +2235,112 @@ const War = {
     inner.appendChild(box);
   },
 
-  renderControls(inner, war) {
+  renderControls(inner, war, key) {
+    const protest = war.kind === 'protest';
+    if (!protest && war.active) this.renderProtestActions(inner, war, key);
     const row = el('div.btn-row');
     if (!war.result) {
       row.appendChild(el('button.solid-btn', {
-        onclick: async () => { try { await POST('/api/gm/war/control', { paused: !war.paused }); } catch (e) { toast(e.message, true); } }
+        onclick: async () => { try { await POST('/api/gm/war/control', { paused: !war.paused, conflict: key }); } catch (e) { toast(e.message, true); } }
       }, war.paused ? '▶ Resume' : '⏸ Pause'));
       for (const s of [1, 2, 4, 8]) {
         row.appendChild(el('button.dash-btn', {
           class: war.speed === s ? 'active' : '',
-          onclick: async () => { try { await POST('/api/gm/war/control', { speed: s }); } catch (e) { toast(e.message, true); } }
+          onclick: async () => { try { await POST('/api/gm/war/control', { speed: s, conflict: key }); } catch (e) { toast(e.message, true); } }
         }, s + '×'));
       }
       row.appendChild(el('button.danger-btn', {
-        onclick: () => confirmModal('END WAR', 'End the war now? The result stays on record for review.', async () => {
-          await POST('/api/gm/war/end');
-          toast('War ended by GM order.');
-        }, 'End War')
-      }, '■ End War'));
+        onclick: () => confirmModal(protest ? 'END PROTEST' : 'END WAR', protest ? 'End the protest now? The crowds stand down and production resumes.' : 'End the war now? The result stays on record for review.', async () => {
+          await POST(protest ? '/api/gm/protest/end' : '/api/gm/war/end', { conflict: key });
+          toast(protest ? 'Protest ended by GM order.' : 'War ended by GM order.');
+        }, protest ? 'End Protest' : 'End War')
+      }, protest ? '■ End Protest' : '■ End War'));
     } else {
-      row.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'This war has concluded. Start a new scenario below to run another.'));
+      row.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'This conflict has concluded.'));
     }
     inner.appendChild(row);
     if (!war.result) {
-      this.renderTuning(inner, war);
-      this.renderSpawner(inner, war);
-      this.renderIntervention(inner, war);
+      if (protest) this.renderProtestTuning(inner, war, key);
+      else this.renderTuning(inner, war);
+      this.renderSpawner(inner, war, key);
+      if (!protest) this.renderIntervention(inner, war);
     }
-    this.renderTreaty(inner, war);
-    if (war.result) this.renderStartForm(inner);
+    if (!protest) {
+      this.renderTreaty(inner, war);
+      if (war.result) this.renderStartForm(inner);
+    }
+  },
+
+  // Protest side toggles — offered to whoever the server granted `cmdAccess`
+  // for (see api.js cmdAccessOf): the organizer's controllers manage the
+  // crowd ('att'), government/military operators manage the police ('def').
+  renderProtestActions(inner, war, key) {
+    if (!war.active) return;
+    const ca = war.cmdAccess || {};
+    const p = war.protest || {};
+    inner.appendChild(Views.secLabel('Protest Control'));
+    const row = el('div.btn-row');
+    if (ca.att) {
+      row.appendChild(el('button.solid-btn', {
+        class: p.protestorsViolent ? 'active' : '',
+        onclick: async () => {
+          try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }); }
+          catch (e) { toast(e.message, true); }
+        }
+      }, p.protestorsViolent ? '✊ Crowds turn violent' : '✊ Allow fighting'));
+      row.appendChild(el('button.dash-btn', {
+        class: p.captureMode ? 'active' : '',
+        onclick: async () => {
+          try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }); }
+          catch (e) { toast(e.message, true); }
+        }
+      }, p.captureMode ? '🏁 Seizing territory' : '🏁 Capture territory'));
+    }
+    if (ca.def) {
+      row.appendChild(el('button.danger-btn', {
+        class: p.govViolent ? 'active' : '',
+        onclick: async () => {
+          try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }); }
+          catch (e) { toast(e.message, true); }
+        }
+      }, p.govViolent ? '🚓 Forces engaged' : '🚓 Use force'));
+    }
+    inner.appendChild(row);
+    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
+      p.protestorsViolent
+        ? 'The crowds are fighting — government airstrikes are now permitted (defender side).'
+        : 'The demonstration is peaceful: neither side can attack, and no airstrikes may be called.'));
+  },
+
+  // GM tuning for an active protest — violence damage, strike economic impact,
+  // civilian casualties and refugee scale (see server/war.js setProtestTuning).
+  _protestTuneTimers: {},
+  renderProtestTuning(inner, war, key) {
+    inner.appendChild(Views.secLabel('Protest Tuning'));
+    const t = Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, (war.protest || {}).tuning || {});
+    const mods = Object.assign({ dmg: 1, hp: 1 }, war.mods || {});
+    const box = el('div');
+    const post = (patch) => {
+      POST('/api/gm/protest/tuning', Object.assign({}, patch, { conflict: key }))
+        .catch(e => toast(e.message, true));
+    };
+    const debounced = (field, value) => {
+      clearTimeout(this._protestTuneTimers[field]);
+      this._protestTuneTimers[field] = setTimeout(() => post({ [field]: value }), 300);
+    };
+    const sl = (field, value, min, max, step, fmt) =>
+      Forms.field(field, Forms.slider({ v: value }, 'v', min, max, {
+        step, format: fmt, onInput: (v) => debounced(field, v)
+      }));
+    box.appendChild(sl('Violence damage ×', mods.dmg, 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Unit HP ×', mods.hp, 0.1, 5, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Strike output drop (0–100%)', t.strikeFrac, 0, 1, 0.05, (v) => Math.round(v * 100) + '%'));
+    box.appendChild(sl('Civilian deaths per fight tick (×)', t.civFrac, 0, 10, 0.1, (v) => Number(v).toFixed(1) + '×'));
+    box.appendChild(sl('Fleeing civilians fraction', t.refugeeFrac, 0, 0.5, 0.01, (v) => Number(v).toFixed(2)));
+    box.appendChild(sl('Refugee wave every N ticks', t.refugeeEvery, 2, 12, 1, (v) => String(Math.round(v))));
+    inner.appendChild(box);
+    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+      'Strike output: production in cities touched by the crowds is reduced by up to this fraction.'));
   },
 
   // ---------- peace treaty desk (Phase 24 — GM-only) ----------

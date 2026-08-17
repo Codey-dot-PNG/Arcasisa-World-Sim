@@ -46,7 +46,15 @@ const UNIT_DEFAULTS = {
   // carries multiply its effectiveness through the same per-unit kit system
   // tanks use (resupplyUnits), so an empty squadron fights far below these.
   boat:     { strength: 900,  speed: 6.5, atk: 0.8 },
-  warship:  { strength: 3600, speed: 5.0, atk: 1.6 }
+  warship:  { strength: 3600, speed: 5.0, atk: 1.6 },
+  // Phase 31 — protests & mass strikes: crowd and police units for the
+  // protest conflict doc (see server/war.js startProtest). `protestor` is
+  // the unarmed crowd (weak damage even when violent — fists vs rifles) and
+  // `police` the security forces (garrison-grade, static — the engine hands
+  // DEF_MOVE_SPEED to defender units on their first order, so they can
+  // charge when commanded).
+  protestor: { strength: 2000, speed: 2.5, atk: 0.35 },
+  police:    { strength: 1200, speed: 0,   atk: 1.0 }
 };
 
 const valksland_invasion = {

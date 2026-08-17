@@ -494,6 +494,21 @@ function migrate(world) {
     delete world.war;
     changed = true;
   }
+  // Protests (Phase 31): db.protest is a second conflict doc with the same
+  // lifecycle — self-heal a malformed one exactly like a malformed war.
+  if (world.protest && typeof world.protest.tick !== 'number') {
+    delete world.protest;
+    changed = true;
+  }
+  if (world.protest && !world.protest.bombs) { world.protest.bombs = { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } }; changed = true; }
+  if (world.protest && !world.protest.protest) { world.protest.protest = { organizerId: world.protest.attackerId, baseCities: [], policeCities: [], protestorsViolent: false, govViolent: false, captureMode: false }; changed = true; }
+  // Phase 31 defaults for live worlds (fresh seeds carry them in seed.js):
+  // additive — a world without settings.war.protest keeps the hardcoded
+  // PROTEST_DEFAULTS in server/war.js, these just give the GM visible knobs.
+  if (!world.settings.war) { world.settings.war = {}; changed = true; }
+  const protDefaults = { tickMs: 2000, strikeFrac: 0.5, civPerRiotFrac: 0.6, refugeeRiotFrac: 0.04, refugeeRiotEvery: 4, dmg: 1, hp: 1 };
+  if (!world.settings.war.protest) { world.settings.war.protest = Object.assign({}, protDefaults); changed = true; }
+  else { for (const k of Object.keys(protDefaults)) if (world.settings.war.protest[k] === undefined) { world.settings.war.protest[k] = protDefaults[k]; changed = true; } }
   // Phase 16 — interactive War layer (bombs/craters). Additive: a war started
   // before this change simply lacks these fields until the next tick/order.
   if (world.war && !world.war.bombs) { world.war.bombs = { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } }; changed = true; }

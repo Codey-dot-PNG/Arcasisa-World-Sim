@@ -38,6 +38,7 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `PATCH /api/company/:id/controls` | CEO/owner: `keepPct, govMix, govPriceMult, wage, govMixByItem` |
 | `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |
 | `PATCH /api/trade/controls` | President (controls `ent_gov`) or GM: `govBuy`, `exports`, `imports` |
+| `POST /api/protest/control` | active-protest toggles, side-gated by `cmdAccessOf`: `protestorsViolent`/`captureMode` need `att` (organizer's controller or GM), `govViolent` needs `def` (government/military operator or GM). Response includes the fresh protest doc; responds-sync so the flip lands instantly |
 
 ## Market (Phase 4.4 / Workstream A)
 
@@ -77,6 +78,10 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy |
 | `POST users` · `PATCH\|DELETE users/:id` | user CRUD; calls `sim.syncPresidency` |
 | `POST\|PATCH\|DELETE coll/:coll(/:id)` | generic CRUD for `entities, provinces, cities, properties, items, events, variables, roles, accounts, markers` — with cascade deletes, geometry-based province placement, deed/cert/texture sync hooks |
+| `POST war/start` · `POST war/control` · `POST war/end` · `POST war/tuning` · `GET war/scenarios` · `POST war/scenarios/custom` · `POST war/spawn` · `POST war/join` · `POST war/treaty` | war desk — see docs/WAR.md. Control/end/tuning/spawn accept `conflict: 'war'\|'protest'` (default `war`) |
+| `POST protest/start` | `{name?, organizerId, baseCities:[cityIds], policeCities:[cityIds], crowds?, perCity?}` — 409 while a protest is active |
+| `POST protest/tuning` | `{strikeFrac? 0–1, civFrac? 0–10, refugeeFrac? 0–0.5, dmg? 0.1–10, hp? 0.1–10}` — see docs/WAR.md "Protests & civil unrest" |
+| `POST protest/end` | ends the protest (GM); refugees settle, strikes clear next economy pass |
 
 ## Permission filtering — `filterState(u)`
 
@@ -95,5 +100,8 @@ The single place the world is narrowed per operator. Key rules:
 - Trades: parties + GM.
 - `events`, full `roles`, `users` are GM-only. `history` without `statistics` is
   share-prices-only. `globalVars` without `statistics` → population + econConfidence only.
+- `db.war` **and** `db.protest` ship to every logged-in operator (both conflicts are
+  public spectacle), redacted like war docs (`command.notes` emptied; each doc carries
+  the caller's `cmdAccess {att, def}` — see docs/WAR.md "Command authority").
 
 **When adding state, decide its visibility here** — never rely on the client to hide data.

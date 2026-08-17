@@ -694,7 +694,89 @@ function ledgerTxn(fromAcctId, toAcctId, amount, memo, actor, kind) {
   });
 }
 
+// ---------- strikes (Phase 31 — protest economy impact) ----------
+// Peaceful and violent protests alike hit the economy: while a protestor
+// crowd stands within STRIKE_RADIUS of a property, its workforce is out on
+// strike and output scales by (1 − degree), where degree grows with crowd
+// strength up to the GM-tunable strikeFrac (live protests carry their own
+// protest.tuning; settings.war.protest holds the defaults). Runs at the top
+// of runEconomy; transitions (strike starts / work resumes) log with refs to
+// the owner so the CEO's timeline and company view surface them through the
+// existing management UI. Employees stay EMPLOYED — nobody is fired for
+// striking, and the strike ends when the crowd moves on or the protest ends.
+const STRIKE_RADIUS = 120; // px — crowds this close to a site stop its workforce
+function strikeAlive(u) {
+  return !!u && !u.dead && u.state !== 'dead' && (u.strength || 0) > 0;
+}
+function applyStrikes(db) {
+  const protest = db.protest;
+  const turn = ((db.settings || {}).time || {}).turn || 0;
+  if (!protest || !protest.active) {
+    // No active protest: clear every lingering strike flag with a closing
+    // audit entry, so a strike never outlives the crowd that caused it.
+    for (const pr of db.properties) {
+      if (pr.vars && pr.vars.strike) {
+        store.log('economy', `Work resumes at ${pr.name}`, 'The strike is over and the workforce has returned to the job.', 'STRIKE', [pr.ownerId]);
+        delete pr.vars.strike;
+      }
+    }
+    return;
+  }
+  const cap = ((protest.protest || {}).tuning || {}).strikeFrac;
+  if (!(cap > 0)) {
+    // strikeFrac tuned to zero disables the economic effect entirely.
+    for (const pr of db.properties) {
+      if (pr.vars && pr.vars.strike) delete pr.vars.strike;
+    }
+    return;
+  }
+  const R2 = STRIKE_RADIUS * STRIKE_RADIUS;
+  const struck = new Set(); // propertyIds still under a live strike this turn
+  let firstStruck = null;
+  for (const pr of db.properties) {
+    if (!pr || !pr.pos || !pr.prodMode || !pr.ownerId) continue;
+    const px = pr.pos[0], py = pr.pos[1];
+    let degree = 0;
+    for (const u of protest.units) {
+      if (u.side !== 'att' || u.kind !== 'protestor' || !strikeAlive(u)) continue;
+      const dx = u.pos[0] - px, dy = u.pos[1] - py;
+      if (dx * dx + dy * dy > R2) continue;
+      degree += Math.min(1, (u.strength || 0) / 5000);
+    }
+    if (degree <= 0) continue;
+    degree = Math.min(cap, degree);
+    pr.vars = pr.vars || {};
+    const was = pr.vars.strike;
+    struck.add(pr.id);
+    if (was) {
+      was.degree = degree; // intensity tracks the crowd while it lasts
+    } else {
+      pr.vars.strike = { degree, sinceTurn: turn };
+      if (!firstStruck) firstStruck = pr;
+      store.log('economy', `Work stoppage at ${pr.name}`,
+        'The workforce has joined the strike and downed tools. Production is suspended until the crowds disperse.', 'STRIKE', [pr.ownerId]);
+    }
+  }
+  // One wire piece per protest — the first site to shut down is the story.
+  if (firstStruck && !protest._strikeNewsAt) {
+    protest._strikeNewsAt = turn;
+    draftNews(`${(protest.name || 'THE PROTESTS').toUpperCase()}: WORKERS DOWN TOOLS`,
+      `Workers at ${firstStruck.name} have joined the demonstrations, halting production. Management has been notified; owners are watching the crowds for signs of how long the stoppage may last.`, 'Business', true, 'Wire Service');
+  }
+  // Clear strikes on sites the crowds have left (no unit within the radius).
+  for (const pr of db.properties) {
+    if (pr.vars && pr.vars.strike && !struck.has(pr.id)) {
+      store.log('economy', `Work resumes at ${pr.name}`,
+        'The crowds have moved on and the workforce has returned to the job.', 'STRIKE', [pr.ownerId]);
+      delete pr.vars.strike;
+    }
+  }
+}
 function runEconomy(db, actor) {
+  // Strikes (Phase 31): while an active protest's crowds sit on a property,
+  // its workforce is out — output scales by the strike degree below. Runs
+  // first so every revenue path (goods/cash/province GDP) sees it.
+  try { applyStrikes(db); } catch (e) { /* strikes are optional */ }
   const g = db.globalVars;
   const items = db.items;
   const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
@@ -765,8 +847,9 @@ function runEconomy(db, actor) {
     const staffMult = Math.max(0, Math.min(5, staffRatio));
     const upgradeMult = 1 + ((pr.upgradeInvested || 0) / Math.max(50, pr.value || 100));
     const active = pr.prodMode === 'goods' || pr.prodMode === 'cash';
+    const strikeOf = (pr.vars && pr.vars.strike && pr.vars.strike.degree) || 0;
     const f = active
-      ? Math.max(0.4, outFactor(pr)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult
+      ? Math.max(0.4, outFactor(pr)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult * Math.max(0, 1 - strikeOf)
       : 1;
 
     // gross production value (drives GDP): private at output, public at cost

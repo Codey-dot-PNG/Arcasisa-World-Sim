@@ -105,6 +105,26 @@ takes 0.6× of the same hit. Generic: reads only `db.war`/`db.provinces`, no
 scenario-specific knowledge. (The market-side war effects live in server/market.js — see
 "War → market" below.)
 
+**Strikes (`applyStrikes`, Phase 31):** at the top of runEconomy, every live `att` (crowd)
+unit in an active protest marks nearby sites on strike. A property within
+`STRIKE_RADIUS` (120px) of a crowd gets `pr.vars.strike = {degree, sinceTurn}` — `degree`
+is capped by the protest's `tuning.strikeFrac` (default 0.5) and scales with crowd
+strength (Σ min(1, strength/5000), so a 5000-strong crowd applies its full fraction).
+Production is multiplied by `Math.max(0, 1 − degree)` for both goods and cash modes, AFTER
+the staff/hour multipliers (the workforce multiplier composes first; the strike factor
+multiplies that result). The flags clear the moment the crowds leave or the protest ends
+(a closing timeline log marks it), employees stay employed and wages keep flowing, and the
+first strike of each protest emits a Wire Service `draftNews`. Companies and property
+owners see the banner in their Operations desks.
+
+**Riot refugees (Phase 31):** while a protest is violent (`protestorsViolent`), each
+fighting tick kills civilians around the clashes (`tuning.civFrac` × the tick's losses)
+and every `tuning.refugeeEvery` ticks (default 4) a wave moves `tuning.refugeeFrac`
+(default 0.04) of the affected population into shelter via the same `moveRefugees` /
+`settleRefugees` machinery as war refugees (see docs/WAR.md "Refugee columns"); columns
+render and settle identically, and `war.stats.civilianDeaths`/`refugees` feed the War
+Room strip.
+
 ## Foreign trade — the order book (`generateTradeOrders` / `executeTrade`)
 
 Nothing settles automatically. Each turn `generateTradeOrders` resets the per-turn

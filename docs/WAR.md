@@ -1508,21 +1508,136 @@ whether an in-flight airstrike ever visibly disappears from the predicted
 war. Useful as a regression check whenever `_rebase`, `_optimistic`,
 `_dropBomb`, or the engine's tick pipeline changes shape.
 
-## API — `server/api.js`
+## Protests & civil unrest (Phase 31)
+
+A protest is a **second conflict document** — `db.protest` — built on the exact
+same machinery as an invasion war: same deterministic engine, same realtime
+prediction/heartbeat, same War layer and War Room. An invasion war and a
+protest run **simultaneously** (dual docs; each has its own `_lastTick`
+wall-clock gate), so a GM can run a strike mid-war or a war mid-strike. The
+engine and its `db.war`-shaped reads are unchanged: `server/war.js`'s
+`conflictDoc(db, key)` projects `{ war: db.protest, provinces, cities, … }`
+for every engine call, and every route/command takes a `conflict:
+'war'|'protest'` discriminator (default `war`).
+
+### The document
+
+`db.protest` mirrors `db.war` (`active/paused/speed/tickMs/tick/startedAt`,
+`grid`, `cells`, `units`, `objectives:[]`, `refugees`, `bombs`, `airstrikes`,
+`craters`, `events`, `stats`, `mods`, `allies`, `result`) plus:
+
+- `kind: 'protest'` — the discriminator the engine and client branch on.
+- `attackerId` = organizer entity, `defenderId` = the government.
+- `protest: { organizerId, baseCities, policeCities, protestorsViolent,
+  govViolent, captureMode, tuning: { strikeFrac, civFrac, refugeeFrac,
+  refugeeEvery }, strikeCityNames }` — see the gates and tuning below.
+- No `war.command`/`war.ai` — crowds and police are player-driven; the
+  commander-hierarchy AI no-ops on a protest.
+
+Units: crowds (`side:'att'`, `kind:'protestor'`, glyph ✊) spawn around the
+base cities (`crowds` per city, each `perCity` strong, speed 2.5, atk 0.35);
+police detachments (`side:'def'`, `kind:'police'`, glyph 🚓, `garrison:true`,
+speed 0 until the first order, strength scaled with city size) spawn 2 per
+police city.
+
+### Violence & territory gates (engine)
+
+`canFight` (shared `war-engine.js`, byte-identical on server and client)
+enforces the escalation ladder:
+
+- `att` (crowds) fight **only** while `war.protest.protestorsViolent` —
+  the organizer side's "Allow fighting" toggle.
+- `def` (police/army) fight when the crowds are violent **or**
+  `war.protest.govViolent` — the government's "Use force" toggle. A
+  government may not attack a peaceful crowd, but may defend once attacked.
+- `stepTerritory` early-returns unless `war.protest.captureMode` — the
+  "Capture territory" toggle that flips the protest into occupation mode.
+- `checkVictory` for `kind === 'protest'` ends the rally when **no live `att`
+  units remain** (`result.winner:'def'`, "Protests dispersed"): a protest can
+  never formally win — a concession is a GM end. Capture mode records cells
+  but cannot end the protest.
+- Airstrikes are defender-only AND only once the protest is violent
+  (`isProtestViolent` in `dropBomb` and the `/api/war/bomb` route).
+
+### Lifecycle & commands
+
+- `POST /api/gm/protest/start { name?, organizerId, baseCities:[ids],
+  policeCities:[ids], crowds?, perCity? }` — GM-only; 409 while a protest is
+  active. Organizer can be a party, person, company, org or foreign power;
+  at least one base city is required.
+- `POST /api/protest/control { conflict:'protest', protestorsViolent?,
+  govViolent?, captureMode? }` — side-gated by `cmdAccess` (see below); each
+  flip pushes a milestone event, logs to the timeline and (for the escalation
+  flips) drafts Wire Service news.
+- `POST /api/gm/protest/tuning { strikeFrac? 0–1, civFrac? 0–10,
+  refugeeFrac? 0–0.5, dmg? 0.1–10, hp? 0.1–10 }` — GM-only; `hp` rescales
+  live unit strengths by the ratio, exactly like `setWarTuning`.
+- `POST /api/gm/protest/end` — GM abort; refugees still on the road settle,
+  strike flags clear next economy pass.
+
+### Command authority
+
+`api.cmdAccessOf(db, war, u)` — the same per-conflict answer shipped to every
+client as `war.cmdAccess {att, def}`:
+
+- `att` (crowds): GM, or any operator who **controls the organizer entity**
+  via the ownership chain — a party leader commands their party's crowds.
+- `def` (police): GM, controllers of the defender entity,
+  `government`-clearance operators, or anyone holding the `military` map
+  layer (the National Police file under the military staff — the police role
+  gained `'military'` in its mapLayers for this).
+
+Every `/api/war/command` and `/api/war/bomb` call is side-gated against this;
+violations 403 with `deny`.
+
+### Strike economics
+
+Each economy turn, `sim.applyStrikes` looks for live `att` (crowd) units
+within `STRIKE_RADIUS` (120px) of a property and writes
+`pr.vars.strike = { degree, sinceTurn }` — `degree` capped at the protest's
+`tuning.strikeFrac` and scaled by crowd strength (a 5000-strong crowd applies
+its full fraction). Production is multiplied by `Math.max(0, 1 − degree)`.
+The first strike of a protest emits a Wire Service `draftNews`; the flags
+clear (with a closing log) the moment the crowds leave or the protest ends.
+Striking employees stay employed — no layoffs, no pay stops.
+
+### Riot casualties & refugees
+
+While a protest is violent, `applyRiotDevastation` applies the same
+`refugees` machinery as a war: each fighting tick kills civilians around the
+clashes (`tuning.civFrac` × the tick's casualties), and every
+`refugeeEvery` ticks a `moveRefugees` wave evacuates `refugeeFrac` of the
+affected population toward shelter. Refugee columns render and settle exactly
+like war refugees; civilian deaths and refugee counts feed
+`war.stats.civilianDeaths` / `war.stats.refugees` in the War Room strip.
+
+### Client
+
+`public/js/war.js` predicts and renders **both** docs at once on the War
+layer (one shared `_preds` map keyed by conflict, one heartbeat polling
+`GET /api/war/state` returning `{war, protest, v}`). The floating toolbar
+gains a ⚔ / ✊ conflict switch (commands, selection and the GM side toggle
+target the active conflict); the War Room stacks a section per conflict with
+protest-specific status chips, side toggles, tuning sliders and a GM start
+form (organizer picker, city check-lists, crowd sizing). The map layer label
+and registration trigger on `S().war || S().protest`.
+
+
 
 - `POST /api/gm/war/start { scenario }` — GM-only; 409 if a war is already
   active; 400 for an unknown scenario id or a scenario referencing missing
   entities.
-- `POST /api/gm/war/control { paused?, speed? }` — GM-only; `speed` must be
-  one of 1/2/4/8.
-- `POST /api/gm/war/end` — GM-only abort. `endWar` sets `active:false` and
-  (if the war hadn't already produced a result) a `result` with
-  `winner: null` — **the war document is kept, not deleted**, so the GM (and
-  players) can review the final front line and casualty count. A GM must
-  start a new scenario to run another war; there's no separate "clear" route
-  — the next `war/start` fails with 409 while one is still `active`, and
-  since `startWar` overwrites `db.war` wholesale, starting a new scenario
-  after a `result` has been set naturally replaces the old record.
+- `POST /api/gm/war/control { paused?, speed?, conflict? }` — GM-only;
+  `speed` must be one of 1/2/4/8. `conflict` picks which doc (default `war`).
+- `POST /api/gm/war/end { conflict? }` — GM-only abort. `endWar` sets
+  `active:false` and (if the war hadn't already produced a result) a
+  `result` with `winner: null` — **the war document is kept, not deleted**,
+  so the GM (and players) can review the final front line and casualty count.
+  A GM must start a new scenario to run another war; there's no separate
+  "clear" route — the next `war/start` fails with 409 while one is still
+  `active`, and since `startWar` overwrites `db.war` wholesale, starting a
+  new scenario after a `result` has been set naturally replaces the old
+  record.
 - `POST /api/gm/war/tuning { dmg?, bombDmg?, hp? }` — GM-only; each provided
   key must be a finite number, clamped to `[0.1, 10]`; calls
   `war.setWarTuning` — see "GM global tuning" above for what each multiplier
@@ -1532,38 +1647,42 @@ war. Useful as a regression check whenever `_rebase`, `_optimistic`,
   `{ scenarios: [{id, name, attackerId, defenderId, attackerName, defenderName}, …] }`
   for every entry in `server/war-scenarios.js`, so the War Room's Start form
   doesn't hardcode the scenario list — see "GM Studio" client note below.
-- `POST /api/gm/war/spawn { side, pos:[x,y], kind?, name?, count?, strength?, atk?, speed? }`
+- `POST /api/gm/war/spawn { side, pos:[x,y], kind?, name?, count?, strength?, atk?, speed?, conflict? }`
   — GM-only; calls `war.spawnUnits` (see "GM unit spawner" below). `side`
   must be `att`/`def`, `pos` finite inside the grid, `count` clamped 1–12,
   `strength` 50–20000, `atk` 0.2–10, `speed` 0–12; any omitted stat falls
-  back to `UNIT_DEFAULTS[kind]` (default kind `infantry`).
+  back to `UNIT_DEFAULTS[kind]` (default kind `infantry`). In a protest,
+  `protestor` crowds are att-only and `police` def-only.
 - `POST /api/gm/war/join { entityId, side, count? }` — GM-only; calls
   `war.joinWar` (see "Foreign intervention" below). `entityId` must resolve
   to a `type:'foreign'` entity that isn't already the attacker/defender or a
   prior `war.allies` entry; `count` clamps 1–10 (default 4).
-- `POST /api/war/command { side?, orders:[{unitId,dest}]|[{unitId,path}] }`
-  and `POST /api/war/bomb { side?, pos:[x,y] }` — **player-accessible** (any
-  logged-in operator, not GM-gated); see "Interactive War layer" above for
-  the authority model and validation, and "Manual paths" for the `path` order
-  shape.
+- `POST /api/war/command { side?, orders:[{unitId,dest}]|[{unitId,path}], conflict? }`
+  and `POST /api/war/bomb { side?, pos:[x,y], conflict? }` —
+  **player-accessible** (any logged-in operator with `cmdAccess` for that
+  side, not GM-gated); see "Interactive War layer" above for the authority
+  model and validation, and "Manual paths" for the `path` order shape. In a
+  protest, bombs are additionally rejected while the protest is peaceful.
 - `GET /api/war/state` — **player-accessible** lightweight heartbeat (Phase
   18): runs `maybeWarTick` (save + broadcast on a real tick) and returns
-  `{war, v}` only, with `war.command` redacted for non-GM exactly like
-  filterState (numeric plan state ships, every nation's `notes` emptied —
-  see `warForPlayers`). Clients watching an active war poll it at ~tick cadence;
-  see "Client-side prediction" above.
+  `{war, protest, v}` only, with `war.command`/`protest.command` redacted for
+  non-GM exactly like filterState (numeric plan state ships, every nation's
+  `notes` emptied — see `warForPlayers`). Clients watching an active conflict
+  poll it at ~tick cadence; see "Client-side prediction" above.
 - Heartbeat: `GET /api/state` also calls `war.maybeWarTick(db)` right after
   the existing `market.maybeDayTick(db)` call, saving + broadcasting on a
   real tick — identical wall-clock-gate pattern, so any traffic at all
   drives the war even if no one is running the dedicated heartbeat.
-- `api.filterState`: `db.war` ships to every logged-in operator (so all
-  players can watch the front). Since Phase 27 non-GM roles receive a
-  REDACTED `war.command` — the numeric plan state (phases/postures,
+- `api.filterState`: `db.war` AND `db.protest` ship to every logged-in
+  operator (so all players can watch the front). Since Phase 27 non-GM roles
+  receive a REDACTED `war.command` — the numeric plan state (phases/postures,
   doctrines, thresholds, tier gates) with every nation's `notes: []` —
   because the client's predicted engine needs it to replay the commander AI
   deterministically between snapshots (see `warForPlayers` in api.js). Each
-  command's REASONING (its `notes`) remains GM-only intel; players still
-  see objectives, casualties, province control and the event feed.
+  command's REASONING (its `notes`) remains GM-only intel; players still see
+  objectives, casualties, province control and the event feed. Protests have
+  no `command`; every doc additionally ships the caller's `cmdAccess
+  {att, def}`.
 
 ## Local realtime — `server.js`
 

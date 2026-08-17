@@ -55,6 +55,41 @@ const EQUIP_DEFAULTS = {
 };
 function warCfg(db) { return Object.assign({}, DEVASTATION_DEFAULTS, EQUIP_DEFAULTS, (db.settings && db.settings.war) || {}); }
 
+// ---------- protests & mass strikes (Phase 31) ----------
+// A protest is a SECOND conflict document (db.protest) built from the exact
+// same machinery as a war — deterministic engine ticks, heartbeat prediction,
+// GM spawner, airstrikes — with protestor crowds as side 'att' and the
+// security forces as side 'def'. `kind: 'protest'` is the marker the engine
+// gates on (canFight/stepTerritory/checkVictory in war-engine.js). All the
+// world-specific numbers below are data: settings.war.protest overrides any
+// of these defaults (engine-generic, rule 7).
+const PROTEST_DEFAULTS = {
+  tickMs: 2000,            // per-tick interval at 1× speed, like a war's
+  strikeFrac: 0.5,         // max output cut on a property fully swamped by the strike
+  civPerRiotFrac: 0.6,     // riot civilian toll as a fraction of civPerFightTick (strength-scaled)
+  refugeeRiotFrac: 0.04,   // fraction of a province's population fleeing per riot wave
+  refugeeRiotEvery: 4,     // riot refugee wave cadence (ticks)
+  dmg: 1,                  // default violence multiplier (GM-adjustable)
+  hp: 1
+};
+function protestCfg(db) {
+  return Object.assign({}, PROTEST_DEFAULTS, (((db.settings || {}).war || {}).protest) || {});
+}
+// The engine always reads `db.war`; each conflict doc ticks through a small
+// projection that puts the conflict under that key and shares everything else
+// (provinces, cities, settings, entities, terrain) with the real db.
+function conflictDoc(db, key) {
+  if (key !== 'protest') return db;
+  return {
+    war: db.protest, provinces: db.provinces, cities: db.cities,
+    settings: db.settings, entities: db.entities, terrain: db.terrain
+  };
+}
+function isProtestViolent(war) {
+  return !!(war && war.kind === 'protest' && war.protest &&
+    (war.protest.protestorsViolent || war.protest.govViolent));
+}
+
 // Population changes always move vars.population AND demographics together
 // (pro-rata), so the election model sees the same world the map does.
 function scalePopulation(prov, ratio) {
@@ -133,8 +168,8 @@ function moveRefugees(db, war, sourceProv, frac) {
 // once (`_settled` — also what licenses the engine to prune the entry, see
 // stepRefugees). People killed on the road (engine-side airstrike falloff /
 // crossfire, already in stats.civilianDeaths) simply never arrive.
-function settleRefugees(db) {
-  const war = db.war;
+function settleRefugees(db, isProtest) {
+  const war = isProtest ? db.protest : db.war;
   if (!war || !Array.isArray(war.refugees)) return;
   for (const r of war.refugees) {
     if (r._settled || r.arrived == null) continue;
@@ -191,8 +226,8 @@ function logNationNotes(db, war, side, nid, nat) {
   }
   nat._noteSeenTick = maxT;
 }
-function logAiNotes(db) {
-  const war = db.war;
+function logAiNotes(db, war) {
+  war = war || db.war;
   if (!war) return;
   const cmd = war.command;
   if (!cmd) return; // pre-hierarchy doc — store.migrate/ensureCommand upgrade it before the first logged tick
@@ -201,9 +236,10 @@ function logAiNotes(db) {
     for (const nid in nations) logNationNotes(db, war, side, nid, nations[nid]);
   }
 }
-function applyDevastation(db) {
-  const war = db.war;
+function applyDevastation(db, key) {
+  const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active) return;
+  if (war.kind === 'protest') { applyRiotDevastation(db, war); return; }
   const cfg = warCfg(db);
   war.stats._refStage = war.stats._refStage || {};
 
@@ -243,6 +279,52 @@ function applyDevastation(db) {
     war.stats._civNewsAt = civ;
     SERVER_CTX.news('CIVILIAN TOLL OF THE WAR MOUNTS',
       `Officials now put the number of civilians killed since the invasion began at more than ${Math.round(civ / 1000) * 1000}. Hospitals near the front report they are past capacity.`);
+  }
+}
+
+// Riot devastation for protest docs: violent crowds/security forces bleed the
+// local province at the (GM-tunable) riot casualty rate and throw off
+// periodic refugee waves — the same moveRefugees/settleRefugees machinery
+// occupation uses, so people leave the books and arrive somewhere else
+// exactly like war refugees. Skipped entirely while the protest stays
+// peaceful (a sit-in hits no one).
+function applyRiotDevastation(db, war) {
+  if (!war.protest || (!war.protest.protestorsViolent && !war.protest.govViolent)) return;
+  war.stats = war.stats || {};
+  const cfg = warCfg(db);
+  const t = war.protest.tuning || {};
+  const civFrac = (t.civFrac !== undefined ? t.civFrac : (cfg.civPerRiotFrac !== undefined ? cfg.civPerRiotFrac : 0.6));
+  const tolls = {};
+  for (const u of war.units) {
+    if (!isLive(u) || u.state !== 'fighting') continue;
+    const pid = geometry.provinceAt(db.provinces, u.pos);
+    if (!pid) continue;
+    tolls[pid] = (tolls[pid] || 0) + cfg.civPerFightTick * Math.max(0.3, (u.strength || 0) / 2000) * civFrac;
+  }
+  for (const pid in tolls) killCivilians(db, war, pid, tolls[pid]);
+  // Periodic riot refugee waves — cadence and size are both GM-tunable.
+  war.stats._riotRefTick = (war.stats._riotRefTick || 0) + 1;
+  const every = Math.max(2, (t.refugeeEvery !== undefined ? t.refugeeEvery : (cfg.refugeeRiotEvery !== undefined ? cfg.refugeeRiotEvery : 4)));
+  const frac = (t.refugeeFrac !== undefined ? t.refugeeFrac : (cfg.refugeeRiotFrac !== undefined ? cfg.refugeeRiotFrac : 0.04));
+  if (war.stats._riotRefTick % every === 0) {
+    for (const pid in tolls) {
+      const prov = db.provinces.find(p => p.id === pid);
+      if (!prov) continue;
+      const moved = moveRefugees(db, war, prov, frac);
+      if (moved > 0) {
+        store.log('event', `Refugees flee ${prov.name}`,
+          `${moved.toLocaleString('en-US')} civilians leave ${prov.name} as rioting spreads.`, 'WAR ENGINE', []);
+        SERVER_CTX.news(`RIOTING ENGULFS ${prov.name.toUpperCase()}`,
+          `An estimated ${moved.toLocaleString('en-US')} civilians are on the roads out of ${prov.name} as street violence escalates. Neighbouring provinces are preparing to receive the displaced.`);
+      }
+    }
+  }
+  // Periodic wire coverage of the mounting toll.
+  const civ = war.stats.civilianDeaths || 0;
+  if (civ - (war.stats._civNewsAt || 0) >= cfg.civNewsEvery) {
+    war.stats._civNewsAt = civ;
+    SERVER_CTX.news('CIVILIAN TOLL OF THE UNREST MOUNTS',
+      `Officials now put the number of civilians killed since the unrest began at more than ${Math.round(civ / 1000) * 1000}. Hospitals near the affected districts are past capacity.`);
   }
 }
 
@@ -1234,8 +1316,10 @@ function demobilizeUnits(db, war, actor) {
   });
   if (parts.length) store.log('event', 'Forces demobilised', `Surviving formations returned their equipment to the national stockpiles: ${parts.join('; ')}.`, actor || 'WAR ENGINE', [war.attackerId, war.defenderId]);
 }
-function endWar(db, actor, reason) {
-  const war = db.war;
+function endWar(db, actor, reason, key) {
+  // Protests share the war lifecycle (dual conflict docs — see startProtest):
+  // `key` picks which document ends, defaulting to the invasion war.
+  const war = key === 'protest' ? db.protest : db.war;
   if (!war) return null;
   war.active = false;
   if (!war.result) war.result = { winner: null, endedAt: new Date().toISOString(), reason: reason || 'Ended by the Gamemaster' };
@@ -1255,15 +1339,18 @@ function endWar(db, actor, reason) {
     if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
   }
   demobilizeUnits(db, war, actor);
-  store.log('event', 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
+  store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
+  if (war.kind === 'protest') {
+    SERVER_CTX.news('THE STREETS FALL QUIET', 'The protests have ended. Banners are being folded away and the affected districts return to their daily routines.');
+  }
   return war;
 }
 
 // ---------- player command entry point ----------
 // Pure order application lives in the engine (the client applies the same
 // orders optimistically); this shim only exists so api.js keeps one import.
-function commandUnits(db, side, orders, actor) {
-  engine.applyOrders(db, side, orders);
+function commandUnits(db, side, orders, actor, key) {
+  engine.applyOrders(conflictDoc(db, key === 'protest' ? 'protest' : 'war'), side, orders);
 }
 
 // ---------- GM unit spawner (Feature: mid-war reinforcements) ----------
@@ -1273,9 +1360,15 @@ function commandUnits(db, side, orders, actor) {
 // is multiplied by the CURRENT hp multiplier, so a mid-war-buffed scenario
 // stays consistent) and marks every unit `spawned: true` for provenance.
 const SPAWN_SCATTER_R = 50; // px — random ring radius units land in around the requested point
-function spawnUnits(db, opts, actor) {
-  const war = db.war;
+function spawnUnits(db, opts, actor, key) {
+  const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active) return { ok: false, error: 'No war is active.' };
+  if (war.kind === 'protest' && opts.kind === 'protestor' && opts.side !== 'att') {
+    return { ok: false, error: 'Protestor crowds are attacker-side units.' };
+  }
+  if (war.kind === 'protest' && opts.kind === 'police' && opts.side !== 'def') {
+    return { ok: false, error: 'Police units are defender-side.' };
+  }
   const side = opts.side === 'att' ? 'att' : (opts.side === 'def' ? 'def' : null);
   if (!side) return { ok: false, error: 'Side must be att or def.' };
   const pos = opts.pos;
@@ -1311,7 +1404,7 @@ function spawnUnits(db, opts, actor) {
       kind, pos: spawnPos, dest: null,
       strength, maxStrength: strength, org: 100,
       speed, atk, state: 'holding', objectiveId: null,
-      garrison: side === 'def' && kind === 'garrison',
+      garrison: side === 'def' && (kind === 'garrison' || kind === 'police'),
       spawned: true
     };
     war.units.push(u);
@@ -1529,6 +1622,180 @@ function setWarTuning(db, patch, actor) {
   return { ok: true, mods: war.mods };
 }
 
+// ---------- protests & mass strikes (Phase 31) ----------
+// GM-started civil unrest that reuses the entire war stack as a SECOND
+// conflict document (db.protest — see protestCfg/conflictDoc above), so an
+// invasion war and a protest can run at the same time. Crowds spawn in the
+// chosen base cities (side 'att', kind 'protestor'); the security forces
+// (side 'def', kind 'police', speed 0 — the engine grants DEF_MOVE_SPEED to
+// defender units on their first order) garrison the chosen police cities.
+// `protest.protest` carries the political state (violence toggles, capture
+// mode) and the GM-tunable riot/economy numbers (protest.protest.tuning).
+function startProtest(db, opts, actor) {
+  const name = (typeof opts.name === 'string' && opts.name.trim().slice(0, 60)) || 'Popular unrest';
+  if (db.protest && db.protest.active) throw new Error('A protest is already underway');
+  const organizer = db.entities.find(e => e.id === opts.organizerId);
+  if (!organizer) throw new Error('Unknown organizer entity: ' + opts.organizerId);
+  const defender = db.entities.find(e => e.id === opts.defenderId) || db.entities.find(e => e.type === 'government');
+  if (!defender) throw new Error('Unknown defender entity.');
+  const cityOf = (id) => db.cities.find(c => c.id === id);
+  const baseIds = Array.isArray(opts.baseCities) ? opts.baseCities.filter(id => !!cityOf(id)) : [];
+  const policeIds = (Array.isArray(opts.policeCities) ? opts.policeCities.filter(id => !!cityOf(id)) : []).filter(id => !baseIds.includes(id));
+  if (!baseIds.length) throw new Error('At least one base city is required.');
+  const cfg = protestCfg(db);
+  const grid = buildGrid(db);
+  engine.ensureNavalGrid(db);
+  const wf = { grid }; // grid facade for clampToWorld
+  const cityPt = (c) => engine.clampToWorld(wf, [c.pos[0] + rand(-30, 30), c.pos[1] + rand(-30, 30)]);
+  const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
+  const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
+  const units = [];
+  let n = 0;
+  for (const cid of baseIds) {
+    const c = cityOf(cid);
+    for (let k = 0; k < crowdCount; k++) {
+      n++;
+      units.push({
+        id: store.uid('warunit'), side: 'att', name: `${name} ${n} (${c.name})`,
+        kind: 'protestor', pos: cityPt(c), dest: null,
+        strength: perCity, maxStrength: perCity, org: 100,
+        speed: 2.5, atk: 0.35, state: 'holding', objectiveId: null,
+        nationId: organizer.id, spawned: true
+      });
+    }
+  }
+  // Police detachments: two per selected city, strength scaled with city size
+  // (the capital rates more than a township).
+  for (const cid of policeIds) {
+    const c = cityOf(cid);
+    const st = engine.clamp(Math.round(600 * Math.max(1, c.size || 1)), 400, 6000);
+    for (let k = 0; k < 2; k++) {
+      n++;
+      units.push({
+        id: store.uid('warunit'), side: 'def', name: `Police — ${c.name} ${toRoman(k + 1)}`,
+        kind: 'police', pos: cityPt(c), dest: null,
+        strength: st, maxStrength: st, org: 100,
+        speed: 0, atk: 1, state: 'holding', objectiveId: null,
+        nationId: defender.id, garrison: true, spawned: true
+      });
+    }
+  }
+  const attTotal = units.filter(u => u.side === 'att').reduce((s, u) => s + u.strength, 0);
+  db.protest = {
+    active: true, paused: false, speed: 1,
+    tickMs: cfg.tickMs, _lastTick: Date.now(),
+    tick: 0, startedAt: new Date().toISOString(),
+    kind: 'protest', name,
+    attackerId: organizer.id, defenderId: defender.id,
+    grid, cells: {}, units, objectives: [], refugees: [],
+    supplyAnchor: null,
+    seed: (Math.floor(Math.random() * 0xffffffff)) >>> 0 || 1,
+    bombs: { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0, aircraftRemaining: 0 } },
+    airstrikes: [], craters: [], events: [],
+    stats: { attLosses: 0, defLosses: 0, provinceControl: {}, citiesHeld: [], civilianDeaths: 0, refugees: 0, enemyControl: {} },
+    mods: { dmg: cfg.dmg, bombDmg: 1, hp: cfg.hp },
+    allies: { att: [], def: [] },
+    protest: {
+      organizerId: organizer.id,
+      baseCities: baseIds, policeCities: policeIds,
+      protestorsViolent: false, govViolent: false, captureMode: false,
+      tuning: {
+        strikeFrac: cfg.strikeFrac,
+        civFrac: cfg.civPerRiotFrac,
+        refugeeFrac: cfg.refugeeRiotFrac,
+        refugeeEvery: cfg.refugeeRiotEvery
+      },
+      strikeCityNames: baseIds.map(id => cityOf(id).name)
+    },
+    result: null
+  };
+  const civNames = [...new Set(baseIds.map(id => cityOf(id).name))].join(', ');
+  store.log('gm', 'Protest started',
+    `${name}: ${units.filter(u => u.side === 'att').length} crowd${units.filter(u => u.side === 'att').length === 1 ? '' : 's'} (${attTotal.toLocaleString('en-US')} strong) gathered in ${civNames}; police deployed in ${policeIds.length} cit${policeIds.length === 1 ? 'y' : 'ies'}.`,
+    actor || 'WAR ENGINE', [organizer.id, defender.id]);
+  SERVER_CTX.news(`${name.toUpperCase()}: CROWDS GATHER IN THE STREETS`,
+    `Mass demonstrations are underway in ${civNames} as supporters of ${organizer.name} take to the streets. The government has ordered police to the affected districts.`);
+  return db.protest;
+}
+
+// The side-toggle entry point for an ACTIVE protest. Server-enforced: the
+// client is untrusted, and `war.protest` flags are what the engine's canFight
+// gates both sides' violence on (see war-engine.js).
+function setProtestControl(db, patch, actor) {
+  const protest = db.protest;
+  if (!protest || !protest.active) return { ok: false, error: 'No protest is active.' };
+  const p = protest.protest = protest.protest || {};
+  const before = { v: !!p.protestorsViolent, g: !!p.govViolent, c: !!p.captureMode };
+  if (typeof patch.protestorsViolent === 'boolean') p.protestorsViolent = !!patch.protestorsViolent;
+  if (typeof patch.govViolent === 'boolean') p.govViolent = !!patch.govViolent;
+  if (typeof patch.captureMode === 'boolean') p.captureMode = !!patch.captureMode;
+  const after = { v: !!p.protestorsViolent, g: !!p.govViolent, c: !!p.captureMode };
+  const parts = [];
+  if (after.v !== before.v) parts.push(after.v ? 'the crowds turn violent' : 'the crowds revert to peaceful protest');
+  if (after.g !== before.g) parts.push(after.g ? 'security forces are ordered to disperse the crowds by force' : 'security forces stand down');
+  if (after.c !== before.c) parts.push(after.c ? 'protestors begin seizing territory' : 'protestors abandon seized ground');
+  if (parts.length) {
+    const anchor = protest.units.find(u => isLive(u));
+    engine.pushEvent(protest, 'milestone', anchor ? anchor.pos.slice() : [1920, 1080], parts.join('; ') + '.');
+    store.log('gm', 'Protest status changed', parts.join('; ') + '.', actor || 'WAR ENGINE', [protest.attackerId, protest.defenderId]);
+    const where = (p.strikeCityNames && p.strikeCityNames.join(', ')) || 'several cities';
+    if (after.v && !before.v) {
+      SERVER_CTX.news('PROTESTS TURN VIOLENT', `Demonstrations in ${where} have boiled over into violence. Smoke rises over the crowds.`);
+    } else if (!after.v && before.v) {
+      SERVER_CTX.news('CROWDS STAND DOWN', 'After a day of clashes, the demonstrators have called for calm and the streets have largely quieted.');
+    }
+    if (after.g && !before.g) SERVER_CTX.news('SECURITY FORCES MOVE IN', 'Police and paramilitary detachments have been ordered to disperse the demonstrations by force.');
+    if (after.c && !before.c) SERVER_CTX.news('PROTESTORS SEIZE DISTRICTS', `The crowds in ${where} have begun occupying streets and squares, throwing up barricades and claiming the territory.`);
+  }
+  return { ok: true, protest: p };
+}
+
+// GM tuning for an active protest — the three levers the user asked for:
+// violence damage (dmg), economic impact (strikeFrac) and casualties
+// (civFrac), plus hp and refugee scale. Same clamping spirit as
+// setWarTuning (TUNING_MIN/MAX for the multipliers).
+function setProtestTuning(db, patch, actor) {
+  const protest = db.protest;
+  if (!protest || !protest.active) return { ok: false, error: 'No protest is active.' };
+  const p = protest.protest = protest.protest || {};
+  p.tuning = p.tuning || {};
+  const changes = [];
+  if (patch.strikeFrac !== undefined && Number.isFinite(Number(patch.strikeFrac))) {
+    p.tuning.strikeFrac = engine.clamp(Number(patch.strikeFrac), 0, 1);
+    changes.push(`strikeFrac=${p.tuning.strikeFrac}`);
+  }
+  if (patch.civFrac !== undefined && Number.isFinite(Number(patch.civFrac))) {
+    p.tuning.civFrac = engine.clamp(Number(patch.civFrac), 0, 10);
+    changes.push(`civFrac=${p.tuning.civFrac}`);
+  }
+  if (patch.refugeeFrac !== undefined && Number.isFinite(Number(patch.refugeeFrac))) {
+    p.tuning.refugeeFrac = engine.clamp(Number(patch.refugeeFrac), 0, 0.5);
+    changes.push(`refugeeFrac=${p.tuning.refugeeFrac}`);
+  }
+  if (patch.dmg !== undefined && Number.isFinite(Number(patch.dmg))) {
+    protest.mods = protest.mods || { dmg: 1, hp: 1 };
+    protest.mods.dmg = engine.clamp(Number(patch.dmg), TUNING_MIN, TUNING_MAX);
+    changes.push(`dmg=${protest.mods.dmg}×`);
+  }
+  if (patch.hp !== undefined && Number.isFinite(Number(patch.hp))) {
+    const newHp = engine.clamp(Number(patch.hp), TUNING_MIN, TUNING_MAX);
+    const oldHp = (protest.mods || {}).hp || 1;
+    if (newHp !== oldHp) {
+      const ratio = newHp / oldHp;
+      for (const u of protest.units) {
+        if (!isLive(u)) continue;
+        u.strength = round1(u.strength * ratio);
+        u.maxStrength = round1((u.maxStrength || u.strength) * ratio);
+      }
+    }
+    protest.mods = protest.mods || {};
+    protest.mods.hp = newHp;
+    changes.push(`hp=${newHp}×`);
+  }
+  if (changes.length) store.log('gm', 'Protest tuning updated', changes.join(' '), actor || 'WAR ENGINE', []);
+  return { ok: true, tuning: p.tuning, mods: protest.mods || {} };
+}
+
 // ---------- peace treaties (Phase 24 — GM-only) ----------
 // A treaty is the GM's pen redrawing the world after (or during) a war:
 // reparations move money, cession hands a Republic province to a foreign
@@ -1665,14 +1932,19 @@ function findAirstrikeOrigin(db) {
 // engine's stepAirstrikes at war.tick >= strikeTick, so a predicting client
 // detonates it on the same tick as the server. This function keeps the same
 // name/route/auth/cooldown contract the client already calls.
-function dropBomb(db, side, pos, actor) {
+function dropBomb(db, side, pos, actor, key) {
   // Bombs are DEFENDER-ONLY — the attacker AI never calls in an airstrike,
   // and even a GM commanding the attacker side directly has no air arm. This
   // is enforced here, not just hidden client-side, since the client is
   // untrusted.
   if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
-  const war = db.war;
+  const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
+  // Protests: the air arm stays grounded until the unrest turns violent — a
+  // peaceful crowd is never tear-gassed from the sky.
+  if (war.kind === 'protest' && !isProtestViolent(war)) {
+    return { ok: false, error: 'Airstrikes are only available once the unrest has turned violent.' };
+  }
   war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };
   const bomb = war.bombs[side] = war.bombs[side] || { cooldownUntil: 0 };
   const now = Date.now();
@@ -1815,21 +2087,41 @@ function ctxFor(db) {
 // u.supplied verdicts and writes the u.kit the NEXT tick(s) fight with.
 // maybeWarTick can burn through several catch-up ticks per call — resupply
 // applies once per call, same accepted coarseness as applyDevastation.
-function warTick(db) {
-  ensureWarGrid(db);
-  const ticked = engine.warTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); logAiNotes(db); applyOccupationTransfers(db); }
-  // The engine ends wars itself (annihilation, total conquest) without going
-  // through endWar — catch that here so the survivors still demobilise.
-  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE');
+// Ticks the server side of one conflict document ('war' or 'protest') —
+// the engine machinery (deterministic tick, airstrike cinematics, refugees)
+// plus everything that must NEVER run on a predicting client: resupply draws,
+// devastation/refugee bookkeeping, AI plan notes, occupation transfers.
+// `force` uses the engine's immediate warTick (used nowhere today — kept for
+// parity with the pre-protest module API); the heartbeat path always uses
+// wall-clock-gated maybeWarTick so each document advances on its own cadence.
+function tickConflict(db, key, force) {
+  const doc = key === 'protest' ? db.protest : db.war;
+  if (!doc || !doc.active) return false;
+  const wat = conflictDoc(db, key);
+  ensureWarGrid(wat);
+  const ticked = force ? engine.warTick(wat, ctxFor(db)) : engine.maybeWarTick(wat, ctxFor(db));
+  if (ticked) {
+    resupplyUnits(db, doc);
+    applyDevastation(db, key);
+    settleRefugees(db, key === 'protest');
+    if (doc.kind !== 'protest') { logAiNotes(db, doc); applyOccupationTransfers(db); }
+  }
+  // The engine ends conflicts itself (annihilation, total conquest, protest
+  // dispersal) without going through endWar — catch that here so the
+  // survivors still demobilise.
+  if (ticked && doc && !doc.active) demobilizeUnits(db, doc, 'WAR ENGINE');
   return ticked;
 }
+function warTick(db) {
+  return tickConflict(db, 'war', true);
+}
 function maybeWarTick(db) {
-  ensureWarGrid(db);
-  const ticked = engine.maybeWarTick(db, ctxFor(db));
-  if (ticked) { resupplyUnits(db, db.war); applyDevastation(db); settleRefugees(db); logAiNotes(db); applyOccupationTransfers(db); }
-  if (ticked && db.war && !db.war.active) demobilizeUnits(db, db.war, 'WAR ENGINE'); // see warTick — engine-ended wars must demobilise too
-  return ticked;
+  // Dual conflict docs (Phase 31): a protest and an invasion tick
+  // independently and may run at the same time; each advances through its
+  // own _lastTick gate inside engine.maybeWarTick.
+  const r1 = tickConflict(db, 'war', false);
+  const r2 = tickConflict(db, 'protest', false);
+  return r1 || r2;
 }
 
 // Milestone fingerprint — the changes worth a GLOBAL sync broadcast. Routine
@@ -1851,9 +2143,10 @@ function milestoneKey(war) {
 // Tick + tell the caller how loudly to signal: save on any tick (the commit
 // is what heartbeat pollers read), broadcast only on a milestone.
 function maybeWarTickSignal(db) {
-  const before = milestoneKey(db.war);
+  const bWar = milestoneKey(db.war);
+  const bProt = milestoneKey(db.protest);
   const ticked = maybeWarTick(db);
-  return { ticked, milestone: ticked && milestoneKey(db.war) !== before };
+  return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc };

@@ -331,7 +331,7 @@ function seed() {
     role('president', 'President', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: false, gm: false }),
     role('minister', 'Cabinet Minister', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
     role('journalist', 'Journalist', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: true, gm: false }),
-    role('police', 'Police', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
+    role('police', 'Police', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
     role('military', 'Military', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
   ];
 
@@ -518,6 +518,16 @@ function seed() {
       time: { turn: 0, unit: 'day', perTurn: 1, date: '1960-01-01', auto: { enabled: false, seconds: 3600 } },
       parliamentSeats: 150,
       registration: { open: true, defaultRole: 'citizen', stipend: 5000 },
+      // Phase 31 — protests & mass strikes: world defaults for protest
+      // violence/strike/riot numbers (server/war.js PROTEST_DEFAULTS are the
+      // hard fallbacks when a field is missing; live protests carry their
+      // own per-protest tuning in war.protest.tuning, GM-adjustable).
+      war: {
+        protest: {
+          tickMs: 2000, strikeFrac: 0.5, civPerRiotFrac: 0.6,
+          refugeeRiotFrac: 0.04, refugeeRiotEvery: 4, dmg: 1, hp: 1
+        }
+      },
       newsThresholds: { transaction: 5000000 },
       taxation: { enabled: false, corporateRate: 10, propertyRate: 0 },
       demographics: { groups: GROUPS.slice(), metrics: DEMO_METRICS },

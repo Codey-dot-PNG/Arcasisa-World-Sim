@@ -1362,6 +1362,14 @@
   function canFight(war, u) {
     if (u.state === 'transport') return false;
     if (u.kind === 'boat' && !isWaterAt(war, u.pos)) return false;
+    // Protests (Phase 31): violence is gated per side. Crowds only fight
+    // after their "Allow fighting" toggle; the security forces only deal
+    // damage once the crowd is violent ("use force") or they have been
+    // attacked — a peaceful standoff deals no damage either way.
+    if (war.kind === 'protest' && war.protest) {
+      if (u.side === 'att' && !war.protest.protestorsViolent) return false;
+      if (u.side === 'def' && !war.protest.protestorsViolent && !war.protest.govViolent) return false;
+    }
     return true;
   }
   function stepCombat(db, war, ctx, rng) {
@@ -1595,6 +1603,10 @@
 
   // ---------- territory fracture ----------
   function stepTerritory(db, war) {
+    // Protests (Phase 31) only fracture territory in capture mode (the
+    // protestor-side "Capture territory" toggle) — otherwise the crowd
+    // occupies the square but no flag sticks to it.
+    if (war.kind === 'protest' && !(war.protest && war.protest.captureMode)) return;
     const cs = war.grid.cell;
     for (const u of war.units) {
       if (!isLive(u) || u.state === 'embarked') continue;
@@ -1898,6 +1910,21 @@
   }
   function checkVictory(db, war, ctx) {
     if (!war.active) return;
+    // Protests (Phase 31): no objectives, no territory victory — the rally
+    // ends when every protestor has been dispersed/annihilated, or the GM
+    // calls it off (a protest can never formally "win"; a concession is a GM
+    // end). Capture mode still records cells but cannot end the protest.
+    if (war.kind === 'protest') {
+      const attAlive = war.units.some(u => u.side === 'att' && isLive(u));
+      if (!attAlive) {
+        war.active = false;
+        war.result = { winner: 'def', endedAt: new Date().toISOString(), reason: 'Protests dispersed' };
+        const orgId = war.protest ? war.protest.organizerId : null;
+        ctx.log('event', 'The protests disperse', war.name, 'WAR ENGINE', [orgId, war.defenderId]);
+        ctx.news('THE PROTESTS DISPERSE', 'The last protestor has left the streets. The unrest subsides and the city returns to its routines.');
+      }
+      return;
+    }
     // Ceded-objective fallback: a still-pending objective whose city/province
     // has been ceded away can never complete, and the AI would march forever at
     // a stale point (a real regression when a new scenario's target was ceded

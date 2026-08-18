@@ -1337,10 +1337,7 @@ const GM = {
     const tune = this.getDraft('election-tune', {
       durationDays: cfg.durationDays === undefined ? 14 : cfg.durationDays,
       deviationPct: cfg.deviationPct === undefined ? 12 : cfg.deviationPct,
-      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes,
-      moneySupportBase: cfg.moneySupportBase === undefined ? 40000000 : cfg.moneySupportBase,
-      supportScale: cfg.supportScale === undefined ? 3 : cfg.supportScale,
-      materialCampaignRate: cfg.materialCampaignRate === undefined ? 200 : cfg.materialCampaignRate
+      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes
     });
     main.appendChild(this.field('Count duration (world days)',
       Forms.sliderNum(tune, 'durationDays', 1, 60, { step: 1, suffix: ' days' }),
@@ -1351,15 +1348,10 @@ const GM = {
     main.appendChild(this.field('Late votes per campaign support point',
       Forms.sliderNum(tune, 'supportToVotes', 0, 10000, { step: 250 }),
       'What campaign strength is worth in ballots once the count is running.'));
-    main.appendChild(this.field('Support base (Koren per sqrt-unit)',
-      Forms.sliderNum(tune, 'moneySupportBase', 1000000, 100000000, { step: 1000000 }),
-      'Support = scale × √(value ÷ base). At current settings, a ' + CUR() + '10M war-chest lands ≈ +' + (Math.round(Math.sqrt(10000000 / (tune.moneySupportBase || 40000000)) * (tune.supportScale || 6) * 10) / 10) + ' support.'));
-    main.appendChild(this.field('Support scale multiplier',
-      Forms.sliderNum(tune, 'supportScale', 0.5, 10, { step: 0.5, suffix: '×' }),
-      'Overall strength of campaign spending.'));
-    main.appendChild(this.field(CUR() + ' value per unit of material',
-      Forms.sliderNum(tune, 'materialCampaignRate', 0, 2000, { step: 25 }),
-      'What one unit of stock (grain etc.) is worth for campaigning when the item has no market price.'));
+    main.appendChild(this.field('Campaign funding model',
+      el('div', { style: 'font-size:11px; color:var(--ink-faint); line-height:1.5; padding:8px 10px; border:1px solid var(--rule-faint); background:var(--paper-tint); border-radius:6px;' },
+        'Support scales LINEARLY with the party\'s budget against each campaign\'s base cost in the catalogue: funding it at the base ' + CUR() + ' figure delivers exactly its base strength, a 10× budget delivers 10× support, a tenth delivers a tenth — and the campaign\'s required stock is consumed in the same proportion. Set the base cost, strength and stock per campaign in the catalogue below.'),
+      'The old diminishing-return curve (support base / scale / material rate) no longer applies.'));
     main.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async () => {
         try {
@@ -1367,10 +1359,7 @@ const GM = {
             election: {
               durationDays: tune.durationDays,
               deviationPct: tune.deviationPct,
-              supportToVotes: tune.supportToVotes,
-              moneySupportBase: tune.moneySupportBase,
-              supportScale: tune.supportScale,
-              materialCampaignRate: tune.materialCampaignRate
+              supportToVotes: tune.supportToVotes
             }
           });
           this.draftKey = null;

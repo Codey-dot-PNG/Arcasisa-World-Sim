@@ -962,7 +962,7 @@ const Views = {
   },
 
   /* ═══════════ MODULE VIEWS ═══════════ */
-  render(container) {
+  async render(container) {
     if (W.view === 'map') { GameMap.mount(container); return; }
     // Every sync (turn tick, another player's action) rebuilds this view from
     // scratch, which used to snap the reader back to the top of the page.
@@ -972,22 +972,29 @@ const Views = {
     const doc = el('div.doc-view', el('div.doc-inner'));
     clear(container).appendChild(doc);
     const inner = doc.firstChild;
+    let done = Promise.resolve();
     if (W.view === 'parliament') {
       // Phase 33 — while an election is live, Parliament becomes the
       // Elections desk (campaign trail, then the live count). The full
       // chamber page returns the moment the election ends.
       const elc = S().election;
-      if (elc && elc.active) this.viewElection(inner, elc);
-      else this.viewParliament(inner);
+      if (elc && elc.active) done = this.viewElection(inner, elc);
+      else done = this.viewParliament(inner);
     }
     else if (W.view === 'companies') this.viewCompanies(inner);
     else if (W.view === 'economy') this.viewEconomy(inner);
     else if (W.view === 'population') this.viewPopulation(inner);
     else if (W.view === 'news') this.viewNews(inner);
-    else if (W.view === 'entertainment') Entertainment.render(inner);
+    else if (W.view === 'entertainment') done = Entertainment.render(inner);
     else if (W.view === 'timeline') this.viewTimeline(inner);
     else if (W.view === 'war') War.renderPanel(inner);
     else if (W.view === 'gm') GM.render(container);
+    if (scrollTop) doc.scrollTop = scrollTop;
+    // The Elections desk and Entertainment append async content (polling
+    // fetch) after this frame — the container is momentarily short, and a
+    // browser clamps scrollTop toward the top. Re-apply the offset once the
+    // async content is in the tree so a periodic refresh keeps the reader put.
+    await done;
     if (scrollTop) doc.scrollTop = scrollTop;
   },
 
@@ -1196,8 +1203,12 @@ const Views = {
   },
 
   async viewElection(inner, elc) {
-    if (elc.phase === 'voting') this.electionCountView(inner, elc);
-    else this.electionCampaignView(inner, elc);
+    if (elc.phase === 'voting') return this.electionCountView(inner, elc);
+    // return the promise: the campaign view awaits the polling fetch before
+    // appending the poll box / mini-map / desk. Whoever re-renders (render)
+    // must wait for ALL of that so a scroll restore doesn't clamp toward the
+    // top of a momentarily-short page.
+    return this.electionCampaignView(inner, elc);
   },
 
   // ---- Campaign season with investment forms ----
@@ -1519,22 +1530,12 @@ const Views = {
           S().provinces.forEach(pr => provSel.appendChild(el('option', { value: pr.id }, pr.name)));
           form.appendChild(row('Province:', provSel));
           const campOf = () => camps.find(c => c.id === campSel.value) || camps[0];
-          // Funds + materials ABOVE the GM-set base — each extra unit adds
-          // support on the diminishing curve (estimateSupport server-side).
-          const moneyInput = el('input.text-input', { type: 'number', min: 0, step: 10000, placeholder: '0', style: 'flex:1; font-size:12px;' });
+          // Funds = the party's budget. Support scales LINEARLY with it against
+          // the GM base cost (₳base → base strength, 10× → 10× support), and
+          // the campaign's required stock is consumed in the same proportion.
+          const moneyInput = el('input.text-input', { type: 'number', min: 1, step: 10000, placeholder: '0', style: 'flex:1; font-size:12px;' });
           form.appendChild(row('Funds (' + CUR() + '):', moneyInput));
-          let matSel = null, matQty = null;
-          if (p.inventory && p.inventory.length) {
-            matSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
-            matSel.appendChild(el('option', { value: '' }, '— none —'));
-            p.inventory.forEach(r => { const it = itemById(r.itemId); matSel.appendChild(el('option', { value: r.itemId }, `${it ? it.name : r.itemId} (${fmtNum(r.qty)})`)); });
-            matQty = el('input.text-input', { type: 'number', min: 1, placeholder: 'qty', style: 'width:90px; font-size:12px;' });
-            form.appendChild(row('Materials:', matSel, matQty));
-          }
-          const matsOf = () => (matSel && matSel.value && matQty && matQty.value > 0)
-            ? [{ itemId: matSel.value, qty: Math.max(1, Math.round(Number(matQty.value) || 1)) }]
-            : [];
-          // Info line: description · GM base costs · affinity · duration
+          // Info line: description · GM base cost/strength · affinity · duration
           const infoEl = el('div', { style: 'font-size:10.5px; color:var(--ink-faint); line-height:1.5; margin-bottom:6px;' });
           form.appendChild(infoEl);
           const paintInfo = () => {
@@ -1543,9 +1544,10 @@ const Views = {
             const stock = (c.itemCosts || []).map(r => { const it = itemById(r.itemId); return (it ? it.name : r.itemId) + ' ×' + Math.max(1, Number(r.qty) || 1); }).join(', ');
             const bonus = c.bonusParties && Number(c.bonusParties[p.id]);
             infoEl.textContent = (c.description || '') +
-              (stock ? ' · base needs ' + stock : '') +
+              ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) + ' for +' + c.strength + ' support' +
+              (stock ? ' · needs ' + stock : '') +
               (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '') +
-              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funds and materials above the base add support.';
+              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding scales support (and stock) up or down linearly.';
           };
           campSel.addEventListener('change', paintInfo);
           paintInfo();
@@ -1559,11 +1561,11 @@ const Views = {
           btnRow.appendChild(el('button.dash-btn', { style: 'font-size:11px;', onclick: async () => {
             try {
               const qs = 'partyId=' + encodeURIComponent(p.id) + '&province=' + encodeURIComponent(provSel.value) +
-                '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0) +
-                '&materials=' + encodeURIComponent(JSON.stringify(matsOf()));
+                '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0);
               const r = await GET('/api/election/estimate?' + qs);
-              let txt = '"' + r.campaignName + '": +' + r.baseStrength + ' base' + (r.extraSupport ? ' + ' + r.extraSupport + ' extras' : '') + ' → +' + r.strength + ' support';
+              let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) + ' → +' + r.strength + ' support';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
+              if (r.materials && r.materials.length) txt += ' · uses ' + r.materials.map(m => m.name + ' ×' + fmtNum(m.qty)).join(', ');
               txt += ' · runs ' + r.durationMinutes + ' world minutes';
               if (r.votes) txt += ' · ~' + fmtNum(r.votes) + ' late votes';
               estSpan.textContent = txt;
@@ -1574,7 +1576,7 @@ const Views = {
           launchBtn.onclick = async () => {
             launchBtn.disabled = true;
             try {
-              const r = await POST('/api/election/campaign', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0, materials: matsOf() });
+              const r = await POST('/api/election/campaign', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0 });
               toast(p.abbrev + ' launches "' + (r.campaignName || campOf().name || 'campaign') + '"' + (inCount ? ' into the count.' : '.'));
             } catch (e) { toast(e.message, true); launchBtn.disabled = false; }
           };
@@ -1583,8 +1585,6 @@ const Views = {
           moneyInput.addEventListener('input', dirty);
           provSel.addEventListener('change', dirty);
           campSel.addEventListener('change', () => { paintInfo(); dirty(); });
-          if (matSel) matSel.addEventListener('change', dirty);
-          if (matQty) matQty.addEventListener('input', dirty);
           form.appendChild(btnRow);
           box.appendChild(form);
         }

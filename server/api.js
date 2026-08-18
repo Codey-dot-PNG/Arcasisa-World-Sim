@@ -1443,9 +1443,11 @@ async function handle(req, res, pathname, method) {
     // operator who controls the party (its leader chain) can spend the
     // treasury; the GM can too (checked inline — the route is player-facing).
     // Campaigns come from the GM's catalogue (settings.election.campaigns),
-    // each targeted at ONE province with a per-campaign duration; freeform
-    // extra money/materials on top boost the base strength, and party
-    // affinities (campaign.bonusParties) multiply the whole lot.
+    // each targeted at ONE province with a per-campaign duration; the party
+    // picks a budget and support scales linearly with it against the GM-set
+    // base cost, consuming the campaign's required stock in the same
+    // proportion (no freeform extras); party affinities (campaign.bonusParties)
+    // multiply the whole lot.
     if (pathname === '/api/election/campaign' && method === 'POST') {
       const b = await readBody(req);
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
@@ -1461,12 +1463,13 @@ async function handle(req, res, pathname, method) {
       } catch (e) { return bad(e.message); }
     }
 
-    // Phase 34 — campaign estimate: catalogue campaign + freeform extras,
-    // no spending. Shows base strength, the party-affinity multiplier and
-    // the late votes the drive would add while the count is running. A GET
-    // (query params) so the client can preview without a mutating POST — the
-    // GET never carries a sync payload, so clicking "Estimate" no longer
-    // re-renders the world and wipes the form. POST stays as a legacy alias.
+    // Phase 34 — campaign estimate: catalogue campaign at the chosen budget,
+    // no spending. Shows base strength, the scaled required stock, the
+    // party-affinity multiplier and the late votes the drive would add while
+    // the count is running. A GET (query params) so the client can preview
+    // without a mutating POST — the GET never carries a sync payload, so
+    // clicking "Estimate" no longer re-renders the world and wipes the form.
+    // POST stays as a legacy alias.
     if (pathname === '/api/election/estimate' && (method === 'GET' || method === 'POST')) {
       const b = method === 'POST' ? await readBody(req) : Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
       if (typeof b.materials === 'string') { try { b.materials = JSON.parse(b.materials); } catch (e) { b.materials = []; } }

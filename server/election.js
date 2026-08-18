@@ -21,12 +21,12 @@ const COUNT_NOISE = 0.55;    // per-delta wobble fraction
 const STEPS_CAP = 300;       // counting history rows
 const LOG_CAP = 120;           // campaign / Commission log rows
 
-// Campaign-investment constants (GM-overridable via settings.election).
-// Curve: support = scale × √(value / base), calibrated so a full party
-// war-chest (~₳10M + 3000 tons of grain) lands around +3 support.
-const DEFAULT_MONEY_SUPPORT_BASE = 40000000;   // Koren per sqrt-unit
-const DEFAULT_MATERIAL_CAMPAIGN_RATE = 200;   // Koren-equivalent per unit of material
-const DEFAULT_SUPPORT_SCALE = 6;              // multiplier on sqrt
+// Legacy campaign-investment constants (settings.election), retained for
+// applyTuning tolerance only — the modern model scales support linearly with
+// the party's budget against each campaign's own moneyCost.
+const DEFAULT_MONEY_SUPPORT_BASE = 40000000;   // Koren per sqrt-unit (legacy)
+const DEFAULT_MATERIAL_CAMPAIGN_RATE = 200;   // Koren-equivalent per unit (legacy)
+const DEFAULT_SUPPORT_SCALE = 6;              // multiplier on sqrt (legacy)
 
 const fmtNum = (n) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtMoneyOf = (db, n) => `${db.settings.currency || '₳'}${fmtNum(n)}`;
@@ -54,13 +54,6 @@ function partyAccount(db, party) {
 function qtyOf(entity, itemId) {
   const r = (entity.inventory || []).find(x => x.itemId === itemId);
   return r ? r.qty : 0;
-}
-
-function materialValue(db, itemId) {
-  const item = db.items.find(i => i.id === itemId);
-  if (item && item.price) return item.price;
-  const cfg = db.settings.election || {};
-  return Number(cfg.materialCampaignRate) || DEFAULT_MATERIAL_CAMPAIGN_RATE;
 }
 
 function shuffleArray(arr) {
@@ -117,31 +110,45 @@ function decayCampaignSupport(db, parties) {
   }
 }
 
-// ---------- campaign-investment estimate & execution -------------------------
+// ---------- campaign support (linear budget model) ---------------------------
+// Support scales LINEARLY with the party's budget relative to the GM-set base
+// cost: funding "Soup Kitchen" at its ₳12,000 base delivers its base strength
+// (say 3); a ₳120,000 run delivers 10× that (30 points); a ₳1,200 run delivers
+// 10% (0.3). The campaign's required materials (camp.itemCosts) are consumed
+// in the same proportion — exactly what the campaign uses, nothing extra.
 
-function estimateSupport(db, money, materials) {
-  const cfg = db.settings.election || {};
-  const base = Number(cfg.moneySupportBase) || DEFAULT_MONEY_SUPPORT_BASE;
-  const scale = Number(cfg.supportScale) || DEFAULT_SUPPORT_SCALE;
-  let totalValue = money;
-  for (const m of (materials || [])) {
-    if (!m.itemId || !m.qty || m.qty <= 0) continue;
-    totalValue += m.qty * materialValue(db, m.itemId);
+function campaignRatio(camp, money) {
+  const base = Math.max(1, Math.round(Number(camp.moneyCost) || 0));
+  return { base, ratio: Math.max(0, Math.round(Number(money) || 0)) / base };
+}
+
+// Required stock at a given budget ratio: each row of camp.itemCosts scales by
+// the ratio (rounded up so a partial budget still pays for a usable run), with
+// "or" alternatives scaled the same way.
+function scaledMaterials(camp, ratio) {
+  const out = [];
+  for (const row of (camp.itemCosts || [])) {
+    if (!row || !row.itemId) continue;
+    const qty = Math.max(1, Math.ceil(Math.max(1, Number(row.qty) || 1) * ratio));
+    const or = Array.isArray(row.or) && row.or.length
+      ? row.or.map(o => ({ itemId: o.itemId, qty: Math.max(1, Math.ceil(Math.max(1, Number(o.qty) || 1) * ratio)) }))
+      : undefined;
+    out.push({ itemId: row.itemId, qty, or });
   }
-  if (totalValue <= 0) return 0;
-  return Math.round(Math.sqrt(totalValue / base) * scale * 10) / 10;
+  return out;
 }
 
 // Campaigns come from the GM's catalogue (settings.election.campaigns). Each
-// entry carries a money cost, optional stock costs, a base support strength,
+// entry carries a base money cost, required stock, a base support strength,
 // a duration in WORLD minutes (the campaign's effect fades when it elapses and
 // only then may the party run another) and optional party affinities —
 // bonusParties = { partyId: multiplier } — so e.g. a soup kitchen scores
 // double for the communists and a radio address does more for the national
-// front. On top of the base cost a party may add FREE-FORM extra money and
-// materials; the extra value adds support on the same diminishing curve as
-// the old investment system (estimateSupport), and the whole lot — base +
-// extras — is then multiplied by the party's affinity bonus.
+// front. Funding the campaign at its base cost delivers exactly the base
+// strength; the party picks its own budget and support scales LINEARLY with it
+// (₳120,000 on a ₳12,000 base → 10× strength), with the required stock
+// consumed in the same proportion — no free-form extras — and the whole lot
+// multiplied by the party's affinity bonus.
 
 function campaignBonus(db, camp, partyId) {
   const b = (camp && camp.bonusParties) || {};
@@ -202,8 +209,10 @@ function activeCampaignInfo(el, partyId, nowWorldMs) {
     durationMinutes: c.durationMinutes, endsAtWorldMs: c.endsAtWorldMs, minutesLeft };
 }
 
-// Estimate what a catalogue campaign (plus freeform extras) would deliver
-// for this party in this province — no spending happens here.
+// Estimate what a catalogue campaign would deliver for this party in this
+// province at the given budget — no spending happens here. Support is
+// baseStrength × (budget ÷ base cost); materials are whatever the campaign
+// needs at that budget, scaled from its required stock.
 function estimateCampaign(db, partyId, provinceId, campaignId, money, materials) {
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
@@ -213,9 +222,10 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   if (!camp) throw new Error('Unknown campaign.');
   if (camp.enabled === false) throw new Error('That campaign is not on offer.');
   const baseStrength = Math.max(0, Number(camp.strength) || 0);
-  const extra = estimateSupport(db, Math.max(0, Number(money) || 0), materials || []);
+  const { base, ratio } = campaignRatio(camp, money);
+  const needs = scaledMaterials(camp, ratio);
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round((baseStrength + extra) * bonus * 10) / 10;
+  const strength = Math.round(baseStrength * ratio * bonus * 10) / 10;
   let votes = 0;
   const el = db.election;
   if (el && el.active && el.phase === 'voting') {
@@ -223,17 +233,23 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
     votes = Math.round(strength * vpp);
   }
   const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(camp.durationMinutes) || 5)));
+  const names = db.items || [];
   return {
     ok: true, campaignId: camp.id, campaignName: camp.name, description: camp.description || '',
-    baseStrength, extraSupport: Math.round(extra * 10) / 10, bonus,
-    strength, votes, provinceId, provinceName: prov.name, durationMinutes,
+    baseStrength, baseCost: base, money: Math.max(0, Math.round(Number(money) || 0)), ratio: Math.round(ratio * 1000) / 1000,
+    materials: needs.map(n => ({ itemId: n.itemId, qty: n.qty,
+      or: n.or ? n.or.map(o => ({ itemId: o.itemId, qty: o.qty })) : undefined,
+      name: (names.find(i => i.id === n.itemId) || {}).name || n.itemId })),
+    bonus, strength, votes, provinceId, provinceName: prov.name, durationMinutes,
     active: activeCampaignInfo(el, party.id, worldNowMs(db))
   };
 }
 
-// Run a catalogue campaign: pay the base cost + any freeform extras, apply
-// (base + extra) × affinity bonus support to ONE province, and — if the
-// count is already running — convert the strength into late votes.
+// Run a catalogue campaign: pay the party's budget (support scales linearly
+// with it against the GM-set base cost), consume the campaign's required
+// stock in the same proportion, apply baseStrength × ratio × affinity bonus
+// support to ONE province, and — if the count is already running — convert
+// the strength into late votes.
 function runCampaign(db, partyId, provinceId, campaignId, money, materials, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active — campaigns run only during an election.');
@@ -255,46 +271,29 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
       `it ends in ~${Math.max(1, Math.ceil(running.minutesLeft))}m. Wait for it to wind down before launching another.`);
   }
 
+  // The party's budget IS the total spend — support scales linearly with it
+  // against the GM-set base cost (₳base → base strength, 10× budget → 10×
+  // support, a tenth → a tenth). Materials are whatever the campaign needs at
+  // that budget, scaled from its required stock — no freeform extras.
   money = Math.max(0, Math.round(Number(money) || 0));
-  const baseMoney = Math.max(0, Math.round(Number(camp.moneyCost) || 0));
-  const totalMoney = baseMoney + money;
-
-  // Affordability: base cost + extras, in money and in stock.
-  if (totalMoney > 0) {
-    const acct = partyAccount(db, party);
-    if (!acct || acct.balance < totalMoney) throw new Error(`${party.name}'s treasury cannot cover this campaign (${fmtMoneyOf(db, totalMoney)}).`);
-  }
-  const check = checkItemCosts(db, party, camp.itemCosts);
-  if (!check.ok) throw new Error(`${party.name} lacks ${check.missing} — the campaign needs stock.`);
-  for (const m of (materials || [])) {
-    if (!m.itemId || !m.qty || m.qty <= 0) continue;
-    const have = qtyOf(party, m.itemId);
-    if (have < m.qty) {
-      const it = db.items.find(i => i.id === m.itemId);
-      throw new Error(`${party.name} lacks ${it ? it.name : m.itemId} for the extras — need ${m.qty}, have ${have}.`);
-    }
-  }
-
-  // Deduct: base + extras.
-  if (totalMoney > 0) {
-    sim.txn(partyAccount(db, party).id, null, totalMoney, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
-  }
-  deductItemCosts(party, camp.itemCosts);
-  for (const m of (materials || [])) {
-    if (!m.itemId || !m.qty || m.qty <= 0) continue;
-    party.inventory = party.inventory || [];
-    const row = party.inventory.find(r => r.itemId === m.itemId);
-    if (row) {
-      row.qty -= m.qty;
-      if (row.qty <= 0) party.inventory = party.inventory.filter(r => r.qty > 0);
-    }
-  }
-
-  // Strength: (base + freeform extras) × party affinity.
+  const { base, ratio } = campaignRatio(camp, money);
+  const needs = scaledMaterials(camp, ratio);
   const baseStrength = Math.max(0, Number(camp.strength) || 0);
-  const extra = estimateSupport(db, money, materials);
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round((baseStrength + extra) * bonus * 10) / 10;
+  const strength = Math.round(baseStrength * ratio * bonus * 10) / 10;
+  if (money <= 0) throw new Error('Choose a budget for the campaign (₳) — funding ' + fmtMoneyOf(db, base) + ' delivers its base support.');
+  if (strength <= 0) throw new Error('A budget of ' + fmtMoneyOf(db, money) + ' delivers no support for this campaign — raise the budget.');
+
+  // Affordability: the full budget in money, and the scaled required stock.
+  const acct = partyAccount(db, party);
+  if (!acct || acct.balance < money) throw new Error(`${party.name}'s treasury cannot cover this campaign (${fmtMoneyOf(db, money)}).`);
+  const check = checkItemCosts(db, party, needs);
+  if (!check.ok) throw new Error(`${party.name} lacks ${check.missing} at a ${fmtMoneyOf(db, money)} budget — the campaign needs stock in proportion to its funding.`);
+
+  // Deduct the budget and exactly the scaled stock.
+  sim.txn(acct.id, null, money, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
+  deductItemCosts(party, needs);
+
   if (strength > 0) applySupport(db, party, provinceId, strength);
 
   // Late votes if the count is running — scoped to that province.
@@ -316,32 +315,31 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
     endsAtWorldMs: nowWorldMs + durationMinutes * 60000
   };
 
-  // Descriptions for the log (base stock + freeform extras combined).
-  const matDesc = [...(camp.itemCosts || []).filter(r => r && r.itemId), ...(materials || []).filter(m => m.itemId && m.qty > 0)]
-    .map(m => {
-      const it = db.items.find(i => i.id === m.itemId);
-      return `${it ? it.name : m.itemId} ×${Math.max(1, Number(m.qty) || 1)}`;
-    }).join(', ');
+  // Descriptions for the log (the scaled required stock at this budget).
+  const matDesc = needs.map(m => {
+    const it = db.items.find(i => i.id === m.itemId);
+    return `${it ? it.name : m.itemId} ×${m.qty}`;
+  }).join(', ');
 
   el.log = el.log || [];
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
     partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name,
-    money: totalMoney, materials: materials || [], strength, votes, materialDesc: matDesc,
+    money, materials: needs.map(m => ({ itemId: m.itemId, qty: m.qty })), strength, votes, materialDesc: matDesc,
     durationMinutes, bonus, actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
   store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
-    `${totalMoney ? fmtMoneyOf(db, totalMoney) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
+    `${money ? fmtMoneyOf(db, money) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
 
   sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
     `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}` +
-    `${totalMoney ? ', at a cost of ' + fmtMoneyOf(db, totalMoney) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
+    `${money ? ', at a cost of ' + fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
     `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''} and is expected to deliver ${strength} support points` +
     `${el.phase === 'voting' ? ' — and ' + fmtNum(votes) + ' late ballots' : ''}.`,
     'Politics', false, 'Wire Service');
 
-  return { money: totalMoney, strength, votes, bonus, durationMinutes,
+  return { money, strength, votes, bonus, durationMinutes,
     materialDesc: matDesc, provinceId, provinceName: prov.name };
 }
 

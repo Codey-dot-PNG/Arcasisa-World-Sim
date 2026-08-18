@@ -155,6 +155,10 @@ const App = {
   go(view) {
     if (view !== W.view) {
       W.view = view;
+      // An intentional switch lands at the top, but mark it rendered so the
+      // next periodic refresh treats it as the SAME view and preserves the
+      // reader's scroll instead of snapping to the top.
+      lastRenderedView = view;
       this.renderTabs();
       this.renderView(true);
     }
@@ -238,10 +242,10 @@ const App = {
       return;
     }
     if (W.view === 'gm') { GM.render(container); return; }
-    Views.render(container);
+    return Views.render(container);
   },
 
-  renderAll() {
+  async renderAll() {
     if (!W.me || !S()) return;
     // only preserve scroll when this is a re-render of the same view (a
     // periodic refresh) — an actual view switch should land at the top
@@ -251,7 +255,11 @@ const App = {
     this.renderTabs();
     renderExplorer();
     renderTicker();
-    this.renderView();
+    // Wait for the view render to finish: async views (Elections desk,
+    // Entertainment) append content after their first frame, and restoring
+    // the scroll before that happens clamps it toward the top (a browser
+    // can't scroll past the end of a momentarily-short page).
+    await this.renderView();
     // refresh open inspector with new data
     if (W.selection && !document.getElementById('inspector').classList.contains('hidden')) {
       Views.inspect(W.selection.kind, W.selection.id);

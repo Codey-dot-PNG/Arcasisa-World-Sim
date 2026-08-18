@@ -274,7 +274,7 @@ function activeCampaignInfo(el, partyId, nowWorldMs) {
 // baseStrength when funded at the base cost; below the base it scales
 // proportionally, above it returns diminish (campaignStrength). Materials are
 // whatever the campaign needs at that budget, scaled from its required stock.
-function estimateCampaign(db, partyId, provinceId, campaignId, money, materials) {
+function estimateCampaign(db, partyId, provinceId, campaignId, money, materials, opts) {
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
   const prov = db.provinces.find(p => p.id === provinceId);
@@ -282,7 +282,8 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
   if (!camp) throw new Error('Unknown campaign.');
   if (camp.enabled === false) throw new Error('That campaign is not on offer.');
-  const defameParty = camp.defamePartyId ? db.entities.find(e => e.id === camp.defamePartyId) : null;
+  const tgt = campaignTargeting(db, camp, opts || {});
+  const defameParty = tgt.defamePartyId ? db.entities.find(e => e.id === tgt.defamePartyId) : null;
   const baseStrength = Math.max(0, Number(camp.strength) || 0);
   const { base, ratio } = campaignRatio(camp, money);
   const needs = scaledMaterials(camp, ratio);
@@ -308,10 +309,34 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
       name: (names.find(i => i.id === n.itemId) || {}).name || n.itemId })),
     bonus, resonance, strength, votes, provinceId: effProv, provinceName: (db.provinces.find(p => p.id === effProv) || prov).name,
     defame: defameParty ? { partyId: defameParty.id, name: defameParty.name, abbrev: defameParty.abbrev } : null,
-    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    defamative: tgt.defamative,
+    targetGroup: tgt.targetGroup && tgt.targetGroup !== 'all' ? tgt.targetGroup : null,
     targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null,
     durationMinutes,
     active: activeCampaignInfo(el, party.id, worldNowMs(db))
+  };
+}
+
+// Resolve WHO a campaign hits, from the RUNNING party's runtime choices plus
+// any GM-authored defaults. A campaign is defamative when the catalogue flags
+// it (camp.defamative) — or legacy catalogues that pinned a victim
+// (camp.defamePartyId). The party picks the demographic (opts.targetGroup) and,
+// for a defamative drive, the victim party (opts.defamePartyId), overriding the
+// catalogue defaults. Normal campaigns may never be pointed at a party.
+function campaignTargeting(db, camp, opts) {
+  const defamative = camp.defamative === true || !!camp.defamePartyId;
+  const chosen = opts.defamePartyId || camp.defamePartyId || null;
+  const defamePartyId = defamative ? chosen : null;
+  if (!defamative && (opts.defamePartyId || camp.defamePartyId)) {
+    throw new Error('That campaign is not defamative — it cannot be aimed at a party.');
+  }
+  if (defamative && !defamePartyId) {
+    throw new Error('That is a defamative campaign — choose the party to attack.');
+  }
+  return {
+    defamative,
+    defamePartyId,
+    targetGroup: (opts.targetGroup && opts.targetGroup !== 'all') ? opts.targetGroup : (camp.targetGroup || 'all')
   };
 }
 
@@ -319,8 +344,10 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
 // GM-set base cost, diminishing above it), consume the campaign's required
 // stock in the same proportion, apply the resulting strength × affinity bonus
 // support to ONE province, and — if the count is already running — convert
-// the strength into late votes.
-function runCampaign(db, partyId, provinceId, campaignId, money, materials, actor) {
+// the strength into late votes. The RUNNING party picks the demographic
+// (opts.targetGroup) and, for a defamative campaign, the victim party
+// (opts.defamePartyId); both override any GM-authored defaults.
+function runCampaign(db, partyId, provinceId, campaignId, money, materials, actor, opts) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active — campaigns run only during an election.');
   const party = db.entities.find(e => e.id === partyId);
@@ -330,10 +357,14 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
   if (!camp) throw new Error('Unknown campaign.');
   if (camp.enabled === false) throw new Error('That campaign is not on offer.');
-  // Defamation: the catalogue names the victim; the runner pays the budget.
-  const defameParty = camp.defamePartyId ? db.entities.find(e => e.id === camp.defamePartyId) : null;
-  if (camp.defamePartyId && !defameParty) throw new Error('Defamation target not found: ' + camp.defamePartyId);
+  // Defamation: the running party pays for a defamative drive and names the
+  // victim at launch; the GM's catalogue only says the drive is OFFENSIVE
+  // (normal vs defamative). campaignTargeting resolves + validates the choices.
+  const tgt = campaignTargeting(db, camp, opts || {});
+  const defameParty = tgt.defamePartyId ? db.entities.find(e => e.id === tgt.defamePartyId) : null;
+  if (tgt.defamePartyId && !defameParty) throw new Error('Defamation target not found: ' + tgt.defamePartyId);
   if (defameParty && defameParty.id === party.id) throw new Error('A party cannot run a smear against itself.');
+  const targetGroup = tgt.targetGroup;
 
   const nowWorldMs = worldNowMs(db);
   expireCampaigns(db, el, nowWorldMs, actor);
@@ -371,8 +402,8 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   sim.txn(acct.id, null, money, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
   deductItemCosts(party, needs);
 
-  if (defameParty) damageSupport(db, defameParty, effProv, strength, camp.targetGroup, party, el, actor);
-  else if (strength > 0) applySupport(db, party, effProv, strength, camp.targetGroup);
+  if (defameParty) damageSupport(db, defameParty, effProv, strength, targetGroup, party, el, actor);
+  else if (strength > 0) applySupport(db, party, effProv, strength, targetGroup);
 
   // Late votes if the count is running — scoped to the effective province.
   // Defamation is purely negative: damageSupport subtracts the victim's votes,
@@ -406,8 +437,8 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
     partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId: effProv, provinceName: provEff.name,
     money, materials: needs.map(m => ({ itemId: m.itemId, qty: m.qty })), strength, votes, materialDesc: matDesc,
-    durationMinutes, bonus, resonance, defame: defameParty ? defameParty.id : null,
-    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    durationMinutes, bonus, resonance, defame: defameParty ? defameParty.id : null, defamative: tgt.defamative,
+    targetGroup: targetGroup && targetGroup !== 'all' ? targetGroup : null,
     targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null,
     actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
@@ -419,6 +450,7 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
     (defameParty
       ? `${strength} support removed from ${defameParty.name}`
       : `${strength} permanent support points`) +
+    (targetGroup && targetGroup !== 'all' ? ' · targeting ' + targetGroup : '') +
     ` for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${resonance !== 1 ? ' · ×' + resonance + ' poverty resonance' : ''}${votes ? ' · ' + fmtNum(votes) + ' late ballots affected' : ''}`,
     actor, [party.id].concat(defameParty ? [defameParty.id] : []));
 
@@ -438,7 +470,8 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   return { money, strength, votes, bonus, resonance, durationMinutes,
     materialDesc: matDesc, provinceId: effProv, provinceName: provEff.name,
     defame: defameParty ? { partyId: defameParty.id, name: defameParty.name, abbrev: defameParty.abbrev } : null,
-    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    defamative: tgt.defamative,
+    targetGroup: targetGroup && targetGroup !== 'all' ? targetGroup : null,
     targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null };
 }
 

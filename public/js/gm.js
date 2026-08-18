@@ -245,9 +245,6 @@ const GM = {
   provOptions: Forms.provOptions,
   itemOptions: Forms.itemOptions,
 
-  fmtSat(v) { const n = Number(v); return (Math.round(n * 10) / 10) + ''; },
-  groupOptions() { return (S().settings.demographics.groups || []).map(g => [g, g]); },
-
   getDraft(key, source) {
     if (this.draftKey !== key) { this.draft = JSON.parse(JSON.stringify(source)); this.draftKey = key; }
     return this.draft;
@@ -1506,24 +1503,24 @@ const GM = {
         el('div', { style: 'flex:0 0 90px;' }, this.field('Enabled', this.check(c, 'enabled', ''))),
         el('button.icon-btn', { onclick: () => { camps.splice(camps.indexOf(c), 1); App.renderView(); }, title: 'Remove campaign' }, '✕')));
       row.appendChild(el('div', { style: 'margin-top:4px;' }, this.field('Description', this.text(c, 'description'))));
-      // Defamation + targeting — Phase 4.4. A campaign that names a defame
-      // target is negative: its strength strips the victim's support instead
-      // of adding to the runner's, and late ballots come off the victim.
-      const tagRow = el('div', { style: 'display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:4px;' });
-      tagRow.appendChild(el('div', { style: 'flex:0 0 220px;' },
-        this.field('Defame target (blank = positive)',
-          this.sel(c, 'defamePartyId', [['', '— positive campaign —'], ...parties.map(p => [p.id, p.name])]))));
-      tagRow.appendChild(this.field('Target province',
+      // Campaign type + geography + economic framing (Phase 4.4). A campaign is
+      // either NORMAL (adds support) or DEFAMATIVE (negative — the RUNNING
+      // party chooses which party to attack at launch, not the GM). The party
+      // also picks the demographic on the trail; the GM only fixes geography
+      // and optional economic framing.
+      if (c.defamePartyId) { c.defamative = true; delete c.defamePartyId; } // migrate old catalogue rows
+      if (c.defamative === undefined) c.defamative = false;
+      const typeRow = el('div', { style: 'display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:4px;' });
+      typeRow.appendChild(el('label', { style: 'display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--ink-soft);' },
+        this.check(c, 'defamative', ''), 'Defamative campaign'));
+      typeRow.appendChild(this.field('Target province',
         this.sel(c, 'targetProvince', [['', 'all provinces'], ...this.provOptions()])));
-      tagRow.appendChild(this.field('Target group',
-        this.sel(c, 'targetGroup', [['', 'all groups'], ...this.groupOptions()])));
-      tagRow.appendChild(this.field('Economic framing', this.check(c, 'economicFraming', '')));
-      row.appendChild(tagRow);
-      if (c.defamePartyId) {
-        row.appendChild(el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin-top:2px;' },
-          'Offensive: this drive REMOVES ' + this.fmtSat(c.strength) + ' support from ' + (entName(c.defamePartyId)) +
-          ' instead of adding to the runner — late ballots come off the victim’s pile.'));
-      }
+      typeRow.appendChild(this.field('Economic framing', this.check(c, 'economicFraming', '')));
+      row.appendChild(typeRow);
+      row.appendChild(el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin-top:2px;' },
+        c.defamative
+          ? 'Offensive: this drive is negative — on the trail the RUNNING party picks which party to attack. The strength REMOVES the chosen victim’s support instead of adding to the runner; late ballots come off the victim’s pile.'
+          : 'Positive: on the trail the party picks which demographic to target, and the strength adds to their support.'));
       // Party affinities — strength multiplier per party (1 = neutral).
       row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em; margin-top:8px;' }, 'PARTY AFFINITIES — STRENGTH MULTIPLIER PER PARTY (1 = NEUTRAL)'));
       c.bonusParties = c.bonusParties || {};
@@ -1565,7 +1562,7 @@ const GM = {
     };
     for (const c of camps) campBox.appendChild(renderCamp(c));
     campBox.appendChild(el('div.btn-row',
-      el('button.dash-btn', { onclick: () => { camps.push({ id: 'camp_' + Date.now().toString(36), name: 'New Campaign', description: '', moneyCost: 10000, itemCosts: [], strength: 1, durationMinutes: 5, bonusParties: {} }); App.renderView(); } }, '+ Add Campaign'),
+      el('button.dash-btn', { onclick: () => { camps.push({ id: 'camp_' + Date.now().toString(36), name: 'New Campaign', description: '', moneyCost: 10000, itemCosts: [], strength: 1, durationMinutes: 5, bonusParties: {}, defamative: false }); App.renderView(); } }, '+ Add Campaign'),
       el('button.solid-btn', {
         onclick: async () => {
           try {

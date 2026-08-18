@@ -1677,6 +1677,10 @@ function advanceTurn(steps, actor) {
       hh.runConsumption(db, actor || 'ENGINE');
       hh.runFoodSupply(db, actor || 'ENGINE');
       hh.runInequality(db, actor || 'ENGINE');
+      // Health descriptor stats (life expectancy / infant mortality) are cheap
+      // and healthcare-driven — refresh every turn so dashboards never sit on
+      // stale or missing values. Mortality THINNING stays monthly below.
+      hh.refreshHealthStats(db);
       if (monthBoundary) {
         hh.runMobility(db, actor || 'ENGINE');
         hh.runMortality(db, actor || 'ENGINE');

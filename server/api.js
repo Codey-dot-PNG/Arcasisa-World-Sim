@@ -1471,7 +1471,8 @@ async function handle(req, res, pathname, method) {
       if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
         const result = election.runCampaign(db, party.id, b.province, String(b.campaignId),
-          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName,
+          { targetGroup: b.targetGroup || undefined, defamePartyId: b.defamePartyId || undefined });
         store.save(); broadcast('sync');
         return json(res, 200, { election: db.election, ...result });
       } catch (e) { return bad(e.message); }
@@ -1494,7 +1495,8 @@ async function handle(req, res, pathname, method) {
       if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
         const est = election.estimateCampaign(db, party.id, b.province, String(b.campaignId),
-          Math.round(Number(b.money) || 0), b.materials || []);
+          Math.round(Number(b.money) || 0), b.materials || [],
+          { targetGroup: b.targetGroup || undefined, defamePartyId: b.defamePartyId || undefined });
         return json(res, 200, est);
       } catch (e) { return bad(e.message); }
     }
@@ -1510,7 +1512,8 @@ async function handle(req, res, pathname, method) {
       if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
         const result = election.runCampaign(db, party.id, b.province, String(b.campaignId),
-          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName,
+          { targetGroup: b.targetGroup || undefined, defamePartyId: b.defamePartyId || undefined });
         store.save(); broadcast('sync');
         return json(res, 200, { election: db.election, ...result });
       } catch (e) { return bad(e.message); }

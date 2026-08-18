@@ -189,6 +189,8 @@ table.data th{
 }
 table.data td{padding:7px 8px 7px 0; border-bottom:1px dotted var(--rule); vertical-align:top;}
 table.data tr:hover td{background:var(--hover-wash);}
+table.data tr.active td{background:var(--accent-wash);}
+table.data tr.active td:first-child{color:var(--accent);}
 table.data td.num, table.data th.num{text-align:right; font-family:var(--font-mono); font-size:12px; white-space:nowrap;}
 table.data .row-link{cursor:pointer;}
 table.data .row-link:hover td:first-child{color:var(--accent);}

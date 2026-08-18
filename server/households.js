@@ -440,6 +440,9 @@ function runMobility(db, actor) {
 // Mortality (Phase 3): old age (Retired cohort), disease (scaled by
 // 100 - province healthcare), plus famine which runFoodSupply already applied
 // turn-by-turn. Updates province health vars and the life-expectancy proxy.
+// The THINNING only happens monthly (monthBoundary gates the call) — health
+// DESCRIPTOR stats (lifeExpectancy/infantMortality) refresh every turn via
+// refreshHealthStats so dashboards always show live numbers.
 function runMortality(db, actor) {
   if (!enabled(db)) return;
   const hcfg = cfg(db);
@@ -466,13 +469,42 @@ function runMortality(db, actor) {
       p.vars.mortalityRate = Math.round(provDeaths / (p.vars.population || 1) * 1000 * 100) / 100; // deaths per 1000
       rescaleAllHouseholds(db, p);
     }
-    p.vars.lifeExpectancy = Math.round(clamp01(60 + (healthcare - 40) * 0.3 - (p.vars.mortalityRate || 0) * 0.02, 35, 95));
-    p.vars.infantMortality = Math.round(clamp01(45 - (healthcare - 40) * 0.6, 5, 80));
     deaths += provDeaths;
   }
   db.globalVars.population = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0);
   if (deaths > 0) {
     db.globalVars.lastMortalityDeaths = deaths;
+  }
+  refreshHealthStats(db);
+}
+
+// Health DESCRIPTOR stats, refreshed every turn (cheap, healthcare-driven):
+// life expectancy and infant mortality are the population's vital-signs proxy.
+// mortalityRate normally comes from the monthly thinning pass (observed deaths
+// per 1000); before the first month end — or in a month nobody died — it falls
+// back to the EXPECTED annual rate from the same old-age/disease formula, so
+// dashboards always read a real number instead of a dash.
+function refreshHealthStats(db) {
+  const hcfg = cfg(db);
+  const oldRate = clamp01(Number(hcfg.oldAgeMortalityRate) || 0.012, 0, 0.2);
+  const disK = clamp01(Number(hcfg.diseaseMortalityK) || 0.0004, 0, 0.01);
+  for (const p of db.provinces) {
+    if (!p.vars) continue;
+    const healthcare = p.vars.healthcare !== undefined ? Number(p.vars.healthcare) : 50;
+    if (p.vars.mortalityRate === undefined) {
+      const dis = disK * Math.max(0, 100 - healthcare) / 50;
+      let expected = 0;
+      const total = Object.values(p.demographics || {}).reduce((s, g) => s + (g.population || 0), 0) || 1;
+      for (const gname in (p.demographics || {})) {
+        const g = p.demographics[gname];
+        if (!g || !(g.population > 0)) continue;
+        const rate = (gname === 'Retired' ? oldRate : 0) + dis;
+        expected += rate * (g.population || 0) / total;
+      }
+      p.vars.mortalityRate = Math.round(expected * 12 * 1000 * 100) / 100; // per 1000 / year
+    }
+    p.vars.lifeExpectancy = Math.round(clamp01(60 + (healthcare - 40) * 0.3 - (p.vars.mortalityRate || 0) * 0.02, 35, 95));
+    p.vars.infantMortality = Math.round(clamp01(45 - (healthcare - 40) * 0.6, 5, 80));
   }
 }
 
@@ -543,6 +575,6 @@ function weightedAvg(db, provinceId, group, metricPicker) {
 
 module.exports = {
   runWages, payWages, runConsumption, runFoodSupply,
-  runInequality, syncDemographics, runMobility, runMortality,
+  runInequality, syncDemographics, runMobility, runMortality, refreshHealthStats,
   weightedAvg, slimPopulation, computeGini, enabled
 };

@@ -1000,6 +1000,8 @@ const Views = {
       snap[i] = {
         camp: sels.length > 0 ? sels[0].value : '',
         prov: sels.length > 1 ? sels[1].value : '',
+        group: sels.length > 2 ? sels[2].value : 'all',
+        defameParty: sels.length > 3 ? sels[3].value : '',
         money: money.value,
         estText: est ? est.textContent : '',
         launch: launch ? !launch.disabled : false
@@ -1578,12 +1580,29 @@ const Views = {
           S().provinces.forEach(pr => provSel.appendChild(el('option', { value: pr.id }, pr.name)));
           form.appendChild(row('Province:', provSel));
           const campOf = () => camps.find(c => c.id === campSel.value) || camps[0];
+          const isDefamative = (c) => !!(c && (c.defamative === true || c.defamePartyId));
+          // The RUNNING party picks the demographic to reach (all, or one class)
+          // and, for a defamative campaign, WHICH party to attack — both override
+          // any GM-authored defaults on the trail.
+          const groups = ((S().settings.demographics && S().settings.demographics.groups) || []);
+          const groupSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
+          groupSel.appendChild(el('option', { value: 'all' }, 'All demographics'));
+          groups.forEach(n => groupSel.appendChild(el('option', { value: n }, n)));
+          form.appendChild(row('Target group:', groupSel));
+          const defameSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
+          parties.forEach(pt => { if (pt.id !== p.id) defameSel.appendChild(el('option', { value: pt.id }, pt.name)); });
+          const defameRow = row('Attack party:', defameSel);
+          form.appendChild(defameRow);
+          const paintDefame = () => {
+            defameRow.style.display = isDefamative(campOf()) ? '' : 'none';
+            if (!isDefamative(campOf())) defameSel.value = '';
+          };
           // Funds = the party's budget. Support scales LINEARLY with it against
           // the GM base cost (₳base → base strength, 10× → 10× support), and
           // the campaign's required stock is consumed in the same proportion.
           const moneyInput = el('input.text-input', { type: 'number', min: 1, step: 10000, placeholder: '0', style: 'flex:1; font-size:12px;' });
           form.appendChild(row('Funds (' + CUR() + '):', moneyInput));
-          // Info line: description · GM base cost/strength · affinity · duration
+          // Info line: description · base cost/strength · type · affinity · duration
           const infoEl = el('div', { style: 'font-size:10.5px; color:var(--ink-faint); line-height:1.5; margin-bottom:6px;' });
           form.appendChild(infoEl);
           const paintInfo = () => {
@@ -1592,10 +1611,12 @@ const Views = {
             const stock = (c.itemCosts || []).map(r => { const it = itemById(r.itemId); return (it ? it.name : r.itemId) + ' ×' + Math.max(1, Number(r.qty) || 1); }).join(', ');
             const bonus = c.bonusParties && Number(c.bonusParties[p.id]);
             infoEl.textContent = (c.description || '') +
-              ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) + ' for +' + c.strength + ' permanent support' +
+              ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) +
+              (isDefamative(c) ? ' to strip the target of ' : ' for +') + c.strength + (isDefamative(c) ? ' support' : ' permanent support') +
               (stock ? ' · needs ' + stock : '') +
               (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '') +
-              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding at or below the base scales support (and stock) proportionally; above it, returns diminish (rate set by the Commission).';
+              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding at or below the base scales the effect (and stock) proportionally; above it, returns diminish (rate set by the Commission).';
+            paintDefame();
           };
           campSel.addEventListener('change', paintInfo);
           paintInfo();
@@ -1609,30 +1630,42 @@ const Views = {
           btnRow.appendChild(el('button.dash-btn', { style: 'font-size:11px;', onclick: async () => {
             try {
               const qs = 'partyId=' + encodeURIComponent(p.id) + '&province=' + encodeURIComponent(provSel.value) +
-                '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0);
+                '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0) +
+                '&targetGroup=' + encodeURIComponent(groupSel.value) +
+                (isDefamative(campOf()) ? '&defamePartyId=' + encodeURIComponent(defameSel.value || '') : '');
               const r = await GET('/api/election/estimate?' + qs);
-              let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) + ' → +' + r.strength + ' permanent support';
+              let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) +
+                (r.defame ? ' → strips ' + (r.defame.abbrev || r.defame.name) + ' of +' + r.strength + ' support'
+                          : ' → +' + r.strength + ' permanent support');
               if (r.ratio > 1 && r.multiplier !== undefined && Math.abs(r.multiplier - r.ratio) > 0.005) txt += ' (' + r.multiplier + '× of base — diminishing)';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
+              if (r.resonance !== 1) txt += ' (×' + r.resonance + ' poverty resonance)';
+              if (r.targetGroup) txt += ' · targeting ' + r.targetGroup;
               if (r.materials && r.materials.length) txt += ' · uses ' + r.materials.map(m => m.name + ' ×' + fmtNum(m.qty)).join(', ');
               txt += ' · runs ' + r.durationMinutes + ' world minutes';
-              if (r.votes) txt += ' · ~' + fmtNum(r.votes) + ' late votes';
+              if (r.votes) txt += ' · ~' + fmtNum(r.votes) + ' late ballots' + (r.defame ? ' off ' + r.defame.abbrev : '');
               estSpan.textContent = txt;
-              launchBtn.disabled = false;
+              launchBtn.disabled = !(isDefamative(campOf()) && defameSel.value);
             } catch (e) { toast(e.message, true); }
           }}, 'Estimate'));
           btnRow.appendChild(launchBtn);
           launchBtn.onclick = async () => {
             launchBtn.disabled = true;
             try {
-              const r = await POST('/api/election/campaign', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0 });
-              toast(p.abbrev + ' launches "' + (r.campaignName || campOf().name || 'campaign') + '"' + (inCount ? ' into the count.' : '.'));
+              const r = await POST('/api/election/campaign', {
+                partyId: p.id, province: provSel.value, campaignId: campSel.value,
+                money: Number(moneyInput.value) || 0, targetGroup: groupSel.value,
+                defamePartyId: isDefamative(campOf()) ? (defameSel.value || undefined) : undefined
+              });
+              toast((r.defame ? p.abbrev + ' smears ' + (r.defame.abbrev || r.defame.name) : p.abbrev + ' launches "' + (r.campaignName || campOf().name || 'campaign') + '"') + (inCount ? ' into the count.' : '.'));
             } catch (e) { toast(e.message, true); launchBtn.disabled = false; }
           };
           // Changing anything invalidates the estimate — re-estimate before launch.
           const dirty = () => { launchBtn.disabled = true; estSpan.textContent = ''; };
           moneyInput.addEventListener('input', dirty);
           provSel.addEventListener('change', dirty);
+          groupSel.addEventListener('change', dirty);
+          defameSel.addEventListener('change', dirty);
           campSel.addEventListener('change', () => { paintInfo(); dirty(); });
           // Restore the pre-rebuild form state (budget/estimate the player had
           // queued) so a periodic sync refresh doesn't wipe it mid-flow.
@@ -1640,6 +1673,8 @@ const Views = {
           if (snap) {
             if (snap.camp && camps.some(c => c.id === snap.camp)) campSel.value = snap.camp;
             if (snap.prov && S().provinces.some(pv => pv.id === snap.prov)) provSel.value = snap.prov;
+            if (groups.indexOf(snap.group) !== -1) groupSel.value = snap.group;
+            if (snap.defameParty && parties.some(pt => pt.id === snap.defameParty)) defameSel.value = snap.defameParty;
             moneyInput.value = snap.money;
             if (snap.estText) {
               estSpan.textContent = snap.estText;
@@ -3516,18 +3551,109 @@ const Views = {
       ['Population', fmtCompact(g.population)],
       ['Avg. Happiness', (g.avgHappiness !== undefined ? g.avgHappiness + '%' : '—')],
       ['Avg. Approval', (g.avgApproval !== undefined ? g.avgApproval + '%' : '—')],
-      ['GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)]
+      ['GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)],
+      ['Avg Daily Wage', g.averageDailyWage !== undefined ? CUR() + fmtNum(g.averageDailyWage) : '—', 'across all employed labour'],
+      ['Wage Index', g.wageIndex !== undefined ? Math.round(g.wageIndex) : '—', '100 = baseline pay'],
+      ['Employment', g.totalEmployment !== undefined ? fmtNum(g.totalEmployment) : '—', 'citizens on a payroll'],
+      ['Poverty Rate', g.povertyRateNational !== undefined ? Math.round(g.povertyRateNational * 100) / 100 + '%' : '—', 'below ' + CUR() + (g.povertyLine !== undefined ? fmtNum(g.povertyLine) : '400') + '/day'],
+      ['National Gini', g.giniNational !== undefined ? (Math.round(g.giniNational * 100) / 100) : '—', '0 = equal · 1 = one person']
     ]));
 
+    // ---- The citizenry — living standards (national) ----
+    const provs = S().provinces || [];
+    const pOk = provs.filter(x => x.vars && x.vars.foodSecurity !== undefined && x.vars.population > 0);
+    const popTot = pOk.reduce((s, x) => s + (x.vars.population || 0), 0);
+    const foodSecNat = popTot ? pOk.reduce((s, x) => s + (x.vars.foodSecurity || 0) * (x.vars.population || 0) / popTot, 0) : undefined;
+    const lifeExpNat = popTot ? pOk.reduce((s, x) => s + (x.vars.lifeExpectancy || 0) * (x.vars.population || 0) / popTot, 0) : undefined;
+    const foodColor = (v) => v === undefined ? 'var(--ink-faint)' : (v >= 70 ? 'var(--good)' : v >= 30 ? 'var(--accent)' : 'var(--bad)');
+    const avgHap = (x) => {
+      const vals = (x.demographics && Object.keys(x.demographics)) || [];
+      if (!vals.length) return undefined;
+      const pop = vals.reduce((s, n) => s + (x.demographics[n].population || 0), 0);
+      return pop ? vals.reduce((s, n) => s + (x.demographics[n].happiness || 0) * (x.demographics[n].population || 0) / pop, 0) : undefined;
+    };
+
+    inner.appendChild(this.secLabel('The Citizenry — Living Standards'));
+    const natGrid = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    const col = (title, rows) => el('div.stage', { style: 'flex:1 1 240px; min-width:0;' },
+      el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:8px;' }, title),
+      ...rows);
+    natGrid.appendChild(col('Labour & Wages', [
+      el('div', { style: 'display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px;' },
+        this.statCell('Daily wage', g.averageDailyWage !== undefined ? CUR() + fmtNum(g.averageDailyWage) : '—'),
+        this.statCell('Wage index', g.wageIndex !== undefined ? Math.round(g.wageIndex) : '—')),
+      this.kv('Payroll paid last turn', g.lastWageSpend !== undefined ? CUR() + fmtNum(g.lastWageSpend) : '—'),
+      this.kv('Employed citizens', fmtNum(g.totalEmployment) || '—'),
+      this.kv('Households simulated', fmtNum(g.totalHouseholds) || '—')
+    ]));
+    natGrid.appendChild(col('Subsistence & Health', [
+      this.barRow('National food security', foodSecNat || 0, foodColor(foodSecNat), (foodSecNat !== undefined ? Math.round(foodSecNat) + '%' : '—')),
+      this.kv('Famine deaths (cumulative)', g.famineDeaths !== undefined ? fmtNum(g.famineDeaths) : '—'),
+      this.kv('Avg. life expectancy', lifeExpNat !== undefined ? Math.round(lifeExpNat) + ' yrs' : '—'),
+      this.kv('Avg. happiness', g.avgHappiness !== undefined ? g.avgHappiness + '%' : '—')
+    ]));
+    natGrid.appendChild(col('Inequality & Welfare', [
+      this.barRow('Poverty rate', g.povertyRateNational || 0, 'var(--accent)', (g.povertyRateNational !== undefined ? Math.round(g.povertyRateNational * 100) / 100 + '%' : '—')),
+      this.kv('National Gini', g.giniNational !== undefined ? (Math.round(g.giniNational * 100) / 100) : '—'),
+      this.kv('Welfare spending last turn', g.welfareSpending !== undefined ? CUR() + fmtNum(g.welfareSpending) : '—'),
+      this.kv('Stipend payout last turn', g.lastStipendSpend !== undefined ? CUR() + fmtNum(g.lastStipendSpend) : '—'),
+      this.kv('Wealth of named citizens', g.namedCitizenWealth !== undefined ? CUR() + fmtCompact(g.namedCitizenWealth) : '—')
+    ]));
+    inner.appendChild(natGrid);
+
     if (!W.popProv || !provById(W.popProv)) W.popProv = S().provinces[0] && S().provinces[0].id;
+    this.popProvP = provById(W.popProv) || S().provinces[0];
+    const p = this.popProvP;
+    if (!p || !p.demographics) return;
+
     const chips = el('div.chip-row');
-    for (const p of S().provinces) {
-      chips.appendChild(el('button.chip', { class: p.id === W.popProv ? 'active' : '', onclick: () => { W.popProv = p.id; App.renderView(); } }, p.name));
+    for (const px of provs) {
+      chips.appendChild(el('button.chip', { class: px.id === p.id ? 'active' : '', onclick: () => { W.popProv = px.id; App.renderView(); } }, px.name));
     }
     inner.appendChild(chips);
 
-    const p = provById(W.popProv);
-    if (!p || !p.demographics) return;
+    // ---- Selected province: class income + class share (charts) ----
+    const gnames = Object.keys(p.demographics);
+    const klColors = ['#3f5c3a', '#7a6a3a', '#2456a8', '#8a2f24', '#6b7280', '#9aa88a', '#a37427', '#5b5e2c'];
+    const colorOf = (n, i) => klColors[i % klColors.length];
+    const incRows = gnames.filter(n => p.demographics[n].income !== undefined).map((n, i) => ({ label: n, value: p.demographics[n].income, color: colorOf(n, i) }));
+    const shareRows = gnames.filter(n => (p.demographics[n].population || 0) > 0).map((n, i) => ({ label: n, value: p.demographics[n].population, color: colorOf(n, i) }));
+    if (incRows.length) {
+      inner.appendChild(this.secLabel(p.name + ' — Class Income & Share'));
+      const chartRow = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start;' });
+      chartRow.appendChild(Charts.chartBars(incRows, {
+        horizontal: true, width: 430, height: Math.max(110, incRows.length * 22 + 30),
+        title: 'AVERAGE INCOME BY CLASS (' + CUR() + '/day)', valueFormat: v => CUR() + fmtNum(v)
+      }));
+      chartRow.appendChild(Charts.chartPie(shareRows, { width: 320, height: 210, title: p.name + ' — CITIZENS BY CLASS' }));
+      inner.appendChild(chartRow);
+    }
+
+    // ---- Selected province: living standards ----
+    const pv = p.vars || {};
+    inner.appendChild(this.secLabel(p.name + ' — Living Standards'));
+    const provGrid = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    provGrid.appendChild(col('Food & Hunger', [
+      this.barRow('Food security', pv.foodSecurity || 0, foodColor(pv.foodSecurity), (pv.foodSecurity !== undefined ? Math.round(pv.foodSecurity) + '%' : '—')),
+      el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:4px;' }, pv.foodSecurity !== undefined && pv.foodSecurity < 30
+        ? 'FAMINE — the rationing network is failing and the population is dying.'
+        : (pv.foodSecurity !== undefined && pv.foodSecurity < 70 ? 'Shortages — bare shelves; hunger is spreading.' : 'Well fed — supply covers demand.')),
+      this.kv('Food stock on hand (units)', pv.foodStock !== undefined ? fmtNum(Math.round(pv.foodStock)) : '—'),
+      this.kv('Province population', fmtNum(pv.population) || '—')
+    ]));
+    provGrid.appendChild(col('Poverty & Inequality', [
+      this.barRow('Poverty rate', pv.povertyRate || 0, 'var(--accent)', (pv.povertyRate !== undefined ? pv.povertyRate + '%' : '—')),
+      this.kv('Gini index', pv.giniIndex !== undefined ? (Math.round(pv.giniIndex * 100) / 100) : '—'),
+      this.kv('Poverty gap', pv.povertyGap !== undefined ? Math.round(pv.povertyGap * 100) / 100 + '%' : '—'),
+      this.kv('Avg. group happiness', avgHap(p) !== undefined ? Math.round(avgHap(p)) + '%' : '—')
+    ]));
+    provGrid.appendChild(col('Health & Mortality', [
+      this.kv('Life expectancy', pv.lifeExpectancy !== undefined ? Math.round(pv.lifeExpectancy) + ' yrs' : '—'),
+      this.kv('Infant mortality / 1000', pv.infantMortality !== undefined ? Math.round(pv.infantMortality) : '—'),
+      this.kv('Mortality / 1000 / year', pv.mortalityRate !== undefined ? (Math.round(pv.mortalityRate * 10) / 10) : '—'),
+      this.kv('Healthcare index', pv.healthcare !== undefined ? pv.healthcare : '—')
+    ]));
+    inner.appendChild(provGrid);
 
     /* Phase 7.3 — happiness & approval over time for the selected province,
        gated on statistics clearance (filterState only sends state.history
@@ -3558,12 +3684,43 @@ const Views = {
     }
     inner.appendChild(el('table.data', el('thead', head), tbody));
 
+    // ---- Living standards by province (national table) ----
+    inner.appendChild(this.secLabel('Living Standards by Province'));
+    const provTbl = el('table.data',
+      el('thead', el('tr',
+        el('th', 'Province'),
+        el('th.num', 'Population'),
+        el('th.num', 'Food security'),
+        el('th.num', 'Poverty'),
+        el('th.num', 'Gini'),
+        el('th.num', 'Mort./1000'),
+        el('th.num', 'Life exp.'),
+        el('th.num', 'Happiness'))),
+      el('tbody', provs.map(px => {
+        const xv = px.vars || {};
+        const tr = el('tr', { class: (px.id === p.id ? 'active ' : '') + 'row-link', onclick: () => { W.popProv = px.id; App.renderView(); } });
+        tr.appendChild(el('td', px.name));
+        tr.appendChild(el('td.num', fmtNum(xv.population || 0)));
+        tr.appendChild(el('td.num', xv.foodSecurity !== undefined ? el('span', { style: 'color:' + foodColor(xv.foodSecurity) + ';' }, Math.round(xv.foodSecurity) + '%') : '—'));
+        tr.appendChild(el('td.num', xv.povertyRate !== undefined ? Math.round(xv.povertyRate) + '%' : '—'));
+        tr.appendChild(el('td.num', xv.giniIndex !== undefined ? (Math.round(xv.giniIndex * 100) / 100) : '—'));
+        tr.appendChild(el('td.num', xv.mortalityRate !== undefined ? (Math.round(xv.mortalityRate * 10) / 10) : '—'));
+        tr.appendChild(el('td.num', xv.lifeExpectancy !== undefined ? Math.round(xv.lifeExpectancy) : '—'));
+        tr.appendChild(el('td.num', (avgHap(px) !== undefined ? Math.round(avgHap(px)) + '%' : '—')));
+        return tr;
+      })));
+    inner.appendChild(provTbl);
+
     inner.appendChild(this.secLabel('Support of Government by Group'));
     const box = el('div.stage');
     for (const gname in p.demographics) {
       box.appendChild(this.barRow(gname, p.demographics[gname].governmentSupport || 0, 'var(--good)'));
     }
     inner.appendChild(box);
+  },
+
+  statCell(k, v, d) {
+    return el('div.stat-cell', el('div.k', k), el('div.v', v), d ? el('div.d', d) : null);
   },
 
   /* ---- News (Phase 5: four fixed papers) ---- */

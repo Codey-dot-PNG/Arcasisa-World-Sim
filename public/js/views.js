@@ -1503,23 +1503,38 @@ const Views = {
             'The Election Commission has not published a campaign catalogue yet.'));
         } else {
           const form = el('div', { style: 'flex:1; margin-top:8px; padding:10px; border:1px solid var(--rule-faint); background:var(--paper-tint);' });
-          // Province selector
-          const provRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-bottom:6px;' });
-          provRow.appendChild(el('label', { style: 'font-size:11px; min-width:50px;' }, 'Province:'));
-          const provSel = el('select.text-input', { style: 'width:170px; font-size:12px;' });
-          S().provinces.forEach(pr => provSel.appendChild(el('option', { value: pr.id }, pr.name)));
-          provRow.appendChild(provSel);
-          form.appendChild(provRow);
-          // Campaign selector
-          const campRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-bottom:6px;' });
-          campRow.appendChild(el('label', { style: 'font-size:11px; min-width:50px;' }, 'Campaign:'));
+          const row = (label, ...controls) => {
+            const r = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-bottom:6px;' });
+            r.appendChild(el('label.field-label', { style: 'flex:0 0 92px; font-size:11px;' }, label));
+            for (const c of controls) r.appendChild(c);
+            return r;
+          };
+          // Campaign + province selectors (top, per the catalogue)
           const campSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
           camps.forEach(c => campSel.appendChild(el('option', { value: c.id },
-            c.name + ' — ' + (c.moneyCost > 0 ? CUR() + fmtNum(c.moneyCost) : 'free') + ' · +' + c.strength + ' · ' + (c.durationMinutes || 5) + 'm' +
+            c.name + ' — ' + (c.moneyCost > 0 ? CUR() + fmtNum(c.moneyCost) : 'free') + ' base · +' + c.strength + ' · ' + (c.durationMinutes || 5) + 'm' +
             ((c.itemCosts || []).length ? ' · needs stock' : ''))));
-          campRow.appendChild(campSel);
-          form.appendChild(campRow);
+          form.appendChild(row('Campaign:', campSel));
+          const provSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
+          S().provinces.forEach(pr => provSel.appendChild(el('option', { value: pr.id }, pr.name)));
+          form.appendChild(row('Province:', provSel));
           const campOf = () => camps.find(c => c.id === campSel.value) || camps[0];
+          // Funds + materials ABOVE the GM-set base — each extra unit adds
+          // support on the diminishing curve (estimateSupport server-side).
+          const moneyInput = el('input.text-input', { type: 'number', min: 0, step: 10000, placeholder: '0', style: 'flex:1; font-size:12px;' });
+          form.appendChild(row('Funds (' + CUR() + '):', moneyInput));
+          let matSel = null, matQty = null;
+          if (p.inventory && p.inventory.length) {
+            matSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
+            matSel.appendChild(el('option', { value: '' }, '— none —'));
+            p.inventory.forEach(r => { const it = itemById(r.itemId); matSel.appendChild(el('option', { value: r.itemId }, `${it ? it.name : r.itemId} (${fmtNum(r.qty)})`)); });
+            matQty = el('input.text-input', { type: 'number', min: 1, placeholder: 'qty', style: 'width:90px; font-size:12px;' });
+            form.appendChild(row('Materials:', matSel, matQty));
+          }
+          const matsOf = () => (matSel && matSel.value && matQty && matQty.value > 0)
+            ? [{ itemId: matSel.value, qty: Math.max(1, Math.round(Number(matQty.value) || 1)) }]
+            : [];
+          // Info line: description · GM base costs · affinity · duration
           const infoEl = el('div', { style: 'font-size:10.5px; color:var(--ink-faint); line-height:1.5; margin-bottom:6px;' });
           form.appendChild(infoEl);
           const paintInfo = () => {
@@ -1528,56 +1543,25 @@ const Views = {
             const stock = (c.itemCosts || []).map(r => { const it = itemById(r.itemId); return (it ? it.name : r.itemId) + ' ×' + Math.max(1, Number(r.qty) || 1); }).join(', ');
             const bonus = c.bonusParties && Number(c.bonusParties[p.id]);
             infoEl.textContent = (c.description || '') +
-              (stock ? ' · needs ' + stock : '') +
-              (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '');
+              (stock ? ' · base needs ' + stock : '') +
+              (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '') +
+              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funds and materials above the base add support.';
           };
           campSel.addEventListener('change', paintInfo);
           paintInfo();
-          // Freeform extra money
-          const moneyRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-bottom:6px;' });
-          moneyRow.appendChild(el('label', { style: 'font-size:11px; min-width:50px;' }, 'Extra ₳:'));
-          const moneyInput = el('input.text-input', { type: 'number', min: 0, step: 10000, placeholder: '0', style: 'width:130px; font-size:12px;' });
-          moneyRow.appendChild(moneyInput);
-          form.appendChild(moneyRow);
-          // Extra materials
-          const matLines = [];
-          if (p.inventory && p.inventory.length) {
-            const matRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-bottom:6px;' });
-            matRow.appendChild(el('label', { style: 'font-size:11px; min-width:50px;' }, 'Extra mat:'));
-            const matSel = el('select.text-input', { style: 'width:160px; font-size:12px;' });
-            matSel.appendChild(el('option', { value: '' }, '— none —'));
-            p.inventory.forEach(r => { const it = itemById(r.itemId); matSel.appendChild(el('option', { value: r.itemId }, `${it ? it.name : r.itemId} (${fmtNum(r.qty)})`)); });
-            matRow.appendChild(matSel);
-            const qtyInput = el('input.text-input', { type: 'number', min: 1, placeholder: 'qty', style: 'width:60px; font-size:12px;' });
-            matRow.appendChild(qtyInput);
-            matRow.appendChild(el('button.icon-btn', { title: 'Add extra material', onclick: () => {
-              if (!matSel.value || !qtyInput.value) return;
-              const it = itemById(matSel.value);
-              matLines.push({ itemId: matSel.value, qty: Number(qtyInput.value), name: it ? it.name : matSel.value });
-              renderMatList(); qtyInput.value = '';
-            }}, '+'));
-            form.appendChild(matRow);
-          }
-          const matListEl = el('div', { style: 'margin-bottom:6px; font-size:11px;' });
-          const renderMatList = () => {
-            matListEl.innerHTML = '';
-            matLines.forEach((m, i) => {
-              const ln = el('div', { style: 'display:flex; gap:6px; align-items:center;' });
-              ln.appendChild(el('span', m.name + ' ×' + m.qty));
-              ln.appendChild(el('button.icon-btn', { onclick: () => { matLines.splice(i, 1); renderMatList(); }}, '✕'));
-              matListEl.appendChild(ln);
-            });
-          };
-          form.appendChild(matListEl);
-          // Estimate + launch
+          // Estimate (GET — no world mutation, the form stays put) + launch
+          // (POST — the response sync paints the authoritative result in one
+          // round-trip, the same proven pattern as every other game action).
           const btnRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' });
           const estSpan = el('span', { style: 'font-size:11px; color:var(--ink-faint); flex:1;' });
           btnRow.appendChild(estSpan);
           const launchBtn = el('button.solid-btn', { style: 'font-size:11px;', disabled: true }, 'Launch Campaign');
           btnRow.appendChild(el('button.dash-btn', { style: 'font-size:11px;', onclick: async () => {
             try {
-              const mats = matLines.map(m => ({ itemId: m.itemId, qty: m.qty }));
-              const r = await POST('/api/election/estimate', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0, materials: mats });
+              const qs = 'partyId=' + encodeURIComponent(p.id) + '&province=' + encodeURIComponent(provSel.value) +
+                '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0) +
+                '&materials=' + encodeURIComponent(JSON.stringify(matsOf()));
+              const r = await GET('/api/election/estimate?' + qs);
               let txt = '"' + r.campaignName + '": +' + r.baseStrength + ' base' + (r.extraSupport ? ' + ' + r.extraSupport + ' extras' : '') + ' → +' + r.strength + ' support';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
               txt += ' · runs ' + r.durationMinutes + ' world minutes';
@@ -1590,12 +1574,17 @@ const Views = {
           launchBtn.onclick = async () => {
             launchBtn.disabled = true;
             try {
-              const mats = matLines.map(m => ({ itemId: m.itemId, qty: m.qty }));
-              await POST('/api/election/campaign', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0, materials: mats });
-              toast(p.abbrev + ' launches "' + (campOf().name || 'campaign') + '"' + (inCount ? ' into the count.' : '.'));
-              App.renderView();
+              const r = await POST('/api/election/campaign', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0, materials: matsOf() });
+              toast(p.abbrev + ' launches "' + (r.campaignName || campOf().name || 'campaign') + '"' + (inCount ? ' into the count.' : '.'));
             } catch (e) { toast(e.message, true); launchBtn.disabled = false; }
           };
+          // Changing anything invalidates the estimate — re-estimate before launch.
+          const dirty = () => { launchBtn.disabled = true; estSpan.textContent = ''; };
+          moneyInput.addEventListener('input', dirty);
+          provSel.addEventListener('change', dirty);
+          campSel.addEventListener('change', () => { paintInfo(); dirty(); });
+          if (matSel) matSel.addEventListener('change', dirty);
+          if (matQty) matQty.addEventListener('input', dirty);
           form.appendChild(btnRow);
           box.appendChild(form);
         }

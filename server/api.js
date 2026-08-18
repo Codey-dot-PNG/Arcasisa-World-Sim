@@ -1463,9 +1463,13 @@ async function handle(req, res, pathname, method) {
 
     // Phase 34 — campaign estimate: catalogue campaign + freeform extras,
     // no spending. Shows base strength, the party-affinity multiplier and
-    // the late votes the drive would add while the count is running.
-    if (pathname === '/api/election/estimate' && method === 'POST') {
-      const b = await readBody(req);
+    // the late votes the drive would add while the count is running. A GET
+    // (query params) so the client can preview without a mutating POST — the
+    // GET never carries a sync payload, so clicking "Estimate" no longer
+    // re-renders the world and wipes the form. POST stays as a legacy alias.
+    if (pathname === '/api/election/estimate' && (method === 'GET' || method === 'POST')) {
+      const b = method === 'POST' ? await readBody(req) : Object.fromEntries(new URL(req.url, 'http://localhost').searchParams);
+      if (typeof b.materials === 'string') { try { b.materials = JSON.parse(b.materials); } catch (e) { b.materials = []; } }
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');

@@ -26,13 +26,25 @@ const DEFAULT_DEPTH = 5;   // price impact per unit of (qty / sharesOutstanding)
 const MAX_TICK = 0.25;     // a single trade can move the day quote at most ±25%
 const DEFAULT_VOL = 0.02;  // per-tick speculative wiggle amplitude
 // X100 leveraged trade (Phase 34): shares bought at the ordinary day-market
-// price whose VALUE tracks the day quote with 100× sensitivity — a +1% move
-// doubles the position, a −1% move wipes it out. Positions are held on the
-// company's own derivative book (co.x100, NOT the shareholder register — they
-// are not certificates and do not mirror into inventory) and are locked for
-// X100_LOCK_MIN world minutes after purchase (world clock = sim.worldClockNow).
-const X100_MULT = 100;     // value sensitivity multiplier vs the day quote
-const X100_LOCK_MIN = 25;  // world minutes a leveraged position must be held
+// price whose VALUE tracks the day quote with N× sensitivity (default 100) —
+// a +1% move doubles the position, a −1% move wipes it out. Positions live on
+// the company's own derivative book (co.x100, NOT the shareholder register —
+// they are not ordinary certificates; a mirrored `×100 Leveraged Shares` item
+// shows them in inventory, but they are not tradable and can only be sold back
+// through the exchange). The multiplier and the sale lock (real seconds after
+// purchase) are GM-tunable via settings.economy.x100Mult / x100LockSec.
+const X100_MULT_DEFAULT = 100;   // default value sensitivity multiplier vs the day quote
+const X100_LOCK_SEC_DEFAULT = 60; // default seconds a leveraged position must be held before sale
+// NOTE: `=== undefined` guards, NOT `|| default` — 0 is a valid lock setting
+// (no lock) and `Number(0) || 60` would silently resurrect the default.
+function x100MultOf(db) {
+  const v = db.settings && db.settings.economy && db.settings.economy.x100Mult;
+  return v === undefined || v === null || isNaN(Number(v)) ? X100_MULT_DEFAULT : Math.max(1, Number(v));
+}
+function x100LockSecOf(db) {
+  const v = db.settings && db.settings.economy && db.settings.economy.x100LockSec;
+  return v === undefined || v === null || isNaN(Number(v)) ? X100_LOCK_SEC_DEFAULT : Math.max(0, Number(v));
+}
 // Day-Market circuit breakers: speculation may range this far from fundamental
 // value before it is clamped, so the day price can diverge widely from earnings
 // (that is the point) without running away to zero or infinity.
@@ -248,13 +260,34 @@ function x100HoldingOf(co, entityId) {
 function x100EntryOf(co, entityId) {
   return (co.x100 || {})[entityId] || null;
 }
+// The inventory item that mirrors the X100 book (like shareCertificate items
+// mirror the register) — created on demand so leveraged positions show up in
+// the holder's inventory as "×100 Leveraged Shares". The item is NOT tradable
+// and routes through no item-move path: the only way out of a position is
+// selling it back through the exchange (market.sell with opts.x100).
+function x100ItemId(co) { return 'item_share_x100_' + co.id; }
+function x100ItemFor(co, create) {
+  const db = store.get();
+  let it = (db.items || []).find(i => i.meta && i.meta.companyId === co.id && i.meta.leveraged);
+  if (!it && create) {
+    it = {
+      id: x100ItemId(co),
+      name: `${co.abbrev || co.name} ×100 Leveraged Shares`,
+      description: `Derivative positions in ${co.name}. Bought at the ordinary market price, but the position tracks the Day Market with the leveraged multiplier — a small rise pays many times over, any meaningful fall wipes it out. Locked briefly after purchase; sell back through the Lachevan Exchange.`,
+      icon: 'S', category: 'Securities', tradable: false,
+      meta: { companyId: co.id, leveraged: true }
+    };
+    db.items.push(it);
+  }
+  return it;
+}
 // Live value of a leveraged position at a given day quote. Bought at the
-// ordinary price (`entry`); the position then tracks the quote with 100×
+// ordinary price (`entry`); the position then tracks the quote with `mult`×
 // sensitivity — 1% up doubles it, 1% down zeroes it — and can never go
 // negative (value floors at 0, the player's loss is capped at the purchase).
-function x100Value(entry, price) {
+function x100Value(entry, price, mult) {
   if (!entry || !(entry.qty > 0) || !(entry.entry > 0)) return 0;
-  return entry.qty * entry.entry * Math.max(0, 1 + X100_MULT * (price / entry.entry - 1));
+  return entry.qty * entry.entry * Math.max(0, 1 + (mult || X100_MULT_DEFAULT) * (price / entry.entry - 1));
 }
 function treasuryPool(co) {
   return Math.max(0, (co.sharesOutstanding || 0) - heldTotal(co));
@@ -344,6 +377,53 @@ function syncAllCertificates(world) {
   return changed;
 }
 
+// One-time (idempotent) reconciliation for the X100 derivative book (Phase 34):
+// mirror book → ×100 Leveraged Shares certificate items, creating the item on
+// demand and dropping stale rows (book wins, like syncAllCertificates). Runs
+// from store.migrate so live worlds converge without a reset.
+function syncAllX100Certificates(world) {
+  let changed = false;
+  const companies = (world.entities || []).filter(e => e.type === 'company' && e.x100);
+  for (const co of companies) {
+    const book = co.x100 || {};
+    const entries = Object.keys(book).filter(k => book[k] && book[k].qty > 0);
+    if (!entries.length) continue;
+    let item = (world.items || []).find(i => i.meta && i.meta.companyId === co.id && i.meta.leveraged);
+    if (!item) {
+      // create the certificate item on the world being reconciled (during
+      // migrate() store.get() may point elsewhere — build it here, not via
+      // x100ItemFor, which draws on the live store)
+      item = {
+        id: x100ItemId(co),
+        name: `${co.abbrev || co.name} ×100 Leveraged Shares`,
+        description: `Derivative positions in ${co.name}. Bought at the ordinary market price, but the position tracks the Day Market with the leveraged multiplier — a small rise pays many times over, any meaningful fall wipes it out. Locked briefly after purchase; sell back through the Lachevan Exchange.`,
+        icon: 'S', category: 'Securities', tradable: false,
+        meta: { companyId: co.id, leveraged: true }
+      };
+      world.items = world.items || [];
+      world.items.push(item);
+      changed = true;
+    }
+    for (const id of entries) {
+      const holder = (world.entities || []).find(e => e.id === id);
+      if (!holder) continue;
+      holder.inventory = holder.inventory || [];
+      const row = holder.inventory.find(r => r.itemId === item.id);
+      if (!row) { holder.inventory.push({ itemId: item.id, qty: book[id].qty }); changed = true; }
+      else if (row.qty !== book[id].qty) { row.qty = book[id].qty; changed = true; }
+    }
+    // a leveraged certificate with no book entry is stale — drop it
+    for (const holder of (world.entities || [])) {
+      if (!holder.inventory) continue;
+      const row = holder.inventory.find(r => r.itemId === item.id);
+      if (row && !entries.includes(holder.id)) {
+        holder.inventory = holder.inventory.filter(r => r.itemId !== item.id);
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
 function findCompany(companyId) {
   const co = store.get().entities.find(e => e.id === companyId);
   if (!co || co.type !== 'company') throw new Error('Unknown company');
@@ -402,16 +482,34 @@ function buy(companyId, buyerEntityId, shares, actor, opts) {
   if (opts && opts.x100) {
     // X100 leveraged buy: same entry price, same cash, same float — but the
     // position books onto the derivative lane instead of the register and is
-    // locked for X100_LOCK_MIN world minutes before it can be sold (sell()).
+    // locked for x100LockSecOf(db) real seconds before it can be sold (sell()).
     const book = x100Book(co);
     const prev = book[buyerEntityId] || { qty: 0, entry: price, at: 0 };
     book[buyerEntityId] = {
       qty: prev.qty + shares,
       entry: prev.entry > 0 ? prev.entry : price, // keep the original entry price — the position's amplification anchors to it
-      at: sim.worldClockNow(db.settings.time, Date.now())
+      at: Date.now()
     };
+    const lit = x100ItemFor(co, true);
+    if (lit) {
+      buyer.inventory = buyer.inventory || [];
+      const lrow = buyer.inventory.find(r => r.itemId === lit.id);
+      if (lrow) lrow.qty = book[buyerEntityId].qty;
+      else buyer.inventory.push({ itemId: lit.id, qty: book[buyerEntityId].qty });
+    }
   } else {
-    setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
+    // Ordinary shares: track the holder's average entry price on the register
+    // row (Phase 34) so the Exchange can show position value + gain/loss the
+    // same way it does for leveraged positions. Additive — old rows simply
+    // have no entry until their next buy.
+    const prevHeld = holdingOf(co, buyerEntityId);
+    setHolding(co, buyerEntityId, prevHeld + shares);
+    const rec = co.shareholders.find(s => s.entityId === buyerEntityId);
+    if (rec) {
+      rec.entry = prevHeld > 0 && rec.entry
+        ? Math.round((rec.entry * prevHeld + price * shares) / (prevHeld + shares) * 10000) / 10000
+        : price;
+    }
   }
   applyDayImpact(co, +shares, price); // buying pressure nudges the day quote up
   store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${primaryShares ? ' · ' + primaryShares + ' primary → ' + co.name : ''}${vat ? ' + VAT ' + db.settings.currency + vat : ''}${(opts && opts.x100) ? ' · ×100 LEVERAGED' : ''}`, actor, [co.id, buyerEntityId]);
@@ -430,25 +528,37 @@ function sell(companyId, sellerEntityId, shares, actor, opts) {
   const seller = db.entities.find(e => e.id === sellerEntityId);
   if (opts && opts.x100) {
     // X100 leveraged sell. The position's payout tracks the day quote with
-    // X100_MULT sensitivity from its entry price (value floors at 0 — the
-    // most a drop can cost is the purchase itself), and it cannot be sold
-    // within X100_LOCK_MIN world minutes of purchase (GM exempt).
+    // x100MultOf(db) sensitivity from its entry price (value floors at 0 —
+    // the most a drop can cost is the purchase itself), and it cannot be sold
+    // within x100LockSecOf(db) real seconds of purchase (GM exempt).
     const pos = x100EntryOf(co, sellerEntityId);
     if (!pos) throw new Error('You do not hold leveraged shares in this company');
     if (pos.qty < shares) throw new Error('You do not hold that many leveraged shares');
-    const heldMs = sim.worldClockNow(db.settings.time, Date.now()) - pos.at;
-    if (!gm && heldMs < X100_LOCK_MIN * 60000) {
-      throw new Error(`Leveraged shares are locked for another ${Math.ceil((X100_LOCK_MIN * 60000 - heldMs) / 60000)} world minute(s)`);
+    const lockSec = x100LockSecOf(db);
+    const heldMs = Date.now() - pos.at;
+    if (!gm && lockSec > 0 && heldMs < lockSec * 1000) {
+      throw new Error(`Leveraged shares are locked for another ${Math.ceil((lockSec * 1000 - heldMs) / 1000)} second(s)`);
     }
     const price = currentDayPrice(co);
-    const proceeds = Math.round(x100Value(pos, price) * 100) / 100;
-    const baseValue = round2(pos.entry * pos.qty);
+    // value ONLY the shares being sold — the position slice, not pos.qty
+    const proceeds = Math.round(x100Value({ qty: shares, entry: pos.entry }, price, x100MultOf(db)) * 100) / 100;
+    const baseValue = round2(pos.entry * shares);
     // The Bank is the market maker: it pays the position's CURRENT worth (up
     // to ~100× the purchase on a winning run, 0 on a crash) and may run its
     // reserve negative — a designed, visible consequence, same as ordinary sales.
     sim.txn(bankAcct.id, sellAcct.id, proceeds, `Sold ${shares} leveraged ${co.abbrev || co.name} shares @ ${db.settings.currency}${price} (entry ${db.settings.currency}${pos.entry})`, actor, 'transfer');
     pos.qty -= shares;
     if (pos.qty <= 0) delete co.x100[sellerEntityId];
+    // mirror the position out of the holder's inventory certificate
+    const lit = x100ItemFor(co, false);
+    if (lit) {
+      seller.inventory = seller.inventory || [];
+      const lrow = seller.inventory.find(r => r.itemId === lit.id);
+      if (lrow) {
+        lrow.qty = pos.qty;
+        if (lrow.qty <= 0) seller.inventory = seller.inventory.filter(r => r.itemId !== lit.id);
+      }
+    }
     applyDayImpact(co, -shares, price); // selling pressure nudges the day quote down
     store.log('market', `${seller ? seller.name : sellerEntityId} sold ${shares} ×100 leveraged ${co.abbrev || co.name} shares`, `Entry ${db.settings.currency}${pos.entry}; day ${db.settings.currency}${price}; payout ${db.settings.currency}${proceeds}${proceeds < baseValue ? ' · position fell with leverage' : ' · position rose with leverage'}`, actor, [co.id, sellerEntityId]);
     return { shares, proceeds, price, entry: pos.entry, x100: true, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
@@ -473,8 +583,22 @@ function transfer(companyId, fromEntityId, toEntityId, shares, actor) {
   if (!(shares > 0)) throw new Error('Share count must be positive');
   if (fromEntityId === toEntityId) throw new Error('Cannot transfer to the same holder');
   if (holdingOf(co, fromEntityId) < shares) throw new Error('The sender does not hold that many shares');
+  // The sender's cost basis rides along with the shares (Phase 34): the
+  // recipient's register entry becomes its average of what it already held
+  // (if any) and the incoming basis, so position gain/loss stays honest.
+  const fRec0 = co.shareholders.find(s => s.entityId === fromEntityId);
+  const basis = fRec0 && fRec0.entry ? fRec0.entry : null;
   setHolding(co, fromEntityId, holdingOf(co, fromEntityId) - shares);
   setHolding(co, toEntityId, holdingOf(co, toEntityId) + shares);
+  if (basis) {
+    const tRec = co.shareholders.find(s => s.entityId === toEntityId);
+    if (tRec) {
+      const prevQty = tRec.shares - shares; // holding before this transfer
+      tRec.entry = tRec.entry && prevQty > 0
+        ? Math.round((tRec.entry * prevQty + basis * shares) / tRec.shares * 10000) / 10000
+        : basis;
+    }
+  }
   const nm = (id) => { const e = db.entities.find(x => x.id === id); return e ? e.name : id; };
   store.log('ownership', `${shares} ${co.abbrev || co.name} shares transferred`, `${nm(fromEntityId)} → ${nm(toEntityId)}`, actor, [co.id, fromEntityId, toEntityId]);
   return { shares };
@@ -599,7 +723,8 @@ module.exports = {
   shareItemFor, holdingOf, treasuryPool, valuedShares, personPublicHeld, maxPublic,
   setHolding, syncAllCertificates, buy, sell, transfer, issue,
   offer, bonusMint, buyback, remarkFromTrade,
-  x100HeldTotal, x100HoldingOf, x100EntryOf, x100Value,
+  x100HeldTotal, x100HoldingOf, x100EntryOf, x100Value, x100ItemFor, x100ItemId,
+  x100MultOf, x100LockSecOf, syncAllX100Certificates,
   currentDayPrice, applyDayImpact, dayReanchor, dayMarketTick, maybeDayTick, recomputeEconConfidence, nudgeConfidence,
-  BANK_ID, DEFAULT_DEPTH, DEFAULT_VOL, X100_MULT, X100_LOCK_MIN
+  BANK_ID, DEFAULT_DEPTH, DEFAULT_VOL, X100_MULT_DEFAULT, X100_LOCK_SEC_DEFAULT
 };

@@ -373,8 +373,13 @@ function filterState(u) {
     dayTick: { lastAt: db._lastDayTick || 0, intervalMs: (db.settings.economy && db.settings.economy.dayTickMs) || 5000 },
     // X100 leveraged trade tuning (Phase 34) — public constants so the client
     // renders the position value formula and lock countdown identically to the
-    // server (server/market.js's X100_MULT / X100_LOCK_MIN).
-    x100: { mult: market.X100_MULT, lockMin: market.X100_LOCK_MIN },
+    // server (GM-adjustable via settings.economy.x100Mult / x100LockSec). Note
+    // the `=== undefined` guards: 0 is a valid lock setting (no lock), and
+    // `|| fallback` would swallow it.
+    x100: {
+      mult: (db.settings.economy && db.settings.economy.x100Mult !== undefined) ? Number(db.settings.economy.x100Mult) : 100,
+      lockSec: (db.settings.economy && db.settings.economy.x100LockSec !== undefined) ? Number(db.settings.economy.x100LockSec) : 60
+    },
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
     users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined
@@ -846,6 +851,10 @@ async function handle(req, res, pathname, method) {
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
       if (!(qty > 0)) return bad('Quantity must be positive.');
       if (!item.tradable && !u.role.perms.gm) return deny('That item is not tradable.');
+      // X100 leveraged certificates are positions on the derivative book, not
+      // movable inventory — the only way out is selling back through the
+      // exchange (Phase 34).
+      if (item.meta && item.meta.leveraged) return bad('Leveraged positions cannot be traded — sell them back through the exchange.');
       // Share certificates are ownership records — route through the market so
       // the shareholder register moves in lockstep with the certificate item.
       if (item.meta && item.meta.companyId) {
@@ -1182,6 +1191,7 @@ async function handle(req, res, pathname, method) {
 
       const moveItem = (fromE, toE, itemId, qty) => {
         const item = db.items.find(i => i.id === itemId);
+        if (item && item.meta && item.meta.leveraged) throw new Error('Leveraged positions cannot be traded — sell them back through the exchange.');
         if (item && item.meta && item.meta.companyId) { market.transfer(item.meta.companyId, fromE.id, toE.id, qty, u.user.displayName); return; }
         if (item && item.meta && item.meta.propertyId) { deeds.transfer(item.meta.propertyId, fromE.id, toE.id, u.user.displayName); return; }
         fromE.inventory = fromE.inventory || [];
@@ -1830,6 +1840,7 @@ async function handle(req, res, pathname, method) {
         if (!item) return bad('Unknown item.');
         if (!(qty > 0)) return bad('Quantity must be positive.');
         try {
+          if (item.meta && item.meta.leveraged) return bad('Leveraged positions cannot be moved — sell them back through the exchange.');
           if (item.meta && item.meta.companyId) {
             market.transfer(item.meta.companyId, fromE.id, toE.id, qty, actor);
           } else if (item.meta && item.meta.propertyId) {
@@ -1987,6 +1998,10 @@ async function handle(req, res, pathname, method) {
           for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier', 'expensesMultiplier']) {
             if (e[k] !== undefined) e[k] = Math.max(0.05, Number(e[k]) || 0.05);
           }
+          // X100 leveraged trades (Phase 34): lever ×1 upwards, sale lock a
+          // sane non-negative seconds count (0 disables the lock).
+          if (e.x100Mult !== undefined) e.x100Mult = Math.max(1, Number(e.x100Mult) || 100);
+          if (e.x100LockSec !== undefined) e.x100LockSec = Math.max(0, Math.min(86400, Number(e.x100LockSec) || 0));
         }
         if (b.election) { // Phase 33/34 — Election Commission knobs + campaign
           // catalogue. Whole-object replace of the authored sub-fields (the

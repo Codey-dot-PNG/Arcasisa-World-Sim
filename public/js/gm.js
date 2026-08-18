@@ -1227,7 +1227,9 @@ const GM = {
       domesticMultiplier: e.domesticMultiplier === undefined ? 1 : e.domesticMultiplier,
       exportMultiplier: e.exportMultiplier === undefined ? 1 : e.exportMultiplier,
       importMultiplier: e.importMultiplier === undefined ? 1 : e.importMultiplier,
-      expensesMultiplier: e.expensesMultiplier === undefined ? 1 : e.expensesMultiplier
+      expensesMultiplier: e.expensesMultiplier === undefined ? 1 : e.expensesMultiplier,
+      x100Mult: e.x100Mult === undefined ? 100 : e.x100Mult,
+      x100LockSec: e.x100LockSec === undefined ? 60 : e.x100LockSec
     });
     main.appendChild(el('div.doc-title', 'Economy'));
     main.appendChild(el('div.doc-sub', 'global levers over sale prices and running costs'));
@@ -1247,6 +1249,16 @@ const GM = {
       'Scales all property expenses (upkeep) — the amount actually debited each turn and shown as “Upkeep / turn” on every desk. Type any value — not capped.'));
     main.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint); margin-top:12px;' },
       'Records keep their authored values; the levers above scale what actually happens. Share prices and deeds are unaffected.'));
+    // Phase 34 — the ×100 leveraged trade: the multiplier (how hard a
+    // leveraged position tracks the Day Market) and the sale lock (real
+    // seconds after purchase before a leveraged position can be sold).
+    main.appendChild(Views.secLabel('Day Market — ×100 Leveraged Trades'));
+    main.appendChild(this.field('Leverage multiplier',
+      Forms.sliderNum(d, 'x100Mult', 2, 200, { step: 1, suffix: '×', allowBeyondRange: true }),
+      'How hard a leveraged position amplifies the Day Market move: at ×100 a +1% quote move doubles the position and a −1% move wipes it out to zero.'));
+    main.appendChild(this.field('Sale lock (seconds)',
+      Forms.sliderNum(d, 'x100LockSec', 0, 600, { step: 5, allowBeyondRange: true }),
+      'How long after purchase a leveraged position stays locked before it can be sold back. 0 disables the lock.'));
     main.appendChild(el('div.btn-row', { style: 'margin-top:12px;' }, el('button.solid-btn', {
       onclick: async () => {
         try {
@@ -1255,7 +1267,9 @@ const GM = {
               domesticMultiplier: d.domesticMultiplier,
               exportMultiplier: d.exportMultiplier,
               importMultiplier: d.importMultiplier,
-              expensesMultiplier: d.expensesMultiplier
+              expensesMultiplier: d.expensesMultiplier,
+              x100Mult: d.x100Mult,
+              x100LockSec: d.x100LockSec
             }
           });
           this.draftKey = null;

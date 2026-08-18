@@ -173,25 +173,24 @@ function market_treasuryPoolClient(co) {
 }
 // X100 leveraged position value at a given day quote — mirrors
 // server/market.js's x100Value (Phase 34): each position tracks the day price
-// with X100_MULT sensitivity from its entry price, floored at 0.
+// with the GM-tuned multiplier (settings.economy.x100Mult, shipped in S().x100)
+// from its entry price, floored at 0.
 function market_x100ValueClient(pos, price) {
   const m = (S().x100 && S().x100.mult) || 100;
   if (!pos || !(pos.qty > 0) || !(pos.entry > 0)) return 0;
   return pos.qty * pos.entry * Math.max(0, 1 + m * (price / pos.entry - 1));
 }
-function market_x100LockMin() {
-  return (S().x100 && S().x100.lockMin) || 25;
+function market_x100LockSec() {
+  const x = S().x100;
+  return x && x.lockSec !== undefined ? Number(x.lockSec) : 60;
 }
-// World minutes still locked before a leveraged position can be sold (0 =
-// unlocked). Uses the exposed world clock (settings.time.clock.nowMs), the
-// same sim.worldClockNow the server's sell() lock check reads.
+// Real seconds still locked before a leveraged position can be sold (0 =
+// unlocked). Mirrors the server's sell() gate (real wall-clock seconds, GM
+// tunable via settings.economy.x100LockSec).
 function market_x100LockLeftClient(pos) {
-  const lock = market_x100LockMin() * 60000;
+  const lock = market_x100LockSec() * 1000;
   if (!pos || !pos.at) return 0;
-  const clock = S().settings.time.clock;
-  const nowWorld = (clock && clock.nowMs) || 0;
-  if (!nowWorld) return 0;
-  return Math.max(0, (pos.at + lock - nowWorld) / 60000);
+  return Math.max(0, (pos.at + lock - Date.now()) / 1000);
 }
 function market_x100HoldingOfClient(co, entityId) {
   const p = (co.x100 || {})[entityId];
@@ -199,6 +198,12 @@ function market_x100HoldingOfClient(co, entityId) {
 }
 function market_x100EntryOfClient(co, entityId) {
   return (co.x100 || {})[entityId] || null;
+}
+// Ordinary-share cost basis from the register row (Phase 34: buy() records
+// the holder's average entry price) — null when unknown/never bought.
+function market_holdEntryOfClient(co, entityId) {
+  const sh = (co.shareholders || []).find(x => x.entityId === entityId);
+  return sh && sh.entry ? sh.entry : null;
 }
 // Shares that count toward valuation / market cap: all outstanding EXCEPT
 // freshly-floated primary stock no real investor has subscribed to yet (mirrors

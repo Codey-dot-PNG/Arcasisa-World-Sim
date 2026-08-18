@@ -245,6 +245,22 @@ prices dilute), `buyback` (retire float, price up), `remarkFromTrade` (block tra
 the trade-offer system re-mark the day quote, clamped ±25 %). The shareholder register is
 canonical; `setHolding` mirrors into certificate items.
 
+**×100 leveraged trades (Phase 34):** a buy with `x100: true` books a DERIVATIVE position on
+`co.x100` (not the register — no ordinary certificate is created, though a non-tradable
+"×100 Leveraged Shares" item mirrors the book into the holder's inventory so it shows up
+there and in the Shareholdings tab). The position is bought at the ordinary day price, but
+its value tracks the day quote with `settings.economy.x100Mult` (default 100×) sensitivity
+from its entry price, floored at zero: +1 % doubles it, −1 % wipes it out — the Bank pays
+the amplified payout on sale and absorbs the loss (its reserve going negative is the same
+designed failure mode as ordinary sales). Positions are locked for
+`settings.economy.x100LockSec` (default 60) REAL seconds after purchase (`pos.at =
+Date.now()`), enforced in `sell()` (GM exempt); both knobs are adjustable in the GM Economy
+tab. The book counts against the float (`heldTotal`) and the public-float cap
+(`personPublicHeld`), and a transfer/trade of the mirrored item is rejected — the only exit
+is selling back through the exchange. Ordinary buys additionally record the holder's
+average entry price on the register row (`rec.entry`, carried by transfers), so the
+Exchange can show position value and gain/loss for normal holdings too.
+
 ## Elections & polling
 
 `computePolling`: per province, per demographic group — turnout from happiness/education;

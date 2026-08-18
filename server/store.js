@@ -152,6 +152,10 @@ function migrate(world) {
     for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier']) {
       if (e[k] === undefined) { e[k] = legacy !== undefined ? legacy : 1; changed = true; }
     }
+    // X100 leveraged trades (Phase 34): GM-tunable lever × sale lock (real
+    // seconds). Additive defaults; existing worlds keep GM-tuned values.
+    if (e.x100Mult === undefined) { e.x100Mult = 100; changed = true; }
+    if (e.x100LockSec === undefined) { e.x100LockSec = 60; changed = true; }
   }
   // News unread waterline — the "News (n)" badge's last-read marker on every
   // user record. Ungated additive field so live worlds pick it up in place.
@@ -383,6 +387,9 @@ function migrate(world) {
   }
   // reconcile share certificates against the canonical register (Phase 4.4)
   try { if (require('./market').syncAllCertificates(world)) changed = true; }
+  catch (e) { /* market module optional during early boot */ }
+  // mirror the X100 leveraged book into its certificate items (Phase 34)
+  try { if (require('./market').syncAllX100Certificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
   // issue/reconcile property deed items against property.ownerId
   try { if (require('./deeds').syncAllDeeds(world)) changed = true; }

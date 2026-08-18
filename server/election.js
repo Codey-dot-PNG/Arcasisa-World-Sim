@@ -4,9 +4,11 @@
    every turn advances the count continuously (no discrete "batches"),
    and provinces report one at a time in shuffled order for drama.
 
-   Campaigns use free-form investment: a party inputs how much money and/or
-   materials to spend, the engine returns a diminishing-returns estimate
-   of support gained, and the party confirms.
+   Campaigns come from the GM's catalogue: a party picks a campaign and a
+   province, pays the base cost (money + stock), then may layer freeform
+   extra money/materials on top for more strength. Each campaign has a
+   duration in world days — while one is running the party can't launch
+   another — and optional per-party affinity multipliers.
 
    All transient state lives on the election doc (no module-level state),
    so the count is serverless-safe per docs/CONVENTIONS.md. The engine
@@ -130,51 +132,154 @@ function estimateSupport(db, money, materials) {
   return Math.round(Math.sqrt(totalValue / base) * scale * 10) / 10;
 }
 
-function investEstimate(db, partyId, provinceId, money, materials) {
+// Campaigns come from the GM's catalogue (settings.election.campaigns). Each
+// entry carries a money cost, optional stock costs, a base support strength,
+// a duration in WORLD days (the campaign's effect fades when it elapses and
+// only then may the party run another) and optional party affinities —
+// bonusParties = { partyId: multiplier } — so e.g. a soup kitchen scores
+// double for the communists and a radio address does more for the national
+// front. On top of the base cost a party may add FREE-FORM extra money and
+// materials; the extra value adds support on the same diminishing curve as
+// the old investment system (estimateSupport), and the whole lot — base +
+// extras — is then multiplied by the party's affinity bonus.
+
+function campaignBonus(db, camp, partyId) {
+  const b = (camp && camp.bonusParties) || {};
+  const v = Number(b[partyId]);
+  return Number.isFinite(v) && v > 0 ? v : 1;
+}
+
+// World-clock time now, in ms since the epoch.
+function worldNowMs(db) {
+  return sim.worldClockNow(db.settings.time, Date.now());
+}
+
+// Fade out campaigns whose duration has elapsed: their support points are
+// unwound from the province (mirroring applySupport's bookkeeping) and the
+// slot frees up so the party can run another campaign. Late votes cast into
+// the count while a campaign was live stay on the books — ballots are
+// ballots — but the support effect (which only shapes polling) is gone.
+// Returns how many campaigns just expired (for broadcast decisions).
+function expireCampaigns(db, el, nowWorldMs, actor) {
+  const pc = el.partyCampaigns || (el.partyCampaigns = {});
+  let expired = 0;
+  for (const partyId of Object.keys(pc)) {
+    const c = pc[partyId];
+    if (!c || (c.endsAtWorldMs !== undefined && nowWorldMs < c.endsAtWorldMs)) continue;
+    const party = db.entities.find(e => e.id === partyId);
+    const prov = db.provinces.find(p => p.id === c.provinceId);
+    if (party && c.strength > 0) {
+      party.support = party.support || {};
+      const s = party.support[c.provinceId];
+      if (s && s.all !== undefined) s.all = Math.round((s.all - c.strength) * 10) / 10;
+      if (!s || !s.all) delete party.support[c.provinceId];
+      party.vars = party.vars || {};
+      const byProv = party.vars.campaignPointsByProvince = party.vars.campaignPointsByProvince || {};
+      byProv[c.provinceId] = Math.round(((byProv[c.provinceId] || 0) - c.strength) * 10) / 10;
+      if (byProv[c.provinceId] <= 0) delete byProv[c.provinceId];
+    }
+    el.log = el.log || [];
+    el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaignEnd',
+      partyId, campaignId: c.campaignId, campaignName: c.name, provinceId: c.provinceId,
+      provinceName: prov ? prov.name : c.provinceId, strength: c.strength, actor: actor || 'ENGINE' });
+    if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
+    store.log('election', `Campaign winds down: ${party ? party.name : partyId}'s "${c.name}" has run its course in ${prov ? prov.name : c.provinceId}`,
+      `${c.strength} support points expire`, actor || 'ENGINE', party ? [party.id] : []);
+    delete pc[partyId];
+    expired++;
+  }
+  return expired;
+}
+
+// Hours remaining until a party's running campaign fades, or null.
+function activeCampaignInfo(el, partyId, nowWorldMs) {
+  const c = (el && el.partyCampaigns && el.partyCampaigns[partyId]) || null;
+  if (!c) return null;
+  const hoursLeft = c.endsAtWorldMs !== undefined
+    ? Math.max(0, (c.endsAtWorldMs - nowWorldMs) / 3600000)
+    : 0;
+  return { campaignId: c.campaignId, name: c.name, provinceId: c.provinceId, strength: c.strength,
+    durationDays: c.durationDays, endsAtWorldMs: c.endsAtWorldMs, hoursLeft };
+}
+
+// Estimate what a catalogue campaign (plus freeform extras) would deliver
+// for this party in this province — no spending happens here.
+function estimateCampaign(db, partyId, provinceId, campaignId, money, materials) {
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
   const prov = db.provinces.find(p => p.id === provinceId);
   if (!prov) throw new Error('Choose a province to campaign in.');
-  const support = estimateSupport(db, money, materials);
+  const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
+  if (!camp) throw new Error('Unknown campaign.');
+  if (camp.enabled === false) throw new Error('That campaign is not on offer.');
+  const baseStrength = Math.max(0, Number(camp.strength) || 0);
+  const extra = estimateSupport(db, Math.max(0, Number(money) || 0), materials || []);
+  const bonus = campaignBonus(db, camp, party.id);
+  const strength = Math.round((baseStrength + extra) * bonus * 10) / 10;
   let votes = 0;
   const el = db.election;
   if (el && el.active && el.phase === 'voting') {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
-    votes = Math.round(support * vpp);
+    votes = Math.round(strength * vpp);
   }
-  return { support, votes, provinceId };
+  const durationDays = Math.max(1, Math.min(90, Math.round(Number(camp.durationDays) || 3)));
+  return {
+    ok: true, campaignId: camp.id, campaignName: camp.name, description: camp.description || '',
+    baseStrength, extraSupport: Math.round(extra * 10) / 10, bonus,
+    strength, votes, provinceId, provinceName: prov.name, durationDays,
+    active: activeCampaignInfo(el, party.id, worldNowMs(db))
+  };
 }
 
-function investCampaign(db, partyId, provinceId, money, materials, actor) {
+// Run a catalogue campaign: pay the base cost + any freeform extras, apply
+// (base + extra) × affinity bonus support to ONE province, and — if the
+// count is already running — convert the strength into late votes.
+function runCampaign(db, partyId, provinceId, campaignId, money, materials, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active — campaigns run only during an election.');
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
   const prov = db.provinces.find(p => p.id === provinceId);
   if (!prov) throw new Error('Choose a province to campaign in.');
+  const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
+  if (!camp) throw new Error('Unknown campaign.');
+  if (camp.enabled === false) throw new Error('That campaign is not on offer.');
+
+  const nowWorldMs = worldNowMs(db);
+  expireCampaigns(db, el, nowWorldMs, actor);
+
+  // One campaign at a time per party — the running one must finish first.
+  const running = activeCampaignInfo(el, party.id, nowWorldMs);
+  if (running) {
+    throw new Error(`"${running.name}" is still running in ${((provById(db, running.provinceId) || {}).name || running.provinceId)} — ` +
+      `it ends in ~${Math.max(1, Math.ceil(running.hoursLeft))}h. Wait for it to wind down before launching another.`);
+  }
 
   money = Math.max(0, Math.round(Number(money) || 0));
+  const baseMoney = Math.max(0, Math.round(Number(camp.moneyCost) || 0));
+  const totalMoney = baseMoney + money;
 
-  // Check money affordability
-  if (money > 0) {
+  // Affordability: base cost + extras, in money and in stock.
+  if (totalMoney > 0) {
     const acct = partyAccount(db, party);
-    if (!acct || acct.balance < money) throw new Error(`${party.name}'s treasury cannot cover this investment.`);
+    if (!acct || acct.balance < totalMoney) throw new Error(`${party.name}'s treasury cannot cover this campaign (${fmtMoneyOf(db, totalMoney)}).`);
   }
-  // Check material affordability
+  const check = checkItemCosts(db, party, camp.itemCosts);
+  if (!check.ok) throw new Error(`${party.name} lacks ${check.missing} — the campaign needs stock.`);
   for (const m of (materials || [])) {
     if (!m.itemId || !m.qty || m.qty <= 0) continue;
     const have = qtyOf(party, m.itemId);
     if (have < m.qty) {
       const it = db.items.find(i => i.id === m.itemId);
-      throw new Error(`${party.name} lacks ${it ? it.name : m.itemId} — need ${m.qty}, have ${have}.`);
+      throw new Error(`${party.name} lacks ${it ? it.name : m.itemId} for the extras — need ${m.qty}, have ${have}.`);
     }
   }
 
-  // Deduct money
-  if (money > 0) {
-    sim.txn(partyAccount(db, party).id, null, money, 'Campaign investment', actor || party.name, 'withdraw');
+  // Deduct: base + extras.
+  if (totalMoney > 0) {
+    sim.txn(partyAccount(db, party).id, null, totalMoney, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
   }
-  // Deduct materials
+  deductItemCosts(party, camp.itemCosts);
   for (const m of (materials || [])) {
     if (!m.itemId || !m.qty || m.qty <= 0) continue;
     party.inventory = party.inventory || [];
@@ -185,46 +290,67 @@ function investCampaign(db, partyId, provinceId, money, materials, actor) {
     }
   }
 
-  // Apply support — scoped to the chosen province only
-  const support = estimateSupport(db, money, materials);
-  if (support > 0) applySupport(db, party, provinceId, support);
+  // Strength: (base + freeform extras) × party affinity.
+  const baseStrength = Math.max(0, Number(camp.strength) || 0);
+  const extra = estimateSupport(db, money, materials);
+  const bonus = campaignBonus(db, camp, party.id);
+  const strength = Math.round((baseStrength + extra) * bonus * 10) / 10;
+  if (strength > 0) applySupport(db, party, provinceId, strength);
 
-  // Late votes if count is running — also scoped to that province
+  // Late votes if the count is running — scoped to that province.
   let votes = 0;
   if (el.phase === 'voting') {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
-    votes = Math.round(support * vpp);
+    votes = Math.round(strength * vpp);
     if (votes) addVotes(el, party.id, provinceId, votes);
   }
 
-  // Descriptions for the log
-  const matDesc = (materials || []).filter(m => m.qty > 0).map(m => {
-    const it = db.items.find(i => i.id === m.itemId);
-    return `${it ? it.name : m.itemId} ×${m.qty}`;
-  }).join(', ');
+  // The campaign now occupies the party's single slot until its duration
+  // (in world days) elapses — then the support fades and the slot opens.
+  const durationDays = Math.max(1, Math.min(90, Math.round(Number(camp.durationDays) || 3)));
+  el.partyCampaigns = el.partyCampaigns || {};
+  el.partyCampaigns[party.id] = {
+    campaignId: camp.id, name: camp.name, provinceId,
+    strength, startWorldMs: nowWorldMs, durationDays,
+    endsAtWorldMs: nowWorldMs + durationDays * 86400000
+  };
+
+  // Descriptions for the log (base stock + freeform extras combined).
+  const matDesc = [...(camp.itemCosts || []).filter(r => r && r.itemId), ...(materials || []).filter(m => m.itemId && m.qty > 0)]
+    .map(m => {
+      const it = db.items.find(i => i.id === m.itemId);
+      return `${it ? it.name : m.itemId} ×${Math.max(1, Number(m.qty) || 1)}`;
+    }).join(', ');
 
   el.log = el.log || [];
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
-    partyId: party.id, campaignName: 'Campaign Investment', provinceId, provinceName: prov.name,
-    money, materials: materials || [], strength: support, votes, materialDesc: matDesc,
-    actor: actor || '—' });
+    partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name,
+    money: totalMoney, materials: materials || [], strength, votes, materialDesc: matDesc,
+    durationDays, bonus, actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
-  store.log('election', `Campaign: ${party.name} invests in ${prov.name}`,
-    `${fmtMoneyOf(db, money)}${matDesc ? ' + ' + matDesc : ''} · ${support} support points${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
+  store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
+    `${totalMoney ? fmtMoneyOf(db, totalMoney) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationDays} world day${durationDays > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
 
   sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
-    `${party.name} has invested ${money ? fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''} in ${prov.name} ` +
-    `${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}, ` +
-    `expected to gain ${support} support points there.`,
+    `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}` +
+    `${totalMoney ? ', at a cost of ' + fmtMoneyOf(db, totalMoney) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
+    `The drive runs for ${durationDays} world day${durationDays > 1 ? 's' : ''} and is expected to deliver ${strength} support points` +
+    `${el.phase === 'voting' ? ' — and ' + fmtNum(votes) + ' late ballots' : ''}.`,
     'Politics', false, 'Wire Service');
 
-  return { money, strength: support, votes, materialDesc: matDesc, provinceId, provinceName: prov.name };
+  return { money: totalMoney, strength, votes, bonus, durationDays,
+    materialDesc: matDesc, provinceId, provinceName: prov.name };
 }
 
-// ---------- legacy campaign templates (kept for backward compat) --------------
-// Old item-cost helpers used by runCampaign below.
+function provById(db, id) {
+  return db.provinces.find(p => p.id === id);
+}
+
+// ---------- item-cost helpers (base stock requirements) -----------------------
+// Used by runCampaign for the catalogue's required goods, with "or"
+// alternatives accepted per row.
 
 function checkItemCosts(db, entity, rows) {
   for (const row of (rows || [])) {
@@ -259,45 +385,6 @@ function deductItemCosts(entity, rows) {
   }
 }
 
-function runCampaign(db, partyId, provinceId, campaignId, actor) {
-  const el = db.election;
-  if (!el || !el.active) throw new Error('No election is active.');
-  const party = db.entities.find(e => e.id === partyId);
-  if (!party || party.type !== 'party') throw new Error('Unknown party.');
-  const prov = db.provinces.find(p => p.id === provinceId);
-  if (!prov) throw new Error('Choose a province to campaign in.');
-  const cfg = db.settings.election || {};
-  const camp = (cfg.campaigns || []).find(c => c.id === campaignId);
-  if (!camp) throw new Error('Unknown campaign.');
-  if (camp.enabled === false) throw new Error('That campaign is not on offer.');
-  const money = Math.max(0, Math.round(Number(camp.moneyCost) || 0));
-  const acct = partyAccount(db, party);
-  if (money > 0 && (!acct || acct.balance < money)) throw new Error(`${party.name}'s treasury cannot cover this campaign.`);
-  const check = checkItemCosts(db, party, camp.itemCosts);
-  if (!check.ok) throw new Error(`${party.name} lacks ${check.missing} — the campaign needs stock.`);
-  if (money > 0) sim.txn(acct.id, null, money, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
-  deductItemCosts(party, camp.itemCosts);
-  const strength = Math.max(0, Number(camp.strength) || 0);
-  if (strength > 0) applySupport(db, party, provinceId, strength);
-  let votes = 0;
-  if (el.phase === 'voting') {
-    const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
-    votes = Math.round(strength * vpp);
-    if (votes) addVotes(el, party.id, provinceId, votes);
-  }
-  el.log = el.log || [];
-  el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
-    partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name, money, strength, votes, actor: actor || '—' });
-  if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
-  store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
-    `${money ? fmtMoneyOf(db, money) + ' · ' : ''}${strength} support points${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
-    actor, [party.id]);
-  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
-    `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}, at a cost of ${money ? fmtMoneyOf(db, money) : 'no money'}${camp.itemCosts && camp.itemCosts.length ? ' plus party stock' : ''}.`,
-    'Politics', false, 'Wire Service');
-  return { money, strength, votes, provinceId, provinceName: prov.name };
-}
-
 // ---------- the live election doc ---------------------------------------------
 
 function pollingSnapshot(db) {
@@ -323,7 +410,7 @@ function startCampaign(db, actor) {
     deviationPct: clampPct(cfg.deviationPct),
     supportToVotes: Math.max(0, Math.round(Number(cfg.supportToVotes) || 2500)),
     rng: (Math.random() * 4294967296) >>> 0,
-    steps: [], log: [], progress: 0, totalBallots: 0
+    steps: [], log: [], progress: 0, totalBallots: 0, partyCampaigns: {}
   };
   sim.draftNews('ELECTION CALLED — CAMPAIGN SEASON OPENS',
     `The Republic goes to the country. Parliament is dissolved and the campaign trail opens; the Election Commission will announce polling day in due course.`,
@@ -361,6 +448,9 @@ function startVoting(db, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('Call an election first — campaigning comes before the polls.');
   if (el.phase !== 'campaign') throw new Error('Voting is already underway.');
+  // Any campaign whose duration elapsed during the campaign season fades
+  // before the true result is sealed, so stale support can't leak into it.
+  expireCampaigns(db, el, worldNowMs(db), actor);
   const { parties, byProvince, national, totalVotes } = sim.computePolling(true);
 
   // Shuffled province order — provinces report one at a time for drama
@@ -468,6 +558,7 @@ function ensureRealtimeScaffold(db, el, actor) {
 // updates are, never the final result.
 function advanceRealtimeCount(db, el, nowWorldMs, actor) {
   if (!ensureRealtimeScaffold(db, el, actor)) return;
+  expireCampaigns(db, el, nowWorldMs, actor);
   const parties = db.entities.filter(e => e.type === 'party');
   const numProvs = el.provinceOrder.length;
   const daysPerProvince = el.durationDays / numProvs;
@@ -563,12 +654,18 @@ const MIN_TICK_REAL_MS = 3000;
 // functions' own comments on why per-tick broadcasts are avoided).
 function maybeTick(db, actor) {
   const el = db.election;
-  if (!el || !el.active || el.phase !== 'voting') return { ticked: false, milestone: false };
+  if (!el || !el.active) return { ticked: false, milestone: false };
   const nowReal = Date.now();
   if (el._lastTickRealMs && (nowReal - el._lastTickRealMs) < MIN_TICK_REAL_MS) return { ticked: false, milestone: false };
   el._lastTickRealMs = nowReal;
-  const beforePct = el.loggedPct || 0;
   const nowWorldMs = sim.worldClockNow(db.settings.time, nowReal);
+  if (el.phase !== 'voting') {
+    // Campaign season: nothing to count, but finished campaigns must fade so
+    // the public polls (which ride the same support model) stay honest.
+    const expired = expireCampaigns(db, el, nowWorldMs, actor);
+    return { ticked: expired > 0, milestone: expired > 0 };
+  }
+  const beforePct = el.loggedPct || 0;
   advanceRealtimeCount(db, el, nowWorldMs, actor);
   const finalized = !db.election; // finalize() sets db.election = null
   const milestone = finalized || (db.election && (db.election.loggedPct || 0) > beforePct);
@@ -732,6 +829,32 @@ function applyTuning(db, b) {
   if (b.supportScale !== undefined) cfg.supportScale = Math.max(0.1, Number(b.supportScale) || DEFAULT_SUPPORT_SCALE);
   if (b.materialCampaignRate !== undefined) cfg.materialCampaignRate = Math.max(0, Number(b.materialCampaignRate) || DEFAULT_MATERIAL_CAMPAIGN_RATE);
 
+  // Catalogue entries are fully GM-authored — clamp the numeric fields so a
+  // typo can't mint infinite strength or a zero-day campaign.
+  if (Array.isArray(b.campaigns)) {
+    cfg.campaigns = b.campaigns.map(c => {
+      const bonus = {};
+      for (const pid in (c && c.bonusParties) || {}) {
+        const v = Number(c.bonusParties[pid]);
+        if (Number.isFinite(v) && v >= 0) bonus[pid] = v;
+      }
+      return {
+        id: String((c && c.id) || 'camp_' + Math.random().toString(36).slice(2, 8)),
+        name: String((c && c.name) || 'Campaign'),
+        description: String((c && c.description) || ''),
+        moneyCost: Math.max(0, Math.round(Number(c && c.moneyCost) || 0)),
+        strength: Math.max(0, Number(c && c.strength) || 0),
+        durationDays: Math.max(1, Math.min(90, Math.round(Number(c && c.durationDays) || 3))),
+        enabled: !(c && c.enabled === false),
+        itemCosts: Array.isArray(c && c.itemCosts) ? c.itemCosts.filter(r => r && r.itemId)
+          .map(r => ({ itemId: r.itemId, qty: Math.max(1, Math.round(Number(r.qty) || 1)),
+            or: Array.isArray(r.or) ? r.or.filter(o => o && o.itemId).map(o => ({ itemId: o.itemId, qty: Math.max(1, Math.round(Number(o.qty) || 1)) })) : undefined }))
+          : [],
+        bonusParties: bonus
+      };
+    }).filter(c => c.name);
+  }
+
   const el = db.election;
   if (!el || !el.active) return;
   el.durationDays = cfg.durationDays || 14;
@@ -760,6 +883,6 @@ function forPlayers(el) {
 
 module.exports = {
   startCampaign, startVoting, onTurn, tickCount, maybeTick,
-  runCampaign, investEstimate, investCampaign,
+  runCampaign, estimateCampaign, expireCampaigns,
   adjustVotes, cancel, applyTuning, forPlayers
 };

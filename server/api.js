@@ -1442,42 +1442,54 @@ async function handle(req, res, pathname, method) {
     // Phase 33/34 — parties run campaigns during the election season. Any
     // operator who controls the party (its leader chain) can spend the
     // treasury; the GM can too (checked inline — the route is player-facing).
-    // Every campaign now targets ONE province — no more blanket national
-    // support bump — so `province` is required on all three routes below.
+    // Campaigns come from the GM's catalogue (settings.election.campaigns),
+    // each targeted at ONE province with a per-campaign duration; freeform
+    // extra money/materials on top boost the base strength, and party
+    // affinities (campaign.bonusParties) multiply the whole lot.
     if (pathname === '/api/election/campaign' && method === 'POST') {
       const b = await readBody(req);
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
       if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
-      try { election.runCampaign(db, party.id, b.province, String(b.campaignId || ''), u.user.displayName); }
-      catch (e) { return bad(e.message); }
-      store.save(); broadcast('sync');
-      return json(res, 200, { election: db.election });
+      if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
+      try {
+        const result = election.runCampaign(db, party.id, b.province, String(b.campaignId),
+          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+        store.save(); broadcast('sync');
+        return json(res, 200, { election: db.election, ...result });
+      } catch (e) { return bad(e.message); }
     }
 
-    // Phase 34 — campaign investment: estimate support gain without spending.
+    // Phase 34 — campaign estimate: catalogue campaign + freeform extras,
+    // no spending. Shows base strength, the party-affinity multiplier and
+    // the late votes the drive would add while the count is running.
     if (pathname === '/api/election/estimate' && method === 'POST') {
       const b = await readBody(req);
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
       if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
+      if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
-        const est = election.investEstimate(db, party.id, b.province, Math.round(Number(b.money) || 0), b.materials || []);
-        return json(res, 200, { ok: true, ...est });
+        const est = election.estimateCampaign(db, party.id, b.province, String(b.campaignId),
+          Math.round(Number(b.money) || 0), b.materials || []);
+        return json(res, 200, est);
       } catch (e) { return bad(e.message); }
     }
 
-    // Phase 34 — campaign investment: commit money + materials, gain support.
+    // Backward-compat alias: the old freeform "invest" route now behaves
+    // exactly like the catalogue campaign route (the client uses /campaign).
     if (pathname === '/api/election/invest' && method === 'POST') {
       const b = await readBody(req);
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
       if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
+      if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
-        const result = election.investCampaign(db, party.id, b.province, Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+        const result = election.runCampaign(db, party.id, b.province, String(b.campaignId),
+          Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
         store.save(); broadcast('sync');
         return json(res, 200, { election: db.election, ...result });
       } catch (e) { return bad(e.message); }

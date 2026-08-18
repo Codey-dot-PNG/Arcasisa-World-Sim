@@ -407,6 +407,20 @@ function syncAllX100Certificates(world) {
     for (const id of entries) {
       const holder = (world.entities || []).find(e => e.id === id);
       if (!holder) continue;
+      // Normalize the position's `at` timestamp. The first two Stock Exchange
+      // commits stored WORLD-CLOCK ms (sim.worldClockNow — a negative/ancient
+      // epoch for 1962), which is not comparable to the real Date.now() the
+      // sell() lock uses; `Date.now() - pos.at` then blows up and the lock
+      // always looks expired (an instant "sell before the lock" exploit).
+      // Real-epoch timestamps are positive ~13-digit values; a missing or
+      // non-positive `at` can only be legacy, so reset it to now once. This
+      // never touches legitimately-held positions (their at is a real epoch),
+      // so it stays safe to run on every load.
+      const p = book[id];
+      if (p && (typeof p.at !== 'number' || p.at <= 0)) {
+        p.at = Date.now();
+        changed = true;
+      }
       holder.inventory = holder.inventory || [];
       const row = holder.inventory.find(r => r.itemId === item.id);
       if (!row) { holder.inventory.push({ itemId: item.id, qty: book[id].qty }); changed = true; }
@@ -535,7 +549,12 @@ function sell(companyId, sellerEntityId, shares, actor, opts) {
     if (!pos) throw new Error('You do not hold leveraged shares in this company');
     if (pos.qty < shares) throw new Error('You do not hold that many leveraged shares');
     const lockSec = x100LockSecOf(db);
-    const heldMs = Date.now() - pos.at;
+    // Defense-in-depth: a real-epoch `at` is a positive ~13-digit number.
+    // Anything else (missing, or legacy world-clock ms from the first Stock
+    // Exchange commits) must not read as "held forever" — treat it as freshly
+    // bought so the lock actually applies instead of silently expiring.
+    const atMs = (typeof pos.at === 'number' && pos.at > 0) ? pos.at : Date.now();
+    const heldMs = Date.now() - atMs;
     if (!gm && lockSec > 0 && heldMs < lockSec * 1000) {
       throw new Error(`Leveraged shares are locked for another ${Math.ceil((lockSec * 1000 - heldMs) / 1000)} second(s)`);
     }

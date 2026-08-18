@@ -2958,6 +2958,7 @@ const Views = {
         const sh = (c.shareholders || []).find(x => x.entityId === W.me.entityId);
         return sh ? sh.shares : 0;
       })();
+      const myEntry = market_holdEntryOfClient(c, W.me.entityId);
 
       // percent change vs the previous recorded price
       const pct = (() => {
@@ -3199,6 +3200,11 @@ const Views = {
     // X100 lock status — real seconds from purchase, mirrors the server's
     // sell() gate (settings.economy.x100LockSec, default 60).
     const lockLeft = hasX100 ? market_x100LockLeftClient(x100Pos) : 0;
+    const locked = lockLeft > 0;
+    // While a position is locked the hammer is deferenced server-side (sell()
+    // throws) and locally (the confirm button is disabled) — the countdown is
+    // informational, not a suggestion.
+    if (locked) x100.disabled = true;
     const val = hasX100 ? market_x100ValueClient(x100Pos, this.livePrice(c)) : 0;
     const valSpan = el('span', { style: 'font-weight:700; color:' + (val > 0 ? 'var(--good)' : 'var(--ink-faint)') + ';' }, CUR() + fmtNum(val));
     const x100Info = el('div', { style: 'display:none; margin:8px 0; padding:10px; border:1px solid var(--accent); background:var(--paper-deep); font-size:12px; color:var(--ink-soft); line-height:1.8; font-family:var(--font-mono);' },

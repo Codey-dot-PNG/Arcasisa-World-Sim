@@ -37,6 +37,12 @@ function rand(el) {
   return el.rng / 4294967296;
 }
 
+// settings.time.perTurn/unit no longer drive the count — see maybeTick
+// below. The count is keyed to sim.worldClockNow(), the same continuous,
+// turn-independent world-time clock the Day Market and War Engine already
+// run on, so it advances by real elapsed world minutes/hours rather than
+// waiting for a discrete turn to be advanced.
+
 // ---------- helpers ----------------------------------------------------------
 
 function partyAccount(db, party) {
@@ -66,26 +72,46 @@ function shuffleArray(arr) {
 
 // ---------- campaign support --------------------------------------------------
 
-function applySupport(db, party, strength) {
+// Campaigns now target ONE province, chosen by whoever runs them — no more
+// blanket national support bump. party.vars.campaignPointsByProvince tracks
+// exactly what's been added where, so decayCampaignSupport can unwind only
+// that (and only there) once the election is decided.
+function applySupport(db, party, provinceId, strength) {
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov) throw new Error('Choose a province to campaign in.');
   party.support = party.support || {};
-  for (const p of db.provinces) {
-    party.support[p.id] = party.support[p.id] || {};
-    party.support[p.id].all = Math.round(((party.support[p.id].all || 0) + strength) * 10) / 10;
-  }
+  party.support[provinceId] = party.support[provinceId] || {};
+  party.support[provinceId].all = Math.round(((party.support[provinceId].all || 0) + strength) * 10) / 10;
   party.vars = party.vars || {};
-  party.vars.campaignPoints = Math.round(((party.vars.campaignPoints || 0) + strength) * 10) / 10;
+  party.vars.campaignPointsByProvince = party.vars.campaignPointsByProvince || {};
+  party.vars.campaignPointsByProvince[provinceId] =
+    Math.round(((party.vars.campaignPointsByProvince[provinceId] || 0) + strength) * 10) / 10;
 }
 
 function decayCampaignSupport(db, parties) {
   for (const pt of parties) {
-    const pts = (pt.vars && pt.vars.campaignPoints) || 0;
-    if (!pts) continue;
-    for (const provId in (pt.support || {})) {
-      const s = pt.support[provId];
+    const byProv = (pt.vars && pt.vars.campaignPointsByProvince) || {};
+    for (const provId in byProv) {
+      const pts = byProv[provId];
+      if (!pts) continue;
+      const s = pt.support && pt.support[provId];
       if (s && s.all !== undefined) s.all = Math.round((s.all - pts) * 10) / 10;
-      if (!s || !s.all) delete pt.support[provId];
+      if (pt.support && (!s || !s.all)) delete pt.support[provId];
     }
-    pt.vars.campaignPoints = 0;
+    if (pt.vars) pt.vars.campaignPointsByProvince = {};
+    // Legacy fallback: a campaign that was mid-flight under the old
+    // national-support code (pt.vars.campaignPoints, a single scalar spread
+    // across every province) won't have a per-province record to unwind —
+    // decay it the old uniform way once, then retire the field for good.
+    const legacyPts = (pt.vars && pt.vars.campaignPoints) || 0;
+    if (legacyPts) {
+      for (const provId in (pt.support || {})) {
+        const s = pt.support[provId];
+        if (s && s.all !== undefined) s.all = Math.round((s.all - legacyPts) * 10) / 10;
+        if (!s || !s.all) delete pt.support[provId];
+      }
+    }
+    if (pt.vars) delete pt.vars.campaignPoints;
   }
 }
 
@@ -104,9 +130,11 @@ function estimateSupport(db, money, materials) {
   return Math.round(Math.sqrt(totalValue / base) * scale * 10) / 10;
 }
 
-function investEstimate(db, partyId, money, materials) {
+function investEstimate(db, partyId, provinceId, money, materials) {
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov) throw new Error('Choose a province to campaign in.');
   const support = estimateSupport(db, money, materials);
   let votes = 0;
   const el = db.election;
@@ -114,14 +142,16 @@ function investEstimate(db, partyId, money, materials) {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
     votes = Math.round(support * vpp);
   }
-  return { support, votes };
+  return { support, votes, provinceId };
 }
 
-function investCampaign(db, partyId, money, materials, actor) {
+function investCampaign(db, partyId, provinceId, money, materials, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active — campaigns run only during an election.');
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov) throw new Error('Choose a province to campaign in.');
 
   money = Math.max(0, Math.round(Number(money) || 0));
 
@@ -155,16 +185,16 @@ function investCampaign(db, partyId, money, materials, actor) {
     }
   }
 
-  // Apply support
+  // Apply support — scoped to the chosen province only
   const support = estimateSupport(db, money, materials);
-  if (support > 0) applySupport(db, party, support);
+  if (support > 0) applySupport(db, party, provinceId, support);
 
-  // Late votes if count is running
+  // Late votes if count is running — also scoped to that province
   let votes = 0;
   if (el.phase === 'voting') {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
     votes = Math.round(support * vpp);
-    if (votes) addVotes(el, party.id, null, votes);
+    if (votes) addVotes(el, party.id, provinceId, votes);
   }
 
   // Descriptions for the log
@@ -175,22 +205,22 @@ function investCampaign(db, partyId, money, materials, actor) {
 
   el.log = el.log || [];
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
-    partyId: party.id, campaignName: 'Campaign Investment',
+    partyId: party.id, campaignName: 'Campaign Investment', provinceId, provinceName: prov.name,
     money, materials: materials || [], strength: support, votes, materialDesc: matDesc,
     actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
-  store.log('election', `Campaign: ${party.name} invests ${fmtMoneyOf(db, money)}${matDesc ? ' + ' + matDesc : ''}`,
-    `${support} support points${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
+  store.log('election', `Campaign: ${party.name} invests in ${prov.name}`,
+    `${fmtMoneyOf(db, money)}${matDesc ? ' + ' + matDesc : ''} · ${support} support points${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
 
-  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'}`,
-    `${party.name} has invested ${money ? fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''} ` +
+  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
+    `${party.name} has invested ${money ? fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''} in ${prov.name} ` +
     `${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}, ` +
-    `expected to gain ${support} support points.`,
+    `expected to gain ${support} support points there.`,
     'Politics', false, 'Wire Service');
 
-  return { money, strength: support, votes, materialDesc: matDesc };
+  return { money, strength: support, votes, materialDesc: matDesc, provinceId, provinceName: prov.name };
 }
 
 // ---------- legacy campaign templates (kept for backward compat) --------------
@@ -229,11 +259,13 @@ function deductItemCosts(entity, rows) {
   }
 }
 
-function runCampaign(db, partyId, campaignId, actor) {
+function runCampaign(db, partyId, provinceId, campaignId, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active.');
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov) throw new Error('Choose a province to campaign in.');
   const cfg = db.settings.election || {};
   const camp = (cfg.campaigns || []).find(c => c.id === campaignId);
   if (!camp) throw new Error('Unknown campaign.');
@@ -246,24 +278,24 @@ function runCampaign(db, partyId, campaignId, actor) {
   if (money > 0) sim.txn(acct.id, null, money, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
   deductItemCosts(party, camp.itemCosts);
   const strength = Math.max(0, Number(camp.strength) || 0);
-  if (strength > 0) applySupport(db, party, strength);
+  if (strength > 0) applySupport(db, party, provinceId, strength);
   let votes = 0;
   if (el.phase === 'voting') {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
     votes = Math.round(strength * vpp);
-    if (votes) addVotes(el, party.id, null, votes);
+    if (votes) addVotes(el, party.id, provinceId, votes);
   }
   el.log = el.log || [];
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
-    partyId: party.id, campaignId: camp.id, campaignName: camp.name, money, strength, votes, actor: actor || '—' });
+    partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name, money, strength, votes, actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
-  store.log('election', `Campaign: ${party.name} runs "${camp.name}"`,
+  store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
     `${money ? fmtMoneyOf(db, money) + ' · ' : ''}${strength} support points${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
-  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'}`,
-    `${party.name} has launched "${camp.name}" ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}, at a cost of ${money ? fmtMoneyOf(db, money) : 'no money'}${camp.itemCosts && camp.itemCosts.length ? ' plus party stock' : ''}.`,
+  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
+    `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}, at a cost of ${money ? fmtMoneyOf(db, money) : 'no money'}${camp.itemCosts && camp.itemCosts.length ? ' plus party stock' : ''}.`,
     'Politics', false, 'Wire Service');
-  return { money, strength, votes };
+  return { money, strength, votes, provinceId, provinceName: prov.name };
 }
 
 // ---------- the live election doc ---------------------------------------------
@@ -345,10 +377,9 @@ function startVoting(db, actor) {
   }
   el.electorate = totalVotes;
   el.phase = 'voting';
-  el.votingTurn = db.settings.time.turn;
+  el.votingTurn = db.settings.time.turn;   // informational only — no longer drives the count
   el.votingDate = db.settings.time.date;
-  el.startTurn = db.settings.time.turn;
-  el._tickTurn = db.settings.time.turn;
+  el.startWorldMs = sim.worldClockNow(db.settings.time, Date.now());
   el.steps = [];
   el.loggedPct = 0;
   updateProgress(el);
@@ -386,15 +417,61 @@ function updateProgress(el) {
   el.progress = el.totalBallots ? Math.min(1, countedSum / el.totalBallots) : 0;
 }
 
-// Advance the count: provinces report one at a time, each taking
-// durationDays/numProvinces world days.  effectiveTurn is the turn to
-// evaluate against (either the real world turn or the GM's manual tick).
-function advanceRealtimeCount(db, el, effectiveTurn, actor) {
+// Defensive self-heal: a `voting`-phase election doc that predates this
+// realtime engine (e.g. a Phase 33 batch-count doc with no provinceOrder),
+// or one otherwise missing its per-province scaffolding, makes the loop
+// below run zero iterations forever — ballots never move, `anyChange` never
+// fires, and nothing ever throws, so there's no error to catch and nobody
+// is ever told. Rebuild the scaffolding from el.targets (always set
+// alongside phase:'voting' by startVoting) instead of leaving the count
+// silently stuck. Returns false only if there's truly nothing to rebuild
+// from, in which case the caller bails without crashing the turn.
+function ensureRealtimeScaffold(db, el, actor) {
+  if (el.phase !== 'voting') return true;
+  const broken = !Array.isArray(el.provinceOrder) || !el.provinceOrder.length
+    || !el.provProgress || !el.provComplete || !el.counted || !el.startWorldMs;
+  if (!broken) return true;
+  if (!el.targets || !Object.keys(el.targets).length) {
+    console.error('election: voting phase with no targets on the doc — cannot self-heal, count is stuck.');
+    return false;
+  }
   const parties = db.entities.filter(e => e.type === 'party');
-  const daysPerTurn = db.settings.time.perTurn || 1;
+  if (!Array.isArray(el.provinceOrder) || !el.provinceOrder.length) {
+    el.provinceOrder = shuffleArray(Object.keys(el.targets));
+  }
+  el.provProgress = el.provProgress || {};
+  el.provComplete = el.provComplete || {};
+  el.counted = el.counted || {};
+  for (const pid of el.provinceOrder) {
+    if (el.provProgress[pid] === undefined) el.provProgress[pid] = 0;
+    if (!el.counted[pid]) {
+      const c = {};
+      for (const pt of parties) c[pt.id] = 0;
+      el.counted[pid] = c;
+    }
+  }
+  if (!el.startWorldMs) el.startWorldMs = sim.worldClockNow(db.settings.time, Date.now());
+  el.steps = el.steps || [];
+  el.log = el.log || [];
+  store.log('election', 'Election Commission repairs the live count',
+    'The count was missing its province schedule and has been rebuilt from the sealed targets.',
+    actor || 'ENGINE', [el.id]);
+  return true;
+}
+
+// Advance the count: provinces report one at a time, each taking
+// durationDays/numProvinces of REAL WORLD TIME (sim.worldClockNow), not
+// world turns. nowWorldMs is the world-clock timestamp to evaluate against —
+// calling this with the same or an earlier nowWorldMs than last time is a
+// safe no-op (newProg <= prevProg guards below), so it's fine to call this
+// as often as we like; how often just changes how chunky the visible
+// updates are, never the final result.
+function advanceRealtimeCount(db, el, nowWorldMs, actor) {
+  if (!ensureRealtimeScaffold(db, el, actor)) return;
+  const parties = db.entities.filter(e => e.type === 'party');
   const numProvs = el.provinceOrder.length;
   const daysPerProvince = el.durationDays / numProvs;
-  const daysElapsed = (effectiveTurn - el.startTurn) * daysPerTurn;
+  const daysElapsed = Math.max(0, (nowWorldMs - el.startWorldMs) / 86400000);
 
   let anyChange = false;
 
@@ -445,9 +522,9 @@ function advanceRealtimeCount(db, el, effectiveTurn, actor) {
   }
 
   if (anyChange) {
-    el._tickTurn = effectiveTurn;
+    el._tickWorldMs = nowWorldMs;
     el.steps.push({
-      turn: effectiveTurn, date: db.settings.time.date,
+      worldMs: nowWorldMs, turn: db.settings.time.turn, date: db.settings.time.date,
       counted: nationalCounts(el),
       provProgress: { ...el.provProgress },
       provComplete: { ...el.provComplete }
@@ -469,21 +546,55 @@ function advanceRealtimeCount(db, el, effectiveTurn, actor) {
   }
 }
 
-// Called from sim.advanceTurn once per turn while the count is live.
-function onTurn(db, actor) {
+// Minimum real-world gap between actual count updates. The count's PACE is
+// set entirely by sim.worldClockNow (world minutes/hours elapsing), not by
+// how often this is called — this gate just throttles HOW OFTEN we bother
+// doing the work, so a burst of concurrent /api/state requests (serverless)
+// or the long-lived process's own poll (server.js) doesn't recompute on
+// every single call or flood el.steps with near-duplicate rows. Safe to
+// call from multiple places (self-gated, same pattern as market.js's
+// _lastDayTick and war.js's tick gate).
+const MIN_TICK_REAL_MS = 3000;
+
+// The count's primary driver — ride this from GET /api/state (serverless)
+// and from a resident timer (server.js, long-lived process), exactly like
+// market.maybeDayTick / war.maybeWarTickSignal. Returns a signal so callers
+// can decide whether to broadcast (milestones/finalize only — see those
+// functions' own comments on why per-tick broadcasts are avoided).
+function maybeTick(db, actor) {
   const el = db.election;
-  if (!el || !el.active || el.phase !== 'voting') return;
-  advanceRealtimeCount(db, el, db.settings.time.turn, actor);
+  if (!el || !el.active || el.phase !== 'voting') return { ticked: false, milestone: false };
+  const nowReal = Date.now();
+  if (el._lastTickRealMs && (nowReal - el._lastTickRealMs) < MIN_TICK_REAL_MS) return { ticked: false, milestone: false };
+  el._lastTickRealMs = nowReal;
+  const beforePct = el.loggedPct || 0;
+  const nowWorldMs = sim.worldClockNow(db.settings.time, nowReal);
+  advanceRealtimeCount(db, el, nowWorldMs, actor);
+  const finalized = !db.election; // finalize() sets db.election = null
+  const milestone = finalized || (db.election && (db.election.loggedPct || 0) > beforePct);
+  return { ticked: true, milestone: !!milestone };
 }
 
-// GM "advance one step" — advances the effective election turn by 1
-// without changing the world clock.
+// Kept as a turn-advance nudge too — cheap, self-gated by maybeTick's own
+// MIN_TICK_REAL_MS, and means a manual "Advance Turn" also gives the count
+// a chance to catch up even in a setup with no other pollers running.
+function onTurn(db, actor) {
+  maybeTick(db, actor);
+}
+
+// GM "refresh now" — forces an immediate recompute against the current
+// world-clock time, bypassing the MIN_TICK_REAL_MS gate. The count's actual
+// progress is still governed entirely by elapsed world time (durationDays
+// vs sim.worldClockNow), so this can't "add" ballots beyond what real time
+// justifies — it just skips waiting for the next automatic poll.
 function tickCount(db, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active.');
   if (el.phase !== 'voting') throw new Error('The count has not started yet — open the polls first.');
-  const nextTurn = Math.max(db.settings.time.turn, (el._tickTurn || db.settings.time.turn)) + 1;
-  advanceRealtimeCount(db, el, nextTurn, actor);
+  const nowReal = Date.now();
+  const nowWorldMs = sim.worldClockNow(db.settings.time, nowReal);
+  advanceRealtimeCount(db, el, nowWorldMs, actor);
+  el._lastTickRealMs = nowReal;
   return db.election;
 }
 
@@ -648,7 +759,7 @@ function forPlayers(el) {
 }
 
 module.exports = {
-  startCampaign, startVoting, onTurn, tickCount,
+  startCampaign, startVoting, onTurn, tickCount, maybeTick,
   runCampaign, investEstimate, investCampaign,
   adjustVotes, cancel, applyTuning, forPlayers
 };

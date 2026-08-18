@@ -124,3 +124,19 @@ setInterval(() => {
     if (sig.ticked) { store.save(); if (sig.milestone) api.broadcast('sync'); }
   } catch (e) { /* transient; retry next tick */ }
 }, 1000).unref();
+
+// Election count — same serverless-safe, self-gated pattern as the Day
+// Market and War Engine above. The count runs off the continuous world
+// clock (sim.worldClockNow), not world turns, so — like the market and war
+// engines — it needs its own wall-clock poll here for this long-lived local
+// process, plus its own gated ride on GET /api/state for serverless (see
+// server/election.js's maybeTick and server/api.js's GET /api/state
+// handler). Both paths share maybeTick's own _lastTickRealMs gate, so
+// running from both places never double-ticks.
+setInterval(() => {
+  try {
+    const election = require('./server/election');
+    const sig = election.maybeTick(store.get(), 'ENGINE');
+    if (sig.ticked) { store.save(); if (sig.milestone) api.broadcast('sync'); }
+  } catch (e) { /* transient; retry next tick */ }
+}, 3000).unref();

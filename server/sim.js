@@ -1596,11 +1596,19 @@ function advanceTurn(steps, actor) {
     try { runForeignMilitary(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignMilitary failed:', e.message); }
     // Bank solvency check → economy-wide crash while its reserve is underwater.
     try { runBankCrisis(db, actor || 'ENGINE'); } catch (e) { console.error('runBankCrisis failed:', e.message); }
-    // Phase 33 — live elections: while the count runs, each turn reveals one
-    // more batch of ballots. Calibrated to the world time system (durationTurns
-    // is in turns — see server/election.js), never a process timer, so it is
-    // serverless-safe. Lazy require keeps the sim↔election cycle out of boot.
-    try { require('./election').onTurn(db, actor || 'ENGINE'); } catch (e) { console.error('election tick failed:', e.message); }
+    // Phase 34 — live elections: the count now runs off the continuous world
+    // clock (sim.worldClockNow), not turns — see election.js's maybeTick,
+    // which is the count's real driver, ridden from GET /api/state and a
+    // resident timer in server.js. This onTurn call is just a bonus nudge so
+    // a manual "Advance Turn" also gives the count a chance to catch up.
+    // Lazy require keeps the sim↔election cycle out of boot.
+    try { require('./election').onTurn(db, actor || 'ENGINE'); }
+    catch (e) {
+      console.error('election tick failed:', e.message);
+      // Also surface it in the in-app log — a GM without access to the
+      // server console would otherwise never learn the count is stuck.
+      try { store.log('election', 'Election tick failed', e.message, 'ENGINE', []); } catch (e2) { /* logging must never break the turn */ }
+    }
 
     const prevGdp = db.globalVars.gdp;
     updateDerived();

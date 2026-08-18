@@ -560,6 +560,13 @@ async function handle(req, res, pathname, method) {
       // on milestones — per-tick broadcasts made every client refetch the full
       // world at tick rate during a war. See war.maybeWarTickSignal.
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
+      // Serverless-friendly election count: the count runs off the
+      // continuous world clock (sim.worldClockNow) now, not turns, so it
+      // needs its own gated ride here — same self-throttled, safe-to-call-
+      // from-anywhere pattern as market/war above. Broadcasts only on a
+      // quarter/half/three-quarter milestone or when the count finalizes,
+      // never on every tiny partial-progress tick.
+      try { const sig = election.maybeTick(db, 'ENGINE'); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* election optional */ }
       // ?ifv= fast-path: the client already holds this version — skip the
       // ~100KB filterState body and answer with a tiny "unchanged" envelope.
       // Never when this very request mutated the world (gated ticks above):
@@ -1435,12 +1442,15 @@ async function handle(req, res, pathname, method) {
     // Phase 33/34 — parties run campaigns during the election season. Any
     // operator who controls the party (its leader chain) can spend the
     // treasury; the GM can too (checked inline — the route is player-facing).
+    // Every campaign now targets ONE province — no more blanket national
+    // support bump — so `province` is required on all three routes below.
     if (pathname === '/api/election/campaign' && method === 'POST') {
       const b = await readBody(req);
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
-      try { election.runCampaign(db, party.id, String(b.campaignId || ''), u.user.displayName); }
+      if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
+      try { election.runCampaign(db, party.id, b.province, String(b.campaignId || ''), u.user.displayName); }
       catch (e) { return bad(e.message); }
       store.save(); broadcast('sync');
       return json(res, 200, { election: db.election });
@@ -1452,8 +1462,9 @@ async function handle(req, res, pathname, method) {
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
       try {
-        const est = election.investEstimate(db, party.id, Math.round(Number(b.money) || 0), b.materials || []);
+        const est = election.investEstimate(db, party.id, b.province, Math.round(Number(b.money) || 0), b.materials || []);
         return json(res, 200, { ok: true, ...est });
       } catch (e) { return bad(e.message); }
     }
@@ -1464,8 +1475,9 @@ async function handle(req, res, pathname, method) {
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
       if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
       try {
-        const result = election.investCampaign(db, party.id, Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
+        const result = election.investCampaign(db, party.id, b.province, Math.round(Number(b.money) || 0), b.materials || [], u.user.displayName);
         store.save(); broadcast('sync');
         return json(res, 200, { election: db.election, ...result });
       } catch (e) { return bad(e.message); }
@@ -1704,10 +1716,11 @@ async function handle(req, res, pathname, method) {
           return json(res, 200, { election: rec });
         } catch (e) { return bad(e.message); }
       }
-      // Phase 33 — live elections (see server/election.js): the Election
-      // Commission's levers. The world-time calibration is the point — the
-      // count advances one batch per world turn, and the GM's durationTurns
-      // setting decides how long the suspense runs. Tuning knobs are saved as
+      // Phase 34 — live elections (see server/election.js): the Election
+      // Commission's levers. The count now runs off the continuous world
+      // clock rather than world turns — durationDays is real world-clock
+      // days, ticked by election.maybeTick (ridden from GET /api/state and
+      // a resident timer in server.js). Tuning knobs are saved as
       // settings.election from the GM Election tab (applyTuning applies them
       // to a live election too), so the routes here stay single-purpose.
       if (pathname === '/api/gm/election/campaign' && method === 'POST') {

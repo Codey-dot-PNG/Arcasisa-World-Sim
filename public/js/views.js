@@ -1645,7 +1645,7 @@ const Views = {
               txt += ' · runs ' + r.durationMinutes + ' world minutes';
               if (r.votes) txt += ' · ~' + fmtNum(r.votes) + ' late ballots' + (r.defame ? ' off ' + r.defame.abbrev : '');
               estSpan.textContent = txt;
-              launchBtn.disabled = !(isDefamative(campOf()) && defameSel.value);
+              launchBtn.disabled = isDefamative(campOf()) && !defameSel.value;
             } catch (e) { toast(e.message, true); }
           }}, 'Estimate'));
           btnRow.appendChild(launchBtn);

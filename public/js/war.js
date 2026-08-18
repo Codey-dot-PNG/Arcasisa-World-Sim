@@ -130,17 +130,20 @@ const War = {
   activeAuth() {
     const s = S() || {};
     this._ensureActiveKey();
-    if (this._activeKey === 'protest' && s.protest) return s.protest;
-    if (s.war) return s.war;
-    return s.protest || null;
+    if (this._activeKey === 'protest' && s.protest && s.protest.active) return s.protest;
+    if (s.war && s.war.active) return s.war;
+    if (s.protest && s.protest.active) return s.protest;
+    return null;
   },
   _ensureActiveKey() {
     const s = S() || {};
-    if (this._activeKey === 'protest' && s.protest) return;
-    if (this._activeKey === 'war' && s.war) return;
-    this._activeKey = s.war ? 'war' : (s.protest ? 'protest' : 'war');
+    if (this._activeKey === 'protest' && s.protest && s.protest.active) return;
+    if (this._activeKey === 'war' && s.war && s.war.active) return;
+    const warActive = !!(s.war && s.war.active);
+    const protestActive = !!(s.protest && s.protest.active);
+    this._activeKey = warActive ? 'war' : (protestActive ? 'protest' : 'war');
   },
-  active() { const s = S(); return !!((s && (s.war || s.protest))); },
+  active() { const s = S(); return !!((s && (s.war && s.war.active || s.protest && s.protest.active))); },
   // A conflict OBJECT lingers after the fighting ends (active:false) so
   // players can review the final front — but its units are no longer
   // commandable. Orders against an inactive conflict are rejected
@@ -1991,8 +1994,8 @@ const War = {
     // Both conflicts run simultaneously — the GM can start the OTHER kind
     // even while one is live (a protest mid-invasion, or a war mid-strike).
     if (isGM()) {
-      if (!S().war) this.renderStartForm(inner);
-      if (!S().protest) this.renderProtestStartForm(inner);
+      if (!S().war || !S().war.active) this.renderStartForm(inner);
+      if (!S().protest || !S().protest.active) this.renderProtestStartForm(inner);
     }
   },
 

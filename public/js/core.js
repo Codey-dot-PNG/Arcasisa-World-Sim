@@ -164,9 +164,41 @@ function ownership_controlsClient(rootEntityId, targetEntityId) {
   return ownershipSetClient(rootEntityId).has(targetEntityId);
 }
 // Shares not yet allocated to any holder — what the market maker sells from.
+// Mirrors server market.heldTotal: the X100 leveraged book also holds real
+// float shares, so it counts against the sellable float (market.js).
 function market_treasuryPoolClient(co) {
-  const held = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
+  const held = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0)
+    + Object.values(co.x100 || {}).reduce((s, p) => s + ((p && p.qty) || 0), 0);
   return Math.max(0, (co.sharesOutstanding || 0) - held);
+}
+// X100 leveraged position value at a given day quote — mirrors
+// server/market.js's x100Value (Phase 34): each position tracks the day price
+// with X100_MULT sensitivity from its entry price, floored at 0.
+function market_x100ValueClient(pos, price) {
+  const m = (S().x100 && S().x100.mult) || 100;
+  if (!pos || !(pos.qty > 0) || !(pos.entry > 0)) return 0;
+  return pos.qty * pos.entry * Math.max(0, 1 + m * (price / pos.entry - 1));
+}
+function market_x100LockMin() {
+  return (S().x100 && S().x100.lockMin) || 25;
+}
+// World minutes still locked before a leveraged position can be sold (0 =
+// unlocked). Uses the exposed world clock (settings.time.clock.nowMs), the
+// same sim.worldClockNow the server's sell() lock check reads.
+function market_x100LockLeftClient(pos) {
+  const lock = market_x100LockMin() * 60000;
+  if (!pos || !pos.at) return 0;
+  const clock = S().settings.time.clock;
+  const nowWorld = (clock && clock.nowMs) || 0;
+  if (!nowWorld) return 0;
+  return Math.max(0, (pos.at + lock - nowWorld) / 60000);
+}
+function market_x100HoldingOfClient(co, entityId) {
+  const p = (co.x100 || {})[entityId];
+  return p ? p.qty : 0;
+}
+function market_x100EntryOfClient(co, entityId) {
+  return (co.x100 || {})[entityId] || null;
 }
 // Shares that count toward valuation / market cap: all outstanding EXCEPT
 // freshly-floated primary stock no real investor has subscribed to yet (mirrors

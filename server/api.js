@@ -289,7 +289,7 @@ function filterState(u) {
     const out = { ...e };
     if (!seeInv(e.id)) delete out.inventory;
     if (e.type === 'company' && !p.companyFinancials && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
-      delete out.vars; delete out.shareholders; delete out.sharesOutstanding;
+      delete out.vars; delete out.shareholders; delete out.sharesOutstanding; delete out.x100;
     }
     return out;
   });
@@ -371,6 +371,10 @@ function filterState(u) {
     // the sole source of the actual next dayPrice (market.js's noise draw
     // uses Math.random(), deliberately NOT reproducible client-side).
     dayTick: { lastAt: db._lastDayTick || 0, intervalMs: (db.settings.economy && db.settings.economy.dayTickMs) || 5000 },
+    // X100 leveraged trade tuning (Phase 34) — public constants so the client
+    // renders the position value formula and lock countdown identically to the
+    // server (server/market.js's X100_MULT / X100_LOCK_MIN).
+    x100: { mult: market.X100_MULT, lockMin: market.X100_LOCK_MIN },
     events: p.gm ? db.events : undefined,
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
     users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined
@@ -1332,7 +1336,7 @@ async function handle(req, res, pathname, method) {
       const gm = u.role.perms.gm;
       const buyerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
       if (!buyerId) return bad('No entity to trade for.');
-      try { const r = market.buy(b.companyId, buyerId, b.shares, u.user.displayName, { gm }); store.save(); broadcast('sync'); return json(res, 200, r); }
+      try { const r = market.buy(b.companyId, buyerId, b.shares, u.user.displayName, { gm, x100: !!b.x100 }); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
     if (pathname === '/api/market/sell' && method === 'POST') {
@@ -1341,7 +1345,7 @@ async function handle(req, res, pathname, method) {
       const sellerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
       if (!sellerId) return bad('No entity to trade for.');
       if (!gm && !ownership.controls(u.user.entityId, sellerId)) return deny('You do not control that holder.');
-      try { const r = market.sell(b.companyId, sellerId, b.shares, u.user.displayName, { gm }); store.save(); broadcast('sync'); return json(res, 200, r); }
+      try { const r = market.sell(b.companyId, sellerId, b.shares, u.user.displayName, { gm, x100: !!b.x100 }); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
     if (pathname === '/api/market/transfer' && method === 'POST') {

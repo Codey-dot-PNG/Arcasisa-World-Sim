@@ -2977,7 +2977,14 @@ const Views = {
                 ? el('span', { style: 'color:var(--accent);' }, ` · ${fmtNum(Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c)))} ON SHELF`) : null),
               ' ', pctEl))),
         el('div', { style: 'text-align:right;' },
-          el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares')));
+          el('div', { style: 'font-family:var(--font-mono); font-size:11px;' }, 'Your holding: ' + fmtNum(myHold) + ' shares'),
+          (() => {
+            const pos = market_x100EntryOfClient(c, W.me.entityId);
+            if (!pos) return null;
+            const val = market_x100ValueClient(pos, this.livePrice(c));
+            return el('div', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent);' }, 'Your ×100: ' + fmtNum(pos.qty) + ' shares · ',
+              el('span', { 'data-x100-value': c.id }, CUR() + fmtNum(val)));
+          })()));
       row.appendChild(head);
 
       const cols = el('div', { style: 'display:flex; gap:18px; align-items:flex-start; margin-top:8px; flex-wrap:wrap;' });
@@ -3080,6 +3087,14 @@ const Views = {
         const c = S().entities.find(e => e.id === n.getAttribute('data-co'));
         if (c) n.textContent = CUR() + fmtNum(this.livePrice(c));
       });
+      // X100 leveraged positions tick live too — same read-only wiggle, applied
+      // to the amplified position value (market_x100ValueClient).
+      const x100Nodes = document.querySelectorAll('[data-x100-value]');
+      x100Nodes.forEach(n => {
+        const c = S().entities.find(e => e.id === n.getAttribute('data-x100-value'));
+        const pos = c && market_x100EntryOfClient(c, W.me.entityId);
+        if (c && pos) n.textContent = CUR() + fmtNum(market_x100ValueClient(pos, this.livePrice(c)));
+      });
       const chartNodes = document.querySelectorAll('[data-day-chart]');
       chartNodes.forEach(n => {
         const c = S().entities.find(e => e.id === n.getAttribute('data-day-chart'));
@@ -3094,16 +3109,27 @@ const Views = {
 
   marketBuyModal(c) {
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
+    const x100 = el('input', { type: 'checkbox', id: 'buy-x100', style: 'accent-color:var(--accent);' });
+    const x100Info = el('div', { style: 'display:none; margin:8px 0; padding:10px; border:1px solid var(--accent); background:var(--paper-deep); font-size:12px; color:var(--ink-soft); line-height:1.7;' },
+      'Bought at the same price as a normal share, but the position tracks the Day Market ', el('b', { style: 'color:var(--accent);' }, '100× amplified'),
+      ': a +1% move doubles the position, a −1% move wipes it out to zero (you can never lose more than the purchase). Locked for ',
+      el('b', {}, `${market_x100LockMin()} world minutes`), ' after buying — no selling within the lock.');
+    x100.addEventListener('change', () => { x100Info.style.display = x100.checked ? 'block' : 'none'; });
     openModal('BUY SHARES — ' + c.name, el('div',
       el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you buy.'),
-      el('label.field-label', 'Shares to buy'), shares
+      el('label.field-label', 'Shares to buy'), shares,
+      el('label', { style: 'display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer;' },
+        x100, el('span', { style: 'color:var(--accent); font-weight:700;' }, '×100 LEVERAGED TRADE'), el('span', { style: 'color:var(--ink-faint); font-size:11px;' }, '— high risk, high reward')),
+      x100Info
     ), [{
       label: 'Buy', onClick: async () => {
         const n = Math.round(Number(shares.value));
         if (!(n > 0)) throw new Error('Enter a positive share count.');
+        const lev = x100.checked;
         const px = this.livePrice(c); // pre-VAT estimate — server truth corrects it one round-trip later
-        const r = await POST('/api/market/buy', { companyId: c.id, shares: n }, {
+        const r = await POST('/api/market/buy', { companyId: c.id, shares: n, x100: lev }, {
           optimistic: (s) => {
+            if (lev) return; // leveraged buys book on the derivative lane — server truth renders it
             const co = s.entities.find(e => e.id === c.id);
             const meId = W.me.entityId;
             if (!co || !meId) return;
@@ -3115,22 +3141,48 @@ const Views = {
             if (acct && px > 0) acct.balance -= n * px;
           }
         });
-        toast(`Bought ${r.shares} shares for ${fmtMoney(r.cost)}.`);
+        toast(lev ? `Bought ${r.shares} ×100 leveraged shares for ${fmtMoney(r.cost)}. Position locked for ${market_x100LockMin()} world minutes.` : `Bought ${r.shares} shares for ${fmtMoney(r.cost)}.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
   marketSellModal(c) {
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
+    const x100 = el('input', { type: 'checkbox', style: 'accent-color:var(--accent);' });
+    const x100Pos = market_x100EntryOfClient(c, W.me.entityId);
+    const hasX100 = !!(x100Pos && x100Pos.qty > 0);
+    if (!hasX100) x100.disabled = true;
+    // World-clock lock status — mirrors the server's sell() gate (25 world
+    // minutes from purchase, computed off settings.time.clock.nowMs).
+    const lockLeft = hasX100 ? market_x100LockLeftClient(x100Pos) : 0;
+    const val = hasX100 ? market_x100ValueClient(x100Pos, this.livePrice(c)) : 0;
+    const valSpan = el('span', { style: 'font-weight:700; color:var(--good);' }, CUR() + fmtNum(val));
+    const x100Info = el('div', { style: 'display:none; margin:8px 0; padding:10px; border:1px solid var(--accent); background:var(--paper-deep); font-size:12px; color:var(--ink-soft); line-height:1.8; font-family:var(--font-mono);' },
+      el('div', 'POSITION ENTRY   ' + CUR() + fmtNum(x100Pos ? x100Pos.entry : 0)),
+      el('div', 'LIVE DAY        ', this.livePriceEl(c)),
+      el('div', 'POSITION VALUE  ', valSpan),
+      el('div', { style: 'color:var(--ink-faint); margin-top:4px;' }, lockLeft > 0 ? `Locked — sale available in ~${Math.ceil(lockLeft)} world minute(s).` : 'Sale unlocked.'));
+    const refresh = () => {
+      x100Info.style.display = x100.checked ? 'block' : 'none';
+      if (x100.checked && hasX100) {
+        valSpan.textContent = CUR() + fmtNum(market_x100ValueClient(market_x100EntryOfClient(c, W.me.entityId), this.livePrice(c)));
+      }
+    };
+    x100.addEventListener('change', refresh);
     openModal('SELL SHARES — ' + c.name, el('div',
       el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you sell.'),
-      el('label.field-label', 'Shares to sell'), shares
+      el('label.field-label', 'Shares to sell'), shares,
+      el('label', { style: 'display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer;', title: hasX100 ? '' : 'You hold no ×100 positions in this company' },
+        x100, el('span', { style: 'color:var(--accent); font-weight:700;' }, '×100 LEVERAGED POSITION'), hasX100 ? null : el('span', { style: 'color:var(--ink-faint); font-size:11px;' }, '(none held)')),
+      x100Info
     ), [{
       label: 'Sell', onClick: async () => {
         const n = Math.round(Number(shares.value));
         if (!(n > 0)) throw new Error('Enter a positive share count.');
+        const lev = x100.checked;
         const px = this.livePrice(c); // estimate — server truth corrects it one round-trip later
-        const r = await POST('/api/market/sell', { companyId: c.id, shares: n }, {
+        const r = await POST('/api/market/sell', { companyId: c.id, shares: n, x100: lev }, {
           optimistic: (s) => {
+            if (lev) return; // leveraged payouts are amplified — server truth decides them
             const co = s.entities.find(e => e.id === c.id);
             const meId = W.me.entityId;
             if (!co || !meId) return;
@@ -3142,9 +3194,10 @@ const Views = {
             if (acct && px > 0) acct.balance += n * px;
           }
         });
-        toast(`Sold ${r.shares} shares for ${fmtMoney(r.proceeds)}.`);
+        toast(lev ? `Sold ${r.shares} ×100 leveraged shares for ${fmtMoney(r.proceeds)}.` : `Sold ${r.shares} shares for ${fmtMoney(r.proceeds)}.`);
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+    refresh();
   },
   // Raise capital (Workstream A2/Phase 15) — sell NEW shares for cash, priced
   // off the live market with a FLOAT-OVERHANG DISCOUNT: the more of the company

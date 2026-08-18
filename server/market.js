@@ -25,6 +25,14 @@ const BANK_ID = 'ent_bank';
 const DEFAULT_DEPTH = 5;   // price impact per unit of (qty / sharesOutstanding)
 const MAX_TICK = 0.25;     // a single trade can move the day quote at most ±25%
 const DEFAULT_VOL = 0.02;  // per-tick speculative wiggle amplitude
+// X100 leveraged trade (Phase 34): shares bought at the ordinary day-market
+// price whose VALUE tracks the day quote with 100× sensitivity — a +1% move
+// doubles the position, a −1% move wipes it out. Positions are held on the
+// company's own derivative book (co.x100, NOT the shareholder register — they
+// are not certificates and do not mirror into inventory) and are locked for
+// X100_LOCK_MIN world minutes after purchase (world clock = sim.worldClockNow).
+const X100_MULT = 100;     // value sensitivity multiplier vs the day quote
+const X100_LOCK_MIN = 25;  // world minutes a leveraged position must be held
 // Day-Market circuit breakers: speculation may range this far from fundamental
 // value before it is clamped, so the day price can diverge widely from earnings
 // (that is the point) without running away to zero or infinity.
@@ -219,7 +227,34 @@ function maybeDayTick(db) {
 }
 
 function heldTotal(co) {
-  return (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
+  const reg = (co.shareholders || []).reduce((s, r) => s + (r.shares || 0), 0);
+  // Leveraged positions also hold real float shares (they were bought from the
+  // float at the market price), so they count against what the market maker
+  // can still sell — otherwise the float could be oversubscribed twice over.
+  return reg + x100HeldTotal(co);
+}
+// X100 leveraged book: co.x100 = { entityId: { qty, entry, at } } — qty shares
+// bought at `entry` day price, world-clock ms `at`. Not part of the canonical
+// shareholder register (these are a derivative lane, not certificates); the
+// float accounting above is the only place the two interact.
+function x100Book(co) { co.x100 = co.x100 || {}; return co.x100; }
+function x100HeldTotal(co) {
+  return Object.values(co.x100 || {}).reduce((s, p) => s + ((p && p.qty) || 0), 0);
+}
+function x100HoldingOf(co, entityId) {
+  const p = (co.x100 || {})[entityId];
+  return p ? p.qty : 0;
+}
+function x100EntryOf(co, entityId) {
+  return (co.x100 || {})[entityId] || null;
+}
+// Live value of a leveraged position at a given day quote. Bought at the
+// ordinary price (`entry`); the position then tracks the quote with 100×
+// sensitivity — 1% up doubles it, 1% down zeroes it — and can never go
+// negative (value floors at 0, the player's loss is capped at the purchase).
+function x100Value(entry, price) {
+  if (!entry || !(entry.qty > 0) || !(entry.entry > 0)) return 0;
+  return entry.qty * entry.entry * Math.max(0, 1 + X100_MULT * (price / entry.entry - 1));
 }
 function treasuryPool(co) {
   return Math.max(0, (co.sharesOutstanding || 0) - heldTotal(co));
@@ -240,10 +275,16 @@ function holdingOf(co, entityId) {
 // controller). This is what the public-float cap limits.
 function personPublicHeld(co) {
   const db = store.get();
-  return (co.shareholders || []).reduce((sum, r) => {
-    if (r.entityId === co.ownerId || r.entityId === co.ceoId) return sum;
+  const sum = (co.shareholders || []).reduce((s, r) => {
+    if (r.entityId === co.ownerId || r.entityId === co.ceoId) return s;
     const e = db.entities.find(x => x.id === r.entityId);
-    return e && e.type === 'person' ? sum + (r.shares || 0) : sum;
+    return e && e.type === 'person' ? s + (r.shares || 0) : s;
+  }, 0);
+  // leveraged positions held by ordinary persons count toward the float cap too
+  return sum + Object.keys(co.x100 || {}).reduce((s2, id) => {
+    if (id === co.ownerId || id === co.ceoId) return s2;
+    const e = db.entities.find(x => x.id === id);
+    return e && e.type === 'person' ? s2 + ((co.x100[id] && co.x100[id].qty) || 0) : s2;
   }, 0);
 }
 function maxPublic(co) {
@@ -358,10 +399,23 @@ function buy(companyId, buyerEntityId, shares, actor, opts) {
     const treasury = db.accounts.find(a => a.id === 'acct_treasury');
     if (treasury) sim.txn(buyAcct.id, treasury.id, vat, `VAT (${tax.vatRate}%) on share purchase`, 'TREASURY', 'transfer');
   }
-  setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
+  if (opts && opts.x100) {
+    // X100 leveraged buy: same entry price, same cash, same float — but the
+    // position books onto the derivative lane instead of the register and is
+    // locked for X100_LOCK_MIN world minutes before it can be sold (sell()).
+    const book = x100Book(co);
+    const prev = book[buyerEntityId] || { qty: 0, entry: price, at: 0 };
+    book[buyerEntityId] = {
+      qty: prev.qty + shares,
+      entry: prev.entry > 0 ? prev.entry : price, // keep the original entry price — the position's amplification anchors to it
+      at: sim.worldClockNow(db.settings.time, Date.now())
+    };
+  } else {
+    setHolding(co, buyerEntityId, holdingOf(co, buyerEntityId) + shares);
+  }
   applyDayImpact(co, +shares, price); // buying pressure nudges the day quote up
-  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${primaryShares ? ' · ' + primaryShares + ' primary → ' + co.name : ''}${vat ? ' + VAT ' + db.settings.currency + vat : ''}`, actor, [co.id, buyerEntityId]);
-  return { shares, cost, price, vat, primaryShares, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
+  store.log('market', `${buyer.name} bought ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each${primaryShares ? ' · ' + primaryShares + ' primary → ' + co.name : ''}${vat ? ' + VAT ' + db.settings.currency + vat : ''}${(opts && opts.x100) ? ' · ×100 LEVERAGED' : ''}`, actor, [co.id, buyerEntityId]);
+  return { shares, cost, price, vat, primaryShares, dayPrice: co.dayPrice, sharePrice: co.sharePrice, x100: !!(opts && opts.x100) };
 }
 
 // Player sells `shares` back into the float; the National Bank pays out.
@@ -370,17 +424,43 @@ function sell(companyId, sellerEntityId, shares, actor, opts) {
   const co = findCompany(companyId);
   shares = Math.round(Number(shares));
   if (!(shares > 0)) throw new Error('Share count must be positive');
+  const gm = opts && opts.gm;
+  const bankAcct = bankAccount();
+  const sellAcct = sim.primaryAccount(sellerEntityId, true);
+  const seller = db.entities.find(e => e.id === sellerEntityId);
+  if (opts && opts.x100) {
+    // X100 leveraged sell. The position's payout tracks the day quote with
+    // X100_MULT sensitivity from its entry price (value floors at 0 — the
+    // most a drop can cost is the purchase itself), and it cannot be sold
+    // within X100_LOCK_MIN world minutes of purchase (GM exempt).
+    const pos = x100EntryOf(co, sellerEntityId);
+    if (!pos) throw new Error('You do not hold leveraged shares in this company');
+    if (pos.qty < shares) throw new Error('You do not hold that many leveraged shares');
+    const heldMs = sim.worldClockNow(db.settings.time, Date.now()) - pos.at;
+    if (!gm && heldMs < X100_LOCK_MIN * 60000) {
+      throw new Error(`Leveraged shares are locked for another ${Math.ceil((X100_LOCK_MIN * 60000 - heldMs) / 60000)} world minute(s)`);
+    }
+    const price = currentDayPrice(co);
+    const proceeds = Math.round(x100Value(pos, price) * 100) / 100;
+    const baseValue = round2(pos.entry * pos.qty);
+    // The Bank is the market maker: it pays the position's CURRENT worth (up
+    // to ~100× the purchase on a winning run, 0 on a crash) and may run its
+    // reserve negative — a designed, visible consequence, same as ordinary sales.
+    sim.txn(bankAcct.id, sellAcct.id, proceeds, `Sold ${shares} leveraged ${co.abbrev || co.name} shares @ ${db.settings.currency}${price} (entry ${db.settings.currency}${pos.entry})`, actor, 'transfer');
+    pos.qty -= shares;
+    if (pos.qty <= 0) delete co.x100[sellerEntityId];
+    applyDayImpact(co, -shares, price); // selling pressure nudges the day quote down
+    store.log('market', `${seller ? seller.name : sellerEntityId} sold ${shares} ×100 leveraged ${co.abbrev || co.name} shares`, `Entry ${db.settings.currency}${pos.entry}; day ${db.settings.currency}${price}; payout ${db.settings.currency}${proceeds}${proceeds < baseValue ? ' · position fell with leverage' : ' · position rose with leverage'}`, actor, [co.id, sellerEntityId]);
+    return { shares, proceeds, price, entry: pos.entry, x100: true, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
+  }
   if (holdingOf(co, sellerEntityId) < shares) throw new Error('You do not hold that many shares');
   const price = currentDayPrice(co);
   const proceeds = Math.round(price * shares * 100) / 100;
-  const bankAcct = bankAccount();
-  const sellAcct = sim.primaryAccount(sellerEntityId, true);
   // The Bank is the market maker; it always absorbs a sale (it may run its
   // reserve negative — a visible consequence), so a player can always exit.
   sim.txn(bankAcct.id, sellAcct.id, proceeds, `Sold ${shares} ${co.abbrev || co.name} shares @ ${db.settings.currency}${price}`, actor, 'transfer');
   setHolding(co, sellerEntityId, holdingOf(co, sellerEntityId) - shares);
   applyDayImpact(co, -shares, price); // selling pressure nudges the day quote down
-  const seller = db.entities.find(e => e.id === sellerEntityId);
   store.log('market', `${seller ? seller.name : sellerEntityId} sold ${shares} ${co.abbrev || co.name} shares`, `${db.settings.currency}${price} each`, actor, [co.id, sellerEntityId]);
   return { shares, proceeds, price, dayPrice: co.dayPrice, sharePrice: co.sharePrice };
 }
@@ -519,6 +599,7 @@ module.exports = {
   shareItemFor, holdingOf, treasuryPool, valuedShares, personPublicHeld, maxPublic,
   setHolding, syncAllCertificates, buy, sell, transfer, issue,
   offer, bonusMint, buyback, remarkFromTrade,
+  x100HeldTotal, x100HoldingOf, x100EntryOf, x100Value,
   currentDayPrice, applyDayImpact, dayReanchor, dayMarketTick, maybeDayTick, recomputeEconConfidence, nudgeConfidence,
-  BANK_ID, DEFAULT_DEPTH, DEFAULT_VOL
+  BANK_ID, DEFAULT_DEPTH, DEFAULT_VOL, X100_MULT, X100_LOCK_MIN
 };

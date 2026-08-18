@@ -72,7 +72,7 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `POST election/vote` | close the polls, open the live count (`phase: 'voting'`); unrevealed per-party ballots are pre-rolled from the polling gap + `deviationPct` |
 | `POST election/adjust` | `{partyId, votes, province?}` — mid-count vote correction (re-spreads proportionally), logged in `election.log` |
 | `POST election/tick-count` | count one batch right now (one "day" of the count) |
-| `POST election/cancel` | abort the election; campaign support and `campaignPoints` decay away |
+| `POST election/cancel` | abort the election; no new campaigns may launch, but support already earned stays permanent |
 | `POST effect` | one-off safe effects: `adjust_demo, adjust_var, adjust_support` |
 | `POST test-expr` | evaluate an expression against global/province/entity scope |
 | `POST mint` | `{accountId, amount}` — positive deposits, negative withdraws |

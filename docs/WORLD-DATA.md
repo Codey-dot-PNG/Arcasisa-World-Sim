@@ -68,8 +68,10 @@ cash (set by the Phase 27 profit-rebalance migration at 12% of its pre-rebalance
 expense footprint; see docs/SIMULATION.md "Zero-property companies bleed").
 
 **Party extras:** `ideology {econ, soc}`, `leaderId`, `inGovernment`, `mpCount`,
-`support { provId: { all|group: bonus } }`. During a live election: `vars.campaignPoints`
-(tracked campaigning, decays when the election ends/cancels).
+`support { provId: { all|group: bonus } }` — campaign support is PERMANENT: earned
+points stay in `support` (shaping polling) until moved by other means. During a live
+election: `vars.campaignPointsByProvince` is the cumulative tally of every support
+point each campaign drive earned per province (informational — nothing unwinds it).
 
 ### Live election doc (Phase 33) — `db.election` or `null`
 

@@ -9,6 +9,9 @@
    extra money/materials on top for more strength. Each campaign has a
    duration in world minutes (world clock) — while one is running the party
    can't launch another — and optional per-party affinity multipliers.
+   Support won by a campaign is PERMANENT: it stays on the party's books in
+   that province (shaping polling) long after the drive itself winds down.
+   The duration only gates the party's next launch, nothing more.
 
    All transient state lives on the election doc (no module-level state),
    so the count is serverless-safe per docs/CONVENTIONS.md. The engine
@@ -69,9 +72,11 @@ function shuffleArray(arr) {
 // ---------- campaign support --------------------------------------------------
 
 // Campaigns now target ONE province, chosen by whoever runs them — no more
-// blanket national support bump. party.vars.campaignPointsByProvince tracks
-// exactly what's been added where, so decayCampaignSupport can unwind only
-// that (and only there) once the election is decided.
+// blanket national support bump. party.vars.campaignPointsByProvince keeps a
+// cumulative tally of every support point the campaign drive earned in each
+// province. Nothing ever unwinds it: campaign support is permanent and
+// lingers in party.support (shaping the simulated polls) until something
+// else moves those numbers.
 function applySupport(db, party, provinceId, strength) {
   const prov = db.provinces.find(p => p.id === provinceId);
   if (!prov) throw new Error('Choose a province to campaign in.');
@@ -82,33 +87,6 @@ function applySupport(db, party, provinceId, strength) {
   party.vars.campaignPointsByProvince = party.vars.campaignPointsByProvince || {};
   party.vars.campaignPointsByProvince[provinceId] =
     Math.round(((party.vars.campaignPointsByProvince[provinceId] || 0) + strength) * 10) / 10;
-}
-
-function decayCampaignSupport(db, parties) {
-  for (const pt of parties) {
-    const byProv = (pt.vars && pt.vars.campaignPointsByProvince) || {};
-    for (const provId in byProv) {
-      const pts = byProv[provId];
-      if (!pts) continue;
-      const s = pt.support && pt.support[provId];
-      if (s && s.all !== undefined) s.all = Math.round((s.all - pts) * 10) / 10;
-      if (pt.support && (!s || !s.all)) delete pt.support[provId];
-    }
-    if (pt.vars) pt.vars.campaignPointsByProvince = {};
-    // Legacy fallback: a campaign that was mid-flight under the old
-    // national-support code (pt.vars.campaignPoints, a single scalar spread
-    // across every province) won't have a per-province record to unwind —
-    // decay it the old uniform way once, then retire the field for good.
-    const legacyPts = (pt.vars && pt.vars.campaignPoints) || 0;
-    if (legacyPts) {
-      for (const provId in (pt.support || {})) {
-        const s = pt.support[provId];
-        if (s && s.all !== undefined) s.all = Math.round((s.all - legacyPts) * 10) / 10;
-        if (!s || !s.all) delete pt.support[provId];
-      }
-    }
-    if (pt.vars) delete pt.vars.campaignPoints;
-  }
 }
 
 // ---------- campaign support (linear budget model) ---------------------------
@@ -160,8 +138,9 @@ function campaignStrength(db, camp, money) {
 
 // Campaigns come from the GM's catalogue (settings.election.campaigns). Each
 // entry carries a base money cost, required stock, a base support strength,
-// a duration in WORLD minutes (the campaign's effect fades when it elapses and
-// only then may the party run another) and optional party affinities —
+// a duration in WORLD minutes (the drive runs for that long and only then
+// may the party run another — the support itself is PERMANENT and is never
+// unwound) and optional party affinities —
 // bonusParties = { partyId: multiplier } — so e.g. a soup kitchen scores
 // double for the communists and a radio address does more for the national
 // front. Funding the campaign at its base cost delivers exactly the base
@@ -182,12 +161,13 @@ function worldNowMs(db) {
   return sim.worldClockNow(db.settings.time, Date.now());
 }
 
-// Fade out campaigns whose duration has elapsed: their support points are
-// unwound from the province (mirroring applySupport's bookkeeping) and the
-// slot frees up so the party can run another campaign. Late votes cast into
-// the count while a campaign was live stay on the books — ballots are
-// ballots — but the support effect (which only shapes polling) is gone.
-// Returns how many campaigns just expired (for broadcast decisions).
+// Wind down campaigns whose duration has elapsed: the drive is over and the
+// party's single slot frees up so it can run another campaign. The support
+// points the drive earned are NOT unwound — support is permanent and stays on
+// the party's books in that province (shaping polling) after the drive ends;
+// only the slot lock is released. Late votes cast into the count while a
+// campaign was live stay on the books too — ballots are ballots.
+// Returns how many campaigns just wound down (for broadcast decisions).
 function expireCampaigns(db, el, nowWorldMs, actor) {
   const pc = el.partyCampaigns || (el.partyCampaigns = {});
   let expired = 0;
@@ -196,30 +176,20 @@ function expireCampaigns(db, el, nowWorldMs, actor) {
     if (!c || (c.endsAtWorldMs !== undefined && nowWorldMs < c.endsAtWorldMs)) continue;
     const party = db.entities.find(e => e.id === partyId);
     const prov = db.provinces.find(p => p.id === c.provinceId);
-    if (party && c.strength > 0) {
-      party.support = party.support || {};
-      const s = party.support[c.provinceId];
-      if (s && s.all !== undefined) s.all = Math.round((s.all - c.strength) * 10) / 10;
-      if (!s || !s.all) delete party.support[c.provinceId];
-      party.vars = party.vars || {};
-      const byProv = party.vars.campaignPointsByProvince = party.vars.campaignPointsByProvince || {};
-      byProv[c.provinceId] = Math.round(((byProv[c.provinceId] || 0) - c.strength) * 10) / 10;
-      if (byProv[c.provinceId] <= 0) delete byProv[c.provinceId];
-    }
     el.log = el.log || [];
     el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaignEnd',
       partyId, campaignId: c.campaignId, campaignName: c.name, provinceId: c.provinceId,
       provinceName: prov ? prov.name : c.provinceId, strength: c.strength, actor: actor || 'ENGINE' });
     if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
     store.log('election', `Campaign winds down: ${party ? party.name : partyId}'s "${c.name}" has run its course in ${prov ? prov.name : c.provinceId}`,
-      `${c.strength} support points expire`, actor || 'ENGINE', party ? [party.id] : []);
+      `${c.strength} support points stay on the books — the drive is over and a new one may launch`, actor || 'ENGINE', party ? [party.id] : []);
     delete pc[partyId];
     expired++;
   }
   return expired;
 }
 
-// Hours remaining until a party's running campaign fades, or null.
+// Hours remaining until a party's running campaign slot opens, or null.
 function activeCampaignInfo(el, partyId, nowWorldMs) {
   const c = (el && el.partyCampaigns && el.partyCampaigns[partyId]) || null;
   if (!c) return null;
@@ -329,8 +299,9 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   }
 
   // The campaign now occupies the party's single slot until its duration
-  // (in world minutes, per the world clock) elapses — then the support
-  // fades and the slot opens.
+  // (in world minutes, per the world clock) elapses — then the slot opens
+  // and the party may launch another. The support itself is permanent:
+  // expiring only releases the slot, never the support points.
   const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(camp.durationMinutes) || 5)));
   el.partyCampaigns = el.partyCampaigns || {};
   el.partyCampaigns[party.id] = {
@@ -353,13 +324,13 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
   store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
-    `${money ? fmtMoneyOf(db, money) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
+    `${money ? fmtMoneyOf(db, money) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} permanent support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
 
   sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
     `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}` +
     `${money ? ', at a cost of ' + fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
-    `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''} and is expected to deliver ${strength} support points` +
+    `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''} and delivers ${strength} permanent support points` +
     `${el.phase === 'voting' ? ' — and ' + fmtNum(votes) + ' late ballots' : ''}.`,
     'Politics', false, 'Wire Service');
 
@@ -471,8 +442,9 @@ function startVoting(db, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('Call an election first — campaigning comes before the polls.');
   if (el.phase !== 'campaign') throw new Error('Voting is already underway.');
-  // Any campaign whose duration elapsed during the campaign season fades
-  // before the true result is sealed, so stale support can't leak into it.
+  // Any campaign whose duration elapsed during the campaign season winds
+  // down before the true result is sealed — its support stays on the books
+  // (campaign support is permanent); only the party's launch slot frees.
   expireCampaigns(db, el, worldNowMs(db), actor);
   const { parties, byProvince, national, totalVotes } = sim.computePolling(true);
 
@@ -683,8 +655,8 @@ function maybeTick(db, actor) {
   el._lastTickRealMs = nowReal;
   const nowWorldMs = sim.worldClockNow(db.settings.time, nowReal);
   if (el.phase !== 'voting') {
-    // Campaign season: nothing to count, but finished campaigns must fade so
-    // the public polls (which ride the same support model) stay honest.
+    // Campaign season: nothing to count, but finished campaigns must wind
+    // down so the party's launch slot frees up (support stays permanent).
     const expired = expireCampaigns(db, el, nowWorldMs, actor);
     return { ticked: expired > 0, milestone: expired > 0 };
   }
@@ -754,7 +726,6 @@ function finalize(db, actor) {
   };
   db.elections.push(rec);
   if (db.elections.length > 60) db.elections.splice(0, db.elections.length - 60);
-  decayCampaignSupport(db, parties);
 
   const winner = parties.find(pt => pt.id === nationalRows[0].partyId);
   const nameOf = (pid) => { const e = db.entities.find(x => x.id === pid); return e ? (e.abbrev || e.name) : pid; };
@@ -830,7 +801,6 @@ function adjustVotes(db, b, actor) {
 function cancel(db, actor) {
   const el = db.election;
   if (!el || !el.active) throw new Error('No election is active.');
-  decayCampaignSupport(db, db.entities.filter(e => e.type === 'party'));
   store.log('election', 'Election called off by the Election Commission',
     `${el.phase === 'campaign' ? 'Campaign' : 'Count'} suspended at ${db.settings.time.date}`,
     actor || 'GM', [el.id]);

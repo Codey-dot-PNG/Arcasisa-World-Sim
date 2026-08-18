@@ -263,9 +263,12 @@ The GM calls an election (`POST /api/gm/election/campaign`) and the world doc ge
 - **campaign** — parties spend money + campaign stock on catalogue campaigns
   (`POST /api/election/campaign`, any controller of the party or the GM; defaults
   migrate into `settings.election.campaigns`). Each run adds `strength` to the party's
-  national support (visible in polling), charges `moneyCost` from the party treasury
+  support in one province (visible in polling), charges `moneyCost` from the party treasury
   account, consumes stock items (rows may offer `or` alternatives), and accrues
-  `party.vars.campaignPoints`.
+  `party.vars.campaignPointsByProvince`. **Support is permanent**: once earned it stays on
+  the party's books in that province (shaping the simulated polls between elections too) —
+  the campaign's `durationMinutes` only gates the party's next launch (one drive at a
+  time), it never unwinds support.
 - **voting** — `POST /api/gm/election/vote` closes the polls and rolls the true ballots
   per province: each party's polling share is nudged by `(rand×2−1) × deviationPct` and
   renormalised per province (the renorm amplifies the swing — an 8 pp polling gap can
@@ -276,10 +279,12 @@ The GM calls an election (`POST /api/gm/election/campaign`) and the world doc ge
   snaps to the true totals (`el.targets`). `campaignPoints` translate into late votes
   (`strength × supportToVotes`) fed in as the count runs. Finalize apportions
   `el.targets` (the shared `sim.apportionSeats`), writes a `db.elections` record
-  (`live: true`), decays campaign support, and publishes Election Commission news.
+  (`live: true`), and publishes Election Commission news. Campaign support is
+  **not** decayed at finalize — every point earned stays on the books.
 - Mid-count levers: `POST /api/gm/election/adjust` (per-party vote correction,
   re-spread proportionally and logged), `POST /api/gm/election/tick-count` (count a
-  batch now), `POST /api/gm/election/cancel` (abort; support decays). Tuning
+  batch now), `POST /api/gm/election/cancel` (abort; support already earned stays).
+  Tuning
   (`PATCH /api/gm/settings` `election: {durationTurns, deviationPct, supportToVotes,
   campaigns}`) applies to the next call and re-derives an in-flight count's unrevealed
   ballots from the new deviation.

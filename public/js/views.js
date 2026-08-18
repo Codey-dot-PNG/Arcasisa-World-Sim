@@ -1580,7 +1580,7 @@ const Views = {
             const stock = (c.itemCosts || []).map(r => { const it = itemById(r.itemId); return (it ? it.name : r.itemId) + ' ×' + Math.max(1, Number(r.qty) || 1); }).join(', ');
             const bonus = c.bonusParties && Number(c.bonusParties[p.id]);
             infoEl.textContent = (c.description || '') +
-              ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) + ' for +' + c.strength + ' support' +
+              ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) + ' for +' + c.strength + ' permanent support' +
               (stock ? ' · needs ' + stock : '') +
               (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '') +
               ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding at or below the base scales support (and stock) proportionally; above it, returns diminish (rate set by the Commission).';
@@ -1599,7 +1599,7 @@ const Views = {
               const qs = 'partyId=' + encodeURIComponent(p.id) + '&province=' + encodeURIComponent(provSel.value) +
                 '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0);
               const r = await GET('/api/election/estimate?' + qs);
-              let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) + ' → +' + r.strength + ' support';
+              let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) + ' → +' + r.strength + ' permanent support';
               if (r.ratio > 1 && r.multiplier !== undefined && Math.abs(r.multiplier - r.ratio) > 0.005) txt += ' (' + r.multiplier + '× of base — diminishing)';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
               if (r.materials && r.materials.length) txt += ' · uses ' + r.materials.map(m => m.name + ' ×' + fmtNum(m.qty)).join(', ');
@@ -1670,7 +1670,7 @@ const Views = {
         e.kind === 'adjust'
           ? `Election Commission ${e.votes > 0 ? 'added' : 'removed'} ${fmtNum(Math.abs(e.votes))} votes ${e.votes > 0 ? 'to' : 'from'} ${entName(e.partyId)}${e.province ? ' (' + ((provById(e.province) || {}).name || e.province) + ')' : ''}`
           : e.kind === 'campaignEnd'
-            ? `${entName(e.partyId)}'s "${e.campaignName}" winds down in ${e.provinceName} — ${e.strength} support expires`
+            ? `${entName(e.partyId)}'s "${e.campaignName}" winds down in ${e.provinceName} — +${e.strength} support is permanent`
             : `${entName(e.partyId)} launched "${e.campaignName || 'campaign'}" in ${e.provinceName}` +
               (e.money ? ' — ' + fmtMoney(e.money) : '') + (e.materialDesc ? ' + ' + e.materialDesc : '') +
               (e.strength ? ' — +' + e.strength + ' support' : '') +

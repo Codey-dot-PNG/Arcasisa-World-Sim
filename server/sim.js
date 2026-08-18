@@ -811,6 +811,7 @@ function runEconomy(db, actor) {
   const provGross = {};     // provinceId -> production value this turn
   const provWage = {};      // provinceId -> { wSum, emp } employee-weighted wage index
   const own = (id) => (perOwner[id] = perOwner[id] || { dom: 0, upkeep: 0, wage: 0, gross: 0 });
+  let payEmp = 0, payWageSum = 0; // nationwide payroll → averageDailyWage / wageIndex
 
   for (const pr of db.properties) {
     if (!pr.ownerId) continue;
@@ -867,6 +868,10 @@ function runEconomy(db, actor) {
     // Government purchases are no longer routed here: the state buys goods
     // through the trade-offer system or the open market like everyone else.
     if (pr.prodMode === 'goods') {
+      // record what actually reached the domestic market this turn — the
+      // household food pass (households.js runFoodSupply) turns these sales
+      // into real circulating food stock instead of letting them vanish.
+      pr._domesticMarketSalesThisTurn = [];
       for (const e of (pr.produces || [])) {
         const retail = priceOf(e.itemId);
         const produced = cleanQty((e.perTurn || 0) * f);
@@ -876,8 +881,10 @@ function runEconomy(db, actor) {
           : (co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
             ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct);
         const keep = cleanQty(produced * itemKeepPct / 100);
+        const sold = cleanQty(produced - keep);
         if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
-        o.dom += (produced - keep) * retail * domMult;
+        if (sold > 0) pr._domesticMarketSalesThisTurn.push({ itemId: e.itemId, qty: sold });
+        o.dom += sold * retail * domMult;
       }
     } else if (pr.prodMode === 'cash') {
       o.dom += (pr.cashPerTurn || 0) * f;
@@ -922,6 +929,7 @@ function runEconomy(db, actor) {
     // expenses: property upkeep plus direct company payroll
     o.upkeep += (pr.expenses || 0) * expMult;
     o.wage += (pr.employees || 0) * wagePerTurn;
+    if ((pr.employees || 0) > 0 && wagePerTurn > 0) { payEmp += (pr.employees || 0); payWageSum += (pr.employees || 0) * wagePerTurn; }
 
     // wage pressure on the province (employee-weighted)
     if (pr.provinceId && pr.employees) {
@@ -942,7 +950,13 @@ function runEconomy(db, actor) {
     const owner = db.entities.find(e => e.id === ownerId);
     const acct = primaryAccount(ownerId, true);
     const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
-    let netAbstract = dom - o.upkeep - o.wage; // created/destroyed at the market edge
+    // The wage bill is NO LONGER deducted here at the mint: previously the
+    // wages money was destroyed at the market edge and nobody actually got
+    // paid. It rides the revenue into the owner's account, and the household
+    // pass (households.js runWages) then DEBITS that account into real
+    // household wallets — money conserved, wages paid with real balances.
+    // o.wage still feeds vars.expenses/vars.profit below for the accounting.
+    let netAbstract = dom - o.upkeep;
 
     // per-turn tax on positive operating net (rates are the same %; net is 1/30
     // of the old monthly figure, so the monthly burden matches the old system)
@@ -1036,6 +1050,18 @@ function runEconomy(db, actor) {
 
   // per-turn government income samples for the finance graphs (recordHistory)
   g.lastTaxIncome = Math.round(taxTotal * 100) / 100;
+
+  // The nation's average wage comes straight off the payroll: employee-
+  // weighted mean of what companies actually pay (a ₳1/day baseline anchors
+  // wageIndex at 100, keeping the wage happiness/employment nudges stable).
+  // Household income tracks this via households.js's upward income nudge, so
+  // raising company wages measurably lifts the class statistics it feeds.
+  if (payEmp > 0 && payWageSum > 0) {
+    const avg = Math.round(payWageSum / payEmp * 100) / 100;
+    g.averageDailyWage = avg;
+    g.wageIndex = Math.round(avg * 100 * 100) / 100;
+    g.totalEmployment = payEmp;
+  }
 
   if (settledOwners) {
     store.log('economy', `Daily economy settled`,
@@ -1639,6 +1665,24 @@ function advanceTurn(steps, actor) {
     // matured war bonds pay out; foreign relations drift with trade/tariffs
     try { redeemMaturedBonds(db, actor || 'ENGINE'); } catch (e) { console.error('redeemMaturedBonds failed:', e.message); }
     try { runDiplomacy(db); } catch (e) { console.error('runDiplomacy failed:', e.message); }
+    // Domestic economy & fiscal overhaul (Phases 1–4): wages flow from owners
+    // to household wallets, household consumption, real circulating food stock
+    // (famine is now a supply fact), inequality stats, and the monthly class-
+    // mobility / mortality / demographic-sync passes. Lazy require keeps the
+    // sim↔households cycle out of boot. After runEconomy's settlement so the
+    // wage money is already sitting in owner accounts when it debits out.
+    try {
+      const hh = require('./households');
+      hh.runWages(db, actor || 'ENGINE');
+      hh.runConsumption(db, actor || 'ENGINE');
+      hh.runFoodSupply(db, actor || 'ENGINE');
+      hh.runInequality(db, actor || 'ENGINE');
+      if (monthBoundary) {
+        hh.runMobility(db, actor || 'ENGINE');
+        hh.runMortality(db, actor || 'ENGINE');
+        hh.syncDemographics(db, actor || 'ENGINE');
+      }
+    } catch (e) { console.error('households pass failed:', e.message); }
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
   store.save();
@@ -1691,7 +1735,7 @@ function recordHistory(weekly) {
 // ---------- elections -----------------------------------------------------
 // Support is computed from the simulated population: every demographic group
 // in every province scores every party, votes split by softmax.
-function scoreParty(party, group, provId) {
+function scoreParty(party, gname, group, provId) {
   const ideo = party.ideology || { econ: 0, soc: 0 };
   let s = 50;
   s -= 0.5 * Math.abs((group.politicalLeaning || 0) - (ideo.econ || 0));
@@ -1699,7 +1743,13 @@ function scoreParty(party, group, provId) {
   const gs = group.governmentSupport || 50;
   s += party.inGovernment ? (gs - 50) * 0.35 : (50 - gs) * 0.12;
   const sup = (party.support || {})[provId];
-  if (sup) s += (sup.all || 0) * 1.2;
+  if (sup) {
+    // `all` is the legacy blanket bucket (untargeted drives, unchanged);
+    // a group key is support a targeted campaign won from that demographic
+    // bucket specifically. Both count toward the group being scored.
+    const credit = (sup.all || 0) + (sup[gname] || 0);
+    if (credit > 0) s += credit * 1.2;
+  }
   return s;
 }
 
@@ -1728,7 +1778,7 @@ function computePolling(noise) {
       const g = p.demographics[gname];
       const turnout = Math.min(0.92, Math.max(0.25, 0.42 + (g.happiness || 50) * 0.004 + (g.education || 40) * 0.0015));
       const voters = (g.population || 0) * turnout;
-      const scores = parties.map(pt => scoreParty(pt, g, p.id) + (noise ? (Math.random() * 6 - 3) : 0));
+      const scores = parties.map(pt => scoreParty(pt, gname, g, p.id) + (noise ? (Math.random() * 6 - 3) : 0));
       const exps = scores.map(s => Math.exp(s / 9));
       const sum = exps.reduce((a, b) => a + b, 0) || 1;
       parties.forEach((pt, i) => { provVotes[pt.id] = (provVotes[pt.id] || 0) + voters * (exps[i] / sum); });
@@ -1968,7 +2018,7 @@ function autoTick(actor) {
 
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
-  runElection, apportionSeats, computePolling, txn, primaryAccount, draftNews, updateDerived,
+  runElection, apportionSeats, computePolling, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf, worldClockNow,

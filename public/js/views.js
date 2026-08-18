@@ -2755,6 +2755,11 @@ const Views = {
     if (g.gdp !== undefined) cells.push(['National GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)]);
     if (g.moneySupply !== undefined) cells.push(['Money Supply', CUR() + fmtCompact(g.moneySupply)]);
     if (g.treasury !== undefined) cells.push(['Federal Treasury', CUR() + fmtCompact(g.treasury)]);
+    if (g.averageDailyWage !== undefined) cells.push(['Avg Daily Wage', CUR() + fmtNum(g.averageDailyWage)]);
+    if (g.wageIndex !== undefined) cells.push(['Wage Index (100=baseline)', fmtNum(Math.round(g.wageIndex)) + '']);
+    if (g.totalEmployment !== undefined) cells.push(['Total Employment', fmtNum(g.totalEmployment)]);
+    if (g.povertyRateNational !== undefined) cells.push(['Poverty Rate', Math.round(g.povertyRateNational * 100) / 100 + '%']);
+    if (g.giniNational !== undefined) cells.push(['National Gini', (Math.round(g.giniNational * 100) / 100) + '']);
     cells.push(['Visible Accounts', fmtNum(S().accounts.length)]);
     inner.appendChild(this.statStrip(cells));
 

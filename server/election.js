@@ -77,16 +77,45 @@ function shuffleArray(arr) {
 // province. Nothing ever unwinds it: campaign support is permanent and
 // lingers in party.support (shaping the simulated polls) until something
 // else moves those numbers.
-function applySupport(db, party, provinceId, strength) {
+function applySupport(db, party, provinceId, strength, group) {
   const prov = db.provinces.find(p => p.id === provinceId);
   if (!prov) throw new Error('Choose a province to campaign in.');
   party.support = party.support || {};
   party.support[provinceId] = party.support[provinceId] || {};
-  party.support[provinceId].all = Math.round(((party.support[provinceId].all || 0) + strength) * 10) / 10;
+  // A campaign with a targetGroup narrows its support to that demographic
+  // group's bucket; no target (or "all") keeps the original blanket `all`
+  // bucket that voting already credits to every group.
+  const bucket = group && group !== 'all' ? group : 'all';
+  party.support[provinceId][bucket] = Math.round(((party.support[provinceId][bucket] || 0) + strength) * 10) / 10;
   party.vars = party.vars || {};
   party.vars.campaignPointsByProvince = party.vars.campaignPointsByProvince || {};
   party.vars.campaignPointsByProvince[provinceId] =
     Math.round(((party.vars.campaignPointsByProvince[provinceId] || 0) + strength) * 10) / 10;
+}
+
+// Defamation (Phase 4.4): a catalogue campaign may name a TARGET PARTY
+// (camp.defamePartyId) — the "same system", but the strength it buys is
+// DAMAGE: support is REMOVED from the victim in the targeted province (clamped
+// at zero) and, once the count is running, the equivalent late ballots come
+// OFF the victim's pile instead of onto the runner's. Purely negative: the
+// runner gains nothing except the victim's lost ground.
+function damageSupport(db, target, provinceId, damage, group, attacker, el, actor) {
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov || !(damage > 0)) return;
+  target.support = target.support || {};
+  target.support[provinceId] = target.support[provinceId] || {};
+  const bucket = group && group !== 'all' ? group : 'all';
+  const cur = target.support[provinceId][bucket] || 0;
+  target.support[provinceId][bucket] = Math.max(0, Math.round((cur - damage) * 10) / 10);
+  attacker.vars = attacker.vars || {};
+  attacker.vars.defamationDelivered = Math.round(((attacker.vars.defamationDelivered || 0) + damage) * 10) / 10;
+  if (el && el.phase === 'voting') {
+    const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
+    const votes = Math.round(damage * vpp);
+    if (votes) addVotes(el, target.id, provinceId, -votes);
+  }
+  store.log('election', `${attacker.name} runs a smear against ${target.name} in ${prov.name}`,
+    `${damage} ${group && group !== 'all' ? group + ' ' : ''}support removed from ${target.abbrev || target.name}`, actor || 'ENGINE', [target.id, attacker.id]);
 }
 
 // ---------- campaign support (linear budget model) ---------------------------
@@ -156,6 +185,46 @@ function campaignBonus(db, camp, partyId) {
   return Number.isFinite(v) && v > 0 ? v : 1;
 }
 
+// A campaign catalogue entry may pin itself to ONE province (targetProvince —
+// a soup kitchen serving a seam town, a radio drive regionalised to a single
+// province). A drive run anywhere lands its support — and only its support —
+// in the pinned province. `"all"` (the migration default) means "any province,
+// exactly as before".
+function effectiveProvinceId(camp, provinceId) {
+  const t = camp && camp.targetProvince;
+  return t && t !== 'all' ? t : provinceId;
+}
+
+// §4.7 — the economic axis. An economic-framing campaign (camp.economicFraming
+// true — opt-in per campaign, no existing row is affected) resonates harder
+// where poverty is real: the multiplier grows with the targeted group's poverty
+// rate (when targetGroup is set) or the targeted province's poverty rate
+// (otherwise), scaled by the GM knob
+// settings.election.economicAlignment.povertyResonanceK. No tag, no scheme, or
+// no poverty data → multiplier exactly 1, legacy behaviour preserved.
+function economicResonance(db, camp, provinceId) {
+  const ea = (db.settings.election || {}).economicAlignment;
+  if (!ea || ea.enabled === false || !camp || !camp.economicFraming) return 1;
+  const K = Number(ea.povertyResonanceK);
+  if (!(K > 0)) return 1;
+  const prov = db.provinces.find(p => p.id === provinceId);
+  if (!prov) return 1;
+  const povertyLine = Number(db.globalVars && db.globalVars.povertyLine) || 400;
+  const tgt = camp.targetGroup;
+  let poverty = null;
+  if (tgt && tgt !== 'all') {
+    const homes = (db.households || []).filter(h => h.provinceId === provinceId && h.group === tgt && (h.population || 0) > 0);
+    const total = homes.reduce((s, h) => s + (h.population || 0), 0);
+    const poor = homes.filter(h => (h.income || 0) < povertyLine).reduce((s, h) => s + (h.population || 0), 0);
+    if (total > 0) poverty = poor / total;
+  } else {
+    const rate = prov.vars && prov.vars.povertyRate;
+    if (rate !== undefined) poverty = Math.min(1, Math.max(0, rate / 100));
+  }
+  if (poverty === null || poverty <= 0) return 1;
+  return Math.round((1 + K * poverty) * 1000) / 1000;
+}
+
 // World-clock time now, in ms since the epoch.
 function worldNowMs(db) {
   return sim.worldClockNow(db.settings.time, Date.now());
@@ -213,12 +282,15 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
   if (!camp) throw new Error('Unknown campaign.');
   if (camp.enabled === false) throw new Error('That campaign is not on offer.');
+  const defameParty = camp.defamePartyId ? db.entities.find(e => e.id === camp.defamePartyId) : null;
   const baseStrength = Math.max(0, Number(camp.strength) || 0);
   const { base, ratio } = campaignRatio(camp, money);
   const needs = scaledMaterials(camp, ratio);
+  const effProv = effectiveProvinceId(camp, provinceId);
   const strength0 = campaignStrength(db, camp, money);
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round(strength0 * bonus * 10) / 10;
+  const resonance = economicResonance(db, camp, effProv);
+  const strength = Math.round(strength0 * bonus * resonance * 10) / 10;
   let votes = 0;
   const el = db.election;
   if (el && el.active && el.phase === 'voting') {
@@ -234,7 +306,11 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
     materials: needs.map(n => ({ itemId: n.itemId, qty: n.qty,
       or: n.or ? n.or.map(o => ({ itemId: o.itemId, qty: o.qty })) : undefined,
       name: (names.find(i => i.id === n.itemId) || {}).name || n.itemId })),
-    bonus, strength, votes, provinceId, provinceName: prov.name, durationMinutes,
+    bonus, resonance, strength, votes, provinceId: effProv, provinceName: (db.provinces.find(p => p.id === effProv) || prov).name,
+    defame: defameParty ? { partyId: defameParty.id, name: defameParty.name, abbrev: defameParty.abbrev } : null,
+    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null,
+    durationMinutes,
     active: activeCampaignInfo(el, party.id, worldNowMs(db))
   };
 }
@@ -254,6 +330,10 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   const camp = (db.settings.election && db.settings.election.campaigns || []).find(c => c.id === campaignId);
   if (!camp) throw new Error('Unknown campaign.');
   if (camp.enabled === false) throw new Error('That campaign is not on offer.');
+  // Defamation: the catalogue names the victim; the runner pays the budget.
+  const defameParty = camp.defamePartyId ? db.entities.find(e => e.id === camp.defamePartyId) : null;
+  if (camp.defamePartyId && !defameParty) throw new Error('Defamation target not found: ' + camp.defamePartyId);
+  if (defameParty && defameParty.id === party.id) throw new Error('A party cannot run a smear against itself.');
 
   const nowWorldMs = worldNowMs(db);
   expireCampaigns(db, el, nowWorldMs, actor);
@@ -273,8 +353,11 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   money = Math.max(0, Math.round(Number(money) || 0));
   const { base, ratio } = campaignRatio(camp, money);
   const needs = scaledMaterials(camp, ratio);
+  const effProv = effectiveProvinceId(camp, provinceId);
+  const provEff = db.provinces.find(p => p.id === effProv) || prov;
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round(campaignStrength(db, camp, money) * bonus * 10) / 10;
+  const resonance = economicResonance(db, camp, effProv);
+  const strength = Math.round(campaignStrength(db, camp, money) * bonus * resonance * 10) / 10;
   if (money <= 0) throw new Error('Choose a budget for the campaign (₳) — funding ' + fmtMoneyOf(db, base) + ' delivers its base support.');
   if (strength <= 0) throw new Error('A budget of ' + fmtMoneyOf(db, money) + ' delivers no support for this campaign — raise the budget.');
 
@@ -288,14 +371,17 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   sim.txn(acct.id, null, money, 'Campaign: ' + camp.name, actor || party.name, 'withdraw');
   deductItemCosts(party, needs);
 
-  if (strength > 0) applySupport(db, party, provinceId, strength);
+  if (defameParty) damageSupport(db, defameParty, effProv, strength, camp.targetGroup, party, el, actor);
+  else if (strength > 0) applySupport(db, party, effProv, strength, camp.targetGroup);
 
-  // Late votes if the count is running — scoped to that province.
+  // Late votes if the count is running — scoped to the effective province.
+  // Defamation is purely negative: damageSupport subtracts the victim's votes,
+  // the runner gains nothing.
   let votes = 0;
   if (el.phase === 'voting') {
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
     votes = Math.round(strength * vpp);
-    if (votes) addVotes(el, party.id, provinceId, votes);
+    if (votes && !defameParty) addVotes(el, party.id, effProv, votes);
   }
 
   // The campaign now occupies the party's single slot until its duration
@@ -305,7 +391,7 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(camp.durationMinutes) || 5)));
   el.partyCampaigns = el.partyCampaigns || {};
   el.partyCampaigns[party.id] = {
-    campaignId: camp.id, name: camp.name, provinceId,
+    campaignId: camp.id, name: camp.name, provinceId: effProv,
     strength, startWorldMs: nowWorldMs, durationMinutes,
     endsAtWorldMs: nowWorldMs + durationMinutes * 60000
   };
@@ -318,24 +404,42 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
 
   el.log = el.log || [];
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
-    partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name,
+    partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId: effProv, provinceName: provEff.name,
     money, materials: needs.map(m => ({ itemId: m.itemId, qty: m.qty })), strength, votes, materialDesc: matDesc,
-    durationMinutes, bonus, actor: actor || '—' });
+    durationMinutes, bonus, resonance, defame: defameParty ? defameParty.id : null,
+    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null,
+    actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
-  store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
-    `${money ? fmtMoneyOf(db, money) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} permanent support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
-    actor, [party.id]);
+  store.log('election', defameParty
+      ? `Smear: ${party.name} attacks "${camp.name}" in ${provEff.name}`
+      : `Campaign: ${party.name} runs "${camp.name}" in ${provEff.name}`,
+    `${money ? fmtMoneyOf(db, money) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ` +
+    (defameParty
+      ? `${strength} support removed from ${defameParty.name}`
+      : `${strength} permanent support points`) +
+    ` for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${resonance !== 1 ? ' · ×' + resonance + ' poverty resonance' : ''}${votes ? ' · ' + fmtNum(votes) + ' late ballots affected' : ''}`,
+    actor, [party.id].concat(defameParty ? [defameParty.id] : []));
 
-  sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
-    `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}` +
+  sim.draftNews(`${party.abbrev || party.name} ${defameParty
+      ? 'HITS ' + (defameParty.abbrev || defameParty.name).toUpperCase() + ' WITH A SMEAR'
+      : (el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL')} IN ${provEff.name.toUpperCase()}`,
+    `${party.name} has launched "${camp.name}" in ${provEff.name}${defameParty ? ', an open campaign of defamation against ' + defameParty.name : ''}` +
+    `${el.phase === 'voting' ? ' as the ballots are counted' : ' on the campaign trail'}` +
     `${money ? ', at a cost of ' + fmtMoneyOf(db, money) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
-    `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''} and delivers ${strength} permanent support points` +
-    `${el.phase === 'voting' ? ' — and ' + fmtNum(votes) + ' late ballots' : ''}.`,
+    `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}` +
+    (defameParty
+      ? ` and strips ${defameParty.name} of ${strength} support points`
+      : ` and delivers ${strength} permanent support points`) +
+    `${el.phase === 'voting' ? ' — ' + fmtNum(votes) + ' late ballots affected' : ''}.`,
     'Politics', false, 'Wire Service');
 
-  return { money, strength, votes, bonus, durationMinutes,
-    materialDesc: matDesc, provinceId, provinceName: prov.name };
+  return { money, strength, votes, bonus, resonance, durationMinutes,
+    materialDesc: matDesc, provinceId: effProv, provinceName: provEff.name,
+    defame: defameParty ? { partyId: defameParty.id, name: defameParty.name, abbrev: defameParty.abbrev } : null,
+    targetGroup: camp.targetGroup && camp.targetGroup !== 'all' ? camp.targetGroup : null,
+    targetProvince: camp.targetProvince && camp.targetProvince !== 'all' ? camp.targetProvince : null };
 }
 
 function provById(db, id) {

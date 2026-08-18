@@ -245,6 +245,9 @@ const GM = {
   provOptions: Forms.provOptions,
   itemOptions: Forms.itemOptions,
 
+  fmtSat(v) { const n = Number(v); return (Math.round(n * 10) / 10) + ''; },
+  groupOptions() { return (S().settings.demographics.groups || []).map(g => [g, g]); },
+
   getDraft(key, source) {
     if (this.draftKey !== key) { this.draft = JSON.parse(JSON.stringify(source)); this.draftKey = key; }
     return this.draft;
@@ -1277,6 +1280,84 @@ const GM = {
         } catch (e) { toast(e.message, true); }
       }
     }, 'Save Economy Settings')));
+
+    // ---- Households & living standards (Phase 3) ----
+    const hh = (S().settings.households) || {};
+    const hd = this.getDraft('households', {
+      enabled: hh.enabled === undefined ? true : hh.enabled,
+      foodReqPerCapPerTurn: hh.foodReqPerCapPerTurn === undefined ? 0.5 : hh.foodReqPerCapPerTurn,
+      govFoodReleaseRate: hh.govFoodReleaseRate === undefined ? 0.5 : hh.govFoodReleaseRate,
+      dependentStipend: hh.dependentStipend === undefined ? 0 : hh.dependentStipend,
+      wageIncomeK: hh.wageIncomeK === undefined ? 0.2 : hh.wageIncomeK,
+      studentGraduationRate: hh.studentGraduationRate === undefined ? 0.10 : hh.studentGraduationRate,
+      retirementRate: hh.retirementRate === undefined ? 0.04 : hh.retirementRate,
+      wcToMcRate: hh.wcToMcRate === undefined ? 0.05 : hh.wcToMcRate,
+      mcToUcRate: hh.mcToUcRate === undefined ? 0.02 : hh.mcToUcRate,
+      educationMobilityK: hh.educationMobilityK === undefined ? 1.5 : hh.educationMobilityK,
+      oldAgeMortalityRate: hh.oldAgeMortalityRate === undefined ? 0.012 : hh.oldAgeMortalityRate,
+      diseaseMortalityK: hh.diseaseMortalityK === undefined ? 0.0004 : hh.diseaseMortalityK,
+      famineMortalityRate: hh.famineMortalityRate === undefined ? 0.0015 : hh.famineMortalityRate,
+      stipendHappinessK: hh.stipendHappinessK === undefined ? 1.5 : hh.stipendHappinessK,
+      demoSyncStrength: hh.demoSyncStrength === undefined ? 0.5 : hh.demoSyncStrength
+    });
+    main.appendChild(Views.secLabel('Households & Living Standards'));
+    main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
+      'The simulated population: wages paid by companies, consumption (food that must feed every citizen), hunger/famine, a stipend welfare programme, class mobility and mortality. Food demand is real — a deficit starves the population through the famine rate below.'));
+    main.appendChild(this.field('Population engine', this.check(hd, 'enabled', ''),
+      'Turn the household simulation on/off (wages, consumption, famine, mobility, mortality).'));
+    main.appendChild(this.field('Minimum food / citizen / turn (units)',
+      Forms.sliderNum(hd, 'foodReqPerCapPerTurn', 0.1, 2, { step: 0.1 }),
+      'Per-citizen daily food requirement. Supply below it drives hunger and famine mortality.'));
+    main.appendChild(this.field('Govt food release rate (×)',
+      Forms.sliderNum(hd, 'govFoodReleaseRate', 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }),
+      'How much of the federal government’s own food stockpile is offered onto the market each turn to help feed citizens.'));
+    main.appendChild(this.field('Monthly famine mortality per turn above threshold',
+      Forms.sliderNum(hd, 'famineMortalityRate', 0, 0.01, { step: 0.0001 }),
+      'Population fraction that dies each turn while food security stays below the famine threshold.'));
+    main.appendChild(Views.secLabel('Welfare Stipend (opt-in)'));
+    main.appendChild(this.field('Stipend per dependent / turn (' + CUR() + ')',
+      Forms.sliderNum(hd, 'dependentStipend', 0, 200, { step: 1 }, true),
+      'What the treasury pays each targeted dependent (default 0 = OFF). Setting it buys subsistence AND a happiness uplift for Students & Retired — a real budget decision.'));
+    main.appendChild(this.field('Stipend happiness uplift (×)',
+      Forms.sliderNum(hd, 'stipendHappinessK', 0, 3, { step: 0.1 }),
+      'How hard the stipend raises targeted households’ happiness, from their baseline.'));
+    main.appendChild(Views.secLabel('Class Mobility & Mortality (monthly)'));
+    main.appendChild(this.field('Working Class → Middle Class / year',
+      Forms.sliderNum(hd, 'wcToMcRate', 0, 0.3, { step: 0.005 }),
+      'Share of the Working Class that rises to the Middle Class each year, scaled by education.'));
+    main.appendChild(this.field('Middle Class → Upper Class / year',
+      Forms.sliderNum(hd, 'mcToUcRate', 0, 0.2, { step: 0.005 }),
+      'Share of the Middle Class that rises to the Upper Class each year, scaled by education.'));
+    main.appendChild(this.field('Education mobility multiplier (×)',
+      Forms.sliderNum(hd, 'educationMobilityK', 0, 3, { step: 0.1 }),
+      'How much a group’s education level accelerates (or, below ~1, mutes) the class ramps.'));
+    main.appendChild(this.field('Student graduation / year',
+      Forms.sliderNum(hd, 'studentGraduationRate', 0, 0.3, { step: 0.005 }),
+      'Share of Students that graduate into the Working Class each year.'));
+    main.appendChild(this.field('Working Class retirement / year',
+      Forms.sliderNum(hd, 'retirementRate', 0, 0.2, { step: 0.005 }),
+      'Share of the Working Class that ages into Retired each year.'));
+    main.appendChild(this.field('Old-age mortality / month',
+      Forms.sliderNum(hd, 'oldAgeMortalityRate', 0, 0.05, { step: 0.001 }),
+      'Monthly share of the Retired cohort that passes from old age.'));
+    main.appendChild(this.field('Disease mortality (per 100−healthcare)',
+      Forms.sliderNum(hd, 'diseaseMortalityK', 0, 0.002, { step: 0.0001 }),
+      'Monthly mortality scaled by how far a province lies below full healthcare.'));
+    main.appendChild(this.field('Wage tracking speed (×)',
+      Forms.sliderNum(hd, 'wageIncomeK', 0, 1, { step: 0.05 }),
+      'How fast household income statistics track realised wages. 0 freezes them; 1 snaps them to the companies’ payroll.'));
+    main.appendChild(this.field('Demographic sync strength (×)',
+      Forms.sliderNum(hd, 'demoSyncStrength', 0, 1, { step: 0.05 }),
+      'How hard the household simulation reconciles to your authored demographics each month.'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:12px;' }, el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', { households: hd });
+          this.draftKey = null;
+          toast('Household settings saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Household Settings')));
   },
 
   /* ═══════════ ELECTION (Phase 33) ═══════════
@@ -1425,6 +1506,24 @@ const GM = {
         el('div', { style: 'flex:0 0 90px;' }, this.field('Enabled', this.check(c, 'enabled', ''))),
         el('button.icon-btn', { onclick: () => { camps.splice(camps.indexOf(c), 1); App.renderView(); }, title: 'Remove campaign' }, '✕')));
       row.appendChild(el('div', { style: 'margin-top:4px;' }, this.field('Description', this.text(c, 'description'))));
+      // Defamation + targeting — Phase 4.4. A campaign that names a defame
+      // target is negative: its strength strips the victim's support instead
+      // of adding to the runner's, and late ballots come off the victim.
+      const tagRow = el('div', { style: 'display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-top:4px;' });
+      tagRow.appendChild(el('div', { style: 'flex:0 0 220px;' },
+        this.field('Defame target (blank = positive)',
+          this.sel(c, 'defamePartyId', [['', '— positive campaign —'], ...parties.map(p => [p.id, p.name])]))));
+      tagRow.appendChild(this.field('Target province',
+        this.sel(c, 'targetProvince', [['', 'all provinces'], ...this.provOptions()])));
+      tagRow.appendChild(this.field('Target group',
+        this.sel(c, 'targetGroup', [['', 'all groups'], ...this.groupOptions()])));
+      tagRow.appendChild(this.field('Economic framing', this.check(c, 'economicFraming', '')));
+      row.appendChild(tagRow);
+      if (c.defamePartyId) {
+        row.appendChild(el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin-top:2px;' },
+          'Offensive: this drive REMOVES ' + this.fmtSat(c.strength) + ' support from ' + (entName(c.defamePartyId)) +
+          ' instead of adding to the runner — late ballots come off the victim’s pile.'));
+      }
       // Party affinities — strength multiplier per party (1 = neutral).
       row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em; margin-top:8px;' }, 'PARTY AFFINITIES — STRENGTH MULTIPLIER PER PARTY (1 = NEUTRAL)'));
       c.bonusParties = c.bonusParties || {};

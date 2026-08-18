@@ -1964,6 +1964,27 @@ async function handle(req, res, pathname, method) {
           if (b.taxation.gamblingRate !== undefined) t.gamblingRate = clamp(b.taxation.gamblingRate);
         }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
+        if (b.households) { // Phase 3 household tunables — merge so a partial
+          // save never wipes sibling knobs; clamp to engine-safe ranges.
+          const hh = s.households = s.households || {};
+          const num = (v, d = 0) => (v === undefined ? d : Number(v));
+          const clamp = (v, lo, hi, d) => Math.max(lo, Math.min(hi, num(v, d)));
+          hh.enabled = b.households.enabled !== undefined ? !!b.households.enabled : (hh.enabled !== false);
+          if (b.households.foodReqPerCapPerTurn !== undefined) hh.foodReqPerCapPerTurn = clamp(b.households.foodReqPerCapPerTurn, 0.01, 10);
+          if (b.households.govFoodReleaseRate !== undefined) hh.govFoodReleaseRate = Math.max(0, num(b.households.govFoodReleaseRate));
+          if (b.households.dependentStipend !== undefined) hh.dependentStipend = Math.max(0, num(b.households.dependentStipend));
+          if (b.households.wageIncomeK !== undefined) hh.wageIncomeK = clamp(b.households.wageIncomeK, 0, 1);
+          if (b.households.demoSyncStrength !== undefined) hh.demoSyncStrength = clamp(b.households.demoSyncStrength, 0, 1);
+          if (b.households.studentGraduationRate !== undefined) hh.studentGraduationRate = clamp(b.households.studentGraduationRate, 0, 1);
+          if (b.households.retirementRate !== undefined) hh.retirementRate = clamp(b.households.retirementRate, 0, 1);
+          if (b.households.wcToMcRate !== undefined) hh.wcToMcRate = clamp(b.households.wcToMcRate, 0, 1);
+          if (b.households.mcToUcRate !== undefined) hh.mcToUcRate = clamp(b.households.mcToUcRate, 0, 1);
+          if (b.households.educationMobilityK !== undefined) hh.educationMobilityK = Math.max(0, num(b.households.educationMobilityK));
+          if (b.households.oldAgeMortalityRate !== undefined) hh.oldAgeMortalityRate = clamp(b.households.oldAgeMortalityRate, 0, 0.5);
+          if (b.households.diseaseMortalityK !== undefined) hh.diseaseMortalityK = Math.max(0, num(b.households.diseaseMortalityK));
+          if (b.households.famineMortalityRate !== undefined) hh.famineMortalityRate = clamp(b.households.famineMortalityRate, 0, 0.5);
+          if (b.households.stipendHappinessK !== undefined) hh.stipendHappinessK = Math.max(0, num(b.households.stipendHappinessK));
+        }
         if (b.ambience) {
           s.ambience = s.ambience || {};
           if (b.ambience.traffic) {

@@ -1583,6 +1583,208 @@ function migrate(world) {
     if (co.wagePerTurn !== wage) { co.wagePerTurn = wage; changed = true; }
   }
 
+  // ==========================================================================
+  // Domestic economy & fiscal overhaul (Phase 1..4 — DOC-ARC-ECON-001).
+  // Four additive migrations (8→9, 9→10, 10→11, 11→12). The live world may be
+  // at any lower schema; each block gates on its own bump so re-running
+  // migrate() (every request in cloud mode) is a no-op once applied.
+  //
+  // Phase 1 (schema 8→9): the household collection (175 representative
+  // quintile buckets, each owning its own account — NEVER ent_gov), real
+  // circulating food stock, national-account debt capacity, staple-food item
+  // tagging, election-campaign targeting defaults, and the `nationalDebt`
+  // global. See server/households.js for the runtime that drives this data.
+  if (world.schema < 9) {
+    if (!Array.isArray(world.households)) world.households = [];
+    const demoGroupsOf = (p) => {
+      const d = p.demographics || {};
+      // if a province carries no demographics at all, synthesise a minimal
+      // seven-group skeleton so the household buckets still line up with the
+      // canon of settings.demographics.groups
+      const names = (world.settings && world.settings.demographics && world.settings.demographics.groups) ||
+        ['Working Class', 'Middle Class', 'Upper Class', 'Students', 'Retired', 'Rural', 'Urban'];
+      if (Object.keys(d).length) return d;
+      const o = {};
+      const pop = (p.vars && p.vars.population) || 0;
+      const shares = { 'Working Class': 0.30, 'Middle Class': 0.22, 'Upper Class': 0.05, 'Students': 0.08, 'Retired': 0.12, 'Rural': 0.115, 'Urban': 0.115 };
+      for (const g of names) {
+        const s = shares[g] !== undefined ? shares[g] : 0.08;
+        o[g] = { population: Math.round(pop * s), income: 520, education: 40, happiness: 50, employment: 85, politicalLeaning: 0, governmentSupport: 50, economicConfidence: 50 };
+      }
+      return o;
+    };
+    for (const p of (world.provinces || [])) {
+      const demo = demoGroupsOf(p);
+      const factors = [0.4, 0.7, 0.9, 1.2, 1.8];
+      for (const gname in demo) {
+        const g = demo[gname] || {};
+        for (let q = 1; q <= 5; q++) {
+          const id = `hh_${String(p.id).split('_')[1]}_${String(gname).toLowerCase().replace(/\s+/g, '_')}_q${q}`;
+          if (world.households.find(h => h.id === id)) continue;
+          const inc = Math.max(50, Math.round((g.income || 500) * factors[q - 1]));
+          world.households.push({
+            id, provinceId: p.id, group: gname, quintile: q,
+            population: Math.max(1, Math.round((g.population || 0) / 5)),
+            accountId: 'acct_' + id,
+            income: inc,
+            expenses: Math.round(inc * 0.75),
+            foodAccess: 90, lifeExpectancy: 65,
+            ageCohort: gname === 'Students' ? 'student' : gname === 'Retired' ? 'retired' : 'working_age',
+            decileRank: q * 2 - 1,
+            vars: { happiness: g.happiness || 50, governmentSupport: g.governmentSupport || 50, economicConfidence: g.economicConfidence || 50 }
+          });
+        }
+      }
+    }
+    // Household accounts owned by the HOUSEHOLD itself, never by ent_gov —
+    // v1.0's ownership bug is fixed here at the seed point so no entity
+    // rollup ever folds ~39M citizens into the government's apparent wealth.
+    if (Array.isArray(world.accounts)) {
+      for (const h of world.households) {
+        if (world.accounts.find(a => a.id === h.accountId)) continue;
+        world.accounts.push({
+          id: h.accountId, ownerId: h.id,
+          name: `${h.group} Q${h.quintile} ${h.provinceId}`,
+          balance: Math.round(h.income * h.population / 1000),
+          meta: { isHousehold: true }
+        });
+      }
+    }
+    // Named player-citizens (type 'person') are specific people, not statistical
+    // aggregates: excluded from the household income distribution so the Gini /
+    // poverty stats don't double-count them, but their WEALTH is surfaced to the
+    // GM via globalVars.namedCitizenWealth (§4.1.1).
+    for (const e of (world.entities || [])) {
+      if (e.type !== 'person') continue;
+      e.meta = e.meta || {};
+      if (e.meta.excludeFromHouseholds === undefined) {
+        e.meta.excludeFromHouseholds = true;
+        changed = true;
+      }
+    }
+    // National-account debt capacity — a generic TYPE-based rule, no entity or
+    // account id hardcoded into engine logic (Hard Constraint #7): any account
+    // owned by a `type: 'government'` entity (ent_gov → acct_treasury, ent_bank
+    // → acct_reserve) may carry an unbounded negative balance. A sovereign can
+    // run a real deficit; the Bank's designed negative-reserve failure state
+    // already set the pattern.
+    for (const e of (world.entities || [])) {
+      if (e.type !== 'government') continue;
+      for (const a of (world.accounts || [])) {
+        if (a.ownerId !== e.id) continue;
+        a.meta = a.meta || {};
+        if (!a.meta.allowNegative) { a.meta.allowNegative = true; changed = true; }
+      }
+    }
+    // Food circulation tagging: staple foods are real, finite, spendable-down
+    // stock once runFoodSupply is live (§4.2). A head of livestock feeds more
+    // than a tonne of grain — foodCalorieWeight is GM-tunable seed data, never
+    // engine logic.
+    const grain = (world.items || []).find(it => it.id === 'item_grain');
+    if (grain) { grain.meta = grain.meta || {}; grain.meta.stapleFood = true; grain.meta.foodCalorieWeight = 1; changed = true; }
+    const livestock = (world.items || []).find(it => it.id === 'item_livestock');
+    if (livestock) { livestock.meta = livestock.meta || {}; livestock.meta.stapleFood = true; livestock.meta.foodCalorieWeight = 6; changed = true; }
+    for (const p of (world.provinces || [])) {
+      p.vars = p.vars || {};
+      if (p.vars.foodStock === undefined) { p.vars.foodStock = 0; changed = true; }
+      if (p.vars.foodSecurity === undefined) { p.vars.foodSecurity = 90; changed = true; }
+    }
+    // Household tunables — every knob defaults additively so a GM's later
+    // tuning is never clobbered by a re-run.
+    if (!world.settings.households) { world.settings.households = {}; changed = true; }
+    const hh = world.settings.households;
+    if (hh.enabled === undefined) { hh.enabled = true; changed = true; }
+    if (hh.foodReqPerCapPerTurn === undefined) { hh.foodReqPerCapPerTurn = 0.5; changed = true; }
+    if (hh.foodStockDecayRate === undefined) { hh.foodStockDecayRate = 0.10; changed = true; }
+    if (hh.govFoodReleaseRate === undefined) { hh.govFoodReleaseRate = 0.05; changed = true; }
+    if (hh.demoSyncStrength === undefined) { hh.demoSyncStrength = 0.5; changed = true; }
+    if (hh.workingGroups === undefined) { hh.workingGroups = ['Working Class', 'Middle Class', 'Upper Class', 'Rural', 'Urban']; changed = true; }
+    if (hh.dependentGroups === undefined) { hh.dependentGroups = ['Students', 'Retired']; changed = true; }
+    // Welfare stipends are OPT-IN (0 = off): a government that raises
+    // dependentStipend > 0 buys subsistence AND a happiness uplift for the
+    // targeted dependentGroups. Zero keeps the treasury untouched until the
+    // GM makes that a budget decision.
+    if (hh.dependentStipend === undefined) { hh.dependentStipend = 0; changed = true; }
+    // Election campaign targeting defaults (§4.7) — every existing campaign
+    // row stays fully backward compatible: `"all"` means exactly what it did
+    // before, until a GM deliberately narrows a drive.
+    for (const c of ((world.settings.election && world.settings.election.campaigns) || [])) {
+      if (c.targetProvince === undefined) { c.targetProvince = 'all'; changed = true; }
+      if (c.targetGroup === undefined) { c.targetGroup = 'all'; changed = true; }
+    }
+    if (world.globalVars && world.globalVars.nationalDebt === undefined) { world.globalVars.nationalDebt = 0; changed = true; }
+    world.schema = 9;
+    changed = true;
+  }
+
+  // Phase 2 (schema 9→10): personal income tax brackets + the poverty line.
+  // taxation.enabled is NEVER flipped by a migration — brackets are authored
+  // but inert until the GM turns the switch, same as corporate/gambling rates.
+  if (world.schema < 10) {
+    if (world.settings && world.settings.taxation) {
+      const tax = world.settings.taxation;
+      if (!Array.isArray(tax.pitBrackets)) {
+        tax.pitBrackets = [
+          { upTo: 400, rate: 0 },
+          { upTo: 1200, rate: 0.12 },
+          { upTo: 3000, rate: 0.22 },
+          { upTo: 8000, rate: 0.35 },
+          { upTo: Infinity, rate: 0.50 }
+        ];
+        changed = true;
+      }
+    }
+    if (world.globalVars && world.globalVars.povertyLine === undefined) { world.globalVars.povertyLine = 400; changed = true; }
+    world.schema = 10;
+    changed = true;
+  }
+
+  // Phase 3 (schema 10→11): class mobility & mortality tunables. Students
+  // graduate into Working Class (~10%/year), Working Class ages into Retired
+  // (~4%/year), and — career ladder — Working Class rises into Middle Class and
+  // Middle into Upper at GM rates scaled by the sender group's education
+  // (educationMobilityK amplifies/mutes the class ramp). Old age and disease
+  // (linked to province healthcare) thin the population monthly. Stipends are
+  // OPT-IN (0 by default; a government that raises dependentStipend buys
+  // subsistence AND a happiness uplift for the targeted groups) — taxes stay
+  // the engine's real revenue channel. Rates are annual, converted to monthly
+  // inside households.js's runMobility/runMortality/runWages.
+  if (world.schema < 11) {
+    if (world.settings && world.settings.households) {
+      const hh = world.settings.households;
+      if (hh.studentGraduationRate === undefined) { hh.studentGraduationRate = 0.10; changed = true; }
+      if (hh.retirementRate === undefined) { hh.retirementRate = 0.04; changed = true; }
+      if (hh.wcToMcRate === undefined) { hh.wcToMcRate = 0.05; changed = true; }   // annual, Working Class → Middle Class
+      if (hh.mcToUcRate === undefined) { hh.mcToUcRate = 0.02; changed = true; }   // annual, Middle Class → Upper Class
+      if (hh.educationMobilityK === undefined) { hh.educationMobilityK = 1.5; changed = true; } // ramp: 0.5 + (edu/100)·K
+      if (hh.oldAgeMortalityRate === undefined) { hh.oldAgeMortalityRate = 0.012; changed = true; }     // monthly, on the Retired cohort
+      if (hh.diseaseMortalityK === undefined) { hh.diseaseMortalityK = 0.0004; changed = true; }        // monthly, scaled by (100 - healthcare)
+      if (hh.famineMortalityRate === undefined) { hh.famineMortalityRate = 0.0015; changed = true; }    // per turn while foodSecurity < 30
+      if (hh.dependentStipend === undefined) { hh.dependentStipend = 0; changed = true; }               // opt-in welfare; 0 = off
+      if (hh.stipendHappinessK === undefined) { hh.stipendHappinessK = 1.5; changed = true; }           // happiness uplift strength per stipend
+      if (hh.wageIncomeK === undefined) { hh.wageIncomeK = 0.2; changed = true; }                       // how fast household income tracks realised wages
+    }
+    world.schema = 11;
+    changed = true;
+  }
+
+  // Phase 4 (schema 11→12): elections get an economic axis — a campaign
+  // authored with an economic framing tag resonates harder in a targeted
+  // group the higher that group's poverty rate (or a targeted province's
+  // poverty). Opt-in per campaign; untagged or untargeted campaigns behave
+  // exactly as before.
+  if (world.schema < 12) {
+    if (world.settings && world.settings.election) {
+      const el = world.settings.election;
+      if (el.economicAlignment === undefined) {
+        el.economicAlignment = { enabled: true, povertyResonanceK: 0.4 };
+        changed = true;
+      }
+    }
+    world.schema = 12;
+    changed = true;
+  }
+
   return changed;
 }
 

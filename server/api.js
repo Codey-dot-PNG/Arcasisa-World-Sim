@@ -1997,6 +1997,7 @@ async function handle(req, res, pathname, method) {
           if (b.election.moneySupportBase !== undefined) s.election.moneySupportBase = Math.max(1, Number(b.election.moneySupportBase) || 40000000);
           if (b.election.supportScale !== undefined) s.election.supportScale = Math.max(0.1, Number(b.election.supportScale) || 3);
           if (b.election.materialCampaignRate !== undefined) s.election.materialCampaignRate = Math.max(0, Number(b.election.materialCampaignRate) || 200);
+          if (b.election.campaignDiminish !== undefined) s.election.campaignDiminish = Math.max(0.01, Math.min(1, Number(b.election.campaignDiminish) || 0.6));
           election.applyTuning(db, s.election);
         }
         sim.scheduleAuto();

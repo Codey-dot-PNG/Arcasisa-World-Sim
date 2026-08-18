@@ -247,32 +247,44 @@ const App = {
 
   async renderAll() {
     if (!W.me || !S()) return;
-    // only preserve scroll when this is a re-render of the same view (a
-    // periodic refresh) — an actual view switch should land at the top
-    const sameView = W.view === lastRenderedView;
-    const saved = sameView ? captureScroll() : null;
-    this.renderTopbar();
-    this.renderTabs();
-    renderExplorer();
-    renderTicker();
-    // Wait for the view render to finish: async views (Elections desk,
-    // Entertainment) append content after their first frame, and restoring
-    // the scroll before that happens clamps it toward the top (a browser
-    // can't scroll past the end of a momentarily-short page).
-    await this.renderView();
-    // refresh open inspector with new data
-    if (W.selection && !document.getElementById('inspector').classList.contains('hidden')) {
-      Views.inspect(W.selection.kind, W.selection.id);
+    // Async views make renderAll itself async (it awaits the Elections/… view
+    // render). Two syncs arriving inside that window — an SSE event while a
+    // response-sync is mid-render — used to rebuild the SAME container twice,
+    // racing each other and sometimes dropping the async content. Serialize:
+    // one render at a time; anything that lands meanwhile re-renders after.
+    if (this._rendering) { this._rerenderQueued = true; return; }
+    this._rendering = true;
+    try {
+      // only preserve scroll when this is a re-render of the same view (a
+      // periodic refresh) — an actual view switch should land at the top
+      const sameView = W.view === lastRenderedView;
+      const saved = sameView ? captureScroll() : null;
+      this.renderTopbar();
+      this.renderTabs();
+      renderExplorer();
+      renderTicker();
+      // Wait for the view render to finish: async views (Elections desk,
+      // Entertainment) append content after their first frame, and restoring
+      // the scroll before that happens clamps it toward the top (a browser
+      // can't scroll past the end of a momentarily-short page).
+      await this.renderView();
+      // refresh open inspector with new data
+      if (W.selection && !document.getElementById('inspector').classList.contains('hidden')) {
+        Views.inspect(W.selection.kind, W.selection.id);
+      }
+      // Phase 3 — GM Command Bar: slim always-visible toolbar, GM-only, any view.
+      if (typeof GMBar !== 'undefined') GMBar.render();
+      // Phase 10 — reflect settings.music into the shared <audio> element +
+      // top-bar widget on every state refresh / sync broadcast.
+      if (typeof Music !== 'undefined') Music.apply();
+      // Phase 25 QoL — toast timeline entries touching the player's own chain
+      if (typeof Notify !== 'undefined') Notify.check();
+      if (saved) restoreScroll(saved);
+      lastRenderedView = W.view;
+    } finally {
+      this._rendering = false;
+      if (this._rerenderQueued) { this._rerenderQueued = false; this.renderAll(); }
     }
-    // Phase 3 — GM Command Bar: slim always-visible toolbar, GM-only, any view.
-    if (typeof GMBar !== 'undefined') GMBar.render();
-    // Phase 10 — reflect settings.music into the shared <audio> element +
-    // top-bar widget on every state refresh / sync broadcast.
-    if (typeof Music !== 'undefined') Music.apply();
-    // Phase 25 QoL — toast timeline entries touching the player's own chain
-    if (typeof Notify !== 'undefined') Notify.check();
-    if (saved) restoreScroll(saved);
-    lastRenderedView = W.view;
   }
 };
 

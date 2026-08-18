@@ -22,11 +22,12 @@ const STEPS_CAP = 300;       // counting history rows
 const LOG_CAP = 120;           // campaign / Commission log rows
 
 // Legacy campaign-investment constants (settings.election), retained for
-// applyTuning tolerance only — the modern model scales support linearly with
-// the party's budget against each campaign's own moneyCost.
+// applyTuning tolerance only — the modern model anchors strength at each
+// campaign's own moneyCost and diminishes above it.
 const DEFAULT_MONEY_SUPPORT_BASE = 40000000;   // Koren per sqrt-unit (legacy)
 const DEFAULT_MATERIAL_CAMPAIGN_RATE = 200;   // Koren-equivalent per unit (legacy)
 const DEFAULT_SUPPORT_SCALE = 6;              // multiplier on sqrt (legacy)
+const DEFAULT_CAMPAIGN_DIMINISH = 0.6;        // γ for excess budget above base
 
 const fmtNum = (n) => Math.round(n).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
 const fmtMoneyOf = (db, n) => `${db.settings.currency || '₳'}${fmtNum(n)}`;
@@ -138,6 +139,25 @@ function scaledMaterials(camp, ratio) {
   return out;
 }
 
+// Pre-affinity strength for a campaign at the given budget.
+// Below/at the base cost the strength is exactly proportional (₳1,200 on a
+// ₳12,000 base → 10% of base strength). Above the base, returns DIMINISH at a
+// GM-adjustable rate (settings.election.campaignDiminish, 0..1): excess
+// budget `e = ratio - 1` contributes e^γ, so γ = 1 is fully linear (10× budget
+// → 10× strength) and γ < 1 saturates faster (γ = 0.6 → a 10× budget delivers
+// 1 + 9^0.6 ≈ 4.7× the base strength).
+function campaignStrength(db, camp, money) {
+  const { base, ratio } = campaignRatio(camp, money);
+  const baseStrength = Math.max(0, Number(camp.strength) || 0);
+  if (ratio <= 1) return baseStrength * ratio;
+  const cfg = db.settings.election || {};
+  let gamma = Number(cfg.campaignDiminish);
+  if (!Number.isFinite(gamma)) gamma = DEFAULT_CAMPAIGN_DIMINISH;
+  gamma = Math.min(1, Math.max(0.01, gamma));
+  const excess = Math.pow(ratio - 1, gamma);
+  return baseStrength * (1 + excess);
+}
+
 // Campaigns come from the GM's catalogue (settings.election.campaigns). Each
 // entry carries a base money cost, required stock, a base support strength,
 // a duration in WORLD minutes (the campaign's effect fades when it elapses and
@@ -145,10 +165,11 @@ function scaledMaterials(camp, ratio) {
 // bonusParties = { partyId: multiplier } — so e.g. a soup kitchen scores
 // double for the communists and a radio address does more for the national
 // front. Funding the campaign at its base cost delivers exactly the base
-// strength; the party picks its own budget and support scales LINEARLY with it
-// (₳120,000 on a ₳12,000 base → 10× strength), with the required stock
-// consumed in the same proportion — no free-form extras — and the whole lot
-// multiplied by the party's affinity bonus.
+// strength; the party picks its own budget — below the base it scales down
+// proportionally, ABOVE the base it grows with DIMINISHING returns (rate set
+// by the GM: settings.election.campaignDiminish), with the required stock
+// consumed in the same proportion as the budget — no free-form extras — and
+// the whole lot multiplied by the party's affinity bonus.
 
 function campaignBonus(db, camp, partyId) {
   const b = (camp && camp.bonusParties) || {};
@@ -210,9 +231,10 @@ function activeCampaignInfo(el, partyId, nowWorldMs) {
 }
 
 // Estimate what a catalogue campaign would deliver for this party in this
-// province at the given budget — no spending happens here. Support is
-// baseStrength × (budget ÷ base cost); materials are whatever the campaign
-// needs at that budget, scaled from its required stock.
+// province at the given budget — no spending happens here. Support anchors at
+// baseStrength when funded at the base cost; below the base it scales
+// proportionally, above it returns diminish (campaignStrength). Materials are
+// whatever the campaign needs at that budget, scaled from its required stock.
 function estimateCampaign(db, partyId, provinceId, campaignId, money, materials) {
   const party = db.entities.find(e => e.id === partyId);
   if (!party || party.type !== 'party') throw new Error('Unknown party.');
@@ -224,8 +246,9 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   const baseStrength = Math.max(0, Number(camp.strength) || 0);
   const { base, ratio } = campaignRatio(camp, money);
   const needs = scaledMaterials(camp, ratio);
+  const strength0 = campaignStrength(db, camp, money);
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round(baseStrength * ratio * bonus * 10) / 10;
+  const strength = Math.round(strength0 * bonus * 10) / 10;
   let votes = 0;
   const el = db.election;
   if (el && el.active && el.phase === 'voting') {
@@ -237,6 +260,7 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   return {
     ok: true, campaignId: camp.id, campaignName: camp.name, description: camp.description || '',
     baseStrength, baseCost: base, money: Math.max(0, Math.round(Number(money) || 0)), ratio: Math.round(ratio * 1000) / 1000,
+    multiplier: baseStrength > 0 ? Math.round(strength0 / baseStrength * 1000) / 1000 : 0,
     materials: needs.map(n => ({ itemId: n.itemId, qty: n.qty,
       or: n.or ? n.or.map(o => ({ itemId: o.itemId, qty: o.qty })) : undefined,
       name: (names.find(i => i.id === n.itemId) || {}).name || n.itemId })),
@@ -245,9 +269,9 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
   };
 }
 
-// Run a catalogue campaign: pay the party's budget (support scales linearly
-// with it against the GM-set base cost), consume the campaign's required
-// stock in the same proportion, apply baseStrength × ratio × affinity bonus
+// Run a catalogue campaign: pay the party's budget (support anchors at the
+// GM-set base cost, diminishing above it), consume the campaign's required
+// stock in the same proportion, apply the resulting strength × affinity bonus
 // support to ONE province, and — if the count is already running — convert
 // the strength into late votes.
 function runCampaign(db, partyId, provinceId, campaignId, money, materials, actor) {
@@ -271,16 +295,16 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
       `it ends in ~${Math.max(1, Math.ceil(running.minutesLeft))}m. Wait for it to wind down before launching another.`);
   }
 
-  // The party's budget IS the total spend — support scales linearly with it
-  // against the GM-set base cost (₳base → base strength, 10× budget → 10×
-  // support, a tenth → a tenth). Materials are whatever the campaign needs at
-  // that budget, scaled from its required stock — no freeform extras.
+  // The party's budget IS the total spend — support anchors at base strength
+  // for the GM base cost, scales proportionally below it and with DIMINISHING
+  // returns above it (campaignStrength, GM rate). Materials are whatever the
+  // campaign needs at that budget, scaled from its required stock — no
+  // freeform extras.
   money = Math.max(0, Math.round(Number(money) || 0));
   const { base, ratio } = campaignRatio(camp, money);
   const needs = scaledMaterials(camp, ratio);
-  const baseStrength = Math.max(0, Number(camp.strength) || 0);
   const bonus = campaignBonus(db, camp, party.id);
-  const strength = Math.round(baseStrength * ratio * bonus * 10) / 10;
+  const strength = Math.round(campaignStrength(db, camp, money) * bonus * 10) / 10;
   if (money <= 0) throw new Error('Choose a budget for the campaign (₳) — funding ' + fmtMoneyOf(db, base) + ' delivers its base support.');
   if (strength <= 0) throw new Error('A budget of ' + fmtMoneyOf(db, money) + ' delivers no support for this campaign — raise the budget.');
 
@@ -827,6 +851,7 @@ function applyTuning(db, b) {
   if (b.moneySupportBase !== undefined) cfg.moneySupportBase = Math.max(1, Number(b.moneySupportBase) || DEFAULT_MONEY_SUPPORT_BASE);
   if (b.supportScale !== undefined) cfg.supportScale = Math.max(0.1, Number(b.supportScale) || DEFAULT_SUPPORT_SCALE);
   if (b.materialCampaignRate !== undefined) cfg.materialCampaignRate = Math.max(0, Number(b.materialCampaignRate) || DEFAULT_MATERIAL_CAMPAIGN_RATE);
+  if (b.campaignDiminish !== undefined) cfg.campaignDiminish = Math.min(1, Math.max(0.01, Number(b.campaignDiminish) || DEFAULT_CAMPAIGN_DIMINISH));
 
   // Catalogue entries are fully GM-authored — clamp the numeric fields so a
   // typo can't mint infinite strength or a zero-day campaign.

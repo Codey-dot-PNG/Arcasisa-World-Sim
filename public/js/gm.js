@@ -1337,7 +1337,8 @@ const GM = {
     const tune = this.getDraft('election-tune', {
       durationDays: cfg.durationDays === undefined ? 14 : cfg.durationDays,
       deviationPct: cfg.deviationPct === undefined ? 12 : cfg.deviationPct,
-      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes
+      supportToVotes: cfg.supportToVotes === undefined ? 2500 : cfg.supportToVotes,
+      campaignDiminish: cfg.campaignDiminish === undefined ? 0.6 : cfg.campaignDiminish
     });
     main.appendChild(this.field('Count duration (world days)',
       Forms.sliderNum(tune, 'durationDays', 1, 60, { step: 1, suffix: ' days' }),
@@ -1348,10 +1349,9 @@ const GM = {
     main.appendChild(this.field('Late votes per campaign support point',
       Forms.sliderNum(tune, 'supportToVotes', 0, 10000, { step: 250 }),
       'What campaign strength is worth in ballots once the count is running.'));
-    main.appendChild(this.field('Campaign funding model',
-      el('div', { style: 'font-size:11px; color:var(--ink-faint); line-height:1.5; padding:8px 10px; border:1px solid var(--rule-faint); background:var(--paper-tint); border-radius:6px;' },
-        'Support scales LINEARLY with the party\'s budget against each campaign\'s base cost in the catalogue: funding it at the base ' + CUR() + ' figure delivers exactly its base strength, a 10× budget delivers 10× support, a tenth delivers a tenth — and the campaign\'s required stock is consumed in the same proportion. Set the base cost, strength and stock per campaign in the catalogue below.'),
-      'The old diminishing-return curve (support base / scale / material rate) no longer applies.'));
+    main.appendChild(this.field('Campaign diminishing returns',
+      Forms.sliderNum(tune, 'campaignDiminish', 0.05, 1, { step: 0.05, suffix: '×' }),
+      'How support grows ABOVE a campaign\'s base cost: 1.0 = fully linear (a ' + CUR() + '120,000 drive on a ' + CUR() + '12,000 base delivers 10× the base strength); lower = faster saturation (at 0.6 the same drive delivers ≈ ' + Math.round((1 + Math.pow(9, 0.6)) * 100) / 100 + '×). Funding at or below the base stays exactly proportional, and required stock always scales with the budget.'));
     main.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async () => {
         try {
@@ -1359,7 +1359,8 @@ const GM = {
             election: {
               durationDays: tune.durationDays,
               deviationPct: tune.deviationPct,
-              supportToVotes: tune.supportToVotes
+              supportToVotes: tune.supportToVotes,
+              campaignDiminish: tune.campaignDiminish
             }
           });
           this.draftKey = null;

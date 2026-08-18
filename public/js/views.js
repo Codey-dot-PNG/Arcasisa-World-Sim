@@ -1,6 +1,14 @@
 'use strict';
 /* Module views + the contextual inspector panel. */
 
+// Campaign-desk form state carried across re-renders. A sync (another player,
+// a turn, a count milestone) rebuilds the whole view from scratch, which used
+// to wipe the budget a party had typed in and the estimate it had queued. The
+// desk snapshot is captured in render() just before the DOM is torn down and
+// applied by electionCampaignDesk when the form redraws — a periodic refresh
+// becomes invisible to someone mid-campaign.
+let deskSnap = null;
+
 const Views = {
 
   /* ═══════════ shared bits ═══════════ */
@@ -962,6 +970,32 @@ const Views = {
   },
 
   /* ═══════════ MODULE VIEWS ═══════════ */
+  // Snapshot each controlled party's campaign-desk row (budget, selections,
+  // estimate) before the view DOM is rebuilt. Only run when the CURRENT tree
+  // is actually the campaign desk — a fresh arrival (view switch, election
+  // phase change) drops any stale snapshot instead of resurrecting it.
+  snapshotDeskForms(container) {
+    if (!container.querySelector('.party-row input[type="number"]')) { deskSnap = null; return; }
+    const snap = {};
+    const rows = container.querySelectorAll('.party-row');
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const money = row.querySelector('input[type="number"]');
+      if (!money) continue;
+      const sels = row.querySelectorAll('select');
+      const est = row.querySelector('span[data-desk-est]');
+      const launch = row.querySelector('button.solid-btn');
+      snap[i] = {
+        camp: sels.length > 0 ? sels[0].value : '',
+        prov: sels.length > 1 ? sels[1].value : '',
+        money: money.value,
+        estText: est ? est.textContent : '',
+        launch: launch ? !launch.disabled : false
+      };
+    }
+    deskSnap = snap;
+  },
+
   async render(container) {
     if (W.view === 'map') { GameMap.mount(container); return; }
     // Every sync (turn tick, another player's action) rebuilds this view from
@@ -969,6 +1003,7 @@ const Views = {
     // Carry the previous scroll offset across the rebuild instead.
     const prevScroll = container.querySelector('.doc-view');
     const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
+    this.snapshotDeskForms(container);
     const doc = el('div.doc-view', el('div.doc-inner'));
     clear(container).appendChild(doc);
     const inner = doc.firstChild;
@@ -1488,7 +1523,8 @@ const Views = {
     const desk = el('div');
     inner.appendChild(desk);
     const camps = ((S().settings.election && S().settings.election.campaigns) || []).filter(c => c.enabled !== false);
-    for (const p of parties) {
+    for (let partyIdx = 0; partyIdx < parties.length; partyIdx++) {
+      const p = parties[partyIdx];
       const controlled = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, p.id));
       if (inCount && !controlled) continue;
       const acct = (S().accounts || []).find(a => a.ownerId === p.id);
@@ -1547,7 +1583,7 @@ const Views = {
               ' · base ' + CUR() + fmtNum(Math.max(1, Number(c.moneyCost) || 0)) + ' for +' + c.strength + ' support' +
               (stock ? ' · needs ' + stock : '') +
               (bonus && bonus !== 1 ? ' · ×' + bonus + ' affinity for ' + p.abbrev : '') +
-              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding scales support (and stock) up or down linearly.';
+              ' · runs ' + (c.durationMinutes || 5) + ' world minutes — funding at or below the base scales support (and stock) proportionally; above it, returns diminish (rate set by the Commission).';
           };
           campSel.addEventListener('change', paintInfo);
           paintInfo();
@@ -1555,7 +1591,7 @@ const Views = {
           // (POST — the response sync paints the authoritative result in one
           // round-trip, the same proven pattern as every other game action).
           const btnRow = el('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:8px;' });
-          const estSpan = el('span', { style: 'font-size:11px; color:var(--ink-faint); flex:1;' });
+          const estSpan = el('span', { 'data-desk-est': '', style: 'font-size:11px; color:var(--ink-faint); flex:1;' });
           btnRow.appendChild(estSpan);
           const launchBtn = el('button.solid-btn', { style: 'font-size:11px;', disabled: true }, 'Launch Campaign');
           btnRow.appendChild(el('button.dash-btn', { style: 'font-size:11px;', onclick: async () => {
@@ -1564,6 +1600,7 @@ const Views = {
                 '&campaignId=' + encodeURIComponent(campSel.value) + '&money=' + (Number(moneyInput.value) || 0);
               const r = await GET('/api/election/estimate?' + qs);
               let txt = '"' + r.campaignName + '": ' + CUR() + fmtNum(r.money) + ' → +' + r.strength + ' support';
+              if (r.ratio > 1 && r.multiplier !== undefined && Math.abs(r.multiplier - r.ratio) > 0.005) txt += ' (' + r.multiplier + '× of base — diminishing)';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
               if (r.materials && r.materials.length) txt += ' · uses ' + r.materials.map(m => m.name + ' ×' + fmtNum(m.qty)).join(', ');
               txt += ' · runs ' + r.durationMinutes + ' world minutes';
@@ -1585,12 +1622,27 @@ const Views = {
           moneyInput.addEventListener('input', dirty);
           provSel.addEventListener('change', dirty);
           campSel.addEventListener('change', () => { paintInfo(); dirty(); });
+          // Restore the pre-rebuild form state (budget/estimate the player had
+          // queued) so a periodic sync refresh doesn't wipe it mid-flow.
+          const snap = deskSnap ? deskSnap[partyIdx] : null;
+          if (snap) {
+            if (snap.camp && camps.some(c => c.id === snap.camp)) campSel.value = snap.camp;
+            if (snap.prov && S().provinces.some(pv => pv.id === snap.prov)) provSel.value = snap.prov;
+            moneyInput.value = snap.money;
+            if (snap.estText) {
+              estSpan.textContent = snap.estText;
+              launchBtn.disabled = !snap.launch;
+            }
+            paintInfo();
+          }
           form.appendChild(btnRow);
           box.appendChild(form);
         }
       }
       desk.appendChild(box);
     }
+    // consumed — the next render() snapshots the (possibly restored) form afresh
+    deskSnap = null;
   },
 
   // Backward-compat helpers for legacy campaign templates.

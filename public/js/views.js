@@ -1364,7 +1364,9 @@ const Views = {
     svg.setAttribute('width', '100%');
     svg.setAttribute('height', 'auto');
     svg.setAttribute('style', 'max-height:420px; border:1px solid var(--rule-strong); background:#181a1e;');
-    svg.appendChild(Object.assign(document.createElementNS(NS, 'rect'), { width: mapW, height: mapH, fill: '#181a1e' }));
+    const bg = document.createElementNS(NS, 'rect');
+    bg.setAttribute('width', mapW); bg.setAttribute('height', mapH); bg.setAttribute('fill', '#181a1e');
+    svg.appendChild(bg);
 
     for (const p of S().provinces) {
       if (!p.shape) continue;
@@ -1376,16 +1378,29 @@ const Views = {
       }
       const provTotal = provCount ? Object.values(provCount).reduce((s, v) => s + v, 0) : 0;
       const leadP = [...parties].sort((a, b) => (provCount ? (provCount[b.id] || 0) : 0) - (provCount ? (provCount[a.id] || 0) : 0))[0];
-      // Province outline
+      const leadShare = provCount && provTotal > 0 ? (provCount[leadP ? leadP.id : ''] || 0) / provTotal : 0;
+      // Province outline — a vote-share choropleth: the leading party's color,
+      // with the depth of the fill scaling with its share of the province's
+      // counted ballots (a landslide saturates, a photo finish stays pale).
       const path = document.createElementNS(NS, 'path');
       path.setAttribute('d', p.shape);
       path.setAttribute('fill-rule', 'evenodd');
       if (counting) {
-        path.setAttribute('fill', done ? '#2a2e34' : prog > 0 ? '#22252a' : '#1a1d22');
-        path.setAttribute('stroke', done ? 'var(--accent)' : prog > 0 ? '#555' : '#333');
+        if (done && leadP && leadShare > 0) {
+          path.setAttribute('fill', leadP.color || '#2a2e34');
+          path.setAttribute('fill-opacity', String(Math.round((0.18 + 0.62 * leadShare) * 100) / 100));
+          path.setAttribute('stroke', leadP.color || 'var(--accent)');
+        } else if (prog > 0 && leadP && leadShare > 0) {
+          path.setAttribute('fill', leadP.color || '#22252a');
+          path.setAttribute('fill-opacity', String(Math.round((0.10 + 0.45 * leadShare) * 100) / 100));
+          path.setAttribute('stroke', '#555');
+        } else {
+          path.setAttribute('fill', '#1a1d22');
+          path.setAttribute('stroke', '#333');
+        }
       } else {
         path.setAttribute('fill', (leadP && leadP.color) || '#22252a');
-        path.setAttribute('fill-opacity', '0.35');
+        path.setAttribute('fill-opacity', String(Math.round((0.12 + 0.50 * leadShare) * 100) / 100));
         path.setAttribute('stroke', (leadP && leadP.color) || '#555');
       }
       path.setAttribute('stroke-width', '4');
@@ -1425,12 +1440,25 @@ const Views = {
         pctTxt.setAttribute('font-size', '28'); pctTxt.setAttribute('font-family', 'var(--font-mono)');
         pctTxt.textContent = counting ? Math.round(prog * 100) + '%' : 'POLL';
         svg.appendChild(pctTxt);
+        // The province's current leader + share of counted (or polled) votes
+        if (leadP && leadShare > 0) {
+          const leadTxt = document.createElementNS(NS, 'text');
+          leadTxt.setAttribute('x', cx); leadTxt.setAttribute('y', cy + R + 62);
+          leadTxt.setAttribute('text-anchor', 'middle');
+          leadTxt.setAttribute('fill', leadP.color || '#ccc');
+          leadTxt.setAttribute('font-size', '26'); leadTxt.setAttribute('font-family', 'var(--font-mono)');
+          leadTxt.textContent = (leadP.abbrev || leadP.name) + ' ' + Math.round(leadShare * 100) + '%';
+          svg.appendChild(leadTxt);
+        }
       }
     }
     container.appendChild(svg);
     if (!counting) {
       container.appendChild(el('div', { style: 'font-size:10px; color:var(--ink-faint); margin-top:4px;' },
-        'Piecharts show the current polling split in each province (public polls); province shading is the poll leader.'));
+        'Province shading = the poll leader (depth scales with its share); piecharts show the projected split.'));
+    } else {
+      container.appendChild(el('div', { style: 'font-size:10px; color:var(--ink-faint); margin-top:4px;' },
+        'Province shading = the count leader by ballots counted so far (depth scales with its share); piecharts show the split of counted ballots.'));
     }
     return container;
   },

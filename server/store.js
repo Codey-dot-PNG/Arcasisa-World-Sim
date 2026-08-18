@@ -571,6 +571,11 @@ function migrate(world) {
     delete world.war;
     changed = true;
   }
+  // A conflict marked ended (result set) must never linger as `active` —
+  // the start routes gate on doc.active, so a stale flag would block a new
+  // war/protest forever. Self-heal on load, one direction only.
+  if (world.war && world.war.result && world.war.active) { world.war.active = false; changed = true; }
+  if (world.protest && world.protest.result && world.protest.active) { world.protest.active = false; changed = true; }
   // Protests (Phase 31): db.protest is a second conflict doc with the same
   // lifecycle — self-heal a malformed one exactly like a malformed war.
   if (world.protest && typeof world.protest.tick !== 'number') {

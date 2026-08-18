@@ -1537,6 +1537,7 @@ const Views = {
     const desk = el('div');
     inner.appendChild(desk);
     const camps = ((S().settings.election && S().settings.election.campaigns) || []).filter(c => c.enabled !== false);
+    let deskRowIdx = 0;
     for (let partyIdx = 0; partyIdx < parties.length; partyIdx++) {
       const p = parties[partyIdx];
       const controlled = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, p.id));
@@ -1669,7 +1670,7 @@ const Views = {
           campSel.addEventListener('change', () => { paintInfo(); dirty(); });
           // Restore the pre-rebuild form state (budget/estimate the player had
           // queued) so a periodic sync refresh doesn't wipe it mid-flow.
-          const snap = deskSnap ? deskSnap[partyIdx] : null;
+          const snap = deskSnap ? deskSnap[deskRowIdx] : null;
           if (snap) {
             if (snap.camp && camps.some(c => c.id === snap.camp)) campSel.value = snap.camp;
             if (snap.prov && S().provinces.some(pv => pv.id === snap.prov)) provSel.value = snap.prov;
@@ -1687,6 +1688,7 @@ const Views = {
         }
       }
       desk.appendChild(box);
+      deskRowIdx++;
     }
     // consumed — the next render() snapshots the (possibly restored) form afresh
     deskSnap = null;

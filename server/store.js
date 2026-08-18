@@ -176,23 +176,25 @@ function migrate(world) {
     if (el.materialCampaignRate === undefined) { el.materialCampaignRate = 200; changed = true; }
     if (!Array.isArray(el.campaigns)) {
       el.campaigns = [
-        { id: 'camp_soup', name: 'Soup Kitchen Initiative', description: 'Open community soup kitchens with party-branded ingredients. Feeds the needy, feeds your polling.', moneyCost: 12000, itemCosts: [{ itemId: 'item_grain', qty: 150 }], strength: 3, durationDays: 4, bonusParties: {} },
-        { id: 'camp_pamphlet', name: 'Pamphlet Blitz', description: 'Flood the mailboxes with glossy manifesto pamphlets. Cheap, cheerful, everywhere.', moneyCost: 8000, itemCosts: [], strength: 1.5, durationDays: 2, bonusParties: {} },
-        { id: 'camp_radio', name: 'Nationwide Radio Address', description: 'Prime-time radio speech beamed across the Republic. Reach the whole country in one sitting.', moneyCost: 25000, itemCosts: [], strength: 3, durationDays: 1, bonusParties: {} },
-        { id: 'camp_rally', name: 'Grand Rally Tour', description: 'A whistle-stop tour of motorcades and rallies in every province. Expensive, thirsty, unforgettable.', moneyCost: 45000, itemCosts: [{ itemId: 'item_fuel', qty: 120 }], strength: 5, durationDays: 2, bonusParties: {} },
-        { id: 'camp_youth', name: 'Youth Volunteer Brigades', description: 'Mobilise the young: door-knocking, flag-waving and boundless enthusiasm.', moneyCost: 15000, itemCosts: [], strength: 2, durationDays: 3, bonusParties: {} }
+        { id: 'camp_soup', name: 'Soup Kitchen Initiative', description: 'Open community soup kitchens with party-branded ingredients. Feeds the needy, feeds your polling.', moneyCost: 12000, itemCosts: [{ itemId: 'item_grain', qty: 150 }], strength: 3, durationMinutes: 5, bonusParties: {} },
+        { id: 'camp_pamphlet', name: 'Pamphlet Blitz', description: 'Flood the mailboxes with glossy manifesto pamphlets. Cheap, cheerful, everywhere.', moneyCost: 8000, itemCosts: [], strength: 1.5, durationMinutes: 5, bonusParties: {} },
+        { id: 'camp_radio', name: 'Nationwide Radio Address', description: 'Prime-time radio speech beamed across the Republic. Reach the whole country in one sitting.', moneyCost: 25000, itemCosts: [], strength: 3, durationMinutes: 5, bonusParties: {} },
+        { id: 'camp_rally', name: 'Grand Rally Tour', description: 'A whistle-stop tour of motorcades and rallies in every province. Expensive, thirsty, unforgettable.', moneyCost: 45000, itemCosts: [{ itemId: 'item_fuel', qty: 120 }], strength: 5, durationMinutes: 5, bonusParties: {} },
+        { id: 'camp_youth', name: 'Youth Volunteer Brigades', description: 'Mobilise the young: door-knocking, flag-waving and boundless enthusiasm.', moneyCost: 15000, itemCosts: [], strength: 2, durationMinutes: 5, bonusParties: {} }
       ];
       changed = true;
     } else {
       // Per-campaign fields are additive — older catalogues (or campaigns
       // hand-authored before these fields existed) get sane defaults without
-      // clobbering GM edits. durationDays sets how long the drive runs (and
-      // how long before the party may run another); bonusParties maps a
-      // partyId to a strength multiplier (party affinities, e.g. soup
-      // kitchens for the communists).
+      // clobbering GM edits. durationMinutes sets how long the drive runs in
+      // WORLD-clock minutes (default 5) and how long before the party may run
+      // another; bonusParties maps a partyId to a strength multiplier (party
+      // affinities, e.g. soup kitchens for the communists). Legacy
+      // durationDays is converted away.
       for (const c of el.campaigns) {
         if (!c || typeof c !== 'object') continue;
-        if (c.durationDays === undefined) { c.durationDays = 3; changed = true; }
+        if (c.durationDays !== undefined) { delete c.durationDays; changed = true; }
+        if (c.durationMinutes === undefined) { c.durationMinutes = 5; changed = true; }
         if (c.bonusParties === undefined || typeof c.bonusParties !== 'object') { c.bonusParties = {}; changed = true; }
         if (c.enabled === undefined) { c.enabled = true; changed = true; }
       }

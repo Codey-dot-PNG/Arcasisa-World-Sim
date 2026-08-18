@@ -7,8 +7,8 @@
    Campaigns come from the GM's catalogue: a party picks a campaign and a
    province, pays the base cost (money + stock), then may layer freeform
    extra money/materials on top for more strength. Each campaign has a
-   duration in world days — while one is running the party can't launch
-   another — and optional per-party affinity multipliers.
+   duration in world minutes (world clock) — while one is running the party
+   can't launch another — and optional per-party affinity multipliers.
 
    All transient state lives on the election doc (no module-level state),
    so the count is serverless-safe per docs/CONVENTIONS.md. The engine
@@ -134,7 +134,7 @@ function estimateSupport(db, money, materials) {
 
 // Campaigns come from the GM's catalogue (settings.election.campaigns). Each
 // entry carries a money cost, optional stock costs, a base support strength,
-// a duration in WORLD days (the campaign's effect fades when it elapses and
+// a duration in WORLD minutes (the campaign's effect fades when it elapses and
 // only then may the party run another) and optional party affinities —
 // bonusParties = { partyId: multiplier } — so e.g. a soup kitchen scores
 // double for the communists and a radio address does more for the national
@@ -195,11 +195,11 @@ function expireCampaigns(db, el, nowWorldMs, actor) {
 function activeCampaignInfo(el, partyId, nowWorldMs) {
   const c = (el && el.partyCampaigns && el.partyCampaigns[partyId]) || null;
   if (!c) return null;
-  const hoursLeft = c.endsAtWorldMs !== undefined
-    ? Math.max(0, (c.endsAtWorldMs - nowWorldMs) / 3600000)
+  const minutesLeft = c.endsAtWorldMs !== undefined
+    ? Math.max(0, (c.endsAtWorldMs - nowWorldMs) / 60000)
     : 0;
   return { campaignId: c.campaignId, name: c.name, provinceId: c.provinceId, strength: c.strength,
-    durationDays: c.durationDays, endsAtWorldMs: c.endsAtWorldMs, hoursLeft };
+    durationMinutes: c.durationMinutes, endsAtWorldMs: c.endsAtWorldMs, minutesLeft };
 }
 
 // Estimate what a catalogue campaign (plus freeform extras) would deliver
@@ -222,11 +222,11 @@ function estimateCampaign(db, partyId, provinceId, campaignId, money, materials)
     const vpp = Math.max(0, Math.round(Number(el.supportToVotes) || 2500));
     votes = Math.round(strength * vpp);
   }
-  const durationDays = Math.max(1, Math.min(90, Math.round(Number(camp.durationDays) || 3)));
+  const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(camp.durationMinutes) || 5)));
   return {
     ok: true, campaignId: camp.id, campaignName: camp.name, description: camp.description || '',
     baseStrength, extraSupport: Math.round(extra * 10) / 10, bonus,
-    strength, votes, provinceId, provinceName: prov.name, durationDays,
+    strength, votes, provinceId, provinceName: prov.name, durationMinutes,
     active: activeCampaignInfo(el, party.id, worldNowMs(db))
   };
 }
@@ -252,7 +252,7 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   const running = activeCampaignInfo(el, party.id, nowWorldMs);
   if (running) {
     throw new Error(`"${running.name}" is still running in ${((provById(db, running.provinceId) || {}).name || running.provinceId)} — ` +
-      `it ends in ~${Math.max(1, Math.ceil(running.hoursLeft))}h. Wait for it to wind down before launching another.`);
+      `it ends in ~${Math.max(1, Math.ceil(running.minutesLeft))}m. Wait for it to wind down before launching another.`);
   }
 
   money = Math.max(0, Math.round(Number(money) || 0));
@@ -306,13 +306,14 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   }
 
   // The campaign now occupies the party's single slot until its duration
-  // (in world days) elapses — then the support fades and the slot opens.
-  const durationDays = Math.max(1, Math.min(90, Math.round(Number(camp.durationDays) || 3)));
+  // (in world minutes, per the world clock) elapses — then the support
+  // fades and the slot opens.
+  const durationMinutes = Math.max(1, Math.min(1440, Math.round(Number(camp.durationMinutes) || 5)));
   el.partyCampaigns = el.partyCampaigns || {};
   el.partyCampaigns[party.id] = {
     campaignId: camp.id, name: camp.name, provinceId,
-    strength, startWorldMs: nowWorldMs, durationDays,
-    endsAtWorldMs: nowWorldMs + durationDays * 86400000
+    strength, startWorldMs: nowWorldMs, durationMinutes,
+    endsAtWorldMs: nowWorldMs + durationMinutes * 60000
   };
 
   // Descriptions for the log (base stock + freeform extras combined).
@@ -326,21 +327,21 @@ function runCampaign(db, partyId, provinceId, campaignId, money, materials, acto
   el.log.push({ ts: Date.now(), turn: db.settings.time.turn, date: db.settings.time.date, kind: 'campaign',
     partyId: party.id, campaignId: camp.id, campaignName: camp.name, provinceId, provinceName: prov.name,
     money: totalMoney, materials: materials || [], strength, votes, materialDesc: matDesc,
-    durationDays, bonus, actor: actor || '—' });
+    durationMinutes, bonus, actor: actor || '—' });
   if (el.log.length > LOG_CAP) el.log.splice(0, el.log.length - LOG_CAP);
 
   store.log('election', `Campaign: ${party.name} runs "${camp.name}" in ${prov.name}`,
-    `${totalMoney ? fmtMoneyOf(db, totalMoney) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationDays} world day${durationDays > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
+    `${totalMoney ? fmtMoneyOf(db, totalMoney) : 'no money'}${matDesc ? ' + ' + matDesc : ''} · ${strength} support points for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''}${bonus !== 1 ? ' · ×' + bonus + ' party affinity' : ''}${votes ? ' · ' + fmtNum(votes) + ' late votes' : ''}`,
     actor, [party.id]);
 
   sim.draftNews(`${party.abbrev || party.name} ${el.phase === 'voting' ? 'CAMPAIGNS INTO THE COUNT' : 'ON THE CAMPAIGN TRAIL'} IN ${prov.name.toUpperCase()}`,
     `${party.name} has launched "${camp.name}" in ${prov.name} ${el.phase === 'voting' ? 'as the ballots are counted' : 'on the campaign trail'}` +
     `${totalMoney ? ', at a cost of ' + fmtMoneyOf(db, totalMoney) : ''}${matDesc ? ' plus ' + matDesc : ''}. ` +
-    `The drive runs for ${durationDays} world day${durationDays > 1 ? 's' : ''} and is expected to deliver ${strength} support points` +
+    `The drive runs for ${durationMinutes} world minute${durationMinutes > 1 ? 's' : ''} and is expected to deliver ${strength} support points` +
     `${el.phase === 'voting' ? ' — and ' + fmtNum(votes) + ' late ballots' : ''}.`,
     'Politics', false, 'Wire Service');
 
-  return { money: totalMoney, strength, votes, bonus, durationDays,
+  return { money: totalMoney, strength, votes, bonus, durationMinutes,
     materialDesc: matDesc, provinceId, provinceName: prov.name };
 }
 
@@ -844,7 +845,7 @@ function applyTuning(db, b) {
         description: String((c && c.description) || ''),
         moneyCost: Math.max(0, Math.round(Number(c && c.moneyCost) || 0)),
         strength: Math.max(0, Number(c && c.strength) || 0),
-        durationDays: Math.max(1, Math.min(90, Math.round(Number(c && c.durationDays) || 3))),
+        durationMinutes: Math.max(1, Math.min(1440, Math.round(Number(c && c.durationMinutes) || 5))),
         enabled: !(c && c.enabled === false),
         itemCosts: Array.isArray(c && c.itemCosts) ? c.itemCosts.filter(r => r && r.itemId)
           .map(r => ({ itemId: r.itemId, qty: Math.max(1, Math.round(Number(r.qty) || 1)),

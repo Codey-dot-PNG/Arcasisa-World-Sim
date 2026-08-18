@@ -1272,7 +1272,7 @@ const GM = {
      · the count's duration (in world days), its deviation from the public
        polls, and the campaign→late-votes exchange rate
      · the campaign catalogue parties can buy: money + stock (with "or"
-       alternatives per item row), a duration in world days (one drive at a
+       alternatives per item row), a duration in world minutes (one drive at a
        time per party until it winds down) and per-party affinity multipliers
      · party treasuries (the money they spend) with a quick mint
      · mid-count corrections: add or remove votes, nationally or by province */
@@ -1406,7 +1406,7 @@ const GM = {
     // ---- Campaign catalogue ----
     main.appendChild(Views.secLabel('Campaign Catalogue'));
     main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Each drive runs for a set number of WORLD days — while it runs the party may not launch another. The affinity multipliers scale its strength for specific parties (e.g. soup kitchens ×2 for the communists).'));
+      'Each drive runs for a set number of WORLD minutes (world clock) — while it runs the party may not launch another. The affinity multipliers scale its strength for specific parties (e.g. soup kitchens ×2 for the communists).'));
     const camps = this._elCamps || (this._elCamps = JSON.parse(JSON.stringify(cfg.campaigns || [])));
     const campBox = el('div');
     main.appendChild(campBox);
@@ -1417,7 +1417,7 @@ const GM = {
         el('div', { style: 'flex:1; min-width:200px;' }, this.field('Name', this.text(c, 'name'))),
         el('div', { style: 'flex:0 0 120px;' }, this.field('Money cost (' + CUR() + ')', this.num(c, 'moneyCost'))),
         el('div', { style: 'flex:0 0 120px;' }, this.field('Support strength', this.num(c, 'strength'))),
-        el('div', { style: 'flex:0 0 120px;' }, this.field('Duration (world days)', this.num(c, 'durationDays'))),
+        el('div', { style: 'flex:0 0 120px;' }, this.field('Duration (world minutes)', this.num(c, 'durationMinutes'))),
         el('div', { style: 'flex:0 0 90px;' }, this.field('Enabled', this.check(c, 'enabled', ''))),
         el('button.icon-btn', { onclick: () => { camps.splice(camps.indexOf(c), 1); App.renderView(); }, title: 'Remove campaign' }, '✕')));
       row.appendChild(el('div', { style: 'margin-top:4px;' }, this.field('Description', this.text(c, 'description'))));
@@ -1462,7 +1462,7 @@ const GM = {
     };
     for (const c of camps) campBox.appendChild(renderCamp(c));
     campBox.appendChild(el('div.btn-row',
-      el('button.dash-btn', { onclick: () => { camps.push({ id: 'camp_' + Date.now().toString(36), name: 'New Campaign', description: '', moneyCost: 10000, itemCosts: [], strength: 1, durationDays: 3, bonusParties: {} }); App.renderView(); } }, '+ Add Campaign'),
+      el('button.dash-btn', { onclick: () => { camps.push({ id: 'camp_' + Date.now().toString(36), name: 'New Campaign', description: '', moneyCost: 10000, itemCosts: [], strength: 1, durationMinutes: 5, bonusParties: {} }); App.renderView(); } }, '+ Add Campaign'),
       el('button.solid-btn', {
         onclick: async () => {
           try {

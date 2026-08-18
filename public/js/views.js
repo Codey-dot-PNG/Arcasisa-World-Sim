@@ -1464,11 +1464,11 @@ const Views = {
         const running = (elc.partyCampaigns && elc.partyCampaigns[p.id]) || null;
         if (running) {
           const prov = provById(running.provinceId);
-          const hrsLeft = running.endsAtWorldMs ? Math.max(0, Math.ceil((running.endsAtWorldMs - this.worldHrsNow()) / 3600000)) : 0;
+          const minLeft = running.endsAtWorldMs ? Math.max(0, Math.ceil((running.endsAtWorldMs - this.worldHrsNow()) / 60000)) : 0;
           box.appendChild(el('div', { style: 'flex:1; margin-top:8px; padding:10px; border:1px solid var(--accent); background:var(--paper-tint);' },
             el('div', { style: 'font-size:12px; font-weight:600;' }, '● RUNNING: "' + running.name + '"'),
             el('div', { style: 'font-size:11px; color:var(--ink-soft); margin-top:3px;' },
-              'in ' + (prov ? prov.name : running.provinceId) + ' · +' + running.strength + ' support · ends in ~' + hrsLeft + 'h' +
+              'in ' + (prov ? prov.name : running.provinceId) + ' · +' + running.strength + ' support · ends in ~' + minLeft + 'm' +
               (inCount ? '' : ' — a new drive may launch when it winds down'))));
         } else if (!camps.length) {
           box.appendChild(el('div', { style: 'flex:1; margin-top:8px; padding:10px; border:1px dashed var(--rule-faint); font-size:11px; color:var(--ink-faint);' },
@@ -1487,7 +1487,7 @@ const Views = {
           campRow.appendChild(el('label', { style: 'font-size:11px; min-width:50px;' }, 'Campaign:'));
           const campSel = el('select.text-input', { style: 'flex:1; font-size:12px;' });
           camps.forEach(c => campSel.appendChild(el('option', { value: c.id },
-            c.name + ' — ' + (c.moneyCost > 0 ? CUR() + fmtNum(c.moneyCost) : 'free') + ' · +' + c.strength + ' · ' + (c.durationDays || 3) + 'd' +
+            c.name + ' — ' + (c.moneyCost > 0 ? CUR() + fmtNum(c.moneyCost) : 'free') + ' · +' + c.strength + ' · ' + (c.durationMinutes || 5) + 'm' +
             ((c.itemCosts || []).length ? ' · needs stock' : ''))));
           campRow.appendChild(campSel);
           form.appendChild(campRow);
@@ -1552,7 +1552,7 @@ const Views = {
               const r = await POST('/api/election/estimate', { partyId: p.id, province: provSel.value, campaignId: campSel.value, money: Number(moneyInput.value) || 0, materials: mats });
               let txt = '"' + r.campaignName + '": +' + r.baseStrength + ' base' + (r.extraSupport ? ' + ' + r.extraSupport + ' extras' : '') + ' → +' + r.strength + ' support';
               if (r.bonus !== 1) txt += ' (×' + r.bonus + ' ' + p.abbrev + ' affinity)';
-              txt += ' · runs ' + r.durationDays + ' world days';
+              txt += ' · runs ' + r.durationMinutes + ' world minutes';
               if (r.votes) txt += ' · ~' + fmtNum(r.votes) + ' late votes';
               estSpan.textContent = txt;
               launchBtn.disabled = false;
@@ -1605,7 +1605,7 @@ const Views = {
             : `${entName(e.partyId)} launched "${e.campaignName || 'campaign'}" in ${e.provinceName}` +
               (e.money ? ' — ' + fmtMoney(e.money) : '') + (e.materialDesc ? ' + ' + e.materialDesc : '') +
               (e.strength ? ' — +' + e.strength + ' support' : '') +
-              (e.durationDays ? ' (' + e.durationDays + ' world days)' : '') +
+              (e.durationMinutes ? ' (' + e.durationMinutes + ' world minutes)' : '') +
               (e.bonus && e.bonus !== 1 ? ' — ×' + e.bonus + ' affinity' : '') +
               (e.votes ? ' — ' + fmtNum(e.votes) + ' late votes' : '')))));
   },

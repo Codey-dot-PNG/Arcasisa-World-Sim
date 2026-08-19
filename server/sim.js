@@ -253,7 +253,11 @@ function draftNews(headline, body, category, publish, author, paperId) {
     ts: Date.now(), simDate: db.settings.time.date, turn: db.settings.time.turn
   };
   db.news.push(a);
-  if (db.news.length > 400) db.news.splice(0, db.news.length - 400);
+  // Cap kept deliberately low: full article bodies live in the world doc, and
+  // every commit rewrites the entire doc to Postgres — 400×2-4KB bodies were a
+  // big chunk of each PATCH during heavy traffic. The state payload only ships
+  // metadata; bodies are fetched on demand via /api/news/:id.
+  if (db.news.length > 200) db.news.splice(0, db.news.length - 200);
   store.log('news', (publish ? 'Published: ' : 'Drafted: ') + headline, cat, author || 'Wire Service', [a.id]);
   return a;
 }
@@ -1505,7 +1509,7 @@ function recordTradeHistory(db) {
     importValue: flows.reduce((s, f) => s + Math.max(0, -f.value), 0),
     byItem
   });
-  if (trade.history.length > 180) trade.history.splice(0, trade.history.length - 180);
+  if (trade.history.length > 90) trade.history.splice(0, trade.history.length - 90);
 }
 
 // ---------- foreign relations (Phase 25 — diplomacy) ----------
@@ -1733,7 +1737,11 @@ function recordHistory(weekly) {
     } catch (e) { /* polling is optional data */ }
   }
   db.history.push(entry);
-  if (db.history.length > 1000) db.history.splice(0, db.history.length - 1000);
+  // Cap kept deliberately low: every commit rewrites the whole doc to Postgres,
+  // and 1000 per-turn snapshots (with per-province/per-company objects) were
+  // 1-2MB of each PATCH. The state payload ships only the last 60; /api/history
+  // serves this archive to the long-range charts once per turn.
+  if (db.history.length > 240) db.history.splice(0, db.history.length - 240);
 }
 
 // ---------- elections -----------------------------------------------------

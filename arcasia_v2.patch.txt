@@ -1,0 +1,1638 @@
+# ============================================================
+# ARCASIA — DEMOGRAPHICS MATRIX v2.1 + GOVERNMENT ACTIONS
+# Single-file patch bundle.
+#
+#   • "NEW" files: create at the path shown after '+++ b/'.
+#   • "REWRITE" files: replace the existing file wholesale.
+#   • One manual merge remains (src/events/turnEnd.js) — see the
+#     section after the END OF BUNDLE sentinel.
+#
+# Fixes vs the original patch: undefined applyVotesToElection(),
+# wrong import of endTurnFatigueDecay, never-populated
+# election._profiles, malformed rally itemCosts, broken legacy
+# migration matching, fatigue applied to untargeted voters,
+# unrolled scandalRisk, student-population drain, famine-death
+# miscounting, campaign spam — plus live-verified costs and
+# wire-service news generation.
+# ============================================================
+
+diff --git a/src/news/wire.js b/src/news/wire.js
+new file mode 100644
+--- /dev/null
++++ b/src/news/wire.js
+// ============================================================
+// WIRE SERVICE — news generation.
+// Schema verified against a live save export: every news item
+// carries id/ts/body/turn/author/status/paperId/simDate/category/
+// headline. Wire transfers run on paper_economists; campaign
+// trail items on paper_today; new system items are 'draft'.
+// ============================================================
+
+const WIRE_PAPER = 'paper_economists';
+const DEFAULT_PAPER = 'paper_today';
+
+// Item display names observed in live wire reports.
+const KNOWN_ITEM_NAMES = {
+  item_grain: 'Grain (tonne)',
+  item_msuazzdcammju4: 'The Commie Bus',
+  item_autos: 'Automobiles'
+};
+
+function newNewsId() {
+  return `news_ms${Date.now().toString(36).slice(-6)}${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function pushNews(worldState, entry) {
+  if (!Array.isArray(worldState.news)) worldState.news = [];
+  const item = {
+    id: newNewsId(),
+    ts: Date.now(),
+    turn: worldState.turn || 0,
+    simDate: worldState.date,
+    status: 'draft',
+    paperId: DEFAULT_PAPER,
+    ...entry
+  };
+  worldState.news.push(item);
+  if (worldState.news.length > 500) worldState.news.splice(0, worldState.news.length - 500);
+  return item;
+}
+
+const fmtMoney = n => `₳${Math.round(Number(n) || 0).toLocaleString('en-US')}`;
+
+// Live template: "Financial circles report a transfer of ₳X from A to B.
+// The stated purpose: P."
+function wireTransfer(worldState, from, to, amount, purpose) {
+  return pushNews(worldState, {
+    author: 'Wire Service',
+    paperId: WIRE_PAPER,
+    category: 'Business',
+    headline: `Large transfer moves ${fmtMoney(amount)}`,
+    body: `Financial circles report a transfer of ${fmtMoney(amount)} from ${from} to ${to}. The stated purpose: ${purpose}.`
+  });
+}
+
+function resolveItemName(worldState, itemId) {
+  const list = worldState.items || worldState.itemCatalog || [];
+  const found = Array.isArray(list) && list.find(i => i && (i.id === itemId || i.key === itemId));
+  return (found && (found.name || found.label)) || KNOWN_ITEM_NAMES[itemId] || itemId;
+}
+
+// Live template: " plus Grain (tonne) ×625"
+function itemCostPhrase(worldState, itemCosts) {
+  return (itemCosts || [])
+    .filter(c => c && c.itemId && c.qty)
+    .map(c => ` plus ${resolveItemName(worldState, c.itemId)} ×${c.qty}`)
+    .join('');
+}
+
+module.exports = {
+  pushNews, wireTransfer, fmtMoney, resolveItemName,
+  itemCostPhrase, KNOWN_ITEM_NAMES
+};
+
+diff --git a/src/demographics/groups.js b/src/demographics/groups.js
+# REWRITE — replaces existing file
+--- a/src/demographics/groups.js
++++ b/src/demographics/groups.js
+// ============================================================
+// DEMOGRAPHIC MATRIX SYSTEM v2.1
+// 2 locations x 3 classes x 3 lifecycle stages x 5 quintiles
+// = 90 household segments per province.
+// ============================================================
+
+const DEMOGRAPHIC_AXES = {
+  location:  { key: 'location',  values: ['urban', 'rural'], label: 'Location' },
+  class:     { key: 'class',     values: ['working_class', 'middle_class', 'upper_class'], label: 'Social Class' },
+  lifecycle: { key: 'lifecycle', values: ['student', 'working_age', 'retired'], label: 'Life Stage' }
+};
+
+const QUINTILE_COUNT = 5;
+
+const AXIS_IDEOLOGY = {
+  location: {
+    urban: { economic: -0.2, cultural: -0.1 },
+    rural: { economic:  0.1, cultural:  0.4 }
+  },
+  class: {
+    working_class: { economic: -0.6, cultural:  0.0 },
+    middle_class:  { economic:  0.0, cultural:  0.1 },
+    upper_class:   { economic:  0.5, cultural:  0.3 }
+  },
+  lifecycle: {
+    student:     { economic: -0.3, cultural: -0.4 },
+    working_age: { economic:  0.0, cultural:  0.0 },
+    retired:     { economic:  0.2, cultural:  0.5 }
+  }
+};
+
+const AXIS_SENSITIVITY = {
+  location: {
+    urban: { materialBenefit: 0.7, culturalAppeal: 0.6, economicConfidence: 0.8 },
+    rural: { materialBenefit: 0.9, culturalAppeal: 0.8, economicConfidence: 0.5 }
+  },
+  class: {
+    working_class: { materialBenefit: 0.9, culturalAppeal: 0.3, economicConfidence: 0.7 },
+    middle_class:  { materialBenefit: 0.5, culturalAppeal: 0.5, economicConfidence: 0.9 },
+    upper_class:   { materialBenefit: 0.2, culturalAppeal: 0.4, economicConfidence: 0.6 }
+  },
+  lifecycle: {
+    student:     { materialBenefit: 0.4, culturalAppeal: 0.9, economicConfidence: 0.5 },
+    working_age: { materialBenefit: 0.8, culturalAppeal: 0.4, economicConfidence: 0.8 },
+    retired:     { materialBenefit: 0.6, culturalAppeal: 0.7, economicConfidence: 0.4 }
+  }
+};
+
+// FIX: weights are no longer hardcoded — urbanization is per-province
+// (live map has 4 core states: Korota, Lachevan, Grazi, Mezdov).
+const DEFAULT_WEIGHTS = {
+  urbanization: 0.6,
+  class:     { working_class: 0.45, middle_class: 0.35, upper_class: 0.20 },
+  lifecycle: { student: 0.15, working_age: 0.65, retired: 0.20 }
+};
+
+const URBAN_INCOME_MULTIPLIER = 1.15;
+
+function generateProfiles(provinceId, censusData = {}) {
+  const profiles = [];
+  const total = censusData.totalPopulation || 100000;
+  const urbanization = clamp(
+    censusData.urbanization ?? DEFAULT_WEIGHTS.urbanization, 0.05, 0.95
+  );
+  const locWeight = { urban: urbanization, rural: 1 - urbanization };
+
+  for (const loc of DEMOGRAPHIC_AXES.location.values) {
+    for (const cls of DEMOGRAPHIC_AXES.class.values) {
+      for (const lc of DEMOGRAPHIC_AXES.lifecycle.values) {
+        for (let q = 1; q <= QUINTILE_COUNT; q++) {
+          profiles.push({
+            id: `${provinceId}_${loc}_${cls}_${lc}_q${q}`,
+            provinceId,
+            axes: { location: loc, class: cls, lifecycle: lc, quintile: q },
+            ideology: composeIdeology(loc, cls, lc),
+            sensitivity: composeSensitivity(loc, cls, lc),
+            population: estimateProfilePopulation(total, locWeight[loc], cls, lc),
+            happiness: 50,
+            economicConfidence: 50,
+            governmentSupport: 50,
+            foodAccess: 90,
+            income: estimateIncome(cls, q, loc),
+            fatigue: {}
+          });
+        }
+      }
+    }
+  }
+  return profiles;
+}
+
+function composeIdeology(loc, cls, lc) {
+  const l = AXIS_IDEOLOGY.location[loc];
+  const c = AXIS_IDEOLOGY.class[cls];
+  const s = AXIS_IDEOLOGY.lifecycle[lc];
+  return {
+    economic: clamp((l.economic + c.economic + s.economic) / 3, -1, 1),
+    cultural:  clamp((l.cultural + c.cultural + s.cultural) / 3, -1, 1)
+  };
+}
+
+function composeSensitivity(loc, cls, lc) {
+  const l = AXIS_SENSITIVITY.location[loc];
+  const c = AXIS_SENSITIVITY.class[cls];
+  const s = AXIS_SENSITIVITY.lifecycle[lc];
+  return {
+    materialBenefit:    (l.materialBenefit + c.materialBenefit + s.materialBenefit) / 3,
+    culturalAppeal:     (l.culturalAppeal + c.culturalAppeal + s.culturalAppeal) / 3,
+    economicConfidence: (l.economicConfidence + c.economicConfidence + s.economicConfidence) / 3
+  };
+}
+
+function estimateProfilePopulation(total, locW, cls, lc) {
+  const cw = DEFAULT_WEIGHTS.class[cls] ?? 0.33;
+  const lw = DEFAULT_WEIGHTS.lifecycle[lc] ?? 0.33;
+  return Math.max(0, Math.floor(total * locW * cw * lw / QUINTILE_COUNT));
+}
+
+function estimateIncome(cls, q, loc) {
+  const base = { working_class: 200, middle_class: 600, upper_class: 2500 }[cls] || 400;
+  const mult = [0.4, 0.7, 1.0, 1.4, 2.0][q - 1] || 1;
+  return Math.floor(base * mult * (loc === 'urban' ? URBAN_INCOME_MULTIPLIER : 1));
+}
+
+function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+module.exports = {
+  DEMOGRAPHIC_AXES, QUINTILE_COUNT, AXIS_IDEOLOGY, AXIS_SENSITIVITY,
+  DEFAULT_WEIGHTS, generateProfiles, composeIdeology, composeSensitivity, clamp
+};
+
+diff --git a/src/demographics/households.js b/src/demographics/households.js
+# REWRITE — replaces existing file
+--- a/src/demographics/households.js
++++ b/src/demographics/households.js
+const { generateProfiles } = require('./groups');
+
+// FIX: backward-compatible signature. Legacy worldgen callers passed
+// (province, groupsArray, quintiles) — that used to crash.
+function generateHouseholds(province, censusDataOrGroups, _legacyQuintiles) {
+  let censusData = censusDataOrGroups;
+  if (Array.isArray(censusDataOrGroups) || censusData == null) {
+    censusData = {
+      totalPopulation: province?.vars?.population || 100000,
+      urbanization: province?.vars?.urbanization
+    };
+  }
+  return generateProfiles(province.id, censusData).map(toHousehold);
+}
+
+function toHousehold(profile) {
+  return {
+    id: `hh_${profile.id}`,
+    provinceId: profile.provinceId,
+    axes: profile.axes,
+    group: deriveLegacyGroup(profile.axes),
+    quintile: profile.axes.quintile,
+    population: profile.population,
+    income: profile.income,
+    happiness: profile.happiness,
+    governmentSupport: profile.governmentSupport,
+    economicConfidence: profile.economicConfidence,
+    foodAccess: profile.foodAccess,
+    ideology: profile.ideology,
+    sensitivity: profile.sensitivity,
+    fatigue: profile.fatigue,
+    accountId: `acct_hh_${profile.id}`
+  };
+}
+
+function deriveLegacyGroup(axes) {
+  const loc = axes.location === 'urban' ? 'Urban' : 'Rural';
+  const cls = {
+    working_class: 'Working Class',
+    middle_class: 'Middle Class',
+    upper_class: 'Upper Class'
+  }[axes.class] || 'Working Class';
+  const lc = { student: 'Student', working_age: '', retired: 'Retired' }[axes.lifecycle] || '';
+  return lc ? `${loc} ${cls} (${lc})` : `${loc} ${cls}`;
+}
+
+module.exports = { generateHouseholds, deriveLegacyGroup, toHousehold };
+
+diff --git a/src/election/preferences.js b/src/election/preferences.js
+new file mode 100644
+--- /dev/null
++++ b/src/election/preferences.js
+const { clamp } = require('../demographics/groups');
+const { getFatigueMultiplier } = require('./fatigue'); // FIX: single source of truth
+
+const DEFAULT_PARTY_POSITIONS = {
+  party_ua:  { economic:  0.2,  cultural:  0.15 },
+  party_pfj: { economic: -0.35, cultural: -0.3  },
+  party_nf:  { economic:  0.3,  cultural:  0.65 },
+  party_acp: { economic: -0.8,  cultural: -0.3  },
+  party_kff: { economic:  0.2,  cultural: -0.15 }
+};
+
+const AXIS_WEIGHTS = { economic: 0.6, cultural: 0.4 };
+
+function computeBasePreferences(profile, partyPositions) {
+  const positions = partyPositions || DEFAULT_PARTY_POSITIONS;
+  const scores = {};
+  let total = 0;
+  for (const [partyId, pos] of Object.entries(positions)) {
+    const raw = Math.max(0.01, 1.0 - ideologicalDistance(profile.ideology, pos));
+    scores[partyId] = raw;
+    total += raw;
+  }
+  if (total <= 0) {
+    const n = Object.keys(positions).length || 1;
+    for (const partyId of Object.keys(positions)) scores[partyId] = 1 / n;
+    return scores;
+  }
+  for (const partyId of Object.keys(scores)) scores[partyId] /= total;
+  return scores;
+}
+
+function ideologicalDistance(voter, party) {
+  const de = (voter.economic - party.economic) * AXIS_WEIGHTS.economic;
+  const dc = (voter.cultural - party.cultural) * AXIS_WEIGHTS.cultural;
+  return Math.sqrt(de * de + dc * dc);
+}
+
+// FIX: untargeted campaigns reach everyone at full strength (the original
+// returned 0.5, silently halving Radio Address); quintile targeting honoured.
+function computeTargetMatch(profileAxes, targeting) {
+  if (!targeting || Object.keys(targeting).length === 0) return 1.0;
+  let matchCount = 0, criteriaCount = 0;
+  for (const [axis, allowed] of Object.entries(targeting)) {
+    criteriaCount++;
+    const value = profileAxes ? profileAxes[axis] : undefined;
+    const hit = Array.isArray(allowed) ? allowed.includes(value) : allowed === value;
+    if (hit) matchCount++;
+  }
+  return criteriaCount > 0 ? matchCount / criteriaCount : 1.0;
+}
+
+function applyCampaignStimulus(profile, campaign, partyId, basePrefs) {
+  const modified = { ...basePrefs };
+  const match = computeTargetMatch(profile.axes, campaign.targeting);
+  if (match <= 0) return modified;
+
+  const stimulusType = campaign.stimulusType || 'culturalAppeal';
+  const sensMult = profile.sensitivity?.[stimulusType] ?? 0.5;
+  const strength = (campaign.strength || 1) * match;
+  const fatigueMult = getFatigueMultiplier(profile, partyId, campaign.id);
+  const shift = strength * fatigueMult * sensMult * 0.02;
+
+  modified[partyId] = clamp((modified[partyId] || 0) + shift, 0, 1);
+
+  const total = Object.values(modified).reduce((a, b) => a + b, 0);
+  if (total > 0) for (const k of Object.keys(modified)) modified[k] /= total;
+  return modified;
+}
+
+module.exports = {
+  DEFAULT_PARTY_POSITIONS, AXIS_WEIGHTS,
+  computeBasePreferences, ideologicalDistance,
+  applyCampaignStimulus, computeTargetMatch
+};
+
+diff --git a/src/election/fatigue.js b/src/election/fatigue.js
+new file mode 100644
+--- /dev/null
++++ b/src/election/fatigue.js
+const FATIGUE_CONFIG = {
+  perUseIncrement: 0.15,
+  sameMethodIncrement: 0.25,
+  differentMethodIncrement: 0.05,
+  decayPerTurn: 0.10,
+  maxFatigue: 1.0,
+  minEffectiveness: 0.1,
+  backlashThreshold: 0.8,
+  backlashPenalty: -0.05,
+  crossPartyInterference: 0.05,
+  cooldownTurns: 2
+};
+
+// Lets settings.fatigueConfig override defaults at world load.
+function configureFatigue(overrides = {}) {
+  Object.assign(FATIGUE_CONFIG, overrides);
+  return FATIGUE_CONFIG;
+}
+
+function recordCampaignUse(profile, partyId, campaignId, currentTurn) {
+  if (!profile.fatigue) profile.fatigue = {};
+  if (!profile.fatigue[partyId]) profile.fatigue[partyId] = {};
+  if (!profile.fatigue[partyId][campaignId]) {
+    profile.fatigue[partyId][campaignId] = { uses: 0, cumulative: 0, lastTurn: -999 };
+  }
+  const state = profile.fatigue[partyId][campaignId];
+  const turnsSince = currentTurn - state.lastTurn;
+
+  if (turnsSince > 1) {
+    state.cumulative = Math.max(0, state.cumulative - FATIGUE_CONFIG.decayPerTurn * (turnsSince - 1));
+  }
+
+  let increment;
+  if (turnsSince <= 1) {
+    increment = FATIGUE_CONFIG.perUseIncrement + FATIGUE_CONFIG.sameMethodIncrement;
+  } else if (turnsSince <= FATIGUE_CONFIG.cooldownTurns) {
+    increment = FATIGUE_CONFIG.perUseIncrement + FATIGUE_CONFIG.differentMethodIncrement;
+  } else {
+    increment = FATIGUE_CONFIG.perUseIncrement;
+  }
+
+  state.uses += 1;
+  state.cumulative = Math.min(FATIGUE_CONFIG.maxFatigue, state.cumulative + increment);
+  state.lastTurn = currentTurn;
+  return getEffectivenessMultiplier(state.cumulative);
+}
+
+function getEffectivenessMultiplier(cumulativeFatigue) {
+  return Math.max(FATIGUE_CONFIG.minEffectiveness, 1.0 - cumulativeFatigue);
+}
+
+function getFatigueMultiplier(profile, partyId, campaignId) {
+  const state = profile.fatigue?.[partyId]?.[campaignId];
+  return state ? getEffectivenessMultiplier(state.cumulative) : 1.0;
+}
+
+function checkBacklash(profile, partyId) {
+  if (!profile.fatigue?.[partyId]) return 0;
+  const maxCumulative = Math.max(...Object.values(profile.fatigue[partyId]).map(m => m.cumulative), 0);
+  return maxCumulative >= FATIGUE_CONFIG.backlashThreshold
+    ? FATIGUE_CONFIG.backlashPenalty : 0;
+}
+
+function applyCrossPartyInterference(profile, campaigningPartyId) {
+  if (!profile.fatigue) return;
+  for (const [partyId, methods] of Object.entries(profile.fatigue)) {
+    if (partyId === campaigningPartyId) continue;
+    for (const state of Object.values(methods)) {
+      state.cumulative = Math.min(FATIGUE_CONFIG.maxFatigue,
+        state.cumulative + FATIGUE_CONFIG.crossPartyInterference);
+    }
+  }
+}
+
+function decayFatigue(profile) {
+  if (!profile.fatigue) return;
+  for (const methods of Object.values(profile.fatigue)) {
+    for (const state of Object.values(methods)) {
+      state.cumulative = Math.max(0, state.cumulative - FATIGUE_CONFIG.decayPerTurn);
+    }
+  }
+}
+
+module.exports = {
+  FATIGUE_CONFIG, configureFatigue,
+  recordCampaignUse, getEffectivenessMultiplier, getFatigueMultiplier,
+  checkBacklash, applyCrossPartyInterference, decayFatigue
+};
+
+diff --git a/src/election/campaigns.js b/src/election/campaigns.js
+# REWRITE — replaces existing file
+--- a/src/election/campaigns.js
++++ b/src/election/campaigns.js
+// ============================================================
+// CAMPAIGN CATALOG — costs/durations verified against live wire
+// reports (turn 6: Grazi, Lachevan, Mezdov, Korota):
+//   soup:     ₳5,000 plus Grain (tonne) ×625, 15 min
+//   radio:    ₳2,500,000, 5 min
+//   youth:    ₳1,500,000, 5 min
+//   pamphlet: ₳8,000,000, 5 min
+//   rally:    ₳4,500,000 plus The Commie Bus ×1, 25 min
+// Live data also shows per-party-per-province cost AND effect
+// multipliers (NF & ACP paid 2x and delivered ~2x in Grazi;
+// KFF paid base rate in Mezdov/Korota). resolveCampaignModifier()
+// is the hook for that (worldState.partyOrg[party][province] =
+// { multiplier } or { costMultiplier, effectMultiplier }).
+// ============================================================
+
+const PARTY_INFO = {
+  party_ua:  { name: 'United Alliance', abbr: 'UA' }, // TODO: confirm live display name
+  party_pfj: { name: "People's Freedom and Justice", abbr: 'PFJ' },
+  party_nf:  { name: 'National Front', abbr: 'NF' },
+  party_acp: { name: 'Arcasian Communist Party', abbr: 'ACP' },
+  party_kff: { name: 'Kordish Freedom Front', abbr: 'KFF' }
+};
+
+const partyName = id => (PARTY_INFO[id] && PARTY_INFO[id].name) || id;
+const partyAbbr = id => (PARTY_INFO[id] && PARTY_INFO[id].abbr) || String(id).toUpperCase();
+
+const CAMPAIGNS = {
+  camp_soup: {
+    id: 'camp_soup', name: 'Food for the people Initiative',
+    strength: 1, moneyCost: 5000,
+    itemCosts: [{ itemId: 'item_grain', qty: 625 }],   // live-verified
+    durationMinutes: 15, stimulusType: 'materialBenefit',
+    targeting: { class: ['working_class'], lifecycle: ['working_age', 'student'] },
+    description: 'Open community soup kitchens. Feeds the needy and your polling.',
+    maxUsesPerTurnPerProvince: 2
+  },
+  camp_radio: {
+    id: 'camp_radio', name: 'Radio Address',
+    strength: 1, moneyCost: 2500000, itemCosts: [],
+    durationMinutes: 5, stimulusType: 'culturalAppeal', targeting: {},
+    description: 'Radio speeches beamed across the Republic.',
+    maxUsesPerTurnPerProvince: 3
+  },
+  camp_youth: {
+    id: 'camp_youth', name: 'Youth Pioneers Initiative',
+    strength: 0.5, moneyCost: 1500000, itemCosts: [],
+    durationMinutes: 5, stimulusType: 'culturalAppeal',
+    targeting: { lifecycle: ['student'] },
+    description: 'Flag waving, singing and boundless enthusiasm.',
+    maxUsesPerTurnPerProvince: 2
+  },
+  camp_rally: {
+    id: 'camp_rally', name: 'Grand Rally Tour',
+    strength: 3, moneyCost: 4500000,
+    // FIX: was malformed { or: [...], itemId: 'item_msuazzdcammju4', ... }
+    // blob. Live wire report: "₳4,500,000 plus The Commie Bus ×1",
+    // 25 world minutes (not 45).
+    itemCosts: [{ itemId: 'item_msuazzdcammju4', qty: 1 }],
+    durationMinutes: 25, stimulusType: 'culturalAppeal',
+    targeting: { location: ['urban'] },
+    description: 'A whistle-stop tour of motorcades and rallies.',
+    maxUsesPerTurnPerProvince: 1
+  },
+  camp_pamphlet: {
+    id: 'camp_pamphlet', name: 'Pamphlets & Papers Program',
+    strength: 1.2, moneyCost: 8000000, itemCosts: [],
+    durationMinutes: 5, stimulusType: 'economicConfidence',
+    targeting: { class: ['middle_class', 'upper_class'] },
+    description: 'Flood the mailboxes with glossy manifesto pamphlets.',
+    maxUsesPerTurnPerProvince: 2
+  },
+  camp_vote_buying: {
+    id: 'camp_vote_buying', name: 'Vote Buying',
+    strength: 8, moneyCost: 12000000, itemCosts: [],
+    durationMinutes: 1, stimulusType: 'materialBenefit',
+    targeting: { class: ['working_class'], location: ['rural'] },
+    description: 'A 50 ARK "donation" to mailboxes. Technically legal.',
+    maxUsesPerTurnPerProvince: 1,
+    scandalRisk: 0.15 // now actually rolled — see engine.js
+  }
+};
+
+function resolveCampaignModifier(worldState, partyId, provinceId) {
+  const org = worldState?.partyOrg?.[partyId]?.[provinceId];
+  if (org && typeof org === 'object') {
+    return {
+      costMultiplier: org.costMultiplier ?? org.multiplier ?? 1,
+      effectMultiplier: org.effectMultiplier ?? org.multiplier ?? 1
+    };
+  }
+  return { costMultiplier: 1, effectMultiplier: 1 };
+}
+
+function validateCampaignLaunch(campaignId, provinceId, partyId, turnState) {
+  const campaign = CAMPAIGNS[campaignId];
+  if (!campaign) return { valid: false, reason: 'Unknown campaign' };
+  const key = `${provinceId}_${partyId}_${campaignId}`;
+  const uses = turnState.campaignUsesThisTurn?.[key] || 0;
+  if (uses >= (campaign.maxUsesPerTurnPerProvince || 999)) {
+    return {
+      valid: false,
+      reason: `Campaign limit reached: ${campaign.name} max ${campaign.maxUsesPerTurnPerProvince} uses/turn in ${provinceId}`
+    };
+  }
+  return { valid: true };
+}
+
+module.exports = {
+  CAMPAIGNS, PARTY_INFO, partyName, partyAbbr,
+  resolveCampaignModifier, validateCampaignLaunch
+};
+
+diff --git a/src/election/engine.js b/src/election/engine.js
+# REWRITE — replaces existing file
+--- a/src/election/engine.js
++++ b/src/election/engine.js
+const { computeVoteShares } = require('./voteCount'); // preserved from original
+const {
+  CAMPAIGNS, validateCampaignLaunch, resolveCampaignModifier,
+  partyName, partyAbbr
+} = require('./campaigns');
+const {
+  computeBasePreferences, applyCampaignStimulus,
+  computeTargetMatch, DEFAULT_PARTY_POSITIONS
+} = require('./preferences');
+const {
+  recordCampaignUse, checkBacklash, applyCrossPartyInterference, decayFatigue
+} = require('./fatigue');
+const { clamp } = require('../demographics/groups');
+const { pushNews, wireTransfer, fmtMoney, itemCostPhrase } = require('../news/wire');
+
+const fmtPoints = p => String(Math.round(p * 10) / 10);
+
+function ensureTurnState(election) {
+  if (!election._turnState) election._turnState = {};
+  if (!election._turnState.campaignUsesThisTurn) election._turnState.campaignUsesThisTurn = {};
+  return election._turnState;
+}
+
+// --- optional cost payment -------------------------------------------
+// Live behaviour charges the payer outside the engine (wire reports show
+// players transferring funds to parties, purpose "Campaign."), so the
+// engine does NOT pay by default. Enable with
+// settings.election.enginePaysCosts = true.
+function balanceAccess(entity) {
+  if (!entity) return null;
+  const v = entity.vars || {};
+  for (const key of ['money', 'balance', 'funds', 'treasury']) {
+    if (typeof v[key] === 'number') {
+      return { get: () => v[key], set: x => { v[key] = x; } };
+    }
+  }
+  if (typeof entity.money === 'number') {
+    return { get: () => entity.money, set: x => { entity.money = x; } };
+  }
+  return null;
+}
+
+function payCampaignCost(worldState, partyEntity, campaign, modifier) {
+  const cost = Math.round((campaign.moneyCost || 0) * (modifier.costMultiplier || 1));
+  if (cost <= 0) return { ok: true, cost: 0 };
+  const bal = balanceAccess(partyEntity);
+  if (!bal) return { ok: true, cost, warning: 'No party balance found; cost not deducted.' };
+  if (bal.get() < cost) return { ok: false, cost, have: bal.get() };
+  bal.set(bal.get() - cost);
+  wireTransfer(worldState, partyName(partyEntity.id), 'Bank of Arcasia', cost, `Campaign: ${campaign.name}`);
+  return { ok: true, cost };
+}
+
+function executeCampaign(election, campaignId, provinceId, partyId, actor, worldState) {
+  const campaign = CAMPAIGNS[campaignId];
+  if (!campaign) return { success: false, error: `Unknown campaign: ${campaignId}` };
+
+  const turnState = ensureTurnState(election);
+  const validation = validateCampaignLaunch(campaignId, provinceId, partyId, turnState);
+  if (!validation.valid) return { success: false, error: validation.reason };
+
+  const partyEntity = (worldState.entities || []).find(e => e.id === partyId);
+  if (!partyEntity) return { success: false, error: `Party not found: ${partyId}` };
+
+  const modifier = resolveCampaignModifier(worldState, partyId, provinceId);
+  const moneyCost = Math.round((campaign.moneyCost || 0) * (modifier.costMultiplier || 1));
+
+  if (worldState.settings?.election?.enginePaysCosts) {
+    const payment = payCampaignCost(worldState, partyEntity, campaign, modifier);
+    if (!payment.ok) {
+      return { success: false, error: `Insufficient party funds: need ${fmtMoney(payment.cost)}, have ${fmtMoney(payment.have)}.` };
+    }
+  }
+
+  const province = (worldState.provinces || []).find(p => p.id === provinceId);
+  const provinceName = (province && (province.name || province.displayName)) || provinceId;
+
+  // FIX (critical): the original patch read election._profiles[provinceId],
+  // which was never populated anywhere — campaigns silently affected
+  // nobody. The canonical household store is worldState.households.
+  const households = (worldState.households || []).filter(hh =>
+    hh.provinceId === provinceId && (hh.population || 0) > 0
+  );
+  const migrated = households.filter(hh => hh.axes && hh.ideology);
+
+  // Calibrated against live wire reports (youth ≈ 1-2, radio ≈ 1-10,
+  // pamphlet ≈ 2.5, rally ≈ 12 with org bonus). Tunable.
+  const scale = worldState.settings?.election?.voteToSupportScale ?? 150;
+  let supportPoints;
+  let profilesAffected = 0;
+  let votesGained = null;
+
+  if (!migrated.length) {
+    // Legacy save (households lack axes): flat fallback until the save
+    // migration runs, so campaigns still function.
+    supportPoints = clamp(campaign.strength * (modifier.effectMultiplier || 1), -10, 25);
+    applyVotesToElection(election, provinceId, partyId, supportPoints);
+  } else {
+    const partyPositions = worldState.settings?.partyPositions || DEFAULT_PARTY_POSITIONS;
+    const turn = worldState.turn || 0;
+    const effective = {
+      ...campaign,
+      strength: (campaign.strength || 1) * (modifier.effectMultiplier || 1)
+    };
+
+    for (const profile of migrated) {
+      // FIX: fatigue/interference recorded only for voters the campaign
+      // actually reaches (targeting), not everyone in the province.
+      if (computeTargetMatch(profile.axes, campaign.targeting) <= 0) continue;
+
+      const basePrefs = computeBasePreferences(profile, partyPositions);
+      recordCampaignUse(profile, partyId, campaignId, turn);
+      const modified = applyCampaignStimulus(profile, effective, partyId, basePrefs);
+
+      votesGained = (votesGained || 0) +
+        ((modified[partyId] || 0) - (basePrefs[partyId] || 0)) * profile.population;
+      profilesAffected++;
+      applyCrossPartyInterference(profile, partyId);
+      const backlash = checkBacklash(profile, partyId);
+      if (backlash !== 0) votesGained += backlash * profile.population;
+    }
+
+    if (profilesAffected === 0) {
+      return { success: false, error: `No households in ${provinceName} match this campaign's targeting.` };
+    }
+
+    const reachedPopulation = migrated
+      .filter(hh => computeTargetMatch(hh.axes, campaign.targeting) > 0)
+      .reduce((s, hh) => s + hh.population, 0) || 1;
+
+    // FIX: the original formula could award more votes than there are
+    // voters and dumped population-scale numbers into election.counted.
+    votesGained = clamp(votesGained, -reachedPopulation * 0.1, reachedPopulation);
+    supportPoints = clamp((votesGained / reachedPopulation) * scale, -10, 25);
+    applyVotesToElection(election, provinceId, partyId, supportPoints);
+  }
+
+  const key = `${provinceId}_${partyId}_${campaignId}`;
+  turnState.campaignUsesThisTurn[key] = (turnState.campaignUsesThisTurn[key] || 0) + 1;
+
+  election.log = election.log || [];
+  election.log.push({
+    ts: Date.now(), date: worldState.date, kind: 'campaign', turn: worldState.turn || 0,
+    actor: (actor && actor.displayName) || 'Unknown',
+    partyId, campaignId, provinceId, campaignName: campaign.name,
+    strength: supportPoints,
+    votesGained: votesGained === null ? null : Math.round(votesGained),
+    profilesAffected,
+    money: moneyCost,
+    materials: campaign.itemCosts,
+    durationMinutes: campaign.durationMinutes
+  });
+
+  // Wire news — exact live template:
+  // "[Party] has launched "X" in [Province] on the campaign trail, at a
+  //  cost of ₳N plus Item ×Q. The drive runs for N world minutes and
+  //  delivers N.N permanent support points."
+  pushNews(worldState, {
+    author: 'Wire Service',
+    paperId: 'paper_today',
+    category: 'Politics',
+    headline: `${partyAbbr(partyId)} ON THE CAMPAIGN TRAIL IN ${String(provinceName).toUpperCase()}`,
+    body: `${partyName(partyId)} has launched "${campaign.name}" in ${provinceName} on the campaign trail, at a cost of ${fmtMoney(moneyCost)}${itemCostPhrase(worldState, campaign.itemCosts)}. The drive runs for ${campaign.durationMinutes} world minutes and delivers ${fmtPoints(supportPoints)} permanent support points.`
+  });
+
+  // FIX: scandalRisk was declared but never rolled in the original patch.
+  let scandal = null;
+  if (campaign.scandalRisk && Math.random() < campaign.scandalRisk) {
+    scandal = triggerScandal(election, worldState, provinceId, provinceName, partyId, campaign, migrated, actor);
+  }
+
+  return {
+    success: true,
+    supportGain: supportPoints,   // backward-compatible alias
+    supportPoints,
+    votesGained: votesGained === null ? null : Math.round(votesGained),
+    profilesAffected,
+    scandal
+  };
+}
+
+// FIX (critical): the original patch called this without defining it —
+// ReferenceError on every campaign launch.
+function applyVotesToElection(election, provinceId, partyId, amount) {
+  if (!election.counted) election.counted = {};
+  if (!election.counted[provinceId]) election.counted[provinceId] = {};
+  const cur = election.counted[provinceId][partyId] || 0;
+  election.counted[provinceId][partyId] = Math.max(0, cur + amount);
+}
+const applySupportToProvince = applyVotesToElection; // legacy alias
+
+function triggerScandal(election, worldState, provinceId, provinceName, partyId, campaign, households, actor) {
+  const penalty = 10;
+  for (const hh of households) {
+    hh.happiness = clamp((hh.happiness ?? 50) - 6, 0, 100);
+    hh.governmentSupport = clamp((hh.governmentSupport ?? 50) - 8, 0, 100);
+  }
+  applyVotesToElection(election, provinceId, partyId, -penalty);
+
+  const entry = {
+    ts: Date.now(), date: worldState.date, kind: 'scandal', turn: worldState.turn || 0,
+    actor: (actor && actor.displayName) || 'Unknown',
+    partyId, provinceId, campaignId: campaign.id,
+    message: `${campaign.name} scandal exposed in ${provinceName}! Public trust damaged.`
+  };
+  election.log.push(entry);
+  pushNews(worldState, {
+    author: 'Wire Service', paperId: 'paper_today', category: 'Politics',
+    headline: `CAMPAIGN SCANDAL IN ${String(provinceName).toUpperCase()}`,
+    body: `Irregularities in ${partyName(partyId)}'s "${campaign.name}" have been exposed in ${provinceName}. Investigators are probing the ${partyAbbr(partyId)} operation; public trust has been damaged.`
+  });
+  return { penalty, logEntry: entry };
+}
+
+// FIX (critical): the original imported this from ./fatigue (crash) and
+// iterated election._profiles (never populated). Takes worldState now.
+function endTurnFatigueDecay(worldState) {
+  for (const hh of worldState.households || []) decayFatigue(hh);
+  if (worldState.election?._turnState) {
+    worldState.election._turnState.campaignUsesThisTurn = {};
+  }
+}
+
+module.exports = {
+  executeCampaign,
+  applyVotesToElection,
+  applySupportToProvince,
+  endTurnFatigueDecay
+};
+
+diff --git a/src/events/lifecycle.js b/src/events/lifecycle.js
+new file mode 100644
+--- /dev/null
++++ b/src/events/lifecycle.js
+const DEFAULTS = {
+  studentGraduationRate: 0.10,
+  retirementRate: 0.04,
+  matriculationRate: 0.006
+};
+
+function runLifecycleTransitions(worldState) {
+  const s = { ...DEFAULTS, ...(worldState.settings?.households || {}) };
+  const households = worldState.households;
+  if (!Array.isArray(households) || !households.length) return;
+
+  const byProvince = new Map();
+  for (const hh of households) {
+    if (!byProvince.has(hh.provinceId)) byProvince.set(hh.provinceId, []);
+    byProvince.get(hh.provinceId).push(hh);
+  }
+
+  for (const hhs of byProvince.values()) {
+    const find = (lifecycle, axes) => hhs.find(h =>
+      h.axes?.lifecycle === lifecycle &&
+      h.axes.class === axes.class &&
+      h.axes.location === axes.location &&
+      h.axes.quintile === axes.quintile
+    );
+
+    // FIX: graduates used to land in working_class regardless of origin
+    // class. Class is now preserved.
+    for (const hh of hhs) {
+      if (hh.axes?.lifecycle !== 'student') continue;
+      const movers = Math.floor((hh.population || 0) * s.studentGraduationRate);
+      if (movers <= 0) continue;
+      const target = find('working_age', hh.axes);
+      if (!target) continue;
+      hh.population -= movers;
+      target.population += movers;
+    }
+
+    for (const hh of hhs) {
+      if (hh.axes?.lifecycle !== 'working_age') continue;
+      const retirees = Math.floor((hh.population || 0) * s.retirementRate);
+      if (retirees > 0) {
+        const target = find('retired', hh.axes);
+        if (target) { hh.population -= retirees; target.population += retirees; }
+      }
+      // FIX: students had zero inflow and drained to extinction in ~40
+      // turns. Model children reaching school age.
+      const entrants = Math.floor((hh.population || 0) * s.matriculationRate);
+      if (entrants > 0) {
+        const target = find('student', hh.axes);
+        if (target) { hh.population -= entrants; target.population += entrants; }
+      }
+    }
+  }
+}
+
+module.exports = { runLifecycleTransitions };
+
+diff --git a/src/events/census.js b/src/events/census.js
+new file mode 100644
+--- /dev/null
++++ b/src/events/census.js
+const { clamp } = require('../demographics/groups');
+
+const DEFAULTS = {
+  famineMortalityRate: 0.0015,
+  oldAgeMortalityRate: 0.012,
+  birthRate: 0.0008,
+  foodAccessPerCapitaScale: 1000,
+  rationingFloor: 40
+};
+
+const settingsOf = ws => ({ ...DEFAULTS, ...(ws?.settings?.households || {}) });
+
+function runCensusUpdate(worldState) {
+  const s = settingsOf(worldState);
+  const households = worldState.households;
+  if (!Array.isArray(households)) return;
+
+  // FIX: the original filtered all households per province inside the
+  // household loop — O(provinces × households). Index once.
+  const byProvince = new Map();
+  for (const hh of households) {
+    if (!byProvince.has(hh.provinceId)) byProvince.set(hh.provinceId, []);
+    byProvince.get(hh.provinceId).push(hh);
+  }
+
+  let famineDeaths = 0, oldAgeDeaths = 0, births = 0;
+
+  for (const province of worldState.provinces || []) {
+    const provHHs = byProvince.get(province.id) || [];
+    const popBefore = provHHs.reduce((sum, hh) => sum + (hh.population || 0), 0);
+
+    const foodStock = province.vars?.foodStock || 0;
+    const access = clamp(
+      Math.floor((foodStock / Math.max(1, popBefore)) * s.foodAccessPerCapitaScale), 0, 100
+    );
+
+    for (const hh of provHHs) {
+      if ((hh.population || 0) <= 0) { hh.population = 0; continue; }
+      hh.foodAccess = province.vars?.rationing ? Math.max(access, s.rationingFloor) : access;
+
+      let deaths = 0;
+      if (hh.foodAccess < 50) {
+        const severity = (50 - hh.foodAccess) / 50;
+        const famine = Math.floor(hh.population * s.famineMortalityRate * severity);
+        famineDeaths += famine;
+        deaths += famine;
+      }
+      if (hh.axes?.lifecycle === 'retired') {
+        const age = Math.floor(hh.population * s.oldAgeMortalityRate);
+        oldAgeDeaths += age;
+        deaths += age;
+      }
+      let born = 0;
+      if (hh.axes?.lifecycle === 'working_age') {
+        born = Math.floor(hh.population * s.birthRate);
+        births += born;
+      }
+      hh.population = Math.max(0, hh.population - deaths + born);
+    }
+
+    province.vars = province.vars || {};
+    province.vars.population = provHHs.reduce((sum, hh) => sum + (hh.population || 0), 0);
+  }
+
+  const gv = worldState.globalVars = worldState.globalVars || {};
+  gv.population = households.reduce((sum, hh) => sum + (hh.population || 0), 0);
+  // FIX: old-age deaths were previously counted as famine deaths.
+  gv.famineDeaths = (gv.famineDeaths || 0) + famineDeaths;
+  gv.oldAgeDeaths = (gv.oldAgeDeaths || 0) + oldAgeDeaths;
+  gv.births = (gv.births || 0) + births;
+}
+
+// Used by government food releases for instant foodAccess feedback.
+function recomputeProvinceFoodAccess(worldState, provinceId) {
+  const s = settingsOf(worldState);
+  const province = (worldState.provinces || []).find(p => p.id === provinceId);
+  if (!province) return null;
+  const provHHs = (worldState.households || []).filter(hh => hh.provinceId === provinceId);
+  const pop = provHHs.reduce((sum, hh) => sum + (hh.population || 0), 0);
+  const access = clamp(
+    Math.floor(((province.vars?.foodStock || 0) / Math.max(1, pop)) * s.foodAccessPerCapitaScale),
+    0, 100
+  );
+  for (const hh of provHHs) {
+    hh.foodAccess = province.vars?.rationing ? Math.max(access, s.rationingFloor) : access;
+  }
+  return access;
+}
+
+module.exports = { runCensusUpdate, recomputeProvinceFoodAccess };
+
+diff --git a/src/government/actions.js b/src/government/actions.js
+new file mode 100644
+--- /dev/null
++++ b/src/government/actions.js
+// ============================================================
+// GOVERNMENT ACTIONS — Population tab
+// Welfare stimulus, food release into national supply, rationing,
+// pensions, public works, tax rebates, bank recapitalisation.
+// Treasury/inventory adapters match live entity naming
+// ("Government of Arcasia", "Bank of Arcasia") and emit wire-service
+// transfer news in the live template. Every action:
+// validate -> pay -> mutate. No free effects on failed payment.
+// ============================================================
+
+const { clamp } = require('../demographics/groups');
+const { computeTargetMatch } = require('../election/preferences');
+const { recomputeProvinceFoodAccess } = require('../events/census');
+const { pushNews, wireTransfer, fmtMoney, resolveItemName } = require('../news/wire');
+
+const GOV_LABEL = 'Government of Arcasia';
+
+const GOV_ACTIONS = {
+  welfare_stimulus: {
+    id: 'welfare_stimulus', name: 'Welfare Stimulus',
+    description: 'Direct cash payments to low-income households. Strongest on the working class.',
+    durationMinutes: 10, cooldownTurns: 1, maxPerTurn: 2,
+    fixedCost: 250000, costPerCapita: 25, stipendPerCapita: 20,
+    targeting: { class: ['working_class', 'middle_class'], quintile: [1, 2, 3] },
+    effects: { happiness: 6, governmentSupport: 7, economicConfidence: 2 },
+    newsRecipient: 'The Arcasian People', newsPurpose: 'Welfare stimulus payments'
+  },
+  pension_boost: {
+    id: 'pension_boost', name: 'Pension Increase',
+    description: 'Raise state pensions for retired households.',
+    durationMinutes: 10, cooldownTurns: 1, maxPerTurn: 1,
+    fixedCost: 500000, costPerCapita: 30,
+    targeting: { lifecycle: ['retired'] },
+    effects: { happiness: 8, governmentSupport: 9, economicConfidence: 1 },
+    newsRecipient: 'State Pension Fund', newsPurpose: 'Pension payments'
+  },
+  food_release: {
+    id: 'food_release', name: 'Release Food into National Supply',
+    description: 'Move grain from the national stockpile into provincial food supply. Modes: shortfall (default, worst-fed first), equal, or explicit provinceIds.',
+    durationMinutes: 15, cooldownTurns: 0, maxPerTurn: 5,
+    item: 'item_grain', minQty: 100
+  },
+  public_works: {
+    id: 'public_works', name: 'Public Works Program',
+    description: 'Government jobs for the urban working class.',
+    durationMinutes: 30, cooldownTurns: 1, maxPerTurn: 1,
+    fixedCost: 1000000, costPerCapita: 15,
+    targeting: { class: ['working_class'], lifecycle: ['working_age'], location: ['urban'] },
+    effects: { happiness: 4, governmentSupport: 5, employment: 6 },
+    newsRecipient: 'Public Works Programme', newsPurpose: 'Public works employment'
+  },
+  tax_rebate: {
+    id: 'tax_rebate', name: 'Tax Rebate',
+    description: 'One-off rebate that mainly reassures the middle and upper class.',
+    durationMinutes: 5, cooldownTurns: 2, maxPerTurn: 1,
+    fixedCost: 0, costPerCapita: 60,
+    targeting: { class: ['middle_class', 'upper_class'] },
+    effects: { happiness: 2, governmentSupport: 4, economicConfidence: 8 },
+    newsRecipient: 'Arcasian Taxpayers', newsPurpose: 'Tax rebate'
+  },
+  bank_recapitalize: {
+    id: 'bank_recapitalize', name: 'Bank Recapitalisation',
+    description: 'Emergency transfer to the Bank of Arcasia to restore its reserve. Observed live: ₳200,000,000, purpose "To ensure that the Bank of Arcasia still has reserves."',
+    durationMinutes: 10, cooldownTurns: 1, maxPerTurn: 1,
+    minAmount: 1000000, confidenceBoost: 5
+  }
+};
+
+// ---------- resource adapters (the ONLY places touching money/items) ----------
+
+function findNamedEntity(worldState, needles) {
+  return (worldState.entities || []).find(e => {
+    const hay = `${e.id || ''} ${e.displayName || ''} ${e.name || ''}`.toLowerCase();
+    return needles.some(n => hay.includes(n));
+  }) || null;
+}
+const findGovernmentEntity = ws => findNamedEntity(ws, ['government of arcasia', 'ent_government', 'ent_gov']);
+const findBankEntity = ws => findNamedEntity(ws, ['bank of arcasia', 'ent_bank']);
+
+function balanceAccess(entity) {
+  if (!entity) return null;
+  const v = entity.vars || {};
+  for (const key of ['money', 'balance', 'funds', 'treasury']) {
+    if (typeof v[key] === 'number') {
+      return { get: () => v[key], set: x => { v[key] = x; } };
+    }
+  }
+  if (typeof entity.money === 'number') {
+    return { get: () => entity.money, set: x => { entity.money = x; } };
+  }
+  return null;
+}
+
+function spendMoney(worldState, amount, purpose, recipient) {
+  if (amount <= 0) return { ok: true };
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  const acc = balanceAccess(findGovernmentEntity(worldState)) ||
+    (typeof gv.treasury === 'number'
+      ? { get: () => gv.treasury, set: x => { gv.treasury = x; } }
+      : null);
+  if (!acc) {
+    return { ok: true, warning: 'No government treasury found — cost not deducted. Wire spendMoney() in src/government/actions.js.' };
+  }
+  if (acc.get() < amount) return { ok: false, have: acc.get() };
+  acc.set(acc.get() - amount);
+  if (recipient) wireTransfer(worldState, GOV_LABEL, recipient, amount, purpose || 'Government programme.');
+  return { ok: true };
+}
+
+function countItem(worldState, itemId) {
+  const gov = findGovernmentEntity(worldState);
+  const inv = (gov && (gov.vars?.inventory || gov.inventory)) || null;
+  if (inv && typeof inv[itemId] === 'number') return inv[itemId];
+  const gv = worldState.globalVars || {};
+  return (gv.nationalStock && gv.nationalStock[itemId]) ||
+         (gv.stockpile && gv.stockpile[itemId]) || 0;
+}
+
+function spendItem(worldState, itemId, qty) {
+  const gov = findGovernmentEntity(worldState);
+  const inv = (gov && (gov.vars?.inventory || gov.inventory)) || null;
+  if (inv && typeof inv[itemId] === 'number') {
+    if (inv[itemId] < qty) return { ok: false, have: inv[itemId] };
+    inv[itemId] -= qty;
+    return { ok: true };
+  }
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  gv.nationalStock = gv.nationalStock || {};
+  if ((gv.nationalStock[itemId] || 0) < qty) {
+    return { ok: false, have: gv.nationalStock[itemId] || 0 };
+  }
+  gv.nationalStock[itemId] -= qty;
+  return { ok: true };
+}
+
+// ---------- state / bookkeeping ----------
+
+function ensureGovState(worldState) {
+  worldState._government = worldState._government || {};
+  worldState._government.usesThisTurn = worldState._government.usesThisTurn || {};
+  worldState._government.lastUsedTurn = worldState._government.lastUsedTurn || {};
+  return worldState._government;
+}
+
+function resetGovernmentTurnState(worldState) {
+  if (worldState?._government) worldState._government.usesThisTurn = {};
+}
+
+function logAction(worldState, def, params, result, actor) {
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  if (!Array.isArray(gv.governmentLog)) gv.governmentLog = [];
+  gv.governmentLog.push({
+    ts: Date.now(), date: worldState.date, turn: worldState.turn || 0,
+    actor: (actor && actor.displayName) || GOV_LABEL,
+    actionId: def.id, actionName: def.name,
+    params: { ...params },
+    message: result.message || '',
+    cost: result.cost || 0
+  });
+  if (gv.governmentLog.length > 200) gv.governmentLog.splice(0, gv.governmentLog.length - 200);
+}
+
+const fmt = n => Number(n || 0).toLocaleString('en-US');
+
+// ---------- main entry ----------
+
+function executeGovernmentAction(worldState, actionId, params = {}, actor = null) {
+  const def = GOV_ACTIONS[actionId];
+  if (!def) return { success: false, error: `Unknown government action: ${actionId}` };
+
+  const gov = ensureGovState(worldState);
+  const turn = worldState.turn || 0;
+
+  const last = gov.lastUsedTurn[actionId];
+  if (def.cooldownTurns > 0 && last !== undefined && turn - last < def.cooldownTurns) {
+    const remaining = def.cooldownTurns - (turn - last);
+    return { success: false, error: `${def.name} is on cooldown for ${remaining} more turn(s).` };
+  }
+  if ((gov.usesThisTurn[actionId] || 0) >= def.maxPerTurn) {
+    return { success: false, error: `${def.name} has already been used ${def.maxPerTurn} time(s) this turn.` };
+  }
+
+  const result =
+    def.id === 'food_release'    ? runFoodRelease(worldState, def, params) :
+    def.id === 'bank_recapitalize' ? runBankRecapitalize(worldState, def, params) :
+    runTargetedStimulus(worldState, def, params);
+
+  if (!result.success) return result;
+
+  gov.usesThisTurn[actionId] = (gov.usesThisTurn[actionId] || 0) + 1;
+  gov.lastUsedTurn[actionId] = turn;
+  logAction(worldState, def, params, result, actor);
+  return result;
+}
+
+// ---------- money-based stimulus ----------
+
+function runTargetedStimulus(worldState, def, params) {
+  const targeting = { ...def.targeting, ...(params.targeting || {}) };
+  const scope = params.provinceId
+    ? (worldState.households || []).filter(hh => hh.provinceId === params.provinceId)
+    : (worldState.households || []);
+
+  const targets = [];
+  let coveredPop = 0;
+  for (const hh of scope) {
+    if ((hh.population || 0) <= 0) continue;
+    if (computeTargetMatch(hh.axes, targeting) <= 0) continue;
+    targets.push(hh);
+    coveredPop += hh.population;
+  }
+  if (!targets.length) {
+    return { success: false, error: 'No households match the targeting criteria.' };
+  }
+
+  const cost = (def.fixedCost || 0) + Math.ceil(coveredPop * (def.costPerCapita || 0));
+  const payment = spendMoney(worldState, cost, def.newsPurpose, def.newsRecipient); // pay BEFORE mutating
+  if (!payment.ok) {
+    return { success: false, error: `Insufficient funds: need ${fmtMoney(cost)}, treasury holds ${fmtMoney(payment.have)}.` };
+  }
+
+  let stipendTotal = 0;
+  let touchedEmployment = false;
+  for (const hh of targets) {
+    const sens = hh.sensitivity?.materialBenefit ?? 0.5;
+    if (def.effects.happiness) hh.happiness = clamp((hh.happiness ?? 50) + def.effects.happiness * sens, 0, 100);
+    if (def.effects.governmentSupport) hh.governmentSupport = clamp((hh.governmentSupport ?? 50) + def.effects.governmentSupport * sens, 0, 100);
+    if (def.effects.economicConfidence) hh.economicConfidence = clamp((hh.economicConfidence ?? 50) + def.effects.economicConfidence * sens, 0, 100);
+    if (def.effects.employment) {
+      if (typeof hh.employment === 'number') {
+        hh.employment = clamp(hh.employment + def.effects.employment * sens, 0, 100);
+      }
+      touchedEmployment = true;
+    }
+    if (def.stipendPerCapita) {
+      // Wire hh.stipendPending into your household account ledger on the
+      // next payout tick, then zero it.
+      hh.stipendPending = (hh.stipendPending || 0) + def.stipendPerCapita * hh.population;
+      stipendTotal += def.stipendPerCapita * hh.population;
+    }
+  }
+
+  // Public works also nudges the province-level employment stat if tracked.
+  if (touchedEmployment && params.provinceId) {
+    const province = (worldState.provinces || []).find(p => p.id === params.provinceId);
+    if (province && typeof province.vars?.employment === 'number') {
+      province.vars.employment = clamp(province.vars.employment + def.effects.employment * 0.5, 0, 100);
+    }
+  }
+
+  return {
+    success: true, actionId: def.id, name: def.name, cost,
+    coveredHouseholds: targets.length, coveredPopulation: coveredPop,
+    stipendPaid: stipendTotal, warning: payment.warning,
+    message: `${def.name}: ${fmt(coveredPop)} citizens covered (cost ${fmtMoney(cost)}).`
+  };
+}
+
+// ---------- food release into national supply ----------
+
+function averageFoodAccess(worldState, provinceId) {
+  let sum = 0, pop = 0;
+  for (const hh of worldState.households || []) {
+    if (hh.provinceId !== provinceId || (hh.population || 0) <= 0) continue;
+    sum += (hh.foodAccess ?? 90) * hh.population;
+    pop += hh.population;
+  }
+  return pop > 0 ? sum / pop : 100;
+}
+
+function splitEvenly(provinces, qty) {
+  const out = [];
+  const base = Math.floor(qty / provinces.length);
+  let rem = qty - base * provinces.length;
+  for (const p of provinces) out.push([p, base + (rem-- > 0 ? 1 : 0)]);
+  return out;
+}
+
+function runFoodRelease(worldState, def, params) {
+  const itemId = params.itemId || def.item;
+  const qty = Math.floor(Number(params.qty) || 0);
+  if (qty < def.minQty) {
+    return { success: false, error: `Minimum release quantity is ${def.minQty} ${itemId}.` };
+  }
+
+  let provinces = worldState.provinces || [];
+  if (params.provinceIds?.length) {
+    const wanted = new Set(params.provinceIds);
+    provinces = provinces.filter(p => wanted.has(p.id));
+  }
+  if (!provinces.length) {
+    return { success: false, error: 'No valid provinces to distribute to.' };
+  }
+
+  const payment = spendItem(worldState, itemId, qty);
+  if (!payment.ok) {
+    const hint = (payment.have ?? 0) === 0
+      ? ' If your national stockpile lives elsewhere, wire countItem()/spendItem() in src/government/actions.js.'
+      : '';
+    return { success: false, error: `Insufficient national stock of ${itemId}: have ${fmt(payment.have ?? 0)}, need ${fmt(qty)}.${hint}` };
+  }
+
+  const mode = params.mode || (params.provinceIds?.length ? 'province' : 'shortfall');
+  const accessByProvince = new Map(provinces.map(p => [p.id, averageFoodAccess(worldState, p.id)]));
+
+  let allocations;
+  if (mode === 'equal') {
+    allocations = splitEvenly(provinces, qty);
+  } else {
+    // 'shortfall' (default): send food where access is worst.
+    const weights = provinces.map(p => Math.max(0, 60 - (accessByProvince.get(p.id) ?? 100)));
+    const totalWeight = weights.reduce((a, b) => a + b, 0);
+    if (totalWeight <= 0) {
+      allocations = splitEvenly(provinces, qty); // nobody in deficit
+    } else {
+      allocations = [];
+      let allocated = 0;
+      provinces.forEach((p, i) => {
+        const share = Math.floor((qty * weights[i]) / totalWeight);
+        allocations.push([p, share]);
+        allocated += share;
+      });
+      const remainder = qty - allocated;
+      if (remainder > 0 && allocations.length) {
+        let worst = allocations[0];
+        for (const a of allocations) {
+          if ((accessByProvince.get(a[0].id) ?? 100) < (accessByProvince.get(worst[0].id) ?? 100)) worst = a;
+        }
+        worst[1] += remainder;
+      }
+    }
+  }
+
+  const perProvince = {};
+  for (const [province, share] of allocations) {
+    if (share <= 0) continue;
+    province.vars = province.vars || {};
+    province.vars.foodStock = (province.vars.foodStock || 0) + share;
+    recomputeProvinceFoodAccess(worldState, province.id); // instant feedback
+    perProvince[province.id] = share;
+  }
+
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  gv.foodReleasedTotal = (gv.foodReleasedTotal || 0) + qty;
+
+  if (!params.silent) {
+    pushNews(worldState, {
+      author: 'State Statistical Bureau', paperId: 'paper_today', category: 'Government',
+      headline: 'GOVERNMENT RELEASES FOOD INTO NATIONAL SUPPLY',
+      body: `The Government of Arcasia has released ${fmt(qty)} ${resolveItemName(worldState, itemId)} from the national stockpile into the provincial food supply (${mode} distribution).`
+    });
+  }
+
+  return {
+    success: true, actionId: def.id, name: def.name,
+    item: itemId, qty, mode, perProvince, warning: payment.warning,
+    message: `Released ${fmt(qty)} ${itemId} into the national supply (${mode}).`
+  };
+}
+
+// ---------- bank recapitalisation (observed live, turn 5) ----------
+
+function runBankRecapitalize(worldState, def, params) {
+  const amount = Math.floor(Number(params.amount) || 0);
+  if (amount < def.minAmount) {
+    return { success: false, error: `Minimum recapitalisation is ${fmtMoney(def.minAmount)}.` };
+  }
+  const payment = spendMoney(
+    worldState, amount,
+    'To ensure that the Bank of Arcasia still has reserves.', // live-verbatim purpose
+    'Bank of Arcasia'
+  );
+  if (!payment.ok) {
+    return { success: false, error: `Insufficient funds: need ${fmtMoney(amount)}, treasury holds ${fmtMoney(payment.have)}.` };
+  }
+
+  const bank = findBankEntity(worldState);
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  let credited = false;
+  if (bank) {
+    bank.vars = bank.vars || {};
+    for (const key of ['reserve', 'reserves', 'balance', 'money']) {
+      if (typeof bank.vars[key] === 'number') { bank.vars[key] += amount; credited = true; break; }
+    }
+  }
+  if (!credited) {
+    const base = typeof gv.bankReserve === 'number'
+      ? gv.bankReserve
+      : (bank?.vars?.reserve ?? 0);
+    gv.bankReserve = base + amount;
+  }
+
+  if (typeof gv.marketConfidence === 'number') {
+    gv.marketConfidence = clamp(gv.marketConfidence + def.confidenceBoost, 0, 100);
+  }
+  for (const hh of worldState.households || []) {
+    if ((hh.population || 0) > 0) {
+      hh.economicConfidence = clamp((hh.economicConfidence ?? 50) + 2, 0, 100);
+    }
+  }
+
+  if (!params.silent) {
+    pushNews(worldState, {
+      author: 'State Statistical Bureau', paperId: 'paper_economists', category: 'Economy',
+      headline: 'Bank of Arcasia recapitalised by the Government',
+      body: `The Government of Arcasia has moved ${fmtMoney(amount)} to the Bank of Arcasia. Ministers moved to reassure markets that the emergency has passed.`
+    });
+  }
+
+  return {
+    success: true, actionId: def.id, name: def.name, cost: amount,
+    warning: payment.warning,
+    message: `Recapitalised the Bank of Arcasia with ${fmtMoney(amount)}.`
+  };
+}
+
+// ---------- rationing toggle ----------
+
+function setRationing(worldState, provinceId, enabled) {
+  const province = (worldState.provinces || []).find(p => p.id === provinceId);
+  if (!province) return { success: false, error: `Unknown province: ${provinceId}` };
+  province.vars = province.vars || {};
+  province.vars.rationing = !!enabled;
+  const access = recomputeProvinceFoodAccess(worldState, provinceId);
+
+  if (enabled) {
+    // Rationing guarantees a floor but annoys the well-off.
+    for (const hh of worldState.households || []) {
+      if (hh.provinceId !== provinceId || (hh.population || 0) <= 0) continue;
+      if ((hh.axes?.quintile || 0) >= 4) {
+        hh.happiness = clamp((hh.happiness ?? 50) - 4, 0, 100);
+      }
+    }
+  }
+  const gv = (worldState.globalVars = worldState.globalVars || {});
+  gv.rationingProvinces = (worldState.provinces || []).filter(p => p.vars?.rationing).map(p => p.id);
+  logAction(worldState,
+    { id: 'rationing', name: enabled ? 'Rationing Enabled' : 'Rationing Lifted' },
+    { provinceId }, { success: true, message: '' }, null);
+
+  return {
+    success: true, provinceId, rationing: !!enabled, foodAccess: access,
+    message: `Rationing ${enabled ? 'imposed on' : 'lifted in'} ${provinceId}.`
+  };
+}
+
+// ---------- UI preview API ----------
+
+function estimateGovernmentActionCost(worldState, actionId, params = {}) {
+  const def = GOV_ACTIONS[actionId];
+  if (!def) return null;
+  if (def.id === 'food_release') {
+    return { money: 0, items: [{ itemId: params.itemId || def.item, qty: Math.floor(Number(params.qty) || 0) }] };
+  }
+  if (def.id === 'bank_recapitalize') {
+    return { money: Math.floor(Number(params.amount) || 0), items: [] };
+  }
+  const targeting = { ...def.targeting, ...(params.targeting || {}) };
+  const scope = params.provinceId
+    ? (worldState.households || []).filter(hh => hh.provinceId === params.provinceId)
+    : (worldState.households || []);
+  let coveredPop = 0;
+  for (const hh of scope) {
+    if ((hh.population || 0) <= 0) continue;
+    if (computeTargetMatch(hh.axes, targeting) <= 0) continue;
+    coveredPop += hh.population;
+  }
+  return {
+    money: (def.fixedCost || 0) + Math.ceil(coveredPop * (def.costPerCapita || 0)),
+    coveredPopulation: coveredPop,
+    items: []
+  };
+}
+
+module.exports = {
+  GOV_ACTIONS,
+  executeGovernmentAction,
+  setRationing,
+  estimateGovernmentActionCost,
+  resetGovernmentTurnState
+};
+
+diff --git a/src/save/migration.js b/src/save/migration.js
+new file mode 100644
+--- /dev/null
++++ b/src/save/migration.js
+const { generateProfiles } = require('../demographics/groups');
+const { configureFatigue } = require('../election/fatigue');
+
+const MIGRATION_ID = 'demographics_matrix_v2';
+
+function needsMigration(save) {
+  return !save?._migrations?.includes(MIGRATION_ID);
+}
+
+function migrate(save) {
+  console.log(`[MIGRATION] Applying ${MIGRATION_ID}...`);
+  const oldHouseholds = Array.isArray(save.households) ? save.households : [];
+
+  // FIX (critical): the original migration compared new composite labels
+  // ("Urban Working Class") against legacy flat groups — never matched —
+  // and read legacy?.vars?.happiness though legacy stats are top-level.
+  // Result: everything silently reset to 50 and account balances were
+  // dropped. We now seed from keyword matches with population-weighted
+  // province averages as fallback.
+  const legacy = {};
+  for (const hh of oldHouseholds) {
+    if (!hh?.provinceId) continue;
+    const a = (legacy[hh.provinceId] ||= { pop: 0, happiness: 0, support: 0, confidence: 0, food: 0, income: 0 });
+    const w = hh.population || 0;
+    a.pop += w;
+    a.happiness += pickNum(hh.happiness, hh.vars?.happiness, 50) * w;
+    a.support += pickNum(hh.governmentSupport, hh.vars?.governmentSupport, 50) * w;
+    a.confidence += pickNum(hh.economicConfidence, hh.vars?.economicConfidence, 50) * w;
+    a.food += pickNum(hh.foodAccess, hh.vars?.foodAccess, 90) * w;
+    a.income += pickNum(hh.income, 0) * w;
+  }
+
+  const newHouseholds = [];
+  for (const province of save.provinces || []) {
+    const stats = legacy[province.id];
+    const census = {
+      totalPopulation: stats?.pop || province.vars?.population || 100000,
+      urbanization: province.vars?.urbanization
+    };
+    for (const profile of generateProfiles(province.id, census)) {
+      const src = bestLegacyMatch(oldHouseholds, province.id, profile.axes, stats);
+      newHouseholds.push({
+        id: `hh_${profile.id}`,
+        provinceId: province.id,
+        axes: profile.axes,
+        group: deriveLegacyLabel(profile.axes),
+        quintile: profile.axes.quintile,
+        population: profile.population,
+        income: src.income ?? profile.income,
+        happiness: src.happiness ?? 50,
+        governmentSupport: src.support ?? 50,
+        economicConfidence: src.confidence ?? 50,
+        foodAccess: src.food ?? 90,
+        ideology: profile.ideology,
+        sensitivity: profile.sensitivity,
+        fatigue: {},
+        accountId: `acct_hh_${profile.id}`
+      });
+    }
+  }
+  save.households = newHouseholds;
+
+  reconcileAccounts(save, oldHouseholds);
+
+  if (save.settings?.demographics?.groups) {
+    save.settings.demographics.legacyGroups = save.settings.demographics.groups;
+    delete save.settings.demographics.groups;
+  }
+  save.settings = save.settings || {};
+  if (!save.settings.partyPositions) {
+    save.settings.partyPositions = {
+      party_ua:  { economic:  0.2,  cultural:  0.15 },
+      party_pfj: { economic: -0.35, cultural: -0.3  },
+      party_nf:  { economic:  0.3,  cultural:  0.65 },
+      party_acp: { economic: -0.8,  cultural: -0.3  },
+      party_kff: { economic:  0.2,  cultural: -0.15 }
+    };
+  }
+  if (save.settings.fatigueConfig) configureFatigue(save.settings.fatigueConfig);
+
+  if (!Array.isArray(save._migrations)) save._migrations = [];
+  save._migrations.push(MIGRATION_ID);
+
+  console.log(`[MIGRATION] ${MIGRATION_ID} complete: ${newHouseholds.length} household segments.`);
+  return save;
+}
+
+function legacyMatchScore(hh, axes) {
+  const g = String(hh.group || '').toLowerCase();
+  if (!g) return 0;
+  let s = 0;
+  if (hh.quintile === axes.quintile) s += 2;
+  if (axes.lifecycle === 'student' && g === 'students') s += 4;
+  if (axes.lifecycle === 'retired' && g === 'retired') s += 4;
+  if (axes.class === 'working_class' && g.includes('working')) s += 3;
+  if (axes.class === 'middle_class' && g.includes('middle')) s += 3;
+  if (axes.class === 'upper_class' && g.includes('upper')) s += 3;
+  if (axes.location === 'rural' && g === 'rural') s += 2;
+  if (axes.location === 'urban' && g === 'urban') s += 2;
+  return s;
+}
+
+function bestLegacyMatch(oldHouseholds, provinceId, axes, stats) {
+  const avg = (key, fallback) => (stats && stats.pop > 0) ? stats[key] / stats.pop : fallback;
+  let best = null, bestScore = 0;
+  for (const hh of oldHouseholds) {
+    if (hh.provinceId !== provinceId) continue;
+    const score = legacyMatchScore(hh, axes);
+    if (score > bestScore) { bestScore = score; best = hh; }
+  }
+  if (!best) {
+    return {
+      happiness: avg('happiness', 50), support: avg('support', 50),
+      confidence: avg('confidence', 50), food: avg('food', 90), income: avg('income', null)
+    };
+  }
+  return {
+    happiness: pickNum(best.happiness, best.vars?.happiness, avg('happiness', 50)),
+    support: pickNum(best.governmentSupport, best.vars?.governmentSupport, avg('support', 50)),
+    confidence: pickNum(best.economicConfidence, best.vars?.economicConfidence, avg('confidence', 50)),
+    food: pickNum(best.foodAccess, best.vars?.foodAccess, avg('food', 90)),
+    income: pickNum(best.income, avg('income', null))
+  };
+}
+
+// If an account ledger map exists, redistribute old balances across the new
+// household accounts proportionally to population. Best effort, never throws.
+function reconcileAccounts(save, oldHouseholds) {
+  try {
+    const ledger = save.accounts;
+    if (!ledger || typeof ledger !== 'object') return;
+    const total = oldHouseholds.reduce((sum, hh) => {
+      const id = hh.accountId || hh.id;
+      return sum + (typeof ledger[id] === 'number' ? ledger[id] : 0);
+    }, 0);
+    if (total <= 0) return;
+    const newPop = save.households.reduce((s, hh) => s + (hh.population || 0), 0) || 1;
+    for (const hh of oldHouseholds) delete ledger[hh.accountId || hh.id];
+    for (const hh of save.households) {
+      ledger[hh.accountId] = Math.floor(total * (hh.population || 0) / newPop);
+    }
+    console.log(`[MIGRATION] Redistributed ${total} across new household accounts.`);
+  } catch (err) {
+    console.warn('[MIGRATION] Account reconciliation skipped:', err.message);
+  }
+}
+
+function pickNum(...vals) {
+  for (const v of vals) if (typeof v === 'number' && Number.isFinite(v)) return v;
+  return vals[vals.length - 1];
+}
+
+function deriveLegacyLabel(axes) {
+  const flat = { student: 'Students', retired: 'Retired' }[axes.lifecycle];
+  if (flat) return flat;
+  const loc = axes.location === 'urban' ? 'Urban' : 'Rural';
+  const cls = {
+    working_class: 'Working Class', middle_class: 'Middle Class', upper_class: 'Upper Class'
+  }[axes.class] || 'Working Class';
+  return `${loc} ${cls}`;
+}
+
+module.exports = { needsMigration, migrate, MIGRATION_ID };
+
+# ==== END OF BUNDLE ====
+
+# ------------------------------------------------------------
+# MANUAL MERGE (the only one): src/events/turnEnd.js
+# Add these requires after the existing three:
+#
+#   const { endTurnFatigueDecay } = require('../election/engine');  // from ENGINE, not fatigue.js
+#   const { runCensusUpdate } = require('./census');
+#   const { runLifecycleTransitions } = require('./lifecycle');
+#   const { resetGovernmentTurnState } = require('../government/actions');
+#
+# Inside executeTurnEnd(), after runConfidenceUpdate(worldState); add:
+#
+#   runLifecycleTransitions(worldState);
+#   runCensusUpdate(worldState);
+#   if (worldState.election?.active) endTurnFatigueDecay(worldState);
+#   resetGovernmentTurnState(worldState);
+#
+# OPTIONAL — settings/defaults.js (all systems have internal fallbacks,
+# so this is purely documentation/tuning):
+#   households: { studentGraduationRate: 0.10, retirementRate: 0.04,
+#     matriculationRate: 0.006, famineMortalityRate: 0.0015,
+#     oldAgeMortalityRate: 0.012, birthRate: 0.0008,
+#     foodAccessPerCapitaScale: 1000, rationingFloor: 40 },
+#   election: { campaigns: [], deviationPct: 35, voteToSupportScale: 150 }
+# ------------------------------------------------------------

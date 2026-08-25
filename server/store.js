@@ -1834,6 +1834,45 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 35.1 — seed supply-chain inputs (schema < 15) -----------------
+  // The requires model shipped with no property actually declaring inputs, so
+  // supply chains were invisible in play. Seed conservative, thematically
+  // obvious requirements on the industrial sites that have a workable upstream
+  // (domestic production or an import order that can feed them), PLUS roughly
+  // three turns of starter feed stock — most sites hold no inputs yet, and
+  // requirements without stock would zero their output overnight. Only fills
+  // EMPTY requires / missing stock rows — GM-authored setups are untouched.
+  if ((world.schema || 1) < 15) {
+    const SEED_REQUIRES = {
+      // AMCO Razno Refinery — fuel cracks from crude (~10.5k barrels/turn)
+      prop_refinery: { req: [{ itemId: 'item_crude', perUnit: 0.7 }], feed: ['item_crude', 32000] },
+      // ARC Arms Works — ore feed per service rifle (~110 t/turn)
+      prop_arc_arms: { req: [{ itemId: 'item_ore', perUnit: 0.05 }], feed: ['item_ore', 400] },
+      // Kradon Shipyards — rolled steel per warship hull
+      prop_shipyards: { req: [{ itemId: 'item_steel', perUnit: 40 }], feed: ['item_steel', 5] },
+      // Grazihall cement kilns — mineral feed per tonne of cement
+      prop_cement: { req: [{ itemId: 'item_ore', perUnit: 0.15 }], feed: ['item_ore', 2000] },
+      prop_mswj0jb2e724kq: { req: [{ itemId: 'item_ore', perUnit: 0.15 }], feed: ['item_ore', 800] },
+    };
+    for (const pr of (world.properties || [])) {
+      const seed = SEED_REQUIRES[pr.id];
+      if (!seed) continue;
+      if (!Array.isArray(pr.requires) || !pr.requires.length) {
+        pr.requires = seed.req.map(r => ({ ...r }));
+        pr.vars = pr.vars || {};
+        pr.vars.supplyFulfillment = null; // recomputed on the next production pass
+      }
+      if (Array.isArray(seed.feed)) {
+        pr.inventory = Array.isArray(pr.inventory) ? pr.inventory : [];
+        const row = pr.inventory.find(r => r.itemId === seed.feed[0]);
+        if (row) row.qty = Math.round(((row.qty || 0) + seed.feed[1]) * 1000) / 1000;
+        else pr.inventory.push({ itemId: seed.feed[0], qty: seed.feed[1] });
+      }
+    }
+    world.schema = 15;
+    changed = true;
+  }
+
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed
   // themselves on already-migrated worlds at next load. Old worlds start the

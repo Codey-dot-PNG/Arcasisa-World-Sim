@@ -1106,12 +1106,7 @@ async function handle(req, res, pathname, method) {
         if (b.upgradeInvest !== undefined) wfBits.push('invested ' + db.settings.currency + cleanQty(b.upgradeInvest) + ' in upgrades (total ' + db.settings.currency + (pr.upgradeInvested || 0) + ')');
         store.log('economy', `${pr.name} workforce & safety`, wfBits.join(' · '), u.user.displayName, [pr.id, pr.ownerId]);
       }
-      // 6e. Quality tier / R&D spend
-      if (b.rdSpend !== undefined) {
-        pr.vars = pr.vars || {};
-        pr.vars.rdSpend = Math.max(0, cleanQty(b.rdSpend));
-      }
-      // 6f. Employee morale / training spend
+      // 6f. Training spend — dampens accident odds (see sim.js TRAINING_RISK_DIV)
       if (b.trainingSpend !== undefined) {
         pr.vars = pr.vars || {};
         pr.vars.trainingSpend = Math.max(0, cleanQty(b.trainingSpend));

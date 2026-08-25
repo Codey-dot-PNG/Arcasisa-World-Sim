@@ -1913,7 +1913,6 @@ const Views = {
       workHours: pr.workHours !== undefined ? pr.workHours : coHours,
       safety: pr.safety !== undefined ? pr.safety : coSafety,
       employees: pr.employees !== undefined ? pr.employees : maxEmp,
-      rdSpend: (pr.vars && pr.vars.rdSpend) || 0,
       trainingSpend: (pr.vars && pr.vars.trainingSpend) || 0,
       inherit: !(owner && owner.type === 'company') || !draftedOverride
     });
@@ -1921,7 +1920,6 @@ const Views = {
     if (dr.safety === undefined) dr.safety = coSafety;
     if (dr.employees === undefined) dr.employees = pr.employees !== undefined ? pr.employees : maxEmp;
     if (dr.inherit === undefined) dr.inherit = !(owner && owner.type === 'company') || !draftedOverride;
-    if (dr.rdSpend === undefined) dr.rdSpend = 0;
     if (dr.trainingSpend === undefined) dr.trainingSpend = 0;
     // Live preview multiplier: follows the unsaved hours/safety/staffing draft
     // so the output figures move the moment the levers do.
@@ -1953,10 +1951,8 @@ const Views = {
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
         'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01')),
-      Forms.field('R&D spend / turn (' + CUR() + ')', Forms.num(dr, 'rdSpend', '1'),
-        'Sustained investment nudges output quality up with diminishing returns. Charged with upkeep at settlement.'),
       Forms.field('Training spend / turn (' + CUR() + ')', Forms.num(dr, 'trainingSpend', '1'),
-        'Lowers turnover risk below its wage/morale base over time. Charged with upkeep at settlement.')));
+        'Cuts accident odds: every ' + CUR() + '10,000/turn of sustained training HALVES the remaining risk (75% floor never fully reached). Charged with upkeep at settlement.')));
 
     inner.appendChild(this.secLabel('Workforce & Safety'));
     inner.appendChild(el('div.form-grid',
@@ -1981,6 +1977,24 @@ const Views = {
       el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;' }, 'WORKER MORALE'),
       this.tradeBar(happ, 100, happ >= 60 ? 'var(--good)' : happ >= 40 ? 'var(--ink-soft)' : 'var(--accent)'),
       el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, happ + '%')));
+    // Accident risk readout — client mirror of sim.js's odds stack:
+    // policy base × exponential staffing factor × training dampening.
+    if (prodMode !== 'none' && (pr.employees || 0) > 0) {
+      const SAFETY_RISK = { none: 20, relaxed: 10, standard: 5, strict: 1 };
+      const base = SAFETY_RISK[dr.safety] !== undefined ? SAFETY_RISK[dr.safety] : 5;
+      const staffRatio = maxEmp > 0 ? (dr.employees || 0) / maxEmp : 0;
+      const staffMult = Math.max(0.1, Math.min(1e6, Math.pow(2, staffRatio - 1)));
+      const trainDampen = 1 / (1 + (Number(dr.trainingSpend) || 0) / 10000);
+      const riskPct = base * staffMult * trainDampen;
+      const cutPct = Math.round((1 - trainDampen) * 100);
+      inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:2px 0 4px; flex-wrap:wrap;',
+        title: 'Policy base × staffing factor × training dampening. Over-staffing past capacity DOUBLES the odds per extra 100%.' },
+        el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;' }, 'ACCIDENT RISK / TURN'),
+        el('div', { style: 'font-family:var(--font-mono); font-size:11px; color:' + (riskPct > 10 ? 'var(--accent)' : riskPct > 3 ? 'var(--ink-soft)' : 'var(--good)') + ';' },
+          '≈ ' + (riskPct >= 1 ? riskPct.toFixed(1) : riskPct.toFixed(2)) + '%'),
+        el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' },
+          '(BASE ' + base + '% · STAFFING ×' + staffMult.toFixed(2) + (cutPct > 0 ? ' · TRAINING −' + cutPct + '%' : '') + ')')));
+    }
     // Site condition (6a): decays each production hour unless the maintenance
     // spend covers the required upkeep share; condition multiplies output.
     if (prodMode !== 'none') {
@@ -2079,7 +2093,6 @@ const Views = {
             workHours: dr.inherit ? 'inherit' : dr.workHours,
             safety: dr.inherit ? 'inherit' : dr.safety,
             employees: dr.employees,
-            rdSpend: Number(dr.rdSpend) || 0,
             trainingSpend: Number(dr.trainingSpend) || 0
           });
           if (r && r.property) Object.assign(pr, r.property);
@@ -2114,7 +2127,8 @@ const Views = {
     return secs + 'S';
   },
   // Supply-chain inputs table (Part 4): what the site consumes per unit of
-  // its primary output, and how well it is currently being fed.
+  // its primary output, how much a turn of production needs at the current
+  // workforce draft, and how many turns the on-site stock can still cover.
   requiresTable(pr, wf) {
     const reqs = pr.requires || [];
     const ful = pr.vars && pr.vars.supplyFulfillment;
@@ -2125,27 +2139,29 @@ const Views = {
       wrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:8px; margin-bottom:6px;' },
         el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, 'FULFILLMENT'),
         this.tradeBar(pct, 100, pct >= 99 ? 'var(--good)' : pct >= 50 ? 'var(--ink-soft)' : 'var(--accent)'),
-        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, pct + '% OF CAPACITY')));
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:' + (pct >= 99 ? 'var(--good)' : 'var(--accent)') + ';' },
+          pct >= 99 ? '100% — FULL OUTPUT' : pct + '% OF CAPACITY — DEPOSIT ' + (itemById((reqs[0] || {}).itemId) || { name: 'inputs' }).name.toUpperCase() + ' AT THE SITE')));
     }
-    const tbl = el('table.data', el('thead', el('tr', el('th', 'Input'), el('th.num', 'Per unit made'), el('th.num', 'Needed / turn'), el('th.num', 'Site stock'))));
-    const body = el('tbody');
     const primaryPerTurn = ((pr.produces || [])[0] || {}).perTurn || 1;
-    const turnHours = (S().settings.time || {}).unit === 'hour' ? (S().settings.time.perTurn || 1)
-      : (S().settings.time || {}).unit === 'week' ? 168 * ((S().settings.time || {}).perTurn || 1)
-      : 24 * ((S().settings.time || {}).perTurn || 1);
+    const tbl = el('table.data', el('thead', el('tr', el('th', 'Input'), el('th.num', 'Per unit made'), el('th.num', 'Needed / turn'), el('th.num', 'Site stock'), el('th.num', 'Stock covers'))));
+    const body = el('tbody');
     for (const r of reqs) {
       const it = itemById(r.itemId);
       const stock = ((pr.inventory || []).find(x => x.itemId === r.itemId) || {}).qty || 0;
+      const needed = (r.perUnit || 0) * primaryPerTurn * wf;
+      const turns = needed > 0 ? stock / needed : Infinity;
       body.appendChild(el('tr',
         el('td', it ? it.name : r.itemId),
         el('td.num', fmtNum(r.perUnit || 0, 3)),
-        el('td.num', fmtNum((r.perUnit || 0) * primaryPerTurn * wf, 3)),
-        el('td.num', fmtNum(stock, 3))));
+        el('td.num', fmtNum(needed, 2)),
+        el('td.num', fmtNum(stock, 2)),
+        el('td.num', { style: 'color:' + (turns < 1 ? 'var(--accent)' : turns < 3 ? 'var(--ink-soft)' : 'var(--good)') + ';' },
+          turns === Infinity ? '—' : fmtNum(turns, 1) + ' turn' + (Math.round(turns) === 1 ? '' : 's'))));
     }
     tbl.appendChild(body);
     wrap.appendChild(tbl);
     wrap.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:-2px 0 6px;' },
-      'INPUTS ARE DRAWN FROM THE SITE INVENTORY EVERY PRODUCTION HOUR — DEPOSIT STOCK VIA THE SITE INVENTORY MODAL.'));
+      'INPUTS ARE DRAWN FROM THE SITE INVENTORY EVERY PRODUCTION PASS — RESTOCK VIA THE SITE INVENTORY MODAL OR A SUPPLY CONTRACT. SHORT INPUTS SCALE THE WHOLE LINE DOWN.'));
     return wrap;
   },
   // Capital projects panel (6b): server-priced catalogue fetched per site,

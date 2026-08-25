@@ -787,6 +787,9 @@ function applyStrikes(db) {
 // definition (docs/CONVENTIONS.md — no duplicated engine math).
 const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
 const SAFETY_RISK = { none: 0.20, relaxed: 0.10, standard: 0.05, strict: 0.01 };
+// Training (6f): accident-odds dampening divisor — risk × 1/(1 + spend/this).
+// Each full divisor's worth of training halves the remaining risk.
+const TRAINING_RISK_DIV = 10000;
 
 // Shared per-property production context — the single source of truth for
 // the output-multiplier stack (province happiness × daily wobble × work
@@ -837,16 +840,41 @@ function productionContext(db, pr) {
   return { owner, co, active, f, keepPct, wagePerTurn, wageIdx, hoursMult, safetyRaw, staffRatio };
 }
 
-// Condition (6a) and quality (6e) factors off the persisted vars. Defaults
-// are neutral (100 condition, 50 quality), so worlds that never tick the
-// production cadence behave exactly as before.
-function conditionQualityFactors(pr) {
+// Condition factor (6a) off the persisted vars. Default is neutral (100), so
+// worlds that never tick the production cadence behave exactly as before.
+function conditionFactorOf(pr) {
   const pv = pr.vars || {};
-  const conditionFactor = activePr(pr) ? (pv.condition !== undefined ? pv.condition / 100 : 1) : 1;
-  const qualityFactor = 1 + (((pv.quality !== undefined ? pv.quality : 50)) - 50) / 500; // 0.9× at 0 … 1.1× at 100
-  return { conditionFactor, qualityFactor };
+  return activePr(pr) && pv.condition !== undefined ? pv.condition / 100 : 1;
 }
 function activePr(pr) { return pr.prodMode === 'goods' || pr.prodMode === 'cash'; }
+
+// Part 4 — supply chains. Consumes required inputs from the SITE inventory
+// proportionally to ACTUAL output and returns the 0..1 scaling factor (null
+// when the property declares no requirements). `primaryUnits` is the intended
+// output quantity of the property's PRIMARY product (produces[0]); perUnit is
+// expressed against it, and ALL outputs scale by the same worst-input ratio.
+// Runs identically in both the hourly cadence slice and the legacy turn lump,
+// so supply chains work regardless of how fast the world clock runs.
+function applyRequires(db, pr, primaryUnits) {
+  const reqs = pr.requires;
+  if (!Array.isArray(reqs) || !reqs.length || !(primaryUnits > 0)) return null;
+  let worst = 1;
+  for (const req of reqs) {
+    if (!req.itemId || !(req.perUnit > 0)) continue;
+    const needed = req.perUnit * primaryUnits;
+    const stock = inventoryQty(pr, req.itemId);
+    const ratio = needed > 0 ? Math.min(1, stock / needed) : 1;
+    if (ratio < worst) worst = ratio;
+  }
+  for (const req of reqs) {
+    if (!req.itemId || !(req.perUnit > 0)) continue;
+    const used = cleanQty(req.perUnit * primaryUnits * worst);
+    if (used > 0) removeInventory(pr, req.itemId, used);
+  }
+  pr.vars = pr.vars || {};
+  pr.vars.supplyFulfillment = Math.round(worst * 1000) / 1000;
+  return worst;
+}
 
 function runEconomy(db, actor, scale) {
   scale = typeof scale === 'number' && isFinite(scale) ? scale : 1;
@@ -885,7 +913,16 @@ function runEconomy(db, actor, scale) {
     const owner = ctx.owner;
     const co = ctx.co;
     const f = ctx.f;
-    const { conditionFactor, qualityFactor } = conditionQualityFactors(pr);
+    const conditionFactor = conditionFactorOf(pr);
+    // Supply-chain fulfillment (Part 4): computed once against the primary
+    // output and applied to every product line. Works in BOTH paths — hourly
+    // slices and this legacy lump — so requirements bite even when the world
+    // clock is paused and turns advance manually.
+    let fulfillment = null;
+    if (pr.prodMode === 'goods' && (pr.produces || []).length) {
+      fulfillment = applyRequires(db, pr, (pr.produces[0].perTurn || 0) * f * scale * conditionFactor);
+    }
+    const reqMult = fulfillment === null ? 1 : fulfillment;
 
     // gross production value (drives GDP): private at output, public at cost.
     // With hourly accrual active, goods-mode GDP reads what the cadence
@@ -895,8 +932,8 @@ function runEconomy(db, actor, scale) {
     if (pr.prodMode === 'goods') {
       gross = hourlyAccrued
         ? Object.keys(pr._prodMade || {}).reduce((s, itemId) => s + (pr._prodMade[itemId] || 0) * priceOf(itemId), 0)
-        : (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId) * scale * conditionFactor * qualityFactor, 0);
-    } else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
+        : (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId) * scale * reqMult * conditionFactor, 0);
+    } else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f * scale * conditionFactor;
     else gross = (pr.expenses || 0) * scale;
     if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
 
@@ -927,7 +964,7 @@ function runEconomy(db, actor, scale) {
       } else {
         for (const e of (pr.produces || [])) {
           const retail = priceOf(e.itemId);
-          const produced = cleanQty((e.perTurn || 0) * f * scale * conditionFactor * qualityFactor);
+          const produced = cleanQty((e.perTurn || 0) * f * scale * reqMult * conditionFactor);
           if (produced <= 0) continue;
           const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
             ? clampPct(pr.keepPctByItem[e.itemId], ctx.keepPct)
@@ -943,7 +980,7 @@ function runEconomy(db, actor, scale) {
     } else if (pr.prodMode === 'cash') {
       // With hourly accrual active the cash was already deposited in
       // world-hourly slices by runHourlyProductionTick — do not pay twice.
-      if (!hourlyAccrued) o.dom += (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
+      if (!hourlyAccrued) o.dom += (pr.cashPerTurn || 0) * f * scale * conditionFactor;
     }
 
     // workforce (Phase 28): morale drifts toward the wage anchor, and an
@@ -961,8 +998,11 @@ function runEconomy(db, actor, scale) {
       // capacity on the payroll doubles the risk, so a 200%-over-staffed
       // 'standard' site (5% base) rolls at 10%, 300% at 20%, and so on.
       // Under-staffing halves risk per 100% below the cap (floor 10% of base).
+      // Training spend (6f) dampens the result — each ₳10,000/turn of
+      // sustained training halves the remaining risk (asymptotic, never zero).
       const riskMult = Math.max(0.1, Math.min(1e6, Math.pow(2, ctx.staffRatio - 1)));
-      if (Math.random() < (SAFETY_RISK[ctx.safetyRaw] || 0.05) * riskMult) {
+      const trainDampen = 1 / (1 + ((pr.vars && pr.vars.trainingSpend) || 0) / TRAINING_RISK_DIV);
+      if (Math.random() < (SAFETY_RISK[ctx.safetyRaw] || 0.05) * riskMult * trainDampen) {
         const deaths = Math.min(
           Math.max(1, Math.round(pr.employees * (0.04 + Math.random() * 0.06))),
           Math.max(1, Math.round(pr.employees * 0.5)));
@@ -985,12 +1025,12 @@ function runEconomy(db, actor, scale) {
     }
 
     // expenses: property upkeep, direct company payroll, and the per-turn
-    // controllable spends (6a maintenance / 6e R&D / 6f training) — charged
-    // here through the same settlement draw as every other expense so the
-    // stats actually cost money instead of being free buffs.
+    // controllable spends (6a maintenance / 6f training) — charged here
+    // through the same settlement draw as every other expense so the stats
+    // actually cost money instead of being free buffs.
     const pv = pr.vars || {};
     o.upkeep += (pr.expenses || 0) * expMult
-      + (pv.maintenanceSpend || 0) + (pv.rdSpend || 0) + (pv.trainingSpend || 0);
+      + (pv.maintenanceSpend || 0) + (pv.trainingSpend || 0);
     o.wage += (pr.employees || 0) * ctx.wagePerTurn;
     if ((pr.employees || 0) > 0 && ctx.wagePerTurn > 0) { payEmp += (pr.employees || 0); payWageSum += (pr.employees || 0) * ctx.wagePerTurn; }
 
@@ -1144,7 +1184,8 @@ function runEconomy(db, actor, scale) {
 //     primary output) are consumed from the site inventory through the same
 //     removeInventory path /api/property/items uses; the worst input ratio
 //     scales ALL outputs, and persists as vars.supplyFulfillment for UI.
-//   · 6a — condition decay vs maintenanceSpend; 6e R&D quality; 6f training.
+//   · 6a — condition decay vs maintenanceSpend (training's accident effect
+//     lives in runEconomy's accident roll — it is a per-turn mechanic).
 //   · 6b — capital project advancement; 6c — contract deliveries;
 //     6d — tender closing/award.
 // When the clock is paused or turns advance manually, nothing here fires and
@@ -1156,7 +1197,6 @@ function runHourlyProductionTick(db, actor) {
   db._prodTicksThisTurn = (db._prodTicksThisTurn || 0) + 1;
   const econ = db.settings.economy || {};
   const decayRate = econ.conditionDecayPerHour !== undefined ? Number(econ.conditionDecayPerHour) : 0.5;
-  const rdK = econ.rdQualityK !== undefined ? Number(econ.rdQualityK) : 0.5;
   const hoursPerTurn = Math.max(1, require('./cadence').turnWorldMs(db) / HOUR_MS);
   const slice = 1 / hoursPerTurn;
 
@@ -1175,44 +1215,26 @@ function runHourlyProductionTick(db, actor) {
       const decay = decayRate * slice * (shortfall / requiredUpkeep);
       pv.condition = Math.round(Math.max(0, Math.min(100, pv.condition - decay)) * 100) / 100;
     }
-    const { conditionFactor, qualityFactor } = conditionQualityFactors(pr);
+    const conditionFactor = conditionFactorOf(pr);
 
     if (!ctx.active) continue;
 
     // Part 4 — supply-chain fulfillment BEFORE accumulation, so partial
-    // supply under-produces smoothly hour to hour.
+    // supply under-produces smoothly hour to hour. Same helper the turn-end
+    // pass uses.
     const produces = pr.produces || [];
     let fulfillment = null;
-    if (Array.isArray(pr.requires) && pr.requires.length) {
-      const primary = produces[0];
-      const intendedPrimary = primary && (primary.perTurn > 0)
-        ? primary.perTurn * ctx.f * slice * conditionFactor * qualityFactor : 0;
-      fulfillment = 1;
-      if (intendedPrimary > 0) {
-        for (const req of pr.requires) {
-          if (!req.itemId || !(req.perUnit > 0)) continue;
-          const needed = req.perUnit * intendedPrimary;
-          const stock = inventoryQty(pr, req.itemId);
-          const ratio = needed > 0 ? Math.min(1, stock / needed) : 1;
-          if (ratio < fulfillment) fulfillment = ratio;
-        }
-        // Consume what actual output uses — same mutation helper the site
-        // inventory deposit/withdraw route uses.
-        for (const req of pr.requires) {
-          if (!req.itemId || !(req.perUnit > 0)) continue;
-          const used = cleanQty(req.perUnit * intendedPrimary * fulfillment);
-          if (used > 0) removeInventory(pr, req.itemId, used);
-        }
-      }
-      pv.supplyFulfillment = Math.round(fulfillment * 1000) / 1000;
+    if (pr.prodMode === 'goods' && produces.length) {
+      fulfillment = applyRequires(db, pr, (produces[0].perTurn || 0) * ctx.f * slice * conditionFactor);
     }
+    const reqMult = fulfillment === null ? 1 : fulfillment;
 
     if (pr.prodMode === 'goods') {
       pv._prodAccum = pv._prodAccum || {};
       pr._prodMade = pr._prodMade || {};      // whole units minted this turn (GDP basis)
       pr._salesAccum = pr._salesAccum || {};  // units sold this turn (settled by runEconomy)
       for (const e of produces) {
-        const intended = (e.perTurn || 0) * ctx.f * slice * (fulfillment === null ? 1 : fulfillment) * conditionFactor * qualityFactor;
+        const intended = (e.perTurn || 0) * ctx.f * slice * reqMult * conditionFactor;
         const acc = (pv._prodAccum[e.itemId] || 0) + intended;
         const whole = Math.floor(acc + 1e-9); // floor to whole units on deposit
         pv._prodAccum[e.itemId] = acc - whole;
@@ -1229,7 +1251,7 @@ function runHourlyProductionTick(db, actor) {
       }
     } else { // cash mode: hourly deposits of whole koren, remainder carried
       pv._cashAccum = Number(pv._cashAccum) || 0;
-      pv._cashAccum += (pr.cashPerTurn || 0) * ctx.f * slice * conditionFactor * qualityFactor;
+      pv._cashAccum += (pr.cashPerTurn || 0) * ctx.f * slice * conditionFactor;
       const whole = Math.floor(pv._cashAccum);
       if (whole >= 1) {
         pv._cashAccum -= whole;
@@ -1237,18 +1259,6 @@ function runHourlyProductionTick(db, actor) {
         if (acct) ledgerTxn(null, acct.id, whole, `${pr.name} operations`, actor, 'deposit');
       }
     }
-
-    // 6e. Quality drifts up with sustained R&D spend (diminishing returns).
-    if (pr.prodMode === 'goods' && (pv.rdSpend || 0) > 0) {
-      const q = (pv.quality === undefined ? 50 : pv.quality) + rdK * Math.sqrt(pv.rdSpend / 1000) * slice;
-      pv.quality = Math.round(Math.max(0, Math.min(100, q)) * 100) / 100;
-    }
-    // 6f. Training spend lowers turnover risk below its wage/happiness base —
-    // an accrued dimension on the existing safety/morale tension.
-    const wh = pr.workerHappiness !== undefined ? pr.workerHappiness : 50;
-    const turnoverBase = Math.max(0, (50 - wh) / 100);
-    const trainingReduction = (pv.trainingSpend || 0) > 0 ? Math.min(turnoverBase, pv.trainingSpend / 5000 * slice) : 0;
-    pv.turnoverRisk = Math.round(Math.max(0, Math.min(1, turnoverBase - trainingReduction)) * 1000) / 1000;
   }
 
   advanceProjects(db, actor, HOUR_MS);

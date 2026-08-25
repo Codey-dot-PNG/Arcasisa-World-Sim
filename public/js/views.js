@@ -3719,6 +3719,80 @@ const Views = {
       box.appendChild(this.barRow(gname, p.demographics[gname].governmentSupport || 0, 'var(--good)'));
     }
     inner.appendChild(box);
+
+    // ---- Food Distribution — release from national stockpile ----
+    if (isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, 'ent_gov'))) {
+      inner.appendChild(this.secLabel('Food Distribution'));
+      const gov = entById('ent_gov');
+      const govInv = (gov && gov.inventory) || [];
+      const items = S().items || [];
+      const stapleItems = govInv.filter(row => {
+        const it = items.find(i => i.id === row.itemId);
+        return it && it.meta && it.meta.stapleFood && row.qty > 0;
+      });
+
+      if (!stapleItems.length) {
+        inner.appendChild(el('div.stage', el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:4px 0;' },
+          'The national stockpile holds no staple food. Produce grain or livestock domestically — their sales feed the pool.')));
+      } else {
+        // Draft state for the form
+        if (!W.foodDraft) W.foodDraft = {};
+        const fd = W.foodDraft;
+        if (!fd.itemId || !stapleItems.some(r => r.itemId === fd.itemId)) fd.itemId = stapleItems[0].itemId;
+        const selected = stapleItems.find(r => r.itemId === fd.itemId);
+        const selItem = items.find(i => i.id === fd.itemId);
+        const avail = selected ? selected.qty : 0;
+        const weight = (selItem && selItem.meta && selItem.meta.foodCalorieWeight) || 1;
+        if (!fd.qty || fd.qty > avail) fd.qty = Math.min(1000, Math.round(avail));
+        if (!fd.provs) fd.provs = 'all';
+
+        const formBox = el('div.stage');
+        formBox.appendChild(el('div', { style: 'font-size:12px; margin-bottom:8px;' },
+          'Release staple food from the national stockpile to provinces. Each unit delivers ' + weight + '× in food stock (calorie weight).'));
+
+        // Item + quantity row
+        const row1 = el('div', { style: 'display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;' });
+        row1.appendChild(Forms.field('Food item',
+          Forms.sel(fd, 'itemId', stapleItems.map(r => {
+            const it = items.find(i => i.id === r.itemId);
+            return [r.itemId, (it ? it.name : r.itemId) + ' (' + fmtNum(Math.round(r.qty)) + ' in stock)'];
+          }), () => App.renderView())));
+        row1.appendChild(Forms.field('Quantity',
+          Forms.num(fd, 'qty', '1'),
+          'Available: ' + fmtNum(Math.round(avail)) + ' · delivers ' + fmtNum(Math.round((fd.qty || 0) * weight)) + ' food stock'));
+        formBox.appendChild(row1);
+
+        // Target provinces
+        const row2 = el('div', { style: 'display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;' });
+        row2.appendChild(Forms.field('Target',
+          Forms.sel(fd, 'provs', [['all', 'All provinces (by population)'], ...S().provinces.map(px => [px.id, px.name])])));
+        formBox.appendChild(row2);
+
+        // Preview
+        const targetProvs = fd.provs === 'all' ? S().provinces.filter(px => (px.vars.population || 0) > 0) : [S().provinces.find(px => px.id === fd.provs)].filter(Boolean);
+        const totalPop = targetProvs.reduce((s, px) => s + (px.vars.population || 0), 0) || 1;
+        const previewText = targetProvs.length === 1
+          ? 'Deliver ' + fmtNum(Math.round((fd.qty || 0) * weight)) + ' food stock to ' + targetProvs[0].name
+          : 'Deliver ' + fmtNum(Math.round((fd.qty || 0) * weight)) + ' food stock split across ' + targetProvs.length + ' provinces (' + fmtNum(totalPop) + ' people)';
+        formBox.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); margin-bottom:8px;' }, previewText));
+
+        // Execute button
+        const btn = el('button.solid-btn', { style: 'padding:5px 18px; font-size:12px;' }, 'Release Food');
+        btn.addEventListener('click', async () => {
+          const q = Math.round(Number(fd.qty) || 0);
+          if (!(q > 0)) return toast('Set a quantity first.', true);
+          const provinceIds = fd.provs === 'all' ? [] : [fd.provs];
+          try {
+            const r = await POST('/api/food/release', { itemId: fd.itemId, qty: q, provinceIds });
+            toast('Released ' + fmtNum(Math.round(r.qty)) + ' food stock across ' + Object.keys(r.provinces).length + ' province(s).');
+            App.renderView();
+          } catch (e) { toast(e.message, true); }
+        });
+        formBox.appendChild(el('div.btn-row', btn));
+
+        inner.appendChild(formBox);
+      }
+    }
   },
 
   statCell(k, v, d) {

@@ -1283,7 +1283,6 @@ const GM = {
     const hd = this.getDraft('households', {
       enabled: hh.enabled === undefined ? true : hh.enabled,
       foodReqPerCapPerTurn: hh.foodReqPerCapPerTurn === undefined ? 0.5 : hh.foodReqPerCapPerTurn,
-      govFoodReleaseRate: hh.govFoodReleaseRate === undefined ? 0.5 : hh.govFoodReleaseRate,
       dependentStipend: hh.dependentStipend === undefined ? 0 : hh.dependentStipend,
       wageIncomeK: hh.wageIncomeK === undefined ? 0.2 : hh.wageIncomeK,
       studentGraduationRate: hh.studentGraduationRate === undefined ? 0.10 : hh.studentGraduationRate,
@@ -1299,15 +1298,12 @@ const GM = {
     });
     main.appendChild(Views.secLabel('Households & Living Standards'));
     main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
-      'The simulated population: wages paid by companies, consumption (food that must feed every citizen), hunger/famine, a stipend welfare programme, class mobility and mortality. Food demand is real — a deficit starves the population through the famine rate below.'));
+      'The simulated population: wages paid by companies, consumption (food that must feed every citizen), hunger/famine, a stipend welfare programme, class mobility and mortality. Food demand is real — a deficit starves the population through the famine rate below. Domestic food sales feed the national stockpile; release food to provinces via Population → Food Distribution.'));
     main.appendChild(this.field('Population engine', this.check(hd, 'enabled', ''),
       'Turn the household simulation on/off (wages, consumption, famine, mobility, mortality).'));
     main.appendChild(this.field('Minimum food / citizen / turn (units)',
       Forms.sliderNum(hd, 'foodReqPerCapPerTurn', 0.1, 2, { step: 0.1 }),
       'Per-citizen daily food requirement. Supply below it drives hunger and famine mortality.'));
-    main.appendChild(this.field('Govt food release rate (×)',
-      Forms.sliderNum(hd, 'govFoodReleaseRate', 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-      'How much of the federal government’s own food stockpile is offered onto the market each turn to help feed citizens.'));
     main.appendChild(this.field('Monthly famine mortality per turn above threshold',
       Forms.sliderNum(hd, 'famineMortalityRate', 0, 0.01, { step: 0.0001 }),
       'Population fraction that dies each turn while food security stays below the famine threshold.'));

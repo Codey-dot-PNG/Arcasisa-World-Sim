@@ -1340,6 +1340,22 @@ async function handle(req, res, pathname, method) {
       } catch (e) { return bad(e.message); }
     }
 
+    // ---- food release from national stockpile to provinces ----
+    // The government (or anyone with GM perms) can release staple food from
+    // the national stockpile (gov.inventory) to specific provinces, or all
+    // provinces equally. Body: { itemId, qty, provinceIds? }.
+    if (pathname === '/api/food/release' && method === 'POST') {
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, 'ent_gov')) return deny('Only the government may release food.');
+      const b = await readBody(req);
+      try {
+        const hh = require('./households');
+        const r = hh.releaseFood(db, b.itemId, b.qty, b.provinceIds, u.user.displayName);
+        store.save(); broadcast('sync');
+        return json(res, 200, r);
+      } catch (e) { return bad(e.message); }
+    }
+
     // ---- stock market (Phase 4.4) ----
     if (pathname === '/api/market/buy' && method === 'POST') {
       const b = await readBody(req);

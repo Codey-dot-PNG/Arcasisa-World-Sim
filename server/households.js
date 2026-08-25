@@ -200,17 +200,14 @@ function runConsumption(db, actor) {
   db.globalVars.lastConsumerSpend = round2(spentTotal);
 }
 
-// Circulating food stock (Phase 1, §6.4). Two feeds and one drain:
-//   1. whatever fraction of staple-food production a property sells on the
-//      domestic market (its `_domesticMarketSalesThisTurn`, recorded by
-//      runEconomy) enters its province's foodStock, weighted by the item's
-//      foodCalorieWeight — instead of vanishing.
-//   2. a configurable fraction of the GOVERNMENT's staple-food inventory is
-//      released into circulation each turn, distributed by province
-//      population share — this is the channel that finally gets imported
-//      livestock to an actual citizen (the seed has no livestock producer).
-//   Drain: households consume against real circulating stock — `need` scaled
-//   from population; famine is now a supply fact. Spoilage decays what's left.
+// Circulating food stock (Phase 1, §6.4). Simplified flow:
+//   1. Domestic-market sales of staple foods feed the NATIONAL POOL
+//      (gov.inventory) instead of per-province stock. All food produced
+//      domestically concentrates in one place.
+//   2. Per-turn consumption: each province drains its own foodStock against
+//      real need; famine is a supply fact. Spoilage decays leftovers.
+//   Food is released from the national pool to provinces via the explicit
+//   /api/food/release endpoint (player-driven, not automatic).
 function runFoodSupply(db, actor) {
   if (!enabled(db)) return;
   const hcfg = cfg(db);
@@ -220,38 +217,26 @@ function runFoodSupply(db, actor) {
     return (it && it.meta && it.meta.stapleFood) ? it.meta : null;
   };
 
-  // 1. direct domestic-market sales feed provincial circulation
-  for (const pr of db.properties) {
-    const sales = pr._domesticMarketSalesThisTurn;
-    if (!Array.isArray(sales) || !sales.length) continue;
-    const p = provById(db, pr.provinceId);
-    if (!p) continue;
-    for (const s of sales) {
-      const meta = stapleMeta(s.itemId);
-      if (!meta || !(s.qty > 0)) continue;
-      p.vars.foodStock = round2((p.vars.foodStock || 0) + s.qty * (meta.foodCalorieWeight || 1));
-    }
-  }
-  // 2. government stockpile release — staples held by the state feed the
-  //    rationing/distribution network, distributed by population share
+  // 1. domestic-market sales feed the national stockpile (gov.inventory)
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
-  const totalPop = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0) || 1;
-  if (gov && Array.isArray(gov.inventory) && hcfg.govFoodReleaseRate > 0) {
-    for (const row of [...gov.inventory]) {
-      const meta = stapleMeta(row.itemId);
-      if (!meta || !(row.qty > 0)) continue;
-      const released = row.qty * (hcfg.govFoodReleaseRate || 0);
-      if (!(released > 0)) continue;
-      row.qty = round2(row.qty - released);
-      if (row.qty <= 0) gov.inventory = gov.inventory.filter(r => r !== row);
-      const weight = meta.foodCalorieWeight || 1;
-      for (const p of db.provinces) {
-        p.vars.foodStock = round2((p.vars.foodStock || 0) + released * weight * ((p.vars.population || 0) / totalPop));
+  if (gov) {
+    gov.inventory = gov.inventory || [];
+    for (const pr of db.properties) {
+      const sales = pr._domesticMarketSalesThisTurn;
+      if (!Array.isArray(sales) || !sales.length) continue;
+      for (const s of sales) {
+        const meta = stapleMeta(s.itemId);
+        if (!meta || !(s.qty > 0)) continue;
+        // Store raw quantity; calorie weight is applied on release to provinces
+        const row = gov.inventory.find(r => r.itemId === s.itemId);
+        if (row) row.qty = round2(row.qty + s.qty);
+        else gov.inventory.push({ itemId: s.itemId, qty: round2(s.qty) });
       }
     }
   }
-  // 3. households buy against real circulating stock — famine is now a supply
-  //    fact, not a spending-derived one. Spoilage decays what's left.
+
+  // 2. households consume from their provincial foodStock; famine is a supply
+  //    fact. Spoilage decays what's left.
   for (const p of db.provinces) {
     const need = (p.vars.population || 0) * (hcfg.foodReqPerCapPerTurn || 0);
     const stock = p.vars.foodStock || 0;
@@ -261,6 +246,50 @@ function runFoodSupply(db, actor) {
     p.vars.foodStock = Math.max(0, round2(p.vars.foodStock * (1 - (hcfg.foodStockDecayRate || 0))));
     if (p.vars.foodSecurity < 30) applyFamineMortality(db, p, actor);
   }
+}
+
+// Release food from the national stockpile (gov.inventory) to specific
+// provinces. Called by the /api/food/release endpoint. Returns a summary
+// object on success or throws on validation error.
+function releaseFood(db, itemId, qty, provinceIds, actor) {
+  const items = db.items || [];
+  const item = items.find(i => i.id === itemId);
+  if (!item) throw new Error('Unknown item.');
+  const meta = item.meta && item.meta.stapleFood ? item.meta : null;
+  if (!meta) throw new Error(item.name + ' is not a staple food.');
+  const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
+  if (!gov) throw new Error('No government entity found.');
+  gov.inventory = gov.inventory || [];
+  const row = gov.inventory.find(r => r.itemId === itemId);
+  const weight = meta.foodCalorieWeight || 1;
+  const stockUnits = row ? row.qty : 0;
+  const requested = Math.round(Number(qty) || 0);
+  if (!(requested > 0)) throw new Error('Quantity must be positive.');
+  if (stockUnits < requested) throw new Error('Not enough in national stockpile (' + fmtNum(Math.round(stockUnits)) + ' available).');
+
+  // Resolve target provinces
+  const provs = (provinceIds && provinceIds.length)
+    ? provinceIds.map(id => db.provinces.find(p => p.id === id)).filter(Boolean)
+    : db.provinces.filter(p => (p.vars.population || 0) > 0);
+  if (!provs.length) throw new Error('No valid target provinces.');
+
+  // Distribute evenly across targets
+  const perProv = round2(requested / provs.length);
+  const delivered = {};
+  for (const p of provs) {
+    p.vars.foodStock = round2((p.vars.foodStock || 0) + perProv * weight);
+    delivered[p.id] = perProv;
+  }
+
+  // Debit the national stockpile
+  row.qty = round2(row.qty - requested);
+  if (row.qty <= 0) gov.inventory = gov.inventory.filter(r => r !== row);
+
+  const totalDelivered = round2(perProv * provs.length);
+  store.log('simulation', 'Food released to provinces',
+    fmtNum(totalDelivered) + ' × ' + item.name + ' → ' + provs.map(p => p.name).join(', '),
+    actor || 'ENGINE', ['ent_gov']);
+  return { itemId, qty: totalDelivered, weight, provinces: delivered };
 }
 
 // Famine thinning — capped, logged, counted in globalVars.famineDeaths.
@@ -574,7 +603,7 @@ function weightedAvg(db, provinceId, group, metricPicker) {
 }
 
 module.exports = {
-  runWages, payWages, runConsumption, runFoodSupply,
+  runWages, payWages, runConsumption, runFoodSupply, releaseFood,
   runInequality, syncDemographics, runMobility, runMortality, refreshHealthStats,
   weightedAvg, slimPopulation, computeGini, enabled
 };

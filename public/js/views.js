@@ -728,6 +728,11 @@ const Views = {
         wrap.appendChild(this.kv(c.name, fmtNum(pos.qty) + ' ×100 leveraged shares · ' + CUR() + fmtNum(val) + ' (entry ' + CUR() + fmtNum(pos.entry) + ')'));
       });
     }
+    // Phase 35 — Org Chart (roster delegation). filterState already narrows
+    // what ships: owners/GM see everything, members see their own entry,
+    // everyone else sees nothing.
+    this.orgChartSection(wrap, e);
+
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
 
@@ -1776,6 +1781,95 @@ const Views = {
     return box;
   },
 
+  /* ---- Phase 35 — roster / delegation --------------------------------- */
+  // Client mirror of ownership.js's one-hop control test (owner, CEO, party
+  // leader, government executive, majority shareholder). Deep chains resolve
+  // server-side; this only gates which UI is offered.
+  chainControlsClient(meId, e) {
+    if (!meId || !e) return false;
+    if (e.id === meId || e.ownerId === meId || e.ceoId === meId) return true;
+    if (Array.isArray(e.executives) && e.executives.includes(meId)) return true;
+    if (e.type === 'party' && e.leaderId === meId) return true;
+    if (e.sharesOutstanding && Array.isArray(e.shareholders)) {
+      const held = e.shareholders.filter(s => s.entityId === meId).reduce((sum, s) => sum + (s.shares || 0), 0);
+      if (held > e.sharesOutstanding / 2) return true;
+    }
+    return false;
+  },
+  orgChartSection(wrap, e) {
+    const roster = Array.isArray(e.roster) ? e.roster : [];
+    const me = W.me.entityId;
+    const iControl = isGM() || this.chainControlsClient(me, e);
+    const SCOPE_LABELS = { company_controls: 'Company', property_controls: 'Property', trade: 'Trade', spend: 'Spend',
+      campaign_minor: 'Minor campaigns', campaign_major: 'Major campaigns', command_units: 'Command units', manage_tenders: 'Tenders' };
+    if (!roster.length && !iControl) return;
+    wrap.appendChild(this.secLabel('Org Chart'));
+    for (const m of roster) {
+      const scopes = ((m.grants || {}).scopes || []).map(s => SCOPE_LABELS[s] || s);
+      const expired = m.expiresAt && new Date(m.expiresAt) < new Date();
+      wrap.appendChild(el('div.var-row',
+        el('span.var-label', entName(m.userId) + (m.title ? ' — ' + m.title : '') + (expired ? ' (expired)' : '')),
+        el('span.var-value', scopes.length ? scopes.join(' · ') : 'rank and file')));
+    }
+    if (iControl) {
+      // Pending over-cap requests from delegated members.
+      const pending = (e.pendingRequests || []).filter(r => r.status === 'pending');
+      if (pending.length) {
+        for (const rq of pending) {
+          wrap.appendChild(el('div.var-row',
+            el('span.var-label', entName(rq.userId) + ' asks: ' + (rq.description || rq.scope) + (rq.amount ? ' (' + CUR() + fmtNum(rq.amount) + ')' : '')),
+            el('span', el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
+              try { await POST('/api/entity/' + e.id + '/requests/' + rq.id + '/approve'); toast('Request approved.'); App.renderView(true); } catch (err) { toast(err.message, true); }
+            } }, 'Approve'),
+              el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px; margin-left:4px;', onclick: async () => {
+                try { await POST('/api/entity/' + e.id + '/requests/' + rq.id + '/deny'); toast('Request denied.'); App.renderView(true); } catch (err) { toast(err.message, true); }
+              } }, 'Deny'))));
+        }
+      }
+      wrap.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.rosterAddModal(e) }, '+ Delegate a member')));
+      for (const m of roster) {
+        wrap.appendChild(el('div', { style: 'display:flex; gap:6px; margin:-2px 0 4px;' },
+          el('button.icon-btn', { style: 'font-size:9px;', title: 'Revoke ' + entName(m.userId), onclick: async () => {
+            try { await PATCH('/api/entity/' + e.id + '/roster', { remove: m.userId }); toast('Member removed.'); App.renderView(); } catch (err) { toast(err.message, true); }
+          } }, '✕ revoke ' + entName(m.userId))));
+      }
+    }
+  },
+  rosterAddModal(e) {
+    const draft = { userId: '', title: '', spendLimitPerTurn: null, expiresAt: null, grants: { scopes: [], properties: [], accounts: [] } };
+    const SCOPE_LABELS = [['company_controls', 'Company settings'], ['property_controls', 'Property settings'],
+      ['trade', 'Buy/sell items'], ['spend', 'Spend money'], ['campaign_minor', 'Minor campaigns'],
+      ['campaign_major', 'Major campaigns'], ['command_units', 'Command units'], ['manage_tenders', 'Tenders']];
+    openModal('DELEGATE TO ' + (e.name || '').toUpperCase(), el('div',
+      el('label.field-label', 'Member entity'), Forms.sel(draft, 'userId', Forms.entOptions(null, true)),
+      el('label.field-label', 'Title'), Forms.text(draft, 'title', 'Treasurer'),
+      el('label.field-label', 'Permissions'),
+      el('div.chip-row', SCOPE_LABELS.map(([k, label]) =>
+        el('button.chip', { class: draft.grants.scopes.includes(k) ? 'active' : '', style: 'font-size:11px;',
+          onclick: (ev) => {
+            const btn = ev.currentTarget;
+            if (draft.grants.scopes.includes(k)) { draft.grants.scopes = draft.grants.scopes.filter(s => s !== k); btn.classList.remove('active'); }
+            else { draft.grants.scopes.push(k); btn.classList.add('active'); }
+          } }, label))),
+      el('label.field-label', 'Spend limit per turn (' + CUR() + ', blank = unlimited)'),
+      Forms.num(draft, 'spendLimitPerTurn'),
+      el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:8px;' },
+        'Members below the ownership chain act only within these scopes. Overspend attempts land in your approval queue instead of being refused.')
+    ), [{
+      label: 'Add to roster', onClick: async () => {
+        if (!draft.userId || draft.userId === '__null__') { toast('Choose a member.', true); throw new Error('cancel'); }
+        try {
+          await PATCH('/api/entity/' + e.id + '/roster', { add: {
+            userId: draft.userId, title: draft.title,
+            grants: { scopes: draft.grants.scopes, spendLimitPerTurn: draft.spendLimitPerTurn ?? null },
+            expiresAt: draft.expiresAt,
+          } });
+          toast('Member added.');
+        } catch (err) { toast(err.message, true); throw new Error('cancel'); }
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+
   /* ---- Property Operations (owner desk) ------------------------------- */
   // Properties can be owned directly by a person, without a company in the
   // ownership chain. This desk gives those owners the same day-to-day levers
@@ -1819,12 +1913,16 @@ const Views = {
       workHours: pr.workHours !== undefined ? pr.workHours : coHours,
       safety: pr.safety !== undefined ? pr.safety : coSafety,
       employees: pr.employees !== undefined ? pr.employees : maxEmp,
+      rdSpend: (pr.vars && pr.vars.rdSpend) || 0,
+      trainingSpend: (pr.vars && pr.vars.trainingSpend) || 0,
       inherit: !(owner && owner.type === 'company') || !draftedOverride
     });
     if (dr.workHours === undefined) dr.workHours = coHours;
     if (dr.safety === undefined) dr.safety = coSafety;
     if (dr.employees === undefined) dr.employees = pr.employees !== undefined ? pr.employees : maxEmp;
     if (dr.inherit === undefined) dr.inherit = !(owner && owner.type === 'company') || !draftedOverride;
+    if (dr.rdSpend === undefined) dr.rdSpend = 0;
+    if (dr.trainingSpend === undefined) dr.trainingSpend = 0;
     // Live preview multiplier: follows the unsaved hours/safety/staffing draft
     // so the output figures move the moment the levers do.
     const wf = this.wfMult({ hours: dr.workHours, safety: dr.safety, employees: dr.employees, cap: maxEmp, invested: pr.upgradeInvested, value: pr.value });
@@ -1833,7 +1931,8 @@ const Views = {
       el('div',
         el('div', { style: 'font-family:var(--font-voice); font-size:20px; font-weight:600;' }, pr.name),
         el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
-          (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—')))));
+          (pr.kind || pr.type || 'property') + ' · ' + (province ? province.name : '—') + ' · owner ' + (owner ? owner.name : '—'))),
+      this.productionEtaChip(pr, wf)));
     // Strike banner (Phase 31) — pr.vars.strike is set by the engine's
     // economy pass while crowds are near this site (see sim.js applyStrikes).
     if (pr.vars && pr.vars.strike) {
@@ -1853,7 +1952,11 @@ const Views = {
     inner.appendChild(el('div.form-grid',
       Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
         'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
-      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'))));
+      Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01')),
+      Forms.field('R&D spend / turn (' + CUR() + ')', Forms.num(dr, 'rdSpend', '1'),
+        'Sustained investment nudges output quality up with diminishing returns. Charged with upkeep at settlement.'),
+      Forms.field('Training spend / turn (' + CUR() + ')', Forms.num(dr, 'trainingSpend', '1'),
+        'Lowers turnover risk below its wage/morale base over time. Charged with upkeep at settlement.')));
 
     inner.appendChild(this.secLabel('Workforce & Safety'));
     inner.appendChild(el('div.form-grid',
@@ -1878,6 +1981,31 @@ const Views = {
       el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;' }, 'WORKER MORALE'),
       this.tradeBar(happ, 100, happ >= 60 ? 'var(--good)' : happ >= 40 ? 'var(--ink-soft)' : 'var(--accent)'),
       el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, happ + '%')));
+    // Site condition (6a): decays each production hour unless the maintenance
+    // spend covers the required upkeep share; condition multiplies output.
+    if (prodMode !== 'none') {
+      const cond = (pr.vars && pr.vars.condition !== undefined) ? Math.round(pr.vars.condition) : 100;
+      const reqUpkeep = Math.round(effUpkeep(pr) * 0.3);
+      const maintNow = (pr.vars && pr.vars.maintenanceSpend) || 0;
+      const maintInput = el('input.text-input', { type: 'number', min: '0', step: '1', style: 'width:130px;', value: String(maintNow), title: 'Spend ≥ ' + CUR() + reqUpkeep + '/turn to stop decay' });
+      inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:8px 0 4px; flex-wrap:wrap;' },
+        el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); letter-spacing:.08em;', title: 'Condition multiplies output. Decays while maintenance spend is below the required upkeep share (' + CUR() + reqUpkeep + '/turn).' }, 'SITE CONDITION'),
+        this.tradeBar(cond, 100, cond >= 70 ? 'var(--good)' : cond >= 40 ? 'var(--ink-soft)' : 'var(--accent)'),
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, cond + '%'),
+        maintInput,
+        el('button.dash-btn', {
+          onclick: async (ev) => {
+            try {
+              await POST('/api/property/' + pr.id + '/maintenance', { maintenanceSpend: Number(maintInput.value) || 0 });
+              toast('Maintenance budget saved.');
+              App.renderView();
+            } catch (err) { toast(err.message, true); }
+          }
+        }, 'Set maintenance/turn')));
+      if ((pr.vars && pr.vars.supplyFulfillment !== undefined && pr.vars.supplyFulfillment !== null && pr.vars.supplyFulfillment < 1) || (pr.requires || []).length) {
+        inner.appendChild(this.requiresTable(pr, wf));
+      }
+    }
     const acc = pr.accident;
     if (acc) {
       inner.appendChild(el('div', { style: 'border:1px solid var(--accent); border-radius:6px; padding:8px 10px; margin:8px 0; background:var(--hover-wash); font-size:12px;' },
@@ -1950,7 +2078,9 @@ const Views = {
             keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn,
             workHours: dr.inherit ? 'inherit' : dr.workHours,
             safety: dr.inherit ? 'inherit' : dr.safety,
-            employees: dr.employees
+            employees: dr.employees,
+            rdSpend: Number(dr.rdSpend) || 0,
+            trainingSpend: Number(dr.trainingSpend) || 0
           });
           if (r && r.property) Object.assign(pr, r.property);
           W.propOpsDraft = null;
@@ -1959,6 +2089,103 @@ const Views = {
         } catch (err) { toast(err.message, true); btn.disabled = false; }
       }
     }, 'Save Property Operations')));
+
+    // Capital projects (6b) — server-priced catalogue, live progress bars.
+    if (prodMode !== 'none') this.projectsSection(inner, pr);
+  },
+
+  // Countdown chip for the hourly production cadence: when the next slice
+  // lands and roughly how much the site makes per world-hour at the current
+  // (unsaved-draft) workforce factor.
+  productionEtaChip(pr, wf) {
+    const cad = S().cadence && S().cadence.production;
+    if (!cad) return null;
+    const secs = Math.max(0, Math.round((cad.nextAt - Date.now()) / 1000));
+    const t = S().settings.time || {};
+    const turnHours = t.unit === 'hour' ? (t.perTurn || 1) : t.unit === 'week' ? 168 * (t.perTurn || 1) : 24 * (t.perTurn || 1);
+    const perHour = ((pr.prodMode === 'goods' ? (pr.produces || []).reduce((s, e) => s + (Number(e.perTurn) || 0), 0) : Number(pr.cashPerTurn) || 0) * wf / Math.max(1, turnHours));
+    return el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); text-align:right; margin-left:auto;' },
+      'NEXT PAYOUT ' + this.untilStr(secs),
+      el('div', '', '≈ ' + fmtNum(perHour, 2) + '/HOUR AT CURRENT DRAFT'));
+  },
+  untilStr(secs) {
+    if (secs >= 3600) return Math.floor(secs / 3600) + 'H ' + Math.floor((secs % 3600) / 60) + 'M';
+    if (secs >= 60) return Math.floor(secs / 60) + 'M ' + (secs % 60) + 'S';
+    return secs + 'S';
+  },
+  // Supply-chain inputs table (Part 4): what the site consumes per unit of
+  // its primary output, and how well it is currently being fed.
+  requiresTable(pr, wf) {
+    const reqs = pr.requires || [];
+    const ful = pr.vars && pr.vars.supplyFulfillment;
+    const wrap = el('div');
+    wrap.appendChild(this.secLabel('Supply Chain Inputs'));
+    if (ful !== undefined && ful !== null) {
+      const pct = Math.round(ful * 100);
+      wrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:8px; margin-bottom:6px;' },
+        el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, 'FULFILLMENT'),
+        this.tradeBar(pct, 100, pct >= 99 ? 'var(--good)' : pct >= 50 ? 'var(--ink-soft)' : 'var(--accent)'),
+        el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, pct + '% OF CAPACITY')));
+    }
+    const tbl = el('table.data', el('thead', el('tr', el('th', 'Input'), el('th.num', 'Per unit made'), el('th.num', 'Needed / turn'), el('th.num', 'Site stock'))));
+    const body = el('tbody');
+    const primaryPerTurn = ((pr.produces || [])[0] || {}).perTurn || 1;
+    const turnHours = (S().settings.time || {}).unit === 'hour' ? (S().settings.time.perTurn || 1)
+      : (S().settings.time || {}).unit === 'week' ? 168 * ((S().settings.time || {}).perTurn || 1)
+      : 24 * ((S().settings.time || {}).perTurn || 1);
+    for (const r of reqs) {
+      const it = itemById(r.itemId);
+      const stock = ((pr.inventory || []).find(x => x.itemId === r.itemId) || {}).qty || 0;
+      body.appendChild(el('tr',
+        el('td', it ? it.name : r.itemId),
+        el('td.num', fmtNum(r.perUnit || 0, 3)),
+        el('td.num', fmtNum((r.perUnit || 0) * primaryPerTurn * wf, 3)),
+        el('td.num', fmtNum(stock, 3))));
+    }
+    tbl.appendChild(body);
+    wrap.appendChild(tbl);
+    wrap.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:-2px 0 6px;' },
+      'INPUTS ARE DRAWN FROM THE SITE INVENTORY EVERY PRODUCTION HOUR — DEPOSIT STOCK VIA THE SITE INVENTORY MODAL.'));
+    return wrap;
+  },
+  // Capital projects panel (6b): server-priced catalogue fetched per site,
+  // active projects with progress bars, cancel with partial refund.
+  projectsSection(inner, pr) {
+    inner.appendChild(this.secLabel('Capital Projects'));
+    const activeProjects = pr.projects || [];
+    if (activeProjects.length) {
+      for (const proj of activeProjects) {
+        const pct = Math.round((proj.progress || 0) * 100);
+        inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin-bottom:6px;' },
+          el('div', { style: 'flex:0 0 190px; font-size:12px;' }, (proj.label || proj.kind) + ' · ' + CUR() + fmtNum(proj.cost)),
+          this.tradeBar(pct, 100, 'var(--good)'),
+          el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); min-width:34px;' }, pct + '%'),
+          el('button.dash-btn', {
+            onclick: async () => {
+              try { await POST('/api/property/' + pr.id + '/projects/' + proj.id + '/cancel'); toast('Project cancelled (refund issued).'); App.renderView(); }
+              catch (err) { toast(err.message, true); }
+            }
+          }, 'Cancel')));
+      }
+    } else {
+      inner.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:6px;' }, 'No projects underway.'));
+    }
+    const catWrap = el('div');
+    inner.appendChild(catWrap);
+    GET('/api/property/' + pr.id + '/projects').then(r => {
+      (r.catalog || []).forEach(spec => {
+        catWrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin-bottom:4px; font-size:12px;' },
+          el('div', { style: 'flex:1;' }, spec.label),
+          el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); min-width:170px;' },
+            CUR() + fmtNum(spec.cost) + ' · ' + Math.round(spec.durationWorldMs / 3600000) + 'h · 50% refund on cancel'),
+          el('button.dash-btn', {
+            onclick: async () => {
+              try { await POST('/api/property/' + pr.id + '/projects', { kind: spec.kind }); toast(spec.label + ' commissioned.'); App.renderView(); }
+              catch (err) { toast(err.message, true); }
+            }
+          }, 'Commission')));
+      });
+    }).catch(() => { });
   },
 
   /* ---- International Trade (Phase 15 — the open market) ---- */
@@ -2116,9 +2343,10 @@ const Views = {
         return row;
       }
       // slider draft persists across re-renders (the day-market tick re-renders
-      // every ~5s and must not wipe a drag in progress); the book's turn stamp
-      // flushes stale drafts when orders regenerate
-      if (W.mktDraftTurn !== (trade.orders || {}).turn) { W.mktDraft = {}; W.mktDraftTurn = (trade.orders || {}).turn; }
+      // every ~5s and must not wipe a drag in progress); the book's monotonic
+      // seq stamp flushes stale drafts when orders regenerate (hourly cadence)
+      const bookStamp = (trade.orders || {}).seq || (trade.orders || {}).turn;
+      if (W.mktDraftTurn !== bookStamp) { W.mktDraft = {}; W.mktDraftTurn = bookStamp; }
       W.mktDraft = W.mktDraft || {};
       const dr = W.mktDraft[order.id + ':' + me.id] = W.mktDraft[order.id + ':' + me.id] || { pct: 0 };
       const preview = el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); flex:1; min-width:210px;' });
@@ -2170,9 +2398,12 @@ const Views = {
     };
     const sortByValue = (a, b) => (b.price * b.qty) - (a.price * a.qty);
     section('Export Orders — foreign powers buying from Arcasia', [...(book.buys || [])].sort(sortByValue), 'sell',
-      'No foreign power is buying anything this turn. Orders regenerate from partner demand every turn — the GM authors demand on the Trade Desk.');
+      'No foreign power is buying anything right now. The order book rerolls on a fixed world-clock cadence — the GM authors demand on the Trade Desk.');
     section('Import Offers — foreign powers selling to Arcasia', [...(book.sells || [])].sort(sortByValue), 'buy',
-      'No foreign power is offering goods this turn. Orders regenerate from partner supply every turn — the GM authors supply on the Trade Desk.');
+      'No foreign power is offering goods right now. The order book rerolls on a fixed world-clock cadence — the GM authors supply on the Trade Desk.');
+
+    // Government tenders (6d): open state procurement, open to any company.
+    this.tendersPanel(inner);
 
     // executed flow + trade value over time
     const hist = trade.history || [];
@@ -2572,6 +2803,136 @@ const Views = {
       inner.appendChild(this.secLabel('Share Price Over Time'));
       inner.appendChild(Charts.chartLine(priceHist, { title: 'SHARE PRICE', yFormat: v => CUR() + v }));
     }
+
+    // ---- standing supply contracts (6c) ----
+    this.contractsPanel(inner, c);
+  },
+
+  /* ---- Phase 35 — contracts & tenders ---------------------------------- */
+  // Convert a world-clock timestamp back to a countdown in seconds using the
+  // clock anchor (mirror of cadence.progress's nextAt math on the server).
+  worldIn(worldMs) {
+    const t = (S().settings.time || {}).clock || {};
+    const anchorWorld = Number(t.anchorWorldMs) || 0;
+    const anchorReal = Number(t.anchorRealMs) || Date.now();
+    const rate = Math.max(0.001, Number(t.minutesPerRealMinute) || 59.5);
+    return Math.max(0, Math.round((anchorReal + (worldMs - anchorWorld) / rate - Date.now()) / 1000));
+  },
+  tendersPanel(inner) {
+    const tenders = (S().tenders || []).filter(t => t.status === 'open' || t.status === 'awarded');
+    inner.appendChild(this.secLabel('Government Tenders'));
+    const holders = this.tradeHolders();
+    if (!tenders.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' },
+        'No tenders are out to bid.' + (isGM() ? ' Open one below.' : '')));
+    }
+    for (const t of tenders) {
+      const it = itemById(t.itemId);
+      const myBid = holders.length && (t.bids || []).find(b => b.entityId === W.tradeAs);
+      const best = (t.bids || []).reduce((m, b) => (b.price > 0 && (m === null || b.price < m)) ? b.price : m, null);
+      inner.appendChild(el('div.stage', { style: 'padding:8px 10px; margin-bottom:8px;' },
+        el('div', { style: 'display:flex; gap:12px; align-items:center; flex-wrap:wrap;' },
+          el('span', { style: 'font-size:12.5px; font-weight:600;' }, t.title || (it ? it.name : t.itemId)),
+          el('span', { style: 'font-family:var(--font-mono); font-size:11px;' }, fmtNum(t.qtyWanted) + ' × ' + (it ? it.name : t.itemId)),
+          el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+            (t.bids || []).length + ' BIDS · BEST ' + (best !== null ? CUR() + fmtNum(best) : '—')),
+          el('span', { style: 'flex:1;' }),
+          el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:' + (t.status === 'open' ? 'var(--ink-soft)' : 'var(--good)') + ';' },
+            t.status === 'open' ? 'CLOSES IN ' + this.untilStr(this.worldIn(t.deadlineWorldMs)) : 'AWARDED')),
+        t.status === 'open' && holders.length ? el('div', { style: 'display:flex; gap:8px; align-items:center; margin-top:6px; flex-wrap:wrap;' },
+          el('span', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, 'BID AS'),
+          el('div.chip-row', holders.map(h => el('button.chip', { class: h.id === W.tenderAs ? 'active' : '', onclick: () => { W.tenderAs = h.id; App.renderView(); } }, h.abbrev || h.name))),
+          el('input.text-input', { id: 'tender-bid-' + t.id, type: 'number', min: '0', step: '0.01', placeholder: CUR() + '/unit', style: 'width:110px;' }),
+          el('button.solid-btn', { style: 'padding:3px 12px; font-size:11px;', onclick: async () => {
+            const input = document.getElementById('tender-bid-' + t.id);
+            try {
+              await POST('/api/tenders/' + t.id + '/bids', { entityId: W.tenderAs || holders[0].id, price: Number(input.value) });
+              toast('Bid submitted.');
+              App.renderView();
+            } catch (err) { toast(err.message, true); }
+          } }, myBid ? 'Update bid' : 'Submit bid'),
+          myBid ? el('span', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint);' }, 'YOUR BID ' + CUR() + fmtNum(myBid.price)) : null) : null));
+    }
+    if (isGM()) {
+      const d = W.tenderDraft = W.tenderDraft || { itemId: '', qtyWanted: 100, durationTurns: 4, deadlineHours: 48, title: '', openerEntityId: 'ent_gov' };
+      if (!d.itemId) { const tradable = S().items.filter(i => i.tradable !== false); d.itemId = (tradable[0] || {}).id; }
+      inner.appendChild(el('div.btn-row',
+        el('button.dash-btn', { onclick: () => openModal('OPEN GOVERNMENT TENDER', el('div',
+          el('label.field-label', 'Title'), Forms.text(d, 'title', 'Winter coal reserve'),
+          el('label.field-label', 'Item'), Forms.sel(d, 'itemId', S().items.filter(i => i.tradable !== false).map(i => [i.id, i.name])),
+          el('label.field-label', 'Quantity wanted'), Forms.num(d, 'qtyWanted'),
+          el('label.field-label', 'Contract duration (turns)'), Forms.num(d, 'durationTurns'),
+          el('label.field-label', 'Bidding window (world hours)'), Forms.num(d, 'deadlineHours')
+        ), [{ label: 'Open tender', onClick: async () => {
+          try { await POST('/api/tenders', { openerEntityId: 'ent_gov', title: d.title, itemId: d.itemId, qtyWanted: Number(d.qtyWanted), durationTurns: Number(d.durationTurns), deadlineHours: Number(d.deadlineHours) }); toast('Tender opened.'); App.renderView(); }
+          catch (err) { toast(err.message, true); throw new Error('cancel'); }
+        } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]) }, '+ Open tender (government)')));
+    }
+  },
+  contractsPanel(inner, co) {
+    const list = (S().contracts || []).filter(x => x.fromEntityId === co.id || x.toEntityId === co.id)
+      .filter(x => ['pending', 'active'].includes(x.status)).slice(-20);
+    inner.appendChild(this.secLabel('Supply Contracts'));
+    if (!list.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' }, 'No standing supply contracts.'));
+    } else {
+      const STATUS_COLOR = { pending: 'var(--ink-soft)', active: 'var(--good)' };
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', ''), el('th', 'Item'), el('th.num', 'Qty / turn'), el('th.num', 'Price'), el('th.num', 'Turns left'), el('th', 'Status'), el('th', ''))),
+        el('tbody', [...list].reverse().map(x => {
+          const it = itemById(x.itemId);
+          const iSell = x.fromEntityId === co.id;
+          const other = entById(iSell ? x.toEntityId : x.fromEntityId);
+          const canAccept = x.status === 'pending' && ((x.proposedBy === x.fromEntityId && x.toEntityId === co.id) || (x.proposedBy === x.toEntityId && x.fromEntityId === co.id));
+          return el('tr',
+            el('td', { style: 'font-size:11px; white-space:nowrap;' }, (iSell ? '→ ' : '← ') + (other ? other.name : '—')),
+            el('td', (it ? it.name : x.itemId)),
+            el('td.num', fmtNum(x.qtyPerTurn)), el('td.num', fmtMoney(x.price)),
+            el('td.num', String(x.turnsRemaining !== undefined ? x.turnsRemaining : '∞')),
+            el('td', { style: 'color:' + (STATUS_COLOR[x.status] || 'var(--ink-soft)') + ';' }, x.status),
+            el('td', { style: 'white-space:nowrap;' },
+              canAccept ? el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
+                try { await POST('/api/contracts/' + x.id + '/accept'); toast('Contract accepted.'); App.renderView(); } catch (err) { toast(err.message, true); }
+              } }, 'Accept') : null,
+              canAccept ? ' ' : null,
+              el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
+                try { await POST('/api/contracts/' + x.id + '/' + (x.status === 'pending' ? 'decline' : 'cancel')); toast('Contract ' + (x.status === 'pending' ? 'declined.' : 'cancelled.')); App.renderView(); } catch (err) { toast(err.message, true); }
+              } }, x.status === 'pending' ? 'Decline' : 'Cancel')));
+        }))));
+    }
+    inner.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.contractModal(co) }, '+ Propose contract')));
+  },
+  contractModal(co) {
+    const d = W.contractDraft = W.contractDraft || {};
+    if (!d.itemId) { const tradable = S().items.filter(i => i.tradable !== false); d.itemId = (tradable[0] || {}).id; }
+    if (!d.qtyPerTurn) d.qtyPerTurn = 50;
+    if (!d.price) d.price = 1;
+    if (!d.turnsRemaining) d.turnsRemaining = 12;
+    if (!d.counterpartyId) { const others = S().entities.filter(e => e.id !== co.id); d.counterpartyId = (others[0] || {}).id; }
+    d.asSeller = d.asSeller !== false;
+    openModal('PROPOSE SUPPLY CONTRACT — ' + (co.name || '').toUpperCase(), el('div',
+      el('label.field-label', 'This company is the…'),
+      el('div.chip-row',
+        el('button.chip', { class: d.asSeller ? 'active' : '', onclick: () => { d.asSeller = true; App.renderView(); } }, 'Seller'),
+        el('button.chip', { class: !d.asSeller ? 'active' : '', onclick: () => { d.asSeller = false; App.renderView(); } }, 'Buyer')),
+      el('label.field-label', 'Counterparty'), Forms.sel(d, 'counterpartyId', S().entities.filter(e => e.id !== co.id).map(e => [e.id, e.name])),
+      el('label.field-label', 'Item'), Forms.sel(d, 'itemId', S().items.filter(i => i.tradable !== false).map(i => [i.id, i.name])),
+      el('label.field-label', 'Quantity per turn'), Forms.num(d, 'qtyPerTurn'),
+      el('label.field-label', 'Price per unit (' + CUR() + ')'), Forms.num(d, 'price', '0.01'),
+      el('label.field-label', 'Duration (turns)'), Forms.num(d, 'turnsRemaining'),
+      el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:6px;' }, 'The counterparty must accept before deliveries begin each production hour.')
+    ), [{
+      label: 'Send proposal', onClick: async () => {
+        try {
+          await POST('/api/contracts', {
+            fromEntityId: d.asSeller ? co.id : d.counterpartyId,
+            toEntityId: d.asSeller ? d.counterpartyId : co.id,
+            itemId: d.itemId, qtyPerTurn: Number(d.qtyPerTurn), price: Number(d.price), turnsRemaining: Number(d.turnsRemaining),
+          });
+          toast('Proposal sent.');
+        } catch (err) { toast(err.message, true); throw new Error('cancel'); }
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
 
   /* ---- Government Finances (President & cabinet) ---- */

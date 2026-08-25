@@ -117,3 +117,27 @@ The single place the world is narrowed per operator. Key rules:
   public) with `deviationPct` and `supportToVotes` deleted.
 
 **When adding state, decide its visibility here** — never rely on the client to hide data.
+
+## Phase 35 additions
+
+| Route | Auth | Notes |
+|---|---|---|
+| GET /api/property/:id/projects | property_controls (propertyId-scoped) | server-priced project catalogue + active list |
+| POST /api/property/:id/projects | property_controls | body: { kind } only — cost/duration/effects are engine-derived |
+| POST /api/property/:id/projects/:projId/cancel | property_controls | 50% refund |
+| POST /api/property/:id/maintenance | property_controls | sets per-turn maintenanceSpend (6a) |
+| PATCH /api/entity/:id/roster | ownership chain / GM | { add \| update \| remove }, scope whitelist enforced |
+| GET /api/entity/:id/roster | chain/GM see all; members see own entry | mirrors filterState rules |
+| GET /api/entity/:id/requests | chain / GM | pending over-cap requests |
+| POST /api/entity/:id/requests/:reqId/approve | chain / GM | replays the request's action snapshot, then deletes the request |
+| POST /api/entity/:id/requests/:reqId/deny | chain / GM | deletes; audit timeline keeps the record |
+| POST /api/contracts | either party's 	rade scope | mutual acceptance required before deliveries start |
+| POST /api/contracts/:id/(accept\|decline\|cancel) | a party's 	rade scope | unaccepted offers lapse after 7 days |
+| POST /api/tenders | GM or manage_tenders on opener entity | opens state procurement |
+| POST /api/tenders/:id/bids | controls(bidder) | one live bid per bidder, updatable until the deadline |
+| POST /api/tenders/:id/close | GM or manage_tenders | force-award before the deadline |
+
+State additions: cadence.{name}.{progress,nextAt,hours}, contracts[],
+	enders[]. Visibility follows the existing trades rule (either side in the
+ownership chain; open/awarded tenders are public procurement). Roster entries
+ship full to chain+GM, own-entry-only to members, stripped otherwise.

@@ -1790,15 +1790,12 @@ function migrate(world) {
     changed = true;
   }
 
-  // ---- Phase 35 — generalized real-time cadence scheduler (schema < 13) ----
-  // Replaces one-off wall-clock gates with a single reusable scheduler. Seeds
-  // _cadence state from the current world-clock time so old worlds don't fire
-  // all cadences immediately on upgrade.
+  // ---- Phase 35 — cadence scheduler, contracts, rosters (schema < 13) ----
+  // One-shot structural defaults for worlds arriving from schema ≤ 12.
   if ((world.schema || 1) < 13) {
-    try { if (require('./cadence').migrate(world)) changed = true; }
-    catch (e) { /* cadence module optional during early boot */ }
-    // Initialize contracts array for standing supply contracts (6c)
+    // Standing supply contracts (6c) and government tenders (6d)
     if (!Array.isArray(world.contracts)) world.contracts = [];
+    if (!Array.isArray(world.tenders)) world.tenders = [];
     // Initialize roster and pendingRequests on every entity (additive, no-op if present)
     for (const ent of (world.entities || [])) {
       if (!Array.isArray(ent.roster)) ent.roster = [];
@@ -1807,6 +1804,42 @@ function migrate(world) {
     world.schema = 13;
     changed = true;
   }
+
+  // ---- Phase 35 completion — requires model + cleanup (schema < 14) -------
+  if ((world.schema || 1) < 14) {
+    if (!Array.isArray(world.contracts)) world.contracts = [];
+    if (!Array.isArray(world.tenders)) world.tenders = [];
+    for (const ent of (world.entities || [])) {
+      if (!Array.isArray(ent.roster)) ent.roster = [];
+      if (!Array.isArray(ent.pendingRequests)) ent.pendingRequests = [];
+      // The orphaned delegates system is retired — roster grants are the one
+      // delegation primitive.
+      if (ent.delegates !== undefined) delete ent.delegates;
+    }
+    for (const pr of (world.properties || [])) {
+      // Supply-chain inputs moved to `requires[].perUnit` (inputs per unit
+      // of primary output); convert any interim `consumes[].perTurn` data.
+      if (Array.isArray(pr.requires) && pr.requires.length && Array.isArray(pr.consumes)) delete pr.consumes;
+      else if (Array.isArray(pr.consumes)) {
+        pr.requires = pr.consumes.filter(c => c && c.itemId)
+          .map(c => ({ itemId: c.itemId, perUnit: Math.max(0, Number(c.perTurn) || 0) }));
+        delete pr.consumes;
+      }
+      // Retire accrual leftovers from the interim hourly-economy experiment.
+      if (pr.vars) { delete pr.vars._prodAccum; delete pr.vars._cashAccum; }
+      if (pr._salesAccum !== undefined) pr._salesAccum = null;
+      if (pr._prodMade !== undefined) pr._prodMade = null;
+    }
+    world.schema = 14;
+    changed = true;
+  }
+
+  // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
+  // is idempotent and additive, so new cadences added by later updates seed
+  // themselves on already-migrated worlds at next load. Old worlds start the
+  // clock from "now" rather than firing everything immediately on upgrade.
+  try { if (require('./cadence').migrate(world)) changed = true; }
+  catch (e) { /* cadence module optional during early boot */ }
 
   return changed;
 }

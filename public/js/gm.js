@@ -841,6 +841,31 @@ const GM = {
       }
     }, 'Save Taxation')));
 
+    // Phase 35 — cadence intervals (world-clock hours between ticks)
+    main.appendChild(Views.secLabel('Real-Time Cadences'));
+    d.cadProdHours = d.cadProdHours === undefined ? (((s.cadence || {}).productionHours) || 1) : d.cadProdHours;
+    d.cadDemoHours = d.cadDemoHours === undefined ? (((s.cadence || {}).demographicsHours) || 4) : d.cadDemoHours;
+    d.cadTradeHours = d.cadTradeHours === undefined ? (((s.cadence || {}).tradeResetHours) || 1) : d.cadTradeHours;
+    d.condDecay = d.condDecay === undefined ? (((s.economy || {}).conditionDecayPerHour) || 0.5) : d.condDecay;
+    main.appendChild(el('div.form-grid',
+      this.field('Production slice (world hours)', this.num(d, 'cadProdHours'), 'How often property output pays out. 1 = every world-hour.'),
+      this.field('Demographics drift (world hours)', this.num(d, 'cadDemoHours')),
+      this.field('Trade desk reroll (world hours)', this.num(d, 'cadTradeHours')),
+      this.field('Condition decay / hour', this.num(d, 'condDecay'), 'Condition points lost per world-hour when maintenance spend is short.')));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', {
+            cadence: {
+              productionHours: Number(d.cadProdHours), demographicsHours: Number(d.cadDemoHours),
+              tradeResetHours: Number(d.cadTradeHours), conditionDecayPerHour: Number(d.condDecay),
+            }
+          });
+          toast('Cadence settings saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Cadences')));
+
     main.appendChild(Views.secLabel('Snapshots & Rollback'));
     const snapBox = el('div', el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Consulting the archive…'));
     main.appendChild(snapBox);
@@ -1077,25 +1102,25 @@ const GM = {
       box.appendChild(el('div.btn-row', el('button.dash-btn', {
         onclick: () => { const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category)); d.produces.push({ itemId: (goods[0] || {}).id, perTurn: 1 }); App.renderView(); }
       }, '+ Add produced item')));
-      // Phase 35 supply chains — input requirements
+      // Phase 35 supply chains — input requirements (requires[].perUnit =
+      // units consumed per 1 unit of the PRIMARY produced item).
       box.appendChild(Views.secLabel('Input Requirements (supply chains)'));
       box.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-        'Required inputs consumed from this property\'s stock each turn. Production scales by the lowest input-availability ratio, so a factory with no ore produces nothing.'));
-      d.consumes = (d.consumes && d.consumes.length) ? d.consumes : [];
-      d.consumes.forEach((row, i) => {
-        const unitOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); padding-bottom:9px; white-space:nowrap;' }, '≈ ' + fmtNum(row.perTurn || 0, 4) + '/turn');
+        'Required inputs, consumed from this property\'s on-site stock each production hour per 1 unit of the primary output. Output scales by the worst input-availability ratio; a site with no ore produces nothing.'));
+      d.requires = (d.requires && d.requires.length) ? d.requires : [];
+      if (d.consumes) delete d.consumes; // retired interim field
+      d.requires.forEach((row, i) => {
         const revInput = el('input.text-input', {
-          type: 'number', min: '0', step: '0.000001', value: row.perTurn || 0,
-          oninput: (e) => { row.perTurn = Math.max(0, Number(e.target.value) || 0); unitOut.textContent = '≈ ' + fmtNum(row.perTurn, 4) + '/turn'; }
+          type: 'number', min: '0', step: '0.000001', value: row.perUnit || 0,
+          oninput: (e) => { row.perUnit = Math.max(0, Number(e.target.value) || 0); }
         });
         box.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:6px; flex-wrap:wrap;' },
           el('div', { style: 'flex:1 1 180px' }, F.field('Item required', F.sel(row, 'itemId', goods.map(it => [it.id, it.name + ' (' + CUR() + fmtNum(it.marketValue) + ')']), () => App.renderView()))),
-          el('div', { style: 'flex:1 1 150px' }, F.field('Units / turn', revInput)),
-          unitOut,
-          el('button.icon-btn', { style: 'padding-bottom:8px;', onclick: () => { d.consumes.splice(i, 1); App.renderView(); } }, '✕')));
+          el('div', { style: 'flex:1 1 150px' }, F.field('Units per unit produced', revInput)),
+          el('button.icon-btn', { style: 'padding-bottom:8px;', onclick: () => { d.requires.splice(i, 1); App.renderView(); } }, '✕')));
       });
       box.appendChild(el('div.btn-row', el('button.dash-btn', {
-        onclick: () => { const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category)); d.consumes.push({ itemId: (goods[0] || {}).id, perTurn: 1 }); App.renderView(); }
+        onclick: () => { const goods = S().items.filter(i => !['Securities', 'Deeds', 'Honours'].includes(i.category)); d.requires.push({ itemId: (goods[0] || {}).id, perUnit: 0.5 }); App.renderView(); }
       }, '+ Add required input')));
     } else if (d.prodMode === 'cash') {
       box.appendChild(el('div.form-grid', this.field('Cash generated / turn (' + CUR() + ')', this.num(d, 'cashPerTurn'))));
@@ -1169,31 +1194,8 @@ const GM = {
     } else {
       main.appendChild(this.varsEditor(d, 'entity'));
     }
-    // Phase 35 delegation — grant specific permissions to other entities
-    if (!isNew) {
-      main.appendChild(Views.secLabel('Delegated Permissions'));
-      main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-        'Delegate specific actions to other entities. Delegates with "all" permission control the entity like an owner.'));
-      d.delegates = Array.isArray(d.delegates) ? d.delegates : [];
-      const VALID_PERMS = [['all', 'Full control'], ['manage', 'Property settings'], ['trade', 'Buy/sell items'], ['hire', 'Workforce changes'], ['finance', 'View finances']];
-      d.delegates.forEach((del, i) => {
-        const ent = S().entities.find(e => e.id === del.entityId);
-        const permChips = VALID_PERMS.map(([k, label]) => {
-          const active = del.permissions && del.permissions.includes(k);
-          return el('button.chip', { class: active ? 'active' : '', style: 'font-size:11px; padding:2px 8px;',
-            onclick: () => { del.permissions = del.permissions || []; if (active) del.permissions = del.permissions.filter(p => p !== k); else del.permissions.push(k); App.renderView(); }
-          }, label);
-        });
-        main.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; margin-bottom:6px; flex-wrap:wrap;' },
-          el('div', { style: 'flex:1 1 180px' }, this.sel(del, 'entityId', this.entOptions(), () => App.renderView())),
-          el('div', { style: 'display:flex; gap:4px; flex-wrap:wrap;' }, ...permChips),
-          el('button.icon-btn', { onclick: () => { d.delegates.splice(i, 1); App.renderView(); } }, '✕')));
-      });
-      main.appendChild(el('div.btn-row', el('button.dash-btn', {
-        onclick: () => { d.delegates.push({ entityId: (S().entities[0] || {}).id, permissions: ['manage'] }); App.renderView(); }
-      }, '+ Add delegate')));
-    }
-    // Phase 35 roster — Org Chart tab for entity members
+    // Phase 35 roster — Org Chart for entity members (the ONE delegation
+    // primitive; roster.userId is an ENTITY id, resolved via ownership.canAct)
     if (!isNew) {
       main.appendChild(Views.secLabel('Org Chart'));
       main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
@@ -1202,25 +1204,30 @@ const GM = {
       const VALID_SCOPES = [['company_controls', 'Company settings'], ['property_controls', 'Property settings'],
         ['trade', 'Buy/sell items'], ['spend', 'Spend money'], ['campaign_minor', 'Minor campaigns'],
         ['campaign_major', 'Major campaigns'], ['command_units', 'Command units'], ['manage_tenders', 'Tenders']];
+      const memberOpts = [['', '- choose member -'], ...this.entOptions(null, true)];
       d.roster.forEach((member, i) => {
-        const user = (S().users || []).find(u => u.entityId === member.userId) || {};
+        member.grants = member.grants || { scopes: [], spendLimitPerTurn: null };
+        member.grants.scopes = Array.isArray(member.grants.scopes) ? member.grants.scopes : [];
         const scopeChips = VALID_SCOPES.map(([k, label]) => {
-          const active = member.grants && member.grants.scopes && member.grants.scopes.includes(k);
+          const active = member.grants.scopes.includes(k);
           return el('button.chip', { class: active ? 'active' : '', style: 'font-size:10px; padding:1px 6px;',
-            onclick: () => { member.grants = member.grants || {}; member.grants.scopes = member.grants.scopes || [];
-              if (active) member.grants.scopes = member.grants.scopes.filter(s => s !== k); else member.grants.scopes.push(k); App.renderView(); }
+            onclick: () => { if (active) member.grants.scopes = member.grants.scopes.filter(s => s !== k); else member.grants.scopes.push(k); App.renderView(); }
           }, label);
         });
+        const limitInput = el('input.text-input', { type: 'number', step: 'any', style: 'max-width:140px;',
+          value: member.grants.spendLimitPerTurn === null || member.grants.spendLimitPerTurn === undefined ? '' : member.grants.spendLimitPerTurn,
+          placeholder: 'unlimited',
+          oninput: (e) => { member.grants.spendLimitPerTurn = e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0); } });
         const expiring = member.expiresAt && member.expiresAt < Date.now();
         main.appendChild(el('div', { style: `display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap; ${expiring ? 'opacity:0.5;' : ''}` },
           el('div', { style: 'flex:1 1 150px' }, this.text(member, 'title', 'Title')),
-          el('div', { style: 'flex:1 1 150px' }, el('span', { style: 'font-size:12px;' }, user.displayName || member.userId)),
-          el('div', { style: 'flex:1 1 200px' }, this.num(member.grants || {}, 'spendLimitPerTurn', '0', 'Spend limit/turn (0=unlimited)')),
+          el('div', { style: 'flex:1 1 200px' }, this.sel(member, 'userId', memberOpts, () => App.renderView())),
+          el('div', { style: 'flex:1 1 160px' }, limitInput),
           el('div', { style: 'display:flex; gap:3px; flex-wrap:wrap;' }, ...scopeChips),
           el('button.icon-btn', { onclick: () => { d.roster.splice(i, 1); App.renderView(); } }, '✕')));
       });
       main.appendChild(el('div.btn-row', el('button.dash-btn', {
-        onclick: () => { d.roster = d.roster || []; d.roster.push({ userId: '', title: '', grants: { scopes: [], spendLimitPerTurn: null }, expiresAt: null }); App.renderView(); }
+        onclick: () => { d.roster = d.roster || []; d.roster.push({ userId: '', title: '', grants: { scopes: [], spendLimitPerTurn: null, properties: [], accounts: [] }, expiresAt: null }); App.renderView(); }
       }, '+ Add member')));
       // Pending requests badge
       const pending = (d.pendingRequests || []).filter(r => r.status === 'pending');

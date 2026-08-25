@@ -67,8 +67,8 @@ const server = http.createServer(async (req, res) => {
   sim.init(api.broadcast);
   sim.updateDerived();
   sim.scheduleAuto();
-  // Phase 35 — register default cadence handlers (stock ticker, demographics,
-  // trade reset). Must run after all modules are loaded.
+  // Phase 35 — register default cadence handlers (hourly production,
+  // demographics drift, trade-desk reroll). Must run after all modules are loaded.
   try { require('./server/cadence').registerDefaults(); } catch (e) { /* cadence optional */ }
 
   server.listen(PORT, () => {

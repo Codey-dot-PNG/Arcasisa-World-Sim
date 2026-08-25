@@ -170,7 +170,10 @@ function canAct(db, userId, entityId, scope, opts) {
 
 // ---- Phase 35 — pending requests (approval queue) ----
 
-// Create a pending request. Returns the request object.
+// Create a pending request. Returns the request object. `opts.action` is an
+// optional snapshot of the exact mutation the requester wanted — approving
+// replays it verbatim with the cap bypassed (that replay is what an
+// approval IS; see api.js executeRequestAction).
 function createRequest(db, entityId, userId, scope, opts) {
   db = db || store.get();
   const entity = db.entities.find(e => e.id === entityId);
@@ -185,6 +188,7 @@ function createRequest(db, entityId, userId, scope, opts) {
     accountId: opts && opts.accountId || null,
     unitId: opts && opts.unitId || null,
     description: opts && opts.description || '',
+    action: (opts && opts.action) || null,
     createdAt: Date.now(),
     status: 'pending'
   };

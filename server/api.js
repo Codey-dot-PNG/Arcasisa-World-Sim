@@ -258,6 +258,33 @@ function cmdAccessOf(db, war, u) {
       ownership.canAct(db, u.user.entityId, war.protest.organizerId, 'command_units')));
   return { att, def };
 }
+
+// Phase 35 — approval-queue replay. An over-cap request stores a snapshot of
+// the exact mutation the requester wanted (action), so approving replays THE
+// ORIGINAL intent — not "money to whoever happens to own the entity".
+// Returns a human result string; throws on failure (caller keeps the request
+// pending so the owner can retry or deny).
+function executeRequestAction(db, rq, actor) {
+  const a = rq.action || {};
+  if (a.kind === 'transfer') {
+    const from = db.accounts.find(x => x.id === a.fromAccountId);
+    const to = db.accounts.find(x => x.id === a.toAccountId);
+    if (!from || !to) throw new Error('The source or destination account no longer exists.');
+    if (!(a.amount > 0)) throw new Error('Invalid amount.');
+    if (from.balance < a.amount) throw new Error('Insufficient funds on the source account.');
+    sim.txn(from.id, to.id, Math.round(a.amount * 100) / 100, String(a.memo || '').slice(0, 140), actor, 'transfer');
+    return `Transferred ${db.settings.currency}${Math.round(a.amount * 100) / 100}.`;
+  }
+  if (a.kind === 'campaign') {
+    election.runCampaign(db, a.partyId, a.province, a.campaignId, Math.round(Number(a.money) || 0),
+      Array.isArray(a.materials) ? a.materials : [], actor,
+      { targetGroup: a.targetGroup || undefined, defamePartyId: a.defamePartyId || undefined });
+    return 'Campaign executed.';
+  }
+  // Permission-only scopes (property_controls etc.) have no mutation to
+  // replay — the recorded approval itself is the grant of record.
+  return null;
+}
 function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
@@ -297,10 +324,6 @@ function filterState(u) {
     if (!seeInv(e.id)) delete out.inventory;
     if (e.type === 'company' && !p.companyFinancials && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
       delete out.vars; delete out.shareholders; delete out.sharesOutstanding; delete out.x100;
-    }
-    // Phase 35 delegation: delegates are only visible to the entity owner and GMs
-    if (out.delegates && !p.gm && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
-      delete out.delegates;
     }
     // Phase 35 roster visibility: full list to owner chain + GM; own entry to
     // roster members not in the chain; strip entirely for everyone else.
@@ -371,6 +394,15 @@ function filterState(u) {
     // fetch); charts that want the whole record pull GET /api/history once.
     history: histView(db, p).slice(-HIST_STATE_CAP),
     timeline, trades,
+    // Phase 35 — standing supply contracts (6c): same visibility rule as
+    // negotiated trades (either side in the ownership chain, GM sees all).
+    contracts: p.gm ? (db.contracts || [])
+      : (db.contracts || []).filter(c => controlled.has(c.fromEntityId) || controlled.has(c.toEntityId)),
+    // Government tenders (6d): open tenders are public procurement — every
+    // operator sees them and may bid through a company they control. Bid
+    // detail ships with the tender (bid prices aren't sensitive; it's how a
+    // market works), but only GMs see cancelled/expired history beyond 40.
+    tenders: p.gm ? (db.tenders || []) : (db.tenders || []).filter(t => t.status === 'open' || t.status === 'awarded').slice(-40),
     elections: db.elections,
     // Phase 33 — the live election is a public spectacle (everyone watches
     // the count, like the war front), but the official totals and the count's
@@ -668,16 +700,26 @@ async function handle(req, res, pathname, method) {
       if (from.id === to.id) return bad('Cannot transfer to the same account.');
       if (!(amount > 0)) return bad('Amount must be positive.');
       const isGm = u.role.perms.gm;
-      // Phase 35: use canAct with spend scope; checks roster spendLimitPerTurn
+      // Phase 35: canAct with the spend scope — roster grants narrow by
+      // account and spendLimitPerTurn. Over-cap (but otherwise allowed)
+      // requests go to the owner's approval queue with a snapshot of the
+      // exact transfer, so approving replays the real intent.
       if (!isGm && !ownership.canAct(db, u.user.entityId, from.ownerId, 'spend', { amount, accountId: from.id })) {
-        // Check if there's a roster grant but amount exceeds cap — create pending request
+        // Check if there's a roster grant but amount exceeds cap - create pending request
         const grant = ownership.findGrant(db.entities.find(e => e.id === from.ownerId), u.user.entityId);
-        if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined && amount > grant.grants.spendLimitPerTurn) {
-          const req = ownership.createRequest(db, from.ownerId, u.user.entityId, 'spend', { amount, accountId: from.id, description: b.memo || `Transfer ₳${amount}` });
-          store.log('roster', `Over-cap transfer request created`, `₳${amount} from ${from.name}`, u.user.displayName, [from.ownerId]);
+        if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined
+            && ownership.grantCoversAccount(grant, from.id) && amount > grant.grants.spendLimitPerTurn) {
+          const req = ownership.createRequest(db, from.ownerId, u.user.entityId, 'spend', {
+            amount, accountId: from.id,
+            description: b.memo || `Transfer ${db.settings.currency}${amount}`,
+            action: { kind: 'transfer', fromAccountId: from.id, toAccountId: to.id, amount, memo: String(b.memo || '').slice(0, 140) },
+          });
+          store.log('roster', `Over-cap transfer request created`, `${db.settings.currency}${amount} from ${from.name}`, u.user.displayName, [from.ownerId]);
           store.save(); broadcast('sync');
           return json(res, 202, { ok: false, pending: true, requestId: req.id, message: 'Transfer exceeds your spend limit. Request submitted for owner approval.' });
         }
+        return deny('You do not control the source account.');
+      }
         return deny('You do not control the source account.');
       }
       if (!isGm && from.balance < amount) return bad('Insufficient funds.');
@@ -820,7 +862,21 @@ async function handle(req, res, pathname, method) {
         if (typeof o.attackId === 'string') return true;
         return inBounds(o.dest);
       });
-      war.commandUnits(db, side, orders, u.user.displayName, key);
+      // Phase 5 delegation: a command_units roster grantee whose grant
+      // carries unitFilter may only command the units its grant covers.
+      // Chain/GM/government clearance commands everything, as before.
+      const controllerId = side === 'def' ? doc.defenderId
+        : (doc.kind === 'protest' && doc.protest ? doc.protest.organizerId : null);
+      const perms = u.role.perms;
+      const fullAccess = !!(perms.gm ||
+        (side === 'def' && (perms.government || (perms.mapLayers || []).includes('military'))) ||
+        (controllerId && ownership.controls(u.user.entityId, controllerId)));
+      let finalOrders = orders;
+      if (!fullAccess && controllerId) {
+        finalOrders = orders.filter(o => ownership.canAct(db, u.user.entityId, controllerId, 'command_units', { unitId: o.unitId }));
+        if (!finalOrders.length) return deny('Your command grant does not cover those units.');
+      }
+      war.commandUnits(db, side, finalOrders, u.user.displayName, key);
       // save WITHOUT broadcast: a move order only touches db.war.units, and
       // every war-watching client pulls that through its ~1s /api/war/state
       // heartbeat. A per-order broadcast forced EVERY client (war-watching or
@@ -966,22 +1022,16 @@ async function handle(req, res, pathname, method) {
       const pr = db.properties.find(p => p.id === propertyControlsMatch[1]);
       if (!pr) return bad('No such property.');
       const gm = u.role.perms.gm;
-      // Phase 35: use canAct with property_controls scope; falls back to roster grants
+      // Phase 35: canAct with property_controls scope, narrowed to THIS
+      // property via the grant's properties list. Controls changes are not
+      // spends, so there is nothing for the approval queue to replay — a
+      // failed check is simply denied.
       if (!gm && !pr.ownerId) return deny('Property has no owner.');
       if (!gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) {
-        // Check if the request would exceed spend cap — create pending request instead of 403
-        const b2 = await readBody(req);
-        const grant = ownership.findGrant(db.entities.find(e => e.id === pr.ownerId), u.user.entityId);
-        if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined) {
-          const req2 = ownership.createRequest(db, pr.ownerId, u.user.entityId, 'property_controls', { propertyId: pr.id, description: `Property controls update: ${pr.name}` });
-          store.log('roster', `Over-cap request created`, `${pr.name} controls`, u.user.displayName, [pr.ownerId]);
-          store.save(); broadcast('sync');
-          return json(res, 202, { ok: false, pending: true, requestId: req2.id, message: 'Request submitted for owner approval.' });
-        }
         return deny('You do not control this property.');
       }
       const b = await readBody(req);
-      // Production line changes require company_controls or property_controls with full scope
+      // Production line changes require company_controls or GM
       if (!gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'company_controls') && (b.prodMode !== undefined || Array.isArray(b.produces) || b.cashPerTurn !== undefined)) {
         return deny('Only the Game Master or company controller may manage the production line.');
       }
@@ -1036,11 +1086,15 @@ async function handle(req, res, pathname, method) {
           itemId: String(row.itemId || ''), perTurn: cleanQty(row.perTurn)
         })).filter(row => row.itemId && row.perTurn >= 0 && db.items.some(i => i.id === row.itemId));
       }
-      // Phase 35 supply chains — input requirements
-      if (Array.isArray(b.consumes)) {
-        pr.consumes = b.consumes.slice(0, 32).map(row => ({
-          itemId: String(row.itemId || ''), perTurn: cleanQty(row.perTurn)
-        })).filter(row => row.itemId && row.perTurn >= 0 && db.items.some(i => i.id === row.itemId));
+      // Phase 35 supply chains — input requirements (Part 4). perUnit is
+      // expressed against ONE unit of the property's primary output; the
+      // engine consumes inputs from the site inventory each production hour.
+      if (Array.isArray(b.requires)) {
+        pr.requires = b.requires.slice(0, 32).map(row => ({
+          itemId: String(row.itemId || ''), perUnit: cleanQty(row.perUnit)
+        })).filter(row => row.itemId && row.perUnit >= 0 && db.items.some(i => i.id === row.itemId));
+        pr.vars = pr.vars || {};
+        pr.vars.supplyFulfillment = null; // recomputed on the next hourly tick
       }
       if (b.cashPerTurn !== undefined) pr.cashPerTurn = Math.max(0, cleanQty(b.cashPerTurn));
       store.log('economy', `${pr.name} adjusts operations`,
@@ -1066,44 +1120,12 @@ async function handle(req, res, pathname, method) {
       }
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, property: {
-        id: pr.id, prodMode: pr.prodMode, produces: pr.produces || [], consumes: pr.consumes || [], cashPerTurn: pr.cashPerTurn || 0,
+        id: pr.id, prodMode: pr.prodMode, produces: pr.produces || [], requires: pr.requires || [], cashPerTurn: pr.cashPerTurn || 0,
         keepPct: pr.keepPct, keepPctByItem: pr.keepPctByItem || {}, wagePerTurn: pr.wagePerTurn,
         workHours: pr.workHours, safety: pr.safety, maxEmployees: pr.maxEmployees,
         employees: pr.employees, upgradeInvested: pr.upgradeInvested || 0,
         workerHappiness: pr.workerHappiness, accident: pr.accident || null
       }});
-    }
-
-    // ---- Phase 35 delegation ----
-    // Manage delegates on an entity: add, update, or remove delegation entries.
-    // Only the entity's owner (or GM) may manage delegates.
-    if (pathname === '/api/delegate' && method === 'POST') {
-      const b = await readBody(req);
-      const entityId = String(b.entityId || '');
-      const entity = db.entities.find(e => e.id === entityId);
-      if (!entity) return bad('Unknown entity.');
-      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may manage delegates.');
-      const targetEntityId = String(b.delegateEntityId || '');
-      const targetEntity = db.entities.find(e => e.id === targetEntityId);
-      if (!targetEntity) return bad('Unknown delegate entity.');
-      if (targetEntityId === entityId) return bad('Cannot delegate to yourself.');
-      const VALID_PERMS = ['all', 'manage', 'trade', 'hire', 'finance'];
-      const perms = Array.isArray(b.permissions) ? b.permissions.filter(p => VALID_PERMS.includes(p)) : [];
-      if (!perms.length) return bad('Provide at least one permission: ' + VALID_PERMS.join(', '));
-      entity.delegates = Array.isArray(entity.delegates) ? entity.delegates : [];
-      const existing = entity.delegates.find(d => d.entityId === targetEntityId);
-      if (b.remove) {
-        entity.delegates = entity.delegates.filter(d => d.entityId !== targetEntityId);
-        store.log('delegation', `${entity.name} delegate removed`, `${targetEntity.name}`, u.user.displayName, [entityId, targetEntityId]);
-      } else if (existing) {
-        existing.permissions = perms;
-        store.log('delegation', `${entity.name} delegate updated`, `${targetEntity.name}: ${perms.join(', ')}`, u.user.displayName, [entityId, targetEntityId]);
-      } else {
-        entity.delegates.push({ entityId: targetEntityId, permissions: perms });
-        store.log('delegation', `${entity.name} delegate added`, `${targetEntity.name}: ${perms.join(', ')}`, u.user.displayName, [entityId, targetEntityId]);
-      }
-      store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, delegates: entity.delegates });
     }
 
     // ---- Phase 35 — roster management ----
@@ -1116,7 +1138,7 @@ async function handle(req, res, pathname, method) {
       const roster = Array.isArray(entity.roster) ? entity.roster : [];
       // Members see only their own entry; owners/GM see all
       const isOwner = u.user.entityId === entityId || ownership.controls(u.user.entityId, entityId);
-      const visible = (p.gm || isOwner) ? roster : roster.filter(r => r.userId === u.user.entityId);
+      const visible = (u.role.perms.gm || isOwner) ? roster : roster.filter(r => r.userId === u.user.entityId);
       return json(res, 200, { roster: visible });
     }
     // PATCH /api/entity/:id/roster — add, update, or remove roster members
@@ -1125,7 +1147,7 @@ async function handle(req, res, pathname, method) {
       const entityId = rosterPatchMatch[1];
       const entity = db.entities.find(e => e.id === entityId);
       if (!entity) return bad('Unknown entity.');
-      if (!p.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may manage the roster.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may manage the roster.');
       const b = await readBody(req);
       entity.roster = Array.isArray(entity.roster) ? entity.roster : [];
       const VALID_SCOPES = ['all', 'company_controls', 'property_controls', 'trade', 'spend', 'campaign_minor', 'campaign_major', 'command_units', 'manage_tenders'];
@@ -1190,65 +1212,59 @@ async function handle(req, res, pathname, method) {
       const entity = db.entities.find(e => e.id === entityId);
       if (!entity) return bad('Unknown entity.');
       const isOwner = u.user.entityId === entityId || ownership.controls(u.user.entityId, entityId);
-      if (!p.gm && !isOwner) return deny('Only the owner may view pending requests.');
+      if (!u.role.perms.gm && !isOwner) return deny('Only the owner may view pending requests.');
       const requests = Array.isArray(entity.pendingRequests) ? entity.pendingRequests : [];
       return json(res, 200, { requests: requests.filter(r => r.status === 'pending') });
     }
-    // POST /api/entity/:id/requests/:reqId/approve
+    // POST /api/entity/:id/requests/:reqId/approve — replays the request's
+    // original action with the cap bypassed (that is what the approval IS),
+    // then removes the request. The audit timeline keeps the permanent
+    // record. A failed replay leaves the request pending for a retry.
     const approveMatch = pathname.match(/^\/api\/entity\/([\w-]+)\/requests\/([\w-]+)\/approve$/);
     if (approveMatch && method === 'POST') {
       const entityId = approveMatch[1];
       const reqId = approveMatch[2];
       const entity = db.entities.find(e => e.id === entityId);
       if (!entity) return bad('Unknown entity.');
-      if (!p.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may approve requests.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may approve requests.');
       const req = ownership.findRequest(entity, reqId);
       if (!req) return bad('Request not found or already processed.');
-      const result = ownership.approveRequest(db, entity, req, u.user.entityId);
-      if (!result.ok) return bad(result.error);
-      // Execute the original action (replay through normal route logic with cap bypassed)
-      try {
-        if (req.scope === 'trade' || req.scope === 'spend') {
-          // Execute the spend — transfer money from the requester's account
-          const fromAcct = req.accountId ? db.accounts.find(a => a.id === req.accountId) : null;
-          const toAcct = db.accounts.find(a => a.ownerId === entityId);
-          if (fromAcct && toAcct && req.amount > 0) {
-            require('./sim').txn(fromAcct.id, toAcct.id, req.amount, `Approved request: ${req.description}`, u.user.displayName, 'transfer');
-          }
-        }
-        // Other scopes (property_controls, campaign_minor, etc.) are permission-only
-        // and don't need replay — the approval just grants the action.
-      } catch (e) {
-        store.log('roster', `Request execution failed`, `${reqId}: ${e.message}`, 'SYSTEM', [entityId]);
-      }
-      store.log('roster', `${entity.name} request approved`, `${req.scope} — ${req.description || req.amount}`, u.user.displayName, [entityId]);
+      let resultNote;
+      try { resultNote = executeRequestAction(db, req, u.user.displayName); }
+      catch (e) { return bad('Approval could not be executed: ' + e.message); }
+      ownership.approveRequest(db, entity, req, u.user.entityId);
+      entity.pendingRequests = entity.pendingRequests.filter(r => r.id !== reqId);
+      store.log('roster', `${entity.name} request approved${resultNote ? ' — ' + resultNote : ''}`,
+        `${req.scope} — ${req.description || req.amount}`, u.user.displayName, [entityId]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, request: req });
+      return json(res, 200, { ok: true });
     }
-    // POST /api/entity/:id/requests/:reqId/deny
+    // POST /api/entity/:id/requests/:reqId/deny — removes the request; the
+    // denial lives on in the audit timeline.
     const denyMatch = pathname.match(/^\/api\/entity\/([\w-]+)\/requests\/([\w-]+)\/deny$/);
     if (denyMatch && method === 'POST') {
       const entityId = denyMatch[1];
       const reqId = denyMatch[2];
       const entity = db.entities.find(e => e.id === entityId);
       if (!entity) return bad('Unknown entity.');
-      if (!p.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may deny requests.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('Only the owner may deny requests.');
       const req = ownership.findRequest(entity, reqId);
       if (!req) return bad('Request not found or already processed.');
-      const result = ownership.denyRequest(db, entity, req, u.user.entityId);
-      if (!result.ok) return bad(result.error);
+      ownership.denyRequest(db, entity, req, u.user.entityId);
+      entity.pendingRequests = entity.pendingRequests.filter(r => r.id !== reqId);
       store.log('roster', `${entity.name} request denied`, `${req.scope} — ${req.description || req.amount}`, u.user.displayName, [entityId]);
       store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, request: req });
+      return json(res, 200, { ok: true });
     }
 
     // ---- 6a. Property maintenance spend ----
     // Owner/manager sets maintenanceSpend per turn; controls condition decay.
+    // Charged through runEconomy's expense settlement like any other spend.
     if (pathname.match(/^\/api\/property\/[\w-]+\/maintenance$/) && method === 'POST') {
       const propId = pathname.split('/')[3];
       const pr = db.properties.find(p => p.id === propId);
       if (!pr) return bad('No such property.');
-      if (!u.role.perms.gm && !ownership.hasPermission(u.user.entityId, pr.ownerId, 'manage')) return deny('No permission.');
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) return deny('No permission.');
       const b = await readBody(req);
       const spend = Math.max(0, Number(b.maintenanceSpend) || 0);
       pr.vars = pr.vars || {};
@@ -1259,31 +1275,41 @@ async function handle(req, res, pathname, method) {
     }
 
     // ---- 6b. Build queue / capital projects ----
-    // Commission a project on a property. Owner/manager pays cost up front.
-    if (pathname.match(/^\/api\/property\/[\w-]+\/projects$/) && method === 'POST') {
-      const propId = pathname.split('/')[3];
-      const pr = db.properties.find(p => p.id === propId);
+    // GET returns the server-priced catalogue for THIS property (the client
+    // never computes costs — see PROJECT_KINDS in sim.js).
+    const projMatch = pathname.match(/^\/api\/property\/([\w-]+)\/projects$/);
+    if (projMatch && method === 'GET') {
+      const pr = db.properties.find(p => p.id === projMatch[1]);
       if (!pr) return bad('No such property.');
-      if (!u.role.perms.gm && !ownership.hasPermission(u.user.entityId, pr.ownerId, 'manage')) return deny('No permission.');
+      const catalog = Object.keys(sim.PROJECT_KINDS).map(kind => sim.projectSpecFor(kind, pr))
+        .filter(Boolean).map(s => ({ kind: s.kind, label: s.label, cost: s.cost,
+          durationWorldMs: s.durationWorldMs, cancelRefundPct: s.cancelRefundPct }));
+      return json(res, 200, { catalog, active: pr.projects || [] });
+    }
+    // POST commissions a project. The body carries ONLY the kind — cost,
+    // duration and completion effects are decided by the engine.
+    if (projMatch && method === 'POST') {
+      const pr = db.properties.find(p => p.id === projMatch[1]);
+      if (!pr) return bad('No such property.');
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) return deny('No permission.');
       const b = await readBody(req);
-      const cost = Math.round(Number(b.cost) || 0);
-      if (!(cost > 0)) return bad('Project cost must be positive.');
-      const durationWorldMs = Math.round(Number(b.durationWorldMs) || 3600000);
-      const kind = String(b.kind || 'upgrade');
-      const onComplete = b.onComplete || {};
+      const spec = sim.projectSpecFor(String(b.kind || ''), pr);
+      if (!spec) return bad('Unknown project kind.');
+      pr.projects = Array.isArray(pr.projects) ? pr.projects : [];
+      if (pr.projects.filter(p => p.status === 'active').length >= 3) return bad('This site already has 3 projects underway.');
       const owner = db.entities.find(e => e.id === pr.ownerId);
       if (!owner) return bad('Property has no owner.');
-      const acct = db.accounts.find(a => a.ownerId === owner.id);
-      if (!acct || acct.balance < cost) return bad('Insufficient funds.');
-      // Deduct cost
-      require('./sim').txn(acct.id, null, cost, `Project: ${kind}`, u.user.displayName, 'withdraw');
-      pr.projects = Array.isArray(pr.projects) ? pr.projects : [];
+      const acct = sim.primaryAccount(owner.id, true);
+      if (!acct || acct.balance < spec.cost) return bad('Insufficient funds.');
+      sim.txn(acct.id, null, spec.cost, `Project: ${spec.label}`, u.user.displayName, 'withdraw');
       const proj = {
-        id: store.uid('proj'), kind, cost, startedAtWorldMs: currentWorldMs(db),
-        durationWorldMs, progress: 0, cancelRefundPct: 0.5, onComplete
+        id: store.uid('proj'), kind: spec.kind, label: spec.label, cost: spec.cost,
+        startedAtWorldMs: cadence.currentWorldMs(db), durationWorldMs: spec.durationWorldMs,
+        progress: 0, cancelRefundPct: spec.cancelRefundPct, onComplete: spec.onComplete,
+        status: 'active',
       };
       pr.projects.push(proj);
-      store.log('economy', `${pr.name} project commissioned`, `${kind} — ${db.settings.currency}${cost}`, u.user.displayName, [pr.id]);
+      store.log('economy', `${pr.name} project commissioned`, `${spec.label} — ${db.settings.currency}${spec.cost}`, u.user.displayName, [pr.id]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, project: proj });
     }
@@ -1294,7 +1320,7 @@ async function handle(req, res, pathname, method) {
       const projId = parts[5];
       const pr = db.properties.find(p => p.id === propId);
       if (!pr || !Array.isArray(pr.projects)) return bad('No such property or project.');
-      if (!u.role.perms.gm && !ownership.hasPermission(u.user.entityId, pr.ownerId, 'manage')) return deny('No permission.');
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) return deny('No permission.');
       const idx = pr.projects.findIndex(p => p.id === projId);
       if (idx < 0) return bad('Unknown project.');
       const proj = pr.projects[idx];
@@ -1302,8 +1328,8 @@ async function handle(req, res, pathname, method) {
       const refund = Math.round(proj.cost * (proj.cancelRefundPct || 0.5));
       const owner = db.entities.find(e => e.id === pr.ownerId);
       if (owner) {
-        const acct = db.accounts.find(a => a.ownerId === owner.id);
-        if (acct && refund > 0) require('./sim').txn(null, acct.id, refund, `Project refund: ${proj.kind}`, u.user.displayName, 'deposit');
+        const acct = sim.primaryAccount(owner.id, true);
+        if (acct && refund > 0) sim.txn(null, acct.id, refund, `Project refund: ${proj.kind}`, u.user.displayName, 'deposit');
       }
       pr.projects.splice(idx, 1);
       store.log('economy', `${pr.name} project cancelled`, `Refunded ${db.settings.currency}${refund}`, u.user.displayName, [pr.id]);
@@ -1319,23 +1345,31 @@ async function handle(req, res, pathname, method) {
       const toEntityId = String(b.toEntityId || '');
       const itemId = String(b.itemId || '');
       const qtyPerTurn = Math.round(Number(b.qtyPerTurn) || 0);
-      const price = Math.round(Number(b.price) || 0);
-      const turnsRemaining = Math.round(Number(b.turnsRemaining) || 12);
+      const price = Math.round(Number(b.price) * 100) / 100;
+      const turnsRemaining = Math.max(1, Math.min(52, Math.round(Number(b.turnsRemaining) || 12)));
       if (!fromEntityId || !toEntityId || !itemId || !(qtyPerTurn > 0) || !(price > 0)) return bad('Missing contract fields.');
+      if (fromEntityId === toEntityId) return bad('A contract needs two different parties.');
       if (!db.items.some(i => i.id === itemId)) return bad('Unknown item.');
-      // Only the from-entity's controller can propose
-      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, fromEntityId)) return deny('Only the seller may propose a contract.');
+      // Either side's controller may propose; the OTHER side must accept.
+      const isGm = u.role.perms.gm;
+      const proposingFrom = isGm || ownership.canAct(db, u.user.entityId, fromEntityId, 'trade');
+      const proposingTo = isGm || ownership.canAct(db, u.user.entityId, toEntityId, 'trade');
+      if (!proposingFrom && !proposingTo) return deny('You do not control either party of this contract.');
       db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
       const contract = {
         id: store.uid('cont'), fromEntityId, toEntityId, itemId, qtyPerTurn, price,
-        turnsRemaining, autoRenew: !!b.autoRenew, status: 'pending', proposedBy: u.user.entityId
+        turnsRemaining, autoRenew: !!b.autoRenew, status: 'pending',
+        proposedBy: u.user.entityId, createdAt: Date.now(),
+        offerExpiresAtRealMs: Date.now() + 7 * 24 * 60 * 60 * 1000, // unaccepted offers lapse
       };
       db.contracts.push(contract);
       store.log('economy', `Contract proposed`, `${qtyPerTurn}× ${itemId} @ ${db.settings.currency}${price}/unit`, u.user.displayName, [fromEntityId, toEntityId]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, contract });
     }
-    // Accept/decline/cancel a contract
+    // Accept / decline / cancel a contract. Acceptance belongs to whichever
+    // party did NOT propose; either party (trade scope) may cancel while it
+    // is still pending or active — deliveries stop on the next hourly tick.
     if (pathname.match(/^\/api\/contracts\/[\w-]+\/(accept|decline|cancel)$/) && method === 'POST') {
       const parts = pathname.split('/');
       const contractId = parts[3];
@@ -1343,19 +1377,88 @@ async function handle(req, res, pathname, method) {
       db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
       const contract = db.contracts.find(c => c.id === contractId);
       if (!contract) return bad('Unknown contract.');
+      const isGm = u.role.perms.gm;
+      const controlsFrom = isGm || ownership.canAct(db, u.user.entityId, contract.fromEntityId, 'trade');
+      const controlsTo = isGm || ownership.canAct(db, u.user.entityId, contract.toEntityId, 'trade');
+      if (!controlsFrom && !controlsTo) return deny('You do not control either party of this contract.');
       if (action === 'cancel') {
-        if (!u.role.perms.gm && !ownership.controls(u.user.entityId, contract.fromEntityId)) return deny('Only the proposer may cancel.');
         contract.status = 'cancelled';
       } else if (action === 'accept') {
-        if (!u.role.perms.gm && !ownership.controls(u.user.entityId, contract.toEntityId)) return deny('Only the buyer may accept.');
+        if (contract.status !== 'pending') return bad('Only a pending contract can be accepted.');
+        // Only the counterparty of the proposer may accept it.
+        if (contract.proposedBy && db.entities.some(e => e.id === contract.proposedBy)) {
+          if (contract.proposedBy === contract.fromEntityId && !controlsTo) return deny('Only the buyer may accept.');
+          if (contract.proposedBy === contract.toEntityId && !controlsFrom) return deny('Only the seller may accept.');
+        }
         contract.status = 'active';
+        contract.offerExpiresAtRealMs = null;
       } else if (action === 'decline') {
-        if (!u.role.perms.gm && !ownership.controls(u.user.entityId, contract.toEntityId)) return deny('Only the buyer may decline.');
-        contract.status = 'cancelled';
+        if (contract.status !== 'pending') return bad('Only a pending contract can be declined.');
+        contract.status = 'declined';
       }
-      store.log('economy', `Contract ${action}`, contract.id, u.user.displayName, [contract.fromEntityId, contract.toEntityId]);
+      store.log('economy', `Contract ${action}`, `${contract.qtyPerTurn}× ${contract.itemId} between ${contract.fromEntityId} and ${contract.toEntityId}`, u.user.displayName, [contract.fromEntityId, contract.toEntityId]);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, contract });
+    }
+
+    // ---- 6d. Government tenders ----
+    // Open a tender: GM or a manage_tenders grantee on the opener entity.
+    if (pathname === '/api/tenders' && method === 'POST') {
+      const b = await readBody(req);
+      const openerEntityId = String(b.openerEntityId || 'ent_gov');
+      if (!db.entities.some(e => e.id === openerEntityId)) return bad('Unknown opener entity.');
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, openerEntityId, 'manage_tenders')) return deny('No permission to open tenders.');
+      const itemId = String(b.itemId || '');
+      if (!db.items.some(i => i.id === itemId)) return bad('Unknown item.');
+      const qtyWanted = Math.round(Number(b.qtyWanted) || 0);
+      if (!(qtyWanted > 0)) return bad('Quantity wanted must be positive.');
+      db.tenders = Array.isArray(db.tenders) ? db.tenders : [];
+      const tender = sim.createTenderObj(db, {
+        itemId, qtyWanted,
+        durationTurns: b.durationTurns, deadlineHours: b.deadlineHours,
+        openerEntityId, openedBy: u.user.displayName,
+        title: String(b.title || '').slice(0, 120),
+      });
+      db.tenders.push(tender);
+      const item = db.items.find(x => x.id === itemId);
+      store.log('economy', `Tender opened: ${item ? item.name : itemId}`,
+        `${qtyWanted} units wanted · bids close in ${Math.round((tender.deadlineWorldMs - cadence.currentWorldMs(db)) / 3600000)}h`, u.user.displayName, [openerEntityId]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, tender });
+    }
+    // Bid on an open tender through a company/entity you control.
+    const bidMatch = pathname.match(/^\/api\/tenders\/([\w-]+)\/bids$/);
+    if (bidMatch && method === 'POST') {
+      const tender = (db.tenders || []).find(t => t.id === bidMatch[1]);
+      if (!tender || tender.status !== 'open') return bad('Tender is not open.');
+      if (cadence.currentWorldMs(db) >= tender.deadlineWorldMs) return bad('The bidding deadline has passed.');
+      const b = await readBody(req);
+      const entityId = String(b.entityId || '');
+      if (!entityId) return bad('Choose which company is bidding.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('You do not control that entity.');
+      const price = Math.round(Number(b.price) * 100) / 100;
+      if (!(price > 0)) return bad('Bid price must be positive.');
+      tender.bids = Array.isArray(tender.bids) ? tender.bids : [];
+      const existing = tender.bids.find(x => x.entityId === entityId);
+      if (existing) { existing.price = price; existing.submittedAt = Date.now(); }
+      else tender.bids.push({ entityId, price, submittedAt: Date.now() });
+      const ent = db.entities.find(e => e.id === entityId);
+      store.log('economy', `Tender bid: ${tender.title || tender.itemId}`,
+        `${ent ? ent.name : entityId} bids ${db.settings.currency}${price}/unit`, u.user.displayName, [tender.openerEntityId, entityId]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, tender });
+    }
+    // Close a tender immediately (opener chain / GM); award happens on the
+    // next cadence pass otherwise.
+    const closeMatch = pathname.match(/^\/api\/tenders\/([\w-]+)\/close$/);
+    if (closeMatch && method === 'POST') {
+      const tender = (db.tenders || []).find(t => t.id === closeMatch[1]);
+      if (!tender || tender.status !== 'open') return bad('Tender is not open.');
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, tender.openerEntityId, 'manage_tenders')) return deny('No permission to close this tender.');
+      tender.deadlineWorldMs = cadence.currentWorldMs(db); // due now
+      sim.closeDueTenders(db, u.user.displayName);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, tender });
     }
 
     // ---- negotiated trade offers (Phase 4.3) ----
@@ -1847,10 +1950,16 @@ async function handle(req, res, pathname, method) {
       const MAJOR_THRESHOLD = db.settings.election && db.settings.election.majorCampaignCost || 50000;
       const scope = campaignCost >= MAJOR_THRESHOLD ? 'campaign_major' : 'campaign_minor';
       if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, party.id, scope)) {
-        // Check if there's a roster grant but amount exceeds cap
+        // Over-cap spend by a capped grantee → approval queue with the full
+        // campaign snapshot so the leader's approval can execute it verbatim.
         const grant = ownership.findGrant(party, u.user.entityId);
         if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined && campaignCost > grant.grants.spendLimitPerTurn) {
-          const req = ownership.createRequest(db, party.id, u.user.entityId, scope, { amount: campaignCost, description: `Campaign in ${b.province}` });
+          const req = ownership.createRequest(db, party.id, u.user.entityId, scope, {
+            amount: campaignCost, description: `Campaign in ${b.province}`,
+            action: { kind: 'campaign', partyId: party.id, province: b.province, campaignId: b.campaignId,
+              money: campaignCost, materials: Array.isArray(b.materials) ? b.materials : [],
+              targetGroup: b.targetGroup || null, defamePartyId: b.defamePartyId || null },
+          });
           store.log('roster', `Over-cap campaign request created`, `${party.name} — ₳${campaignCost}`, u.user.displayName, [party.id]);
           store.save(); broadcast('sync');
           return json(res, 202, { ok: false, pending: true, requestId: req.id, message: 'Campaign exceeds your spend limit. Request submitted for party leader approval.' });
@@ -2355,6 +2464,19 @@ async function handle(req, res, pathname, method) {
           if (b.taxation.propertyRate !== undefined) t.propertyRate = clamp(b.taxation.propertyRate);
           if (b.taxation.vatRate !== undefined) t.vatRate = clamp(b.taxation.vatRate);
           if (b.taxation.gamblingRate !== undefined) t.gamblingRate = clamp(b.taxation.gamblingRate);
+        }
+        if (b.cadence) { // Phase 35 cadence intervals (world hours), clamped to engine-safe ranges
+          const cd = s.cadence = s.cadence || {};
+          for (const k of ['productionHours', 'demographicsHours', 'tradeResetHours']) {
+            if (b.cadence[k] === undefined) continue;
+            const n = Number(b.cadence[k]);
+            if (!Number.isFinite(n)) continue;
+            cd[k] = Math.max(0.25, Math.min(72, n));
+          }
+          if (b.cadence.conditionDecayPerHour !== undefined) {
+            s.economy = s.economy || {};
+            s.economy.conditionDecayPerHour = Math.max(0, Math.min(20, Number(b.cadence.conditionDecayPerHour) || 0));
+          }
         }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
         if (b.households) { // Phase 3 household tunables — merge so a partial

@@ -781,6 +781,73 @@ function applyStrikes(db) {
     }
   }
 }
+// Workforce levers (Phase 28): output multiplier and per-turn accident odds
+// by safety policy; morale drift happens per property inside the passes that
+// use them. Module scope so the turn pass and the hourly cadence share one
+// definition (docs/CONVENTIONS.md — no duplicated engine math).
+const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
+const SAFETY_RISK = { none: 0.20, relaxed: 0.10, standard: 0.05, strict: 0.01 };
+
+// Shared per-property production context — the single source of truth for
+// the output-multiplier stack (province happiness × daily wobble × work
+// hours × safety policy × staffing × upgrades − strikes), plus the wage,
+// keep-stock policy and staffing ratio every consumer needs. Used by BOTH
+// runEconomy's turn-end pass and the hourly production cadence
+// (runHourlyProductionTick), so the two can never drift apart.
+function productionContext(db, pr) {
+  const econ = db.settings.economy || {};
+  const variance = econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06;
+  const hapK = econ.happinessOutputK !== undefined ? Number(econ.happinessOutputK) : 0.15;
+  const owner = db.entities.find(e => e.id === pr.ownerId);
+  const co = owner && owner.type === 'company' ? owner : null;
+  const keepPct = pr.keepPct !== undefined
+    ? clampPct(pr.keepPct, 0)
+    : (co ? clampPct(co.keepPct, 0) : 0); // property override, then company policy
+  // Direct currency wages replace the old relative wage index. Keep the
+  // derived index for the existing province happiness/employment nudges.
+  const wagePerTurn = pr.wagePerTurn !== undefined
+    ? Math.max(0, Number(pr.wagePerTurn) || 0)
+    : (co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0);
+  const wageIdx = co ? wagePerTurn * 100 : 100;
+  const hoursRaw = pr.workHours !== undefined ? pr.workHours : (co && co.workHours !== undefined ? co.workHours : 8);
+  const hoursNum = Number(hoursRaw);
+  const hoursMult = (Number.isFinite(hoursNum) ? Math.max(0, Math.min(24, hoursNum)) : 8) / 8;
+  const safetyRaw = pr.safety !== undefined ? pr.safety : (co && co.safety !== undefined ? co.safety : 'standard');
+  const maxEmp = pr.maxEmployees !== undefined
+    ? Math.max(0, Math.round(pr.maxEmployees))
+    : Math.max(1, Math.round(pr.employees || 1));
+  // Staffing fulfilment (Phase 28b): production scales LINEARLY with the
+  // staffing ratio; the exponential accident pricing below is the brake.
+  const staffRatio = maxEmp > 0 ? (pr.employees || 0) / maxEmp : 0;
+  const staffMult = Math.max(0, Math.min(5, staffRatio));
+  const upgradeMult = 1 + ((pr.upgradeInvested || 0) / Math.max(50, pr.value || 100));
+  const active = pr.prodMode === 'goods' || pr.prodMode === 'cash';
+  const strikeOf = (pr.vars && pr.vars.strike && pr.vars.strike.degree) || 0;
+  const prov = pr.provinceId ? db.provinces.find(p => p.id === pr.provinceId) : null;
+  const hap = prov && prov.vars.happiness !== undefined ? Number(prov.vars.happiness) : 50;
+  const provF = 1 + ((hap - 50) / 50) * hapK;
+  // Output breathes with the citizenry: province happiness scales production
+  // around its authored baseline, and a small wobble keeps profits from being
+  // a flat line. The wobble floor applies to the output base only, so
+  // safety/staffing/upgrade decisions always move production exactly as much
+  // as they promise.
+  const f = active
+    ? Math.max(0.4, provF * (1 + (Math.random() * 2 - 1) * variance)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult * Math.max(0, 1 - strikeOf)
+    : 1;
+  return { owner, co, active, f, keepPct, wagePerTurn, wageIdx, hoursMult, safetyRaw, staffRatio };
+}
+
+// Condition (6a) and quality (6e) factors off the persisted vars. Defaults
+// are neutral (100 condition, 50 quality), so worlds that never tick the
+// production cadence behave exactly as before.
+function conditionQualityFactors(pr) {
+  const pv = pr.vars || {};
+  const conditionFactor = activePr(pr) ? (pv.condition !== undefined ? pv.condition / 100 : 1) : 1;
+  const qualityFactor = 1 + (((pv.quality !== undefined ? pv.quality : 50)) - 50) / 500; // 0.9× at 0 … 1.1× at 100
+  return { conditionFactor, qualityFactor };
+}
+function activePr(pr) { return pr.prodMode === 'goods' || pr.prodMode === 'cash'; }
+
 function runEconomy(db, actor, scale) {
   scale = typeof scale === 'number' && isFinite(scale) ? scale : 1;
   // Strikes (Phase 31): while an active protest's crowds sit on a property,
@@ -795,27 +862,16 @@ function runEconomy(db, actor, scale) {
   // multipliers. Records keep their authored values; the engine scales here.
   const domMult = econ.domesticMultiplier !== undefined ? Number(econ.domesticMultiplier) : 1;
   const expMult = econ.expensesMultiplier !== undefined ? Number(econ.expensesMultiplier) : 1;
-  const scale = g.gdpScale || 1;
+  const gdpScale = g.gdpScale || 1;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
   const tax = db.settings.taxation && db.settings.taxation.enabled ? db.settings.taxation : null;
-
-  // Output breathes with the citizenry: province happiness scales production
-  // around its authored baseline, and a small daily wobble keeps profits from
-  // being a flat line. Both knobs live in settings.economy.
-  const variance = econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06;
-  const hapK = econ.happinessOutputK !== undefined ? Number(econ.happinessOutputK) : 0.15;
-  // Workforce levers (Phase 28): output multiplier and per-turn accident odds
-  // by safety policy; morale drift happens per property below.
-  const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
-  const SAFETY_RISK = { none: 0.20, relaxed: 0.10, standard: 0.05, strict: 0.01 };
-  const provFactor = {};
-  for (const p of db.provinces) {
-    const hap = p.vars.happiness !== undefined ? Number(p.vars.happiness) : 50;
-    provFactor[p.id] = 1 + ((hap - 50) / 50) * hapK;
-  }
-  const outFactor = (pr) => Math.max(0.4,
-    (provFactor[pr.provinceId] || 1) * (1 + (Math.random() * 2 - 1) * variance));
+  // Phase 35: when the hourly production cadence fired since the last turn
+  // boundary, goods were already minted/sold (and cash-mode revenue already
+  // deposited) in world-hourly slices — this pass then only SETTLES what
+  // accrued. When it didn't (paused clock, manual turn advance), fall back
+  // to the legacy full lump production so the turn economy never stalls.
+  const hourlyAccrued = (db._prodTicksThisTurn || 0) > 0;
 
   const perOwner = {};      // ownerId -> { dom, upkeep, wage, gross }
   const provGross = {};     // provinceId -> production value this turn
@@ -825,87 +881,22 @@ function runEconomy(db, actor, scale) {
 
   for (const pr of db.properties) {
     if (!pr.ownerId) continue;
-    const owner = db.entities.find(e => e.id === pr.ownerId);
-    const co = owner && owner.type === 'company' ? owner : null;
-    const keepPct = pr.keepPct !== undefined
-      ? clampPct(pr.keepPct, 0)
-      : (co ? clampPct(co.keepPct, 0) : 0); // property override, then company policy
-    // Direct currency wages replace the old relative wage index. Keep the
-    // derived index for the existing province happiness/employment nudges.
-    const wagePerTurn = pr.wagePerTurn !== undefined
-      ? Math.max(0, Number(pr.wagePerTurn) || 0)
-      : (co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0);
-    const wageIdx = co ? wagePerTurn * 100 : 100;
-    // Workforce multipliers (Phase 28): property overrides win, the company's
-    // policy defaults fill in, then hard defaults. 16h doubles output, 24h
-    // triples it; staffing scales linearly with fulfilment (100% at capacity);
-    // every koren sunk into upgrades adds a koren of productive value. The
-    // wobble floor applies to the output base only, so safety/staffing/upgrade
-    // decisions always move production exactly as much as they promise.
-    const hoursRaw = pr.workHours !== undefined ? pr.workHours : (co && co.workHours !== undefined ? co.workHours : 8);
-    const hoursNum = Number(hoursRaw);
-    const hoursMult = (Number.isFinite(hoursNum) ? Math.max(0, Math.min(24, hoursNum)) : 8) / 8;
-    const safetyRaw = pr.safety !== undefined ? pr.safety : (co && co.safety !== undefined ? co.safety : 'standard');
-    const maxEmp = pr.maxEmployees !== undefined
-      ? Math.max(0, Math.round(pr.maxEmployees))
-      : Math.max(1, Math.round(pr.employees || 1));
-    // Staffing fulfilment (Phase 28b): production scales LINEARLY with the
-    // staffing ratio — over-staffing past capacity boosts output by the same
-    // margin (the wobble floor still binds below, and a 5× rated ceiling
-    // keeps an absurd crew from minting absurd GDP in a single turn). The
-    // exponential accident pricing below is the real brake on over-staffing.
-    const staffRatio = maxEmp > 0 ? (pr.employees || 0) / maxEmp : 0;
-    const staffMult = Math.max(0, Math.min(5, staffRatio));
-    const upgradeMult = 1 + ((pr.upgradeInvested || 0) / Math.max(50, pr.value || 100));
-    const active = pr.prodMode === 'goods' || pr.prodMode === 'cash';
-    const strikeOf = (pr.vars && pr.vars.strike && pr.vars.strike.degree) || 0;
-    const f = active
-      ? Math.max(0.4, outFactor(pr)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult * Math.max(0, 1 - strikeOf)
-      : 1;
+    const ctx = productionContext(db, pr);
+    const owner = ctx.owner;
+    const co = ctx.co;
+    const f = ctx.f;
+    const { conditionFactor, qualityFactor } = conditionQualityFactors(pr);
 
-    // gross production value (drives GDP): private at output, public at cost
-    // Phase 35: `scale` parameter (default 1) multiplies production so the
-    // cadence scheduler can fire this at sub-turn intervals while preserving
-    // cumulative per-turn effects. Phase 35 supply chains: if the property
-    // has a `consumes` array, production scales by the minimum input
-    // availability ratio (inputStock / inputRequired), so properties need
-    // materials from upstream to produce at full capacity.
-    let inputFactor = 1;
-    if (pr.consumes && pr.consumes.length && active) {
-      let worst = 1;
-      for (const c of pr.consumes) {
-        if (!c.itemId || !(c.perTurn > 0)) continue;
-        const needed = c.perTurn * f * scale;
-        const stock = inventoryQty(pr, c.itemId);
-        const ratio = needed > 0 ? Math.min(1, stock / needed) : 1;
-        if (ratio < worst) worst = ratio;
-      }
-      inputFactor = worst;
-      // consume the inputs (proportional to actual production)
-      for (const c of pr.consumes) {
-        if (!c.itemId || !(c.perTurn > 0)) continue;
-        const used = cleanQty(c.perTurn * f * scale * inputFactor);
-        if (used > 0) removeInventory(pr, c.itemId, used);
-      }
-    }
-    // 6a. Maintenance decay: condition starts at 100 and decays each tick
-    // unless the property's maintenanceSpend covers requiredUpkeep. Condition
-    // multiplies effective output alongside inputFactor and other multipliers.
-    pr.vars = pr.vars || {};
-    if (pr.vars.condition === undefined) pr.vars.condition = 100;
-    const decayRate = db.settings.economy && db.settings.economy.conditionDecayPerHour !== undefined ? Number(db.settings.economy.conditionDecayPerHour) : 0.5;
-    const maintainSpend = pr.vars.maintenanceSpend || 0;
-    const requiredUpkeep = (pr.expenses || 0) * 0.3;
-    const shortfall = Math.max(0, requiredUpkeep - maintainSpend);
-    const decay = shortfall > 0 ? decayRate * scale * (shortfall / Math.max(1, requiredUpkeep)) : 0;
-    pr.vars.condition = Math.max(0, Math.min(100, pr.vars.condition - decay));
-    const conditionFactor = active ? pr.vars.condition / 100 : 1;
-    // 6e. Quality tier: quality nudges output value (small multiplier)
-    if (pr.vars.quality === undefined) pr.vars.quality = 50;
-    const qualityFactor = 1 + (pr.vars.quality - 50) / 500; // 0.9× at 0 … 1.1× at 100
+    // gross production value (drives GDP): private at output, public at cost.
+    // With hourly accrual active, goods-mode GDP reads what the cadence
+    // actually minted this turn (kept + sold slices); cash-mode uses the
+    // same formula as legacy for its GDP proxy either way.
     let gross;
-    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId) * scale * inputFactor * conditionFactor * qualityFactor, 0);
-    else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
+    if (pr.prodMode === 'goods') {
+      gross = hourlyAccrued
+        ? Object.keys(pr._prodMade || {}).reduce((s, itemId) => s + (pr._prodMade[itemId] || 0) * priceOf(itemId), 0)
+        : (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId) * scale * conditionFactor * qualityFactor, 0);
+    } else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
     else gross = (pr.expenses || 0) * scale;
     if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
 
@@ -921,30 +912,48 @@ function runEconomy(db, actor, scale) {
       // household food pass (households.js runFoodSupply) turns these sales
       // into real circulating food stock instead of letting them vanish.
       pr._domesticMarketSalesThisTurn = [];
-      for (const e of (pr.produces || [])) {
-        const retail = priceOf(e.itemId);
-        const produced = cleanQty((e.perTurn || 0) * f * scale * inputFactor * conditionFactor * qualityFactor);
-        if (produced <= 0) continue;
-        const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
-          ? clampPct(pr.keepPctByItem[e.itemId], keepPct)
-          : (co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
-            ? clampPct(co.keepPctByItem[e.itemId], keepPct) : keepPct);
-        const keep = cleanQty(produced * itemKeepPct / 100);
-        const sold = cleanQty(produced - keep);
-        if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
-        if (sold > 0) pr._domesticMarketSalesThisTurn.push({ itemId: e.itemId, qty: sold });
-        o.dom += sold * retail * domMult;
+      if (hourlyAccrued) {
+        // The hourly cadence minted whole-unit slices onto the site and
+        // accumulated what it sold; settle that revenue here, once per turn.
+        const salesAcc = pr._salesAccum || {};
+        for (const itemId in salesAcc) {
+          const sold = salesAcc[itemId];
+          if (!(sold > 0)) continue;
+          pr._domesticMarketSalesThisTurn.push({ itemId, qty: sold });
+          o.dom += sold * priceOf(itemId) * domMult;
+        }
+        pr._salesAccum = null;
+        pr._prodMade = null;
+      } else {
+        for (const e of (pr.produces || [])) {
+          const retail = priceOf(e.itemId);
+          const produced = cleanQty((e.perTurn || 0) * f * scale * conditionFactor * qualityFactor);
+          if (produced <= 0) continue;
+          const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
+            ? clampPct(pr.keepPctByItem[e.itemId], ctx.keepPct)
+            : (co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
+              ? clampPct(co.keepPctByItem[e.itemId], ctx.keepPct) : ctx.keepPct);
+          const keep = cleanQty(produced * itemKeepPct / 100);
+          const sold = cleanQty(produced - keep);
+          if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
+          if (sold > 0) pr._domesticMarketSalesThisTurn.push({ itemId: e.itemId, qty: sold });
+          o.dom += sold * retail * domMult;
+        }
       }
     } else if (pr.prodMode === 'cash') {
-      o.dom += (pr.cashPerTurn || 0) * f * scale;
+      // With hourly accrual active the cash was already deposited in
+      // world-hourly slices by runHourlyProductionTick — do not pay twice.
+      if (!hourlyAccrued) o.dom += (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
     }
 
     // workforce (Phase 28): morale drifts toward the wage anchor, and an
     // industrial accident — odds by safety policy — kills/maims a slice of the
     // crew. The dead drop off payroll here (employees is read below), dent
     // morale, thin the province's population and post a notice for the desk.
-    if (active && hoursMult > 0 && (pr.employees || 0) > 0) {
-      const target = 50 + clamp01((wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
+    // Runs once per turn here only — never on the hourly cadence — so the
+    // accident odds and morale convergence stay exactly as authored.
+    if (ctx.active && ctx.hoursMult > 0 && (pr.employees || 0) > 0) {
+      const target = 50 + clamp01((ctx.wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
       const h0 = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
       pr.workerHappiness = Math.round(clamp01(h0 + (target - h0) * 0.03 + (Math.random() * 2 - 1) * 0.5, 0, 100) * 10) / 10;
       // Accident odds (Phase 28b): the policy base is multiplied by a
@@ -952,8 +961,8 @@ function runEconomy(db, actor, scale) {
       // capacity on the payroll doubles the risk, so a 200%-over-staffed
       // 'standard' site (5% base) rolls at 10%, 300% at 20%, and so on.
       // Under-staffing halves risk per 100% below the cap (floor 10% of base).
-      const riskMult = Math.max(0.1, Math.min(1e6, Math.pow(2, staffRatio - 1)));
-      if (Math.random() < (SAFETY_RISK[safetyRaw] || 0.05) * riskMult) {
+      const riskMult = Math.max(0.1, Math.min(1e6, Math.pow(2, ctx.staffRatio - 1)));
+      if (Math.random() < (SAFETY_RISK[ctx.safetyRaw] || 0.05) * riskMult) {
         const deaths = Math.min(
           Math.max(1, Math.round(pr.employees * (0.04 + Math.random() * 0.06))),
           Math.max(1, Math.round(pr.employees * 0.5)));
@@ -967,45 +976,50 @@ function runEconomy(db, actor, scale) {
           if (wc) wc.population = Math.max(0, Math.round((wc.population || 0) - deaths));
         }
         pr.accident = {
-          turn: db.settings.time.turn, date: db.settings.time.date, safety: safetyRaw,
-          hours: Math.round(hoursMult * 8), deaths, injuries, fulfilment: Math.round(staffRatio * 100)
+          turn: db.settings.time.turn, date: db.settings.time.date, safety: ctx.safetyRaw,
+          hours: Math.round(ctx.hoursMult * 8), deaths, injuries, fulfilment: Math.round(ctx.staffRatio * 100)
         };
         store.log('accident', `Industrial accident at ${pr.name}`,
-          `${fmtNum(deaths)} dead, ${fmtNum(injuries)} injured (${safetyRaw} safety)`, actor || 'ENGINE', [pr.id, pr.ownerId]);
+          `${fmtNum(deaths)} dead, ${fmtNum(injuries)} injured (${ctx.safetyRaw} safety)`, actor || 'ENGINE', [pr.id, pr.ownerId]);
       }
     }
 
-    // expenses: property upkeep plus direct company payroll
-    o.upkeep += (pr.expenses || 0) * expMult;
-    o.wage += (pr.employees || 0) * wagePerTurn;
-    if ((pr.employees || 0) > 0 && wagePerTurn > 0) { payEmp += (pr.employees || 0); payWageSum += (pr.employees || 0) * wagePerTurn; }
+    // expenses: property upkeep, direct company payroll, and the per-turn
+    // controllable spends (6a maintenance / 6e R&D / 6f training) — charged
+    // here through the same settlement draw as every other expense so the
+    // stats actually cost money instead of being free buffs.
+    const pv = pr.vars || {};
+    o.upkeep += (pr.expenses || 0) * expMult
+      + (pv.maintenanceSpend || 0) + (pv.rdSpend || 0) + (pv.trainingSpend || 0);
+    o.wage += (pr.employees || 0) * ctx.wagePerTurn;
+    if ((pr.employees || 0) > 0 && ctx.wagePerTurn > 0) { payEmp += (pr.employees || 0); payWageSum += (pr.employees || 0) * ctx.wagePerTurn; }
 
     // wage pressure on the province (employee-weighted)
     if (pr.provinceId && pr.employees) {
       const w = provWage[pr.provinceId] = provWage[pr.provinceId] || { wSum: 0, emp: 0 };
-      w.wSum += wageIdx * pr.employees; w.emp += pr.employees;
+      w.wSum += ctx.wageIdx * pr.employees; w.emp += pr.employees;
     }
   }
 
   // settle each owner: net abstract money-in, government purchases, tax.
-    // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
-    // economy spends, a spooked one doesn't. Domestic consumer sales scale by
-    // confFactor. Phase 35: scale parameter multiplies the net result.
-    const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
-    const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
-    let settledOwners = 0, netTotal = 0, taxTotal = 0;
-    for (const ownerId in perOwner) {
-      const o = perOwner[ownerId];
-      const owner = db.entities.find(e => e.id === ownerId);
-      const acct = primaryAccount(ownerId, true);
-      const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
-      // The wage bill is NO LONGER deducted here at the mint: previously the
-      // wages money was destroyed at the market edge and nobody actually got
-      // paid. It rides the revenue into the owner's account, and the household
-      // pass (households.js runWages) then DEBITS that account into real
-      // household wallets — money conserved, wages paid with real balances.
-      // o.wage still feeds vars.expenses/vars.profit below for the accounting.
-      let netAbstract = dom - o.upkeep;
+  // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
+  // economy spends, a spooked one doesn't. Domestic consumer sales scale by
+  // confFactor.
+  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
+  const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
+  let settledOwners = 0, netTotal = 0, taxTotal = 0;
+  for (const ownerId in perOwner) {
+    const o = perOwner[ownerId];
+    const owner = db.entities.find(e => e.id === ownerId);
+    const acct = primaryAccount(ownerId, true);
+    const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
+    // The wage bill is NO LONGER deducted here at the mint: previously the
+    // wages money was destroyed at the market edge and nobody actually got
+    // paid. It rides the revenue into the owner's account, and the household
+    // pass (households.js runWages) then DEBITS that account into real
+    // household wallets — money conserved, wages paid with real balances.
+    // o.wage still feeds vars.expenses/vars.profit below for the accounting.
+    let netAbstract = dom - o.upkeep;
 
     // per-turn tax on positive operating net (rates are the same %; net is 1/30
     // of the old monthly figure, so the monthly burden matches the old system)
@@ -1059,7 +1073,7 @@ function runEconomy(db, actor, scale) {
 
   // GDP: province output × calibration scale (global gdp summed by updateDerived)
   for (const p of db.provinces) {
-    p.vars.gdp = Math.round((provGross[p.id] || 0) * scale * 100) / 100;
+    p.vars.gdp = Math.round((provGross[p.id] || 0) * gdpScale * 100) / 100;
   }
 
   // wage pressure → happiness & employment nudges (small, per turn, clamped)
@@ -1115,6 +1129,291 @@ function runEconomy(db, actor, scale) {
   if (settledOwners) {
     store.log('economy', `Daily economy settled`,
       `${settledOwners} operators · net ${db.settings.currency}${fmtNum(netTotal)}${taxTotal ? ' · tax ' + db.settings.currency + fmtNum(taxTotal) : ''}`, actor || 'ENGINE', []);
+  }
+}
+
+// ---------- Phase 35 — hourly production engine (cadence-driven) -----------
+// Runs on the `production` cadence (every world-hour by default) and owns
+// everything that accrues in world-hourly slices:
+//   · Part 2 — perTurn budgets paid out hourly via fractional accumulators
+//     (`_prodAccum` for items, `_cashAccum` for cash-mode sites). perTurn
+//     KEEPS meaning "per turn" for balancing; the cadence just delivers it
+//     smoothly. Whole units land on the site inventory; the sold slice is
+//     accumulated and settled into revenue once per turn by runEconomy.
+//   · Part 4 — supply chains: requires[].perUnit (inputs per 1 unit of the
+//     primary output) are consumed from the site inventory through the same
+//     removeInventory path /api/property/items uses; the worst input ratio
+//     scales ALL outputs, and persists as vars.supplyFulfillment for UI.
+//   · 6a — condition decay vs maintenanceSpend; 6e R&D quality; 6f training.
+//   · 6b — capital project advancement; 6c — contract deliveries;
+//     6d — tender closing/award.
+// When the clock is paused or turns advance manually, nothing here fires and
+// runEconomy's legacy lump pass covers production instead (see its
+// `hourlyAccrued` flag), so a stopped world still has a working economy.
+const HOUR_MS = 3600000;
+function runHourlyProductionTick(db, actor) {
+  actor = actor || 'CADENCE';
+  db._prodTicksThisTurn = (db._prodTicksThisTurn || 0) + 1;
+  const econ = db.settings.economy || {};
+  const decayRate = econ.conditionDecayPerHour !== undefined ? Number(econ.conditionDecayPerHour) : 0.5;
+  const rdK = econ.rdQualityK !== undefined ? Number(econ.rdQualityK) : 0.5;
+  const hoursPerTurn = Math.max(1, require('./cadence').turnWorldMs(db) / HOUR_MS);
+  const slice = 1 / hoursPerTurn;
+
+  for (const pr of db.properties) {
+    if (!pr.ownerId) continue;
+    const ctx = productionContext(db, pr);
+    pr.vars = pr.vars || {};
+    const pv = pr.vars;
+
+    // 6a. Condition decays toward ruin unless maintenance spend covers the
+    // required upkeep share; condition feeds straight into output below.
+    if (pv.condition === undefined) pv.condition = 100;
+    const requiredUpkeep = Math.max(0, (pr.expenses || 0) * 0.3);
+    const shortfall = Math.max(0, requiredUpkeep - (pv.maintenanceSpend || 0));
+    if (shortfall > 0 && requiredUpkeep > 0) {
+      const decay = decayRate * slice * (shortfall / requiredUpkeep);
+      pv.condition = Math.round(Math.max(0, Math.min(100, pv.condition - decay)) * 100) / 100;
+    }
+    const { conditionFactor, qualityFactor } = conditionQualityFactors(pr);
+
+    if (!ctx.active) continue;
+
+    // Part 4 — supply-chain fulfillment BEFORE accumulation, so partial
+    // supply under-produces smoothly hour to hour.
+    const produces = pr.produces || [];
+    let fulfillment = null;
+    if (Array.isArray(pr.requires) && pr.requires.length) {
+      const primary = produces[0];
+      const intendedPrimary = primary && (primary.perTurn > 0)
+        ? primary.perTurn * ctx.f * slice * conditionFactor * qualityFactor : 0;
+      fulfillment = 1;
+      if (intendedPrimary > 0) {
+        for (const req of pr.requires) {
+          if (!req.itemId || !(req.perUnit > 0)) continue;
+          const needed = req.perUnit * intendedPrimary;
+          const stock = inventoryQty(pr, req.itemId);
+          const ratio = needed > 0 ? Math.min(1, stock / needed) : 1;
+          if (ratio < fulfillment) fulfillment = ratio;
+        }
+        // Consume what actual output uses — same mutation helper the site
+        // inventory deposit/withdraw route uses.
+        for (const req of pr.requires) {
+          if (!req.itemId || !(req.perUnit > 0)) continue;
+          const used = cleanQty(req.perUnit * intendedPrimary * fulfillment);
+          if (used > 0) removeInventory(pr, req.itemId, used);
+        }
+      }
+      pv.supplyFulfillment = Math.round(fulfillment * 1000) / 1000;
+    }
+
+    if (pr.prodMode === 'goods') {
+      pv._prodAccum = pv._prodAccum || {};
+      pr._prodMade = pr._prodMade || {};      // whole units minted this turn (GDP basis)
+      pr._salesAccum = pr._salesAccum || {};  // units sold this turn (settled by runEconomy)
+      for (const e of produces) {
+        const intended = (e.perTurn || 0) * ctx.f * slice * (fulfillment === null ? 1 : fulfillment) * conditionFactor * qualityFactor;
+        const acc = (pv._prodAccum[e.itemId] || 0) + intended;
+        const whole = Math.floor(acc + 1e-9); // floor to whole units on deposit
+        pv._prodAccum[e.itemId] = acc - whole;
+        if (!(whole > 0)) continue;
+        const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
+          ? clampPct(pr.keepPctByItem[e.itemId], ctx.keepPct)
+          : (ctx.co && ctx.co.keepPctByItem && ctx.co.keepPctByItem[e.itemId] !== undefined
+            ? clampPct(ctx.co.keepPctByItem[e.itemId], ctx.keepPct) : ctx.keepPct);
+        const keep = cleanQty(whole * itemKeepPct / 100);
+        const sold = cleanQty(whole - keep);
+        if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
+        if (sold > 0) pr._salesAccum[e.itemId] = cleanQty((pr._salesAccum[e.itemId] || 0) + sold);
+        pr._prodMade[e.itemId] = (pr._prodMade[e.itemId] || 0) + whole;
+      }
+    } else { // cash mode: hourly deposits of whole koren, remainder carried
+      pv._cashAccum = Number(pv._cashAccum) || 0;
+      pv._cashAccum += (pr.cashPerTurn || 0) * ctx.f * slice * conditionFactor * qualityFactor;
+      const whole = Math.floor(pv._cashAccum);
+      if (whole >= 1) {
+        pv._cashAccum -= whole;
+        const acct = primaryAccount(pr.ownerId, true);
+        if (acct) ledgerTxn(null, acct.id, whole, `${pr.name} operations`, actor, 'deposit');
+      }
+    }
+
+    // 6e. Quality drifts up with sustained R&D spend (diminishing returns).
+    if (pr.prodMode === 'goods' && (pv.rdSpend || 0) > 0) {
+      const q = (pv.quality === undefined ? 50 : pv.quality) + rdK * Math.sqrt(pv.rdSpend / 1000) * slice;
+      pv.quality = Math.round(Math.max(0, Math.min(100, q)) * 100) / 100;
+    }
+    // 6f. Training spend lowers turnover risk below its wage/happiness base —
+    // an accrued dimension on the existing safety/morale tension.
+    const wh = pr.workerHappiness !== undefined ? pr.workerHappiness : 50;
+    const turnoverBase = Math.max(0, (50 - wh) / 100);
+    const trainingReduction = (pv.trainingSpend || 0) > 0 ? Math.min(turnoverBase, pv.trainingSpend / 5000 * slice) : 0;
+    pv.turnoverRisk = Math.round(Math.max(0, Math.min(1, turnoverBase - trainingReduction)) * 1000) / 1000;
+  }
+
+  advanceProjects(db, actor, HOUR_MS);
+  executeDueContracts(db, actor);
+  closeDueTenders(db, actor);
+}
+
+// ---- 6b. Capital projects -------------------------------------------------
+// Server-defined catalogue: the client picks a kind, the ENGINE prices it
+// from the property's own value and decides what completion applies. A
+// player can never commission arbitrary effects for a self-chosen price.
+const PROJECT_KINDS = {
+  expand_capacity:    { label: 'Expand capacity',    costOfValue: 0.6,  days: 5 },
+  efficiency_refit:   { label: 'Efficiency refit',   costOfValue: 0.45, days: 4 },
+  condition_overhaul: { label: 'Condition overhaul', costOfValue: 0.25, days: 2 },
+};
+function projectSpecFor(kind, pr) {
+  const def = PROJECT_KINDS[kind];
+  if (!def) return null;
+  const value = Math.max(0, Number(pr.value) || 0);
+  const spec = {
+    kind,
+    cost: Math.round(Math.max(250, value * def.costOfValue)),
+    durationWorldMs: def.days * 86400000,
+    cancelRefundPct: 0.5,
+    onComplete: {},
+    label: def.label,
+  };
+  if (kind === 'expand_capacity') spec.onComplete.maxEmployees = Math.ceil((pr.maxEmployees !== undefined ? pr.maxEmployees : Math.max(1, Math.round(pr.employees || 1))) * 1.5);
+  if (kind === 'efficiency_refit') spec.onComplete.upgradeInvested = Math.round((pr.upgradeInvested || 0) + value * 0.35);
+  if (kind === 'condition_overhaul') spec.onComplete.condition = 100;
+  return spec;
+}
+function applyProjectComplete(pr, proj) {
+  const oc = proj.onComplete || {};
+  // A project proposes its new cap and it applies automatically — it already
+  // went through a real spend/wait cost, so no GM click is needed. Never
+  // shrinks an existing cap.
+  if (oc.maxEmployees !== undefined) pr.maxEmployees = Math.max(pr.maxEmployees || 0, Math.round(oc.maxEmployees));
+  if (oc.upgradeInvested !== undefined) pr.upgradeInvested = Math.max(pr.upgradeInvested || 0, Math.round(oc.upgradeInvested));
+  if (oc.condition !== undefined) { pr.vars = pr.vars || {}; pr.vars.condition = Math.max(pr.vars.condition || 0, oc.condition); }
+  if (Array.isArray(oc.produces)) pr.produces = oc.produces; // reserved for future kinds
+}
+function advanceProjects(db, actor, tickWorldMs) {
+  for (const pr of db.properties) {
+    if (!Array.isArray(pr.projects)) continue;
+    for (let i = pr.projects.length - 1; i >= 0; i--) {
+      const proj = pr.projects[i];
+      if (proj.status !== 'active') continue;
+      proj.progress = Math.min(1, Math.round(((proj.progress || 0) + tickWorldMs / Math.max(1, proj.durationWorldMs)) * 10000) / 10000);
+      if (proj.progress >= 1) {
+        applyProjectComplete(pr, proj);
+        store.log('economy', `${pr.name} completed a ${PROJECT_KINDS[proj.kind] ? PROJECT_KINDS[proj.kind].label.toLowerCase() : proj.kind} project`,
+          `${db.settings.currency}${Math.round(proj.cost)} commissioned`, actor || 'ENGINE', [pr.id, pr.ownerId]);
+        pr.projects.splice(i, 1);
+      }
+    }
+  }
+}
+
+// ---- 6c. Standing supply contracts ----------------------------------------
+// Deliveries move goods through the pooled-stock helpers the trade desk uses
+// (drawHolderStock pulls from the seller entity AND its owned sites) and
+// money moves only through txn. A party that cannot deliver or pay breaches
+// the contract — it never silently stalls forever.
+function executeDueContracts(db, actor) {
+  if (!Array.isArray(db.contracts)) return;
+  const now = Date.now();
+  for (let i = db.contracts.length - 1; i >= 0; i--) {
+    const c = db.contracts[i];
+    if (c.status === 'pending' && c.offerExpiresAtRealMs && now > c.offerExpiresAtRealMs) {
+      c.status = 'expired'; // unaccepted offers lapse after a week
+      continue;
+    }
+    if (c.status !== 'active') continue;
+    const qty = cleanQty(c.qtyPerTurn);
+    const price = Number(c.price) || 0;
+    if (!(qty > 0) || !(price >= 0)) { c.status = 'breached'; c.breachReason = 'bad terms'; continue; }
+    if ((c.turnsRemaining | 0) <= 0) {
+      c.status = c.autoRenew && (c.renewTurns | 0) > 0 ? 'active' : 'completed';
+      if (c.status === 'active') c.turnsRemaining = c.renewTurns | 0;
+      else store.log('economy', `Contract ${c.id} completed`, '', actor || 'ENGINE', [c.fromEntityId, c.toEntityId]);
+      continue;
+    }
+    const fromEnt = db.entities.find(e => e.id === c.fromEntityId);
+    const toEnt = db.entities.find(e => e.id === c.toEntityId);
+    const fromAcct = fromEnt ? primaryAccount(fromEnt.id, true) : null;
+    const toAcct = toEnt ? primaryAccount(toEnt.id, true) : null;
+    if (!fromEnt || !toEnt || !fromAcct || !toAcct) { c.status = 'breached'; c.breachReason = 'party missing'; continue; }
+    const drawn = drawHolderStock(db, fromEnt, c.itemId, qty);
+    const cost = Math.round(price * qty * 100) / 100;
+    if (drawn < qty - 1e-6) {
+      if (drawn > 0) addInventory(fromEnt, c.itemId, drawn); // put back what was drawn
+      c.status = 'breached'; c.breachReason = 'seller short';
+      store.log('economy', `Contract ${c.id} breached`, `${fromEnt.name} could not deliver ${qty} × ${c.itemId}`, actor || 'ENGINE', [fromEnt.id, toEnt.id]);
+      continue;
+    }
+    if (fromAcct.balance < cost) {
+      addInventory(fromEnt, c.itemId, drawn);
+      c.status = 'breached'; c.breachReason = 'buyer cannot pay';
+      store.log('economy', `Contract ${c.id} breached`, `${toEnt.name} lacks the ${db.settings.currency}${cost} due`, actor || 'ENGINE', [fromEnt.id, toEnt.id]);
+      continue;
+    }
+    addInventory(toEnt, c.itemId, qty);
+    txn(fromAcct.id, toAcct.id, cost, `Contract ${c.id} delivery`, actor || 'ENGINE', 'transfer');
+    c.delivered = cleanQty((c.delivered || 0) + qty);
+    if (c.turnsRemaining !== undefined) {
+      c.turnsRemaining--;
+      if (c.turnsRemaining <= 0) {
+        if (c.autoRenew && (c.renewTurns | 0) > 0) c.turnsRemaining = c.renewTurns | 0;
+        else { c.status = 'completed'; store.log('economy', `Contract ${c.id} completed`, '', actor || 'ENGINE', [fromEnt.id, toEnt.id]); }
+      }
+    }
+  }
+}
+
+// ---- 6d. Government tenders (competitive bidding) --------------------------
+// The state (or any GM-delegated opener with the manage_tenders scope) posts
+// what it wants to buy; companies bid a unit price before the world-clock
+// deadline; lowest bid wins and is auto-converted into a standing supply
+// contract for the tender's duration. Deliberately simple v1 rules.
+function createTenderObj(db, opts) {
+  const nowWorld = worldClockNow(db.settings.time, Date.now());
+  const deadlineHours = Math.max(1, Math.min(336, Number(opts.deadlineHours) || 48));
+  return {
+    id: store.uid('tnd'),
+    title: String(opts.title || '').slice(0, 120),
+    itemId: opts.itemId, qtyWanted: Math.max(1, Math.round(Number(opts.qtyWanted) || 1)),
+    durationTurns: Math.max(1, Math.min(52, Math.round(Number(opts.durationTurns) || 4))),
+    deadlineWorldMs: nowWorld + deadlineHours * HOUR_MS,
+    status: 'open', bids: [], awardedTo: null,
+    openerEntityId: opts.openerEntityId || 'ent_gov',
+    openedBy: opts.openedBy || 'SYSTEM',
+    createdAt: Date.now(),
+  };
+}
+function closeDueTenders(db, actor) {
+  if (!Array.isArray(db.tenders)) return;
+  const nowWorld = worldClockNow(db.settings.time, Date.now());
+  for (const t of db.tenders) {
+    if (t.status !== 'open') continue;
+    if (nowWorld < t.deadlineWorldMs) continue;
+    const valid = (t.bids || []).filter(b => b.price > 0 && db.entities.some(e => e.id === b.entityId))
+      .sort((a, b) => a.price - b.price || a.submittedAt - b.submittedAt);
+    if (!valid.length) {
+      t.status = 'expired';
+      store.log('economy', `Tender ${t.id} expired`, 'No qualifying bids received.', actor || 'ENGINE', [t.openerEntityId]);
+      continue;
+    }
+    const winner = valid[0];
+    t.status = 'awarded';
+    t.awardedTo = winner.entityId;
+    t.awardPrice = winner.price;
+    db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
+    const contract = {
+      id: store.uid('cont'), fromEntityId: winner.entityId, toEntityId: t.openerEntityId,
+      itemId: t.itemId, qtyPerTurn: Math.ceil(t.qtyWanted / t.durationTurns), price: winner.price,
+      turnsRemaining: t.durationTurns, autoRenew: false, status: 'active',
+      proposedBy: t.openerEntityId, fromTenderId: t.id, createdAt: Date.now(),
+    };
+    db.contracts.push(contract);
+    const item = db.items.find(x => x.id === t.itemId);
+    store.log('economy', `Tender ${t.id} awarded`, `${(db.entities.find(e => e.id === winner.entityId) || {}).name || winner.entityId} wins at ${db.settings.currency}${winner.price}/unit`, actor || 'ENGINE', [t.openerEntityId, winner.entityId]);
+    draftNews(`State tender awarded: ${item ? item.name : t.itemId}`,
+      `The ${t.qtyWanted}-unit contract has been placed with ${(db.entities.find(e => e.id === winner.entityId) || {}).name || 'the winning bidder'} at ${db.settings.currency}${winner.price} per unit.`, 'Business', false, 'Procurement Office');
   }
 }
 
@@ -1251,7 +1550,28 @@ function repriceAllShares(db, a, b, c, e, actor) {
 // Players (the President from the national stockpile, CEOs from company stock)
 // fill them by hand via executeTrade(). Price responds to volume: the more of
 // an order you fill, the worse your price gets (see TRADE_IMPACT below).
+// Reset the per-turn trade-flow accumulators (called at the turn boundary
+// AFTER recordTradeHistory has archived them).
+function resetTradeFlows(db) {
+  const trade = db.settings.trade;
+  if (!trade) return;
+  trade.lastFlows = [];
+  db.globalVars.lastExportIncome = 0;
+  db.globalVars.lastImportSpend = 0;
+  db.globalVars.lastTariffIncome = 0;
+}
 function generateTradeOrders(db) {
+  const trade = db.settings.trade;
+  if (!trade || !Array.isArray(trade.partners)) return;
+  resetTradeFlows(db);
+  rerollTradeBook(db);
+}
+// Rebuild the order book WITHOUT touching per-turn flow accounting — this is
+// the Part-3c hourly cadence entry point, so the desk refreshes on world
+// time while export/import history stays turn-scoped. `orders.seq` is a
+// monotonic stamp clients key draft-clearing off (the turn no longer changes
+// on an intra-turn reroll).
+function rerollTradeBook(db) {
   const trade = db.settings.trade;
   if (!trade || !Array.isArray(trade.partners)) return;
   // Global GM price levers (Economy tab): demand orders are OUR EXPORTS
@@ -1259,12 +1579,6 @@ function generateTradeOrders(db) {
   const econ = db.settings.economy || {};
   const exportMult = econ.exportMultiplier !== undefined ? Number(econ.exportMultiplier) : 1;
   const importMult = econ.importMultiplier !== undefined ? Number(econ.importMultiplier) : 1;
-  // the previous turn's executed trades were archived by recordTradeHistory —
-  // reset the per-turn accumulators the moment the new order book opens
-  trade.lastFlows = [];
-  db.globalVars.lastExportIncome = 0;
-  db.globalVars.lastImportSpend = 0;
-  db.globalVars.lastTariffIncome = 0;
   const buys = [], sells = [];
   const LVL_PRICE = { High: 1.08, Med: 1, Low: 0.92 }; // hungrier buyers pay more
   for (const p of trade.partners) {
@@ -1317,7 +1631,8 @@ function generateTradeOrders(db) {
     for (const iid of dSet) { const o = mk(iid, 'demand'); if (o) buys.push(o); }
     for (const iid of sSet) { const o = mk(iid, 'supply'); if (o) sells.push(o); }
   }
-  trade.orders = { turn: db.settings.time.turn, buys, sells };
+  trade.orderSeq = (trade.orderSeq || 0) + 1;
+  trade.orders = { turn: db.settings.time.turn, seq: trade.orderSeq, buys, sells };
 }
 
 // Volume→price impact: filling 100% of an order moves your effective unit
@@ -1506,7 +1821,11 @@ function runDemographics(db, monthBoundary, scale) {
   const crisis = db.globalVars.bankCrisis ? (db.globalVars.bankCrisisSeverity || 0.5) : 0;
   const r1 = (v) => Math.round(v * 10) / 10;
   const clampB = (v) => Math.max(0, Math.min(100, v));
-  const pull = (cur, target, k) => cur + (target - cur) * k + (Math.random() * 2 - 1) * 0.15;
+  // Jitter scales with sqrt of the drift scale so a cadence firing N times
+  // per turn accumulates roughly the same per-turn randomness as one full
+  // call, and scale=0 (month-boundary-only mode) jitters not at all.
+  const jitter = 0.15 * Math.sqrt(Math.max(0, Math.min(1, scale)));
+  const pull = (cur, target, k) => cur + (target - cur) * k + (Math.random() * 2 - 1) * jitter;
   for (const p of db.provinces) {
     if (!p.demographics) continue;
     const hapA = p.vars.happiness !== undefined ? p.vars.happiness : 50;
@@ -1666,11 +1985,13 @@ function advanceTurn(steps, actor) {
       if (due) runEvent(ev, actor || 'ENGINE');
     }
 
-    // Production economy runs every turn (replaces the retired profit events):
-    // mint & sell goods / generate cash, pay wages & upkeep, per-turn tax,
-    // recompute province GDP, reprice shares; then the government exports its
-    // stockpile abroad.
+    // Production economy (replaces the retired profit events): settle the
+    // turn's revenue/upkeep/wages/tax and reprice shares. When the hourly
+    // cadence already minted this turn's output in world-hourly slices,
+    // runEconomy only settles; when the clock was paused it falls back to
+    // the legacy lump pass so manual "Advance Turn" keeps working.
     try { runEconomy(db, actor || 'ENGINE'); } catch (e) { console.error('runEconomy failed:', e.message); }
+    db._prodTicksThisTurn = 0;
     // Foreign powers quietly re-arm off-books, in proportion to their authored
     // military profile (Phase 27) — no money involved, just materiel.
     try { runForeignMilitary(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignMilitary failed:', e.message); }
@@ -1711,11 +2032,25 @@ function advanceTurn(steps, actor) {
     // lottery draws (Phase 12) — lazy require avoids a sim↔casino cycle
     try { require('./casino').drawDueLotteries(db, actor || 'ENGINE'); } catch (e) { /* casino optional */ }
     recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
-    // archive the closing turn's executed trades, then open a fresh order book
+    // archive the closing turn's executed trades, then open a fresh order
+    // book — unless the tradeReset cadence has been rerolling it hourly all
+    // turn, in which case only the flow accounting resets here (Part 3c).
     recordTradeHistory(db);
-    try { generateTradeOrders(db); } catch (e) { console.error('generateTradeOrders failed:', e.message); }
-    // demographics breathe with the economy (per-turn drift, monthly growth)
-    try { runDemographics(db, monthBoundary); } catch (e) { console.error('runDemographics failed:', e.message); }
+    if ((db._cadenceTicks && db._cadenceTicks.tradeReset > 0)) {
+      try { resetTradeFlows(db); } catch (e) { console.error('resetTradeFlows failed:', e.message); }
+      db._cadenceTicks.tradeReset = 0;
+    } else {
+      try { generateTradeOrders(db); } catch (e) { console.error('generateTradeOrders failed:', e.message); }
+    }
+    // demographics breathe with the economy. Fast drift lives on the
+    // demographics cadence now (scaled world-hourly slices); when that
+    // cadence fired this turn, the pass here runs drift-free and only
+    // applies month-boundary growth. When it didn't (paused clock), fall
+    // back to the legacy full-strength per-turn drift.
+    const demoTicked = db._cadenceTicks && db._cadenceTicks.demographics > 0;
+    try { runDemographics(db, monthBoundary, demoTicked ? 0 : undefined); }
+    catch (e) { console.error('runDemographics failed:', e.message); }
+    if (demoTicked) db._cadenceTicks.demographics = 0;
     // matured war bonds pay out; foreign relations drift with trade/tariffs
     try { redeemMaturedBonds(db, actor || 'ENGINE'); } catch (e) { console.error('redeemMaturedBonds failed:', e.message); }
     try { runDiplomacy(db); } catch (e) { console.error('runDiplomacy failed:', e.message); }
@@ -2082,7 +2417,9 @@ module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
   runEconomy, runElection, apportionSeats, computePolling, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
-  generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
+  generateTradeOrders, rerollTradeBook, resetTradeFlows, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf, worldClockNow, runDemographics,
+  runHourlyProductionTick, advanceProjects, PROJECT_KINDS, projectSpecFor,
+  executeDueContracts, createTenderObj, closeDueTenders,
   findProv, findEnt, findItem
 };

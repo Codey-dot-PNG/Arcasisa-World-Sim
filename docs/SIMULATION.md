@@ -314,3 +314,64 @@ The GM calls an election (`POST /api/gm/election/campaign`) and the world doc ge
 `syncPresidency(db)` keeps `ent_gov.ceoId` + `executives` matching all users holding the
 `president` role (co-presidencies supported). Called after user CRUD and from `migrate()`.
 Titles are flipped between "President of the Republic" and "Former President".
+
+## Real-time cadences (Phase 35)
+
+A single scheduler (server/cadence.js) runs subsystems on **world-clock** intervals —
+paused clocks pause everything. State: world._cadence (per-cadence
+lastWorldMs/
+extWorldMs), seeded idempotently by cadence.migrate(), which runs from
+store.migrate() **unconditionally** so new cadences self-seed on old worlds. Ticks ride
+requests (GET /api/state) and a local timer; catch-up is capped at 50 iterations and
+advances one interval per run, never jumping to "now". Intervals are GM-tunable via
+settings.cadence.{productionHours,demographicsHours,tradeResetHours} (0.25–72h clamp);
+progress ships in GET /api/state as cadence.{name}.{progress,nextAt,hours}.
+
+Cadences:
+- production (1h): the hourly production engine below + condition decay/maintenance,
+  capital projects, contract deliveries, tender closing.
+- demographics (4h): fast demographic drift, scaled to preserve per-turn totals.
+- 	radeReset (1h): rerolls the foreign order book WITHOUT resetting per-turn flow
+  accounting; orders.seq is the monotonic stamp clients key drafts off.
+
+The Day Market deliberately has NO cadence: it already advances on its own ~5s gate plus
+once per turn.
+
+## Hourly production & turn settlement
+
+unHourlyProductionTick pays out each active property's per-turn budget in world-hourly
+slices using fractional accumulators (ars._prodAccum for items with whole-unit flooring,
+ars._cashAccum for cash-mode deposits). Sold slices accumulate on the property and are
+settled into revenue ONCE per turn by unEconomy, which reads its hourlyAccrued flag:
+when any production tick fired since the last turn boundary it only settles what accrued;
+otherwise it falls back to the legacy lump pass (so paused-clock / manual-turn worlds keep
+a working economy). Wages, upkeep, tax, accidents, morale and share repricing stay strictly
+turn-scoped. Both paths share productionContext() — the single source of truth for the
+output-multiplier stack.
+
+## Supply chains
+
+property.requires = [{ itemId, perUnit }] — inputs consumed from the SITE inventory per
+1 unit of primary output, every production hour. The worst input-availability ratio scales
+ALL outputs and persists as ars.supplyFulfillment. Absent equires ⇒ byte-identical
+behaviour. Edited via PATCH /api/property/:id/controls (equires), GM Studio editor.
+
+## Capital projects, contracts, tenders
+
+- Projects (6b): server-priced catalogue (sim.PROJECT_KINDS: expand_capacity /
+  efficiency_refit / condition_overhaul) — clients pick a KIND, the engine derives cost
+  from the property's value, duration, and completion effects. GET/POST
+  /api/property/:id/projects, cancel refunds 50%. Max 3 active per site.
+- Standing contracts (6c): db.contracts, mutual acceptance, deliveries every production
+  hour through the pooled-stock trade helpers + 	xn; seller/buyer failure ⇒ reached.
+- Tenders (6d): db.tenders, lowest qualifying bid before the world-clock deadline wins
+  and converts into an active contract. Opened by the government or any manage_tenders
+  grantee.
+
+## Roster delegation
+
+entity.roster[].grants.scopes + ownership.canAct(db, userId, entityId, scope, opts) —
+the ONE delegation primitive (chain first, then grants narrowed by spendLimitPerTurn,
+properties/accounts/unitFilter lists). Over-cap spends land in entity.pendingRequests
+with an action snapshot; approving replays the original mutation verbatim then deletes the
+request. Party members with empty scopes render as rank-and-file.

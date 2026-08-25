@@ -329,7 +329,7 @@ progress ships in GET /api/state as cadence.{name}.{progress,nextAt,hours}.
 
 Cadences:
 - production (1h): the hourly production engine below + condition decay/maintenance,
-  capital projects, contract deliveries, tender closing.
+  capital projects, tender closing.
 - demographics (4h): fast demographic drift, scaled to preserve per-turn totals.
 - 	radeReset (1h): rerolls the foreign order book WITHOUT resetting per-turn flow
   accounting; orders.seq is the monotonic stamp clients key drafts off.
@@ -356,17 +356,16 @@ property.requires = [{ itemId, perUnit }] — inputs consumed from the SITE inve
 ALL outputs and persists as ars.supplyFulfillment. Absent equires ⇒ byte-identical
 behaviour. Edited via PATCH /api/property/:id/controls (equires), GM Studio editor.
 
-## Capital projects, contracts, tenders
+## Capital projects, tenders
 
 - Projects (6b): server-priced catalogue (sim.PROJECT_KINDS: expand_capacity /
   efficiency_refit / condition_overhaul) — clients pick a KIND, the engine derives cost
   from the property's value, duration, and completion effects. GET/POST
   /api/property/:id/projects, cancel refunds 50%. Max 3 active per site.
-- Standing contracts (6c): db.contracts, mutual acceptance, deliveries every production
-  hour through the pooled-stock trade helpers + 	xn; seller/buyer failure ⇒ reached.
-- Tenders (6d): db.tenders, lowest qualifying bid before the world-clock deadline wins
-  and converts into an active contract. Opened by the government or any manage_tenders
-  grantee.
+- Tenders (6d): db.tenders, lowest qualifying bid before the world-clock deadline wins;
+  the full order is delivered and paid in ONE SHOT at award time through the pooled-stock
+  trade helpers + txn. Opened by the government or any manage_tenders grantee.
+  (The standing-contracts feature was retired — no db.contracts.)
 
 ## Roster delegation
 

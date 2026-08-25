@@ -131,13 +131,11 @@ The single place the world is narrowed per operator. Key rules:
 | GET /api/entity/:id/requests | chain / GM | pending over-cap requests |
 | POST /api/entity/:id/requests/:reqId/approve | chain / GM | replays the request's action snapshot, then deletes the request |
 | POST /api/entity/:id/requests/:reqId/deny | chain / GM | deletes; audit timeline keeps the record |
-| POST /api/contracts | either party's 	rade scope | mutual acceptance required before deliveries start |
-| POST /api/contracts/:id/(accept\|decline\|cancel) | a party's 	rade scope | unaccepted offers lapse after 7 days |
 | POST /api/tenders | GM or manage_tenders on opener entity | opens state procurement |
 | POST /api/tenders/:id/bids | controls(bidder) | one live bid per bidder, updatable until the deadline |
 | POST /api/tenders/:id/close | GM or manage_tenders | force-award before the deadline |
 
-State additions: cadence.{name}.{progress,nextAt,hours}, contracts[],
-	enders[]. Visibility follows the existing trades rule (either side in the
-ownership chain; open/awarded tenders are public procurement). Roster entries
+State additions: cadence.{name}.{progress,nextAt,hours},
+tenders[]. Open/awarded tenders are public procurement (every operator sees
+them and may bid through a company they control). Roster entries
 ship full to chain+GM, own-entry-only to members, stripped otherwise.

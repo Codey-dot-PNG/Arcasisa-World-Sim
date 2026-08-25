@@ -394,10 +394,6 @@ function filterState(u) {
     // fetch); charts that want the whole record pull GET /api/history once.
     history: histView(db, p).slice(-HIST_STATE_CAP),
     timeline, trades,
-    // Phase 35 — standing supply contracts (6c): same visibility rule as
-    // negotiated trades (either side in the ownership chain, GM sees all).
-    contracts: p.gm ? (db.contracts || [])
-      : (db.contracts || []).filter(c => controlled.has(c.fromEntityId) || controlled.has(c.toEntityId)),
     // Government tenders (6d): open tenders are public procurement — every
     // operator sees them and may bid through a company they control. Bid
     // detail ships with the tender (bid prices aren't sensitive; it's how a
@@ -1330,70 +1326,6 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, refund });
     }
 
-    // ---- 6c. Standing supply contracts ----
-    // Create a contract (requires mutual acceptance via POST /api/contracts/:id/accept)
-    if (pathname === '/api/contracts' && method === 'POST') {
-      const b = await readBody(req);
-      const fromEntityId = String(b.fromEntityId || '');
-      const toEntityId = String(b.toEntityId || '');
-      const itemId = String(b.itemId || '');
-      const qtyPerTurn = Math.round(Number(b.qtyPerTurn) || 0);
-      const price = Math.round(Number(b.price) * 100) / 100;
-      const turnsRemaining = Math.max(1, Math.min(52, Math.round(Number(b.turnsRemaining) || 12)));
-      if (!fromEntityId || !toEntityId || !itemId || !(qtyPerTurn > 0) || !(price > 0)) return bad('Missing contract fields.');
-      if (fromEntityId === toEntityId) return bad('A contract needs two different parties.');
-      if (!db.items.some(i => i.id === itemId)) return bad('Unknown item.');
-      // Either side's controller may propose; the OTHER side must accept.
-      const isGm = u.role.perms.gm;
-      const proposingFrom = isGm || ownership.canAct(db, u.user.entityId, fromEntityId, 'trade');
-      const proposingTo = isGm || ownership.canAct(db, u.user.entityId, toEntityId, 'trade');
-      if (!proposingFrom && !proposingTo) return deny('You do not control either party of this contract.');
-      db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
-      const contract = {
-        id: store.uid('cont'), fromEntityId, toEntityId, itemId, qtyPerTurn, price,
-        turnsRemaining, autoRenew: !!b.autoRenew, status: 'pending',
-        proposedBy: u.user.entityId, createdAt: Date.now(),
-        offerExpiresAtRealMs: Date.now() + 7 * 24 * 60 * 60 * 1000, // unaccepted offers lapse
-      };
-      db.contracts.push(contract);
-      store.log('economy', `Contract proposed`, `${qtyPerTurn}× ${itemId} @ ${db.settings.currency}${price}/unit`, u.user.displayName, [fromEntityId, toEntityId]);
-      store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, contract });
-    }
-    // Accept / decline / cancel a contract. Acceptance belongs to whichever
-    // party did NOT propose; either party (trade scope) may cancel while it
-    // is still pending or active — deliveries stop on the next hourly tick.
-    if (pathname.match(/^\/api\/contracts\/[\w-]+\/(accept|decline|cancel)$/) && method === 'POST') {
-      const parts = pathname.split('/');
-      const contractId = parts[3];
-      const action = parts[4];
-      db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
-      const contract = db.contracts.find(c => c.id === contractId);
-      if (!contract) return bad('Unknown contract.');
-      const isGm = u.role.perms.gm;
-      const controlsFrom = isGm || ownership.canAct(db, u.user.entityId, contract.fromEntityId, 'trade');
-      const controlsTo = isGm || ownership.canAct(db, u.user.entityId, contract.toEntityId, 'trade');
-      if (!controlsFrom && !controlsTo) return deny('You do not control either party of this contract.');
-      if (action === 'cancel') {
-        contract.status = 'cancelled';
-      } else if (action === 'accept') {
-        if (contract.status !== 'pending') return bad('Only a pending contract can be accepted.');
-        // Only the counterparty of the proposer may accept it.
-        if (contract.proposedBy && db.entities.some(e => e.id === contract.proposedBy)) {
-          if (contract.proposedBy === contract.fromEntityId && !controlsTo) return deny('Only the buyer may accept.');
-          if (contract.proposedBy === contract.toEntityId && !controlsFrom) return deny('Only the seller may accept.');
-        }
-        contract.status = 'active';
-        contract.offerExpiresAtRealMs = null;
-      } else if (action === 'decline') {
-        if (contract.status !== 'pending') return bad('Only a pending contract can be declined.');
-        contract.status = 'declined';
-      }
-      store.log('economy', `Contract ${action}`, `${contract.qtyPerTurn}× ${contract.itemId} between ${contract.fromEntityId} and ${contract.toEntityId}`, u.user.displayName, [contract.fromEntityId, contract.toEntityId]);
-      store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, contract });
-    }
-
     // ---- 6d. Government tenders ----
     // Open a tender: GM or a manage_tenders grantee on the opener entity.
     if (pathname === '/api/tenders' && method === 'POST') {
@@ -1408,7 +1340,7 @@ async function handle(req, res, pathname, method) {
       db.tenders = Array.isArray(db.tenders) ? db.tenders : [];
       const tender = sim.createTenderObj(db, {
         itemId, qtyWanted,
-        durationTurns: b.durationTurns, deadlineHours: b.deadlineHours,
+        deadlineHours: b.deadlineHours,
         openerEntityId, openedBy: u.user.displayName,
         title: String(b.title || '').slice(0, 120),
       });

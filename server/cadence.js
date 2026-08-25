@@ -179,10 +179,9 @@ function registerDefaults() {
   registered = true;
 
   // Hourly production slice (Parts 2 & 4) plus everything that rides the
-  // same heartbeat: condition decay/maintenance (6a), capital projects (6b),
-  // standing contracts (6c), tender closing (6d) and training accrual
-  // (6f — the spend itself is charged per turn; see sim.js). All of the
-  // actual math lives in sim.js — this is just wiring.
+  // same heartbeat: condition decay/maintenance (6a), capital projects (6b)
+  // and tender closing (6d). All of the actual math lives in sim.js — this
+  // is just wiring.
   register('production', (db) => {
     require('./sim').runHourlyProductionTick(db, 'CADENCE');
   });

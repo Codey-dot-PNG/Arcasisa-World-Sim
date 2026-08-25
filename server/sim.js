@@ -1186,8 +1186,7 @@ function runEconomy(db, actor, scale) {
 //     scales ALL outputs, and persists as vars.supplyFulfillment for UI.
 //   · 6a — condition decay vs maintenanceSpend (training's accident effect
 //     lives in runEconomy's accident roll — it is a per-turn mechanic).
-//   · 6b — capital project advancement; 6c — contract deliveries;
-//     6d — tender closing/award.
+//   · 6b — capital project advancement; 6d — tender closing/award.
 // When the clock is paused or turns advance manually, nothing here fires and
 // runEconomy's legacy lump pass covers production instead (see its
 // `hourlyAccrued` flag), so a stopped world still has a working economy.
@@ -1262,7 +1261,6 @@ function runHourlyProductionTick(db, actor) {
   }
 
   advanceProjects(db, actor, HOUR_MS);
-  executeDueContracts(db, actor);
   closeDueTenders(db, actor);
 }
 
@@ -1319,67 +1317,11 @@ function advanceProjects(db, actor, tickWorldMs) {
   }
 }
 
-// ---- 6c. Standing supply contracts ----------------------------------------
-// Deliveries move goods through the pooled-stock helpers the trade desk uses
-// (drawHolderStock pulls from the seller entity AND its owned sites) and
-// money moves only through txn. A party that cannot deliver or pay breaches
-// the contract — it never silently stalls forever.
-function executeDueContracts(db, actor) {
-  if (!Array.isArray(db.contracts)) return;
-  const now = Date.now();
-  for (let i = db.contracts.length - 1; i >= 0; i--) {
-    const c = db.contracts[i];
-    if (c.status === 'pending' && c.offerExpiresAtRealMs && now > c.offerExpiresAtRealMs) {
-      c.status = 'expired'; // unaccepted offers lapse after a week
-      continue;
-    }
-    if (c.status !== 'active') continue;
-    const qty = cleanQty(c.qtyPerTurn);
-    const price = Number(c.price) || 0;
-    if (!(qty > 0) || !(price >= 0)) { c.status = 'breached'; c.breachReason = 'bad terms'; continue; }
-    if ((c.turnsRemaining | 0) <= 0) {
-      c.status = c.autoRenew && (c.renewTurns | 0) > 0 ? 'active' : 'completed';
-      if (c.status === 'active') c.turnsRemaining = c.renewTurns | 0;
-      else store.log('economy', `Contract ${c.id} completed`, '', actor || 'ENGINE', [c.fromEntityId, c.toEntityId]);
-      continue;
-    }
-    const fromEnt = db.entities.find(e => e.id === c.fromEntityId);
-    const toEnt = db.entities.find(e => e.id === c.toEntityId);
-    const fromAcct = fromEnt ? primaryAccount(fromEnt.id, true) : null;
-    const toAcct = toEnt ? primaryAccount(toEnt.id, true) : null;
-    if (!fromEnt || !toEnt || !fromAcct || !toAcct) { c.status = 'breached'; c.breachReason = 'party missing'; continue; }
-    const drawn = drawHolderStock(db, fromEnt, c.itemId, qty);
-    const cost = Math.round(price * qty * 100) / 100;
-    if (drawn < qty - 1e-6) {
-      if (drawn > 0) addInventory(fromEnt, c.itemId, drawn); // put back what was drawn
-      c.status = 'breached'; c.breachReason = 'seller short';
-      store.log('economy', `Contract ${c.id} breached`, `${fromEnt.name} could not deliver ${qty} × ${c.itemId}`, actor || 'ENGINE', [fromEnt.id, toEnt.id]);
-      continue;
-    }
-    if (fromAcct.balance < cost) {
-      addInventory(fromEnt, c.itemId, drawn);
-      c.status = 'breached'; c.breachReason = 'buyer cannot pay';
-      store.log('economy', `Contract ${c.id} breached`, `${toEnt.name} lacks the ${db.settings.currency}${cost} due`, actor || 'ENGINE', [fromEnt.id, toEnt.id]);
-      continue;
-    }
-    addInventory(toEnt, c.itemId, qty);
-    txn(fromAcct.id, toAcct.id, cost, `Contract ${c.id} delivery`, actor || 'ENGINE', 'transfer');
-    c.delivered = cleanQty((c.delivered || 0) + qty);
-    if (c.turnsRemaining !== undefined) {
-      c.turnsRemaining--;
-      if (c.turnsRemaining <= 0) {
-        if (c.autoRenew && (c.renewTurns | 0) > 0) c.turnsRemaining = c.renewTurns | 0;
-        else { c.status = 'completed'; store.log('economy', `Contract ${c.id} completed`, '', actor || 'ENGINE', [fromEnt.id, toEnt.id]); }
-      }
-    }
-  }
-}
-
 // ---- 6d. Government tenders (competitive bidding) --------------------------
 // The state (or any GM-delegated opener with the manage_tenders scope) posts
 // what it wants to buy; companies bid a unit price before the world-clock
-// deadline; lowest bid wins and is auto-converted into a standing supply
-// contract for the tender's duration. Deliberately simple v1 rules.
+// deadline; lowest bid wins and the full order is delivered and paid in one
+// shot at award time. Deliberately simple v1 rules.
 function createTenderObj(db, opts) {
   const nowWorld = worldClockNow(db.settings.time, Date.now());
   const deadlineHours = Math.max(1, Math.min(336, Number(opts.deadlineHours) || 48));
@@ -1387,7 +1329,6 @@ function createTenderObj(db, opts) {
     id: store.uid('tnd'),
     title: String(opts.title || '').slice(0, 120),
     itemId: opts.itemId, qtyWanted: Math.max(1, Math.round(Number(opts.qtyWanted) || 1)),
-    durationTurns: Math.max(1, Math.min(52, Math.round(Number(opts.durationTurns) || 4))),
     deadlineWorldMs: nowWorld + deadlineHours * HOUR_MS,
     status: 'open', bids: [], awardedTo: null,
     openerEntityId: opts.openerEntityId || 'ent_gov',
@@ -1409,21 +1350,33 @@ function closeDueTenders(db, actor) {
       continue;
     }
     const winner = valid[0];
+    const winnerEnt = db.entities.find(e => e.id === winner.entityId);
+    const openerEnt = db.entities.find(e => e.id === t.openerEntityId);
+    // One-shot settlement at award: goods move through the pooled-stock trade
+    // helpers, money through txn. A winner that cannot deliver simply loses
+    // the award (recorded, no partial delivery).
+    const cost = Math.round(winner.price * t.qtyWanted * 100) / 100;
+    const fromAcct = winnerEnt ? primaryAccount(winnerEnt.id, true) : null;
+    const toAcct = openerEnt ? primaryAccount(openerEnt.id, true) : null;
+    let note = 'no qualifying delivery';
+    if (winnerEnt && openerEnt && fromAcct && toAcct) {
+      const drawn = drawHolderStock(db, winnerEnt, t.itemId, t.qtyWanted);
+      if (drawn >= t.qtyWanted - 1e-6) {
+        addInventory(openerEnt, t.itemId, t.qtyWanted);
+        txn(fromAcct.id, toAcct.id, cost, `Tender ${t.id} fulfilment`, actor || 'ENGINE', 'transfer');
+        note = `delivered ${t.qtyWanted} × ${t.itemId}`;
+      } else {
+        if (drawn > 0) addInventory(winnerEnt, t.itemId, drawn); // return the short draw
+      }
+    }
     t.status = 'awarded';
     t.awardedTo = winner.entityId;
     t.awardPrice = winner.price;
-    db.contracts = Array.isArray(db.contracts) ? db.contracts : [];
-    const contract = {
-      id: store.uid('cont'), fromEntityId: winner.entityId, toEntityId: t.openerEntityId,
-      itemId: t.itemId, qtyPerTurn: Math.ceil(t.qtyWanted / t.durationTurns), price: winner.price,
-      turnsRemaining: t.durationTurns, autoRenew: false, status: 'active',
-      proposedBy: t.openerEntityId, fromTenderId: t.id, createdAt: Date.now(),
-    };
-    db.contracts.push(contract);
+    t.deliveryNote = note;
     const item = db.items.find(x => x.id === t.itemId);
-    store.log('economy', `Tender ${t.id} awarded`, `${(db.entities.find(e => e.id === winner.entityId) || {}).name || winner.entityId} wins at ${db.settings.currency}${winner.price}/unit`, actor || 'ENGINE', [t.openerEntityId, winner.entityId]);
+    store.log('economy', `Tender ${t.id} awarded`, `${(winnerEnt || {}).name || winner.entityId} wins at ${db.settings.currency}${winner.price}/unit — ${note}`, actor || 'ENGINE', [t.openerEntityId, winner.entityId]);
     draftNews(`State tender awarded: ${item ? item.name : t.itemId}`,
-      `The ${t.qtyWanted}-unit contract has been placed with ${(db.entities.find(e => e.id === winner.entityId) || {}).name || 'the winning bidder'} at ${db.settings.currency}${winner.price} per unit.`, 'Business', false, 'Procurement Office');
+      `The ${t.qtyWanted}-unit order has been placed with ${(winnerEnt || {}).name || 'the winning bidder'} at ${db.settings.currency}${winner.price} per unit.`, 'Business', false, 'Procurement Office');
   }
 }
 
@@ -2430,6 +2383,6 @@ module.exports = {
   generateTradeOrders, rerollTradeBook, resetTradeFlows, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf, worldClockNow, runDemographics,
   runHourlyProductionTick, advanceProjects, PROJECT_KINDS, projectSpecFor,
-  executeDueContracts, createTenderObj, closeDueTenders,
+  createTenderObj, closeDueTenders,
   findProv, findEnt, findItem
 };

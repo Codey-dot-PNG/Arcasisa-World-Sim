@@ -1790,11 +1790,10 @@ function migrate(world) {
     changed = true;
   }
 
-  // ---- Phase 35 — cadence scheduler, contracts, rosters (schema < 13) ----
+  // ---- Phase 35 - cadence scheduler, rosters (schema < 13) ----
   // One-shot structural defaults for worlds arriving from schema ≤ 12.
   if ((world.schema || 1) < 13) {
-    // Standing supply contracts (6c) and government tenders (6d)
-    if (!Array.isArray(world.contracts)) world.contracts = [];
+    // Government tenders (6d)
     if (!Array.isArray(world.tenders)) world.tenders = [];
     // Initialize roster and pendingRequests on every entity (additive, no-op if present)
     for (const ent of (world.entities || [])) {
@@ -1807,7 +1806,6 @@ function migrate(world) {
 
   // ---- Phase 35 completion — requires model + cleanup (schema < 14) -------
   if ((world.schema || 1) < 14) {
-    if (!Array.isArray(world.contracts)) world.contracts = [];
     if (!Array.isArray(world.tenders)) world.tenders = [];
     for (const ent of (world.entities || [])) {
       if (!Array.isArray(ent.roster)) ent.roster = [];
@@ -1872,6 +1870,10 @@ function migrate(world) {
     world.schema = 15;
     changed = true;
   }
+
+  // The standing-contracts feature is retired (tenders settle one-shot at
+  // award instead). Shed any data old worlds still carry — idempotent.
+  if (world.contracts !== undefined) delete world.contracts;
 
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed

@@ -2819,12 +2819,9 @@ const Views = {
       inner.appendChild(this.secLabel('Share Price Over Time'));
       inner.appendChild(Charts.chartLine(priceHist, { title: 'SHARE PRICE', yFormat: v => CUR() + v }));
     }
-
-    // ---- standing supply contracts (6c) ----
-    this.contractsPanel(inner, c);
   },
 
-  /* ---- Phase 35 — contracts & tenders ---------------------------------- */
+  /* ---- Phase 35 — tenders ---------------------------------------------- */
   // Convert a world-clock timestamp back to a countdown in seconds using the
   // clock anchor (mirror of cadence.progress's nextAt math on the server).
   worldIn(worldMs) {
@@ -2877,78 +2874,12 @@ const Views = {
           el('label.field-label', 'Title'), Forms.text(d, 'title', 'Winter coal reserve'),
           el('label.field-label', 'Item'), Forms.sel(d, 'itemId', S().items.filter(i => i.tradable !== false).map(i => [i.id, i.name])),
           el('label.field-label', 'Quantity wanted'), Forms.num(d, 'qtyWanted'),
-          el('label.field-label', 'Contract duration (turns)'), Forms.num(d, 'durationTurns'),
           el('label.field-label', 'Bidding window (world hours)'), Forms.num(d, 'deadlineHours')
         ), [{ label: 'Open tender', onClick: async () => {
-          try { await POST('/api/tenders', { openerEntityId: 'ent_gov', title: d.title, itemId: d.itemId, qtyWanted: Number(d.qtyWanted), durationTurns: Number(d.durationTurns), deadlineHours: Number(d.deadlineHours) }); toast('Tender opened.'); App.renderView(); }
+          try { await POST('/api/tenders', { openerEntityId: 'ent_gov', title: d.title, itemId: d.itemId, qtyWanted: Number(d.qtyWanted), deadlineHours: Number(d.deadlineHours) }); toast('Tender opened.'); App.renderView(); }
           catch (err) { toast(err.message, true); throw new Error('cancel'); }
         } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]) }, '+ Open tender (government)')));
     }
-  },
-  contractsPanel(inner, co) {
-    const list = (S().contracts || []).filter(x => x.fromEntityId === co.id || x.toEntityId === co.id)
-      .filter(x => ['pending', 'active'].includes(x.status)).slice(-20);
-    inner.appendChild(this.secLabel('Supply Contracts'));
-    if (!list.length) {
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' }, 'No standing supply contracts.'));
-    } else {
-      const STATUS_COLOR = { pending: 'var(--ink-soft)', active: 'var(--good)' };
-      inner.appendChild(el('table.data',
-        el('thead', el('tr', el('th', ''), el('th', 'Item'), el('th.num', 'Qty / turn'), el('th.num', 'Price'), el('th.num', 'Turns left'), el('th', 'Status'), el('th', ''))),
-        el('tbody', [...list].reverse().map(x => {
-          const it = itemById(x.itemId);
-          const iSell = x.fromEntityId === co.id;
-          const other = entById(iSell ? x.toEntityId : x.fromEntityId);
-          const canAccept = x.status === 'pending' && ((x.proposedBy === x.fromEntityId && x.toEntityId === co.id) || (x.proposedBy === x.toEntityId && x.fromEntityId === co.id));
-          return el('tr',
-            el('td', { style: 'font-size:11px; white-space:nowrap;' }, (iSell ? '→ ' : '← ') + (other ? other.name : '—')),
-            el('td', (it ? it.name : x.itemId)),
-            el('td.num', fmtNum(x.qtyPerTurn)), el('td.num', fmtMoney(x.price)),
-            el('td.num', String(x.turnsRemaining !== undefined ? x.turnsRemaining : '∞')),
-            el('td', { style: 'color:' + (STATUS_COLOR[x.status] || 'var(--ink-soft)') + ';' }, x.status),
-            el('td', { style: 'white-space:nowrap;' },
-              canAccept ? el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
-                try { await POST('/api/contracts/' + x.id + '/accept'); toast('Contract accepted.'); App.renderView(); } catch (err) { toast(err.message, true); }
-              } }, 'Accept') : null,
-              canAccept ? ' ' : null,
-              el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
-                try { await POST('/api/contracts/' + x.id + '/' + (x.status === 'pending' ? 'decline' : 'cancel')); toast('Contract ' + (x.status === 'pending' ? 'declined.' : 'cancelled.')); App.renderView(); } catch (err) { toast(err.message, true); }
-              } }, x.status === 'pending' ? 'Decline' : 'Cancel')));
-        }))));
-    }
-    inner.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.contractModal(co) }, '+ Propose contract')));
-  },
-  contractModal(co) {
-    const d = W.contractDraft = W.contractDraft || {};
-    if (!d.itemId) { const tradable = S().items.filter(i => i.tradable !== false); d.itemId = (tradable[0] || {}).id; }
-    if (!d.qtyPerTurn) d.qtyPerTurn = 50;
-    if (!d.price) d.price = 1;
-    if (!d.turnsRemaining) d.turnsRemaining = 12;
-    if (!d.counterpartyId) { const others = S().entities.filter(e => e.id !== co.id); d.counterpartyId = (others[0] || {}).id; }
-    d.asSeller = d.asSeller !== false;
-    openModal('PROPOSE SUPPLY CONTRACT — ' + (co.name || '').toUpperCase(), el('div',
-      el('label.field-label', 'This company is the…'),
-      el('div.chip-row',
-        el('button.chip', { class: d.asSeller ? 'active' : '', onclick: () => { d.asSeller = true; App.renderView(); } }, 'Seller'),
-        el('button.chip', { class: !d.asSeller ? 'active' : '', onclick: () => { d.asSeller = false; App.renderView(); } }, 'Buyer')),
-      el('label.field-label', 'Counterparty'), Forms.sel(d, 'counterpartyId', S().entities.filter(e => e.id !== co.id).map(e => [e.id, e.name])),
-      el('label.field-label', 'Item'), Forms.sel(d, 'itemId', S().items.filter(i => i.tradable !== false).map(i => [i.id, i.name])),
-      el('label.field-label', 'Quantity per turn'), Forms.num(d, 'qtyPerTurn'),
-      el('label.field-label', 'Price per unit (' + CUR() + ')'), Forms.num(d, 'price', '0.01'),
-      el('label.field-label', 'Duration (turns)'), Forms.num(d, 'turnsRemaining'),
-      el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:6px;' }, 'The counterparty must accept before deliveries begin each production hour.')
-    ), [{
-      label: 'Send proposal', onClick: async () => {
-        try {
-          await POST('/api/contracts', {
-            fromEntityId: d.asSeller ? co.id : d.counterpartyId,
-            toEntityId: d.asSeller ? d.counterpartyId : co.id,
-            itemId: d.itemId, qtyPerTurn: Number(d.qtyPerTurn), price: Number(d.price), turnsRemaining: Number(d.turnsRemaining),
-          });
-          toast('Proposal sent.');
-        } catch (err) { toast(err.message, true); throw new Error('cancel'); }
-      }
-    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
 
   /* ---- Government Finances (President & cabinet) ---- */

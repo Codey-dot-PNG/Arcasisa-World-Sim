@@ -720,8 +720,6 @@ async function handle(req, res, pathname, method) {
         }
         return deny('You do not control the source account.');
       }
-        return deny('You do not control the source account.');
-      }
       if (!isGm && from.balance < amount) return bad('Insufficient funds.');
       sim.txn(from.id, to.id, amount, String(b.memo || '').slice(0, 140), u.user.displayName, 'transfer');
       store.save(); broadcast('sync');

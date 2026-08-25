@@ -1790,6 +1790,24 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Phase 35 — generalized real-time cadence scheduler (schema < 13) ----
+  // Replaces one-off wall-clock gates with a single reusable scheduler. Seeds
+  // _cadence state from the current world-clock time so old worlds don't fire
+  // all cadences immediately on upgrade.
+  if ((world.schema || 1) < 13) {
+    try { if (require('./cadence').migrate(world)) changed = true; }
+    catch (e) { /* cadence module optional during early boot */ }
+    // Initialize contracts array for standing supply contracts (6c)
+    if (!Array.isArray(world.contracts)) world.contracts = [];
+    // Initialize roster and pendingRequests on every entity (additive, no-op if present)
+    for (const ent of (world.entities || [])) {
+      if (!Array.isArray(ent.roster)) ent.roster = [];
+      if (!Array.isArray(ent.pendingRequests)) ent.pendingRequests = [];
+    }
+    world.schema = 13;
+    changed = true;
+  }
+
   return changed;
 }
 

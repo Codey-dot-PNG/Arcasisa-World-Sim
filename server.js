@@ -67,6 +67,9 @@ const server = http.createServer(async (req, res) => {
   sim.init(api.broadcast);
   sim.updateDerived();
   sim.scheduleAuto();
+  // Phase 35 — register default cadence handlers (stock ticker, demographics,
+  // trade reset). Must run after all modules are loaded.
+  try { require('./server/cadence').registerDefaults(); } catch (e) { /* cadence optional */ }
 
   server.listen(PORT, () => {
     const t = store.get().settings.time;
@@ -140,3 +143,14 @@ setInterval(() => {
     if (sig.ticked) { store.save(); if (sig.milestone) api.broadcast('sync'); }
   } catch (e) { /* transient; retry next tick */ }
 }, 3000).unref();
+
+// Phase 35 — Cadence scheduler: polls less frequently than war/market (these
+// are hour-scale world-time cadences, not sub-second ticks) and runs any
+// cadence whose world-clock interval has elapsed. Same serverless-safe,
+// self-gated pattern as the other timers.
+setInterval(() => {
+  try {
+    const cadence = require('./server/cadence');
+    if (cadence.maybeRunCadences(store.get())) { store.save(); api.broadcast('sync'); }
+  } catch (e) { /* transient; retry next tick */ }
+}, 10000).unref();

@@ -660,6 +660,11 @@ function removeInventory(holder, itemId, qty) {
   if (row.qty <= 0) holder.inventory = holder.inventory.filter(r => r !== row);
   return take;
 }
+function inventoryQty(holder, itemId) {
+  if (!holder || !holder.inventory) return 0;
+  const row = holder.inventory.find(r => r.itemId === itemId);
+  return row ? (row.qty || 0) : 0;
+}
 // How many units of an item a foreign partner will trade per turn. A GM can pin
 // an exact figure in p.capacity[itemId]; otherwise it derives from the authored
 // demand/supply level (High/Med/Low) attached to that item on the partner.
@@ -776,7 +781,8 @@ function applyStrikes(db) {
     }
   }
 }
-function runEconomy(db, actor) {
+function runEconomy(db, actor, scale) {
+  scale = typeof scale === 'number' && isFinite(scale) ? scale : 1;
   // Strikes (Phase 31): while an active protest's crowds sit on a property,
   // its workforce is out — output scales by the strike degree below. Runs
   // first so every revenue path (goods/cash/province GDP) sees it.
@@ -858,10 +864,49 @@ function runEconomy(db, actor) {
       : 1;
 
     // gross production value (drives GDP): private at output, public at cost
+    // Phase 35: `scale` parameter (default 1) multiplies production so the
+    // cadence scheduler can fire this at sub-turn intervals while preserving
+    // cumulative per-turn effects. Phase 35 supply chains: if the property
+    // has a `consumes` array, production scales by the minimum input
+    // availability ratio (inputStock / inputRequired), so properties need
+    // materials from upstream to produce at full capacity.
+    let inputFactor = 1;
+    if (pr.consumes && pr.consumes.length && active) {
+      let worst = 1;
+      for (const c of pr.consumes) {
+        if (!c.itemId || !(c.perTurn > 0)) continue;
+        const needed = c.perTurn * f * scale;
+        const stock = inventoryQty(pr, c.itemId);
+        const ratio = needed > 0 ? Math.min(1, stock / needed) : 1;
+        if (ratio < worst) worst = ratio;
+      }
+      inputFactor = worst;
+      // consume the inputs (proportional to actual production)
+      for (const c of pr.consumes) {
+        if (!c.itemId || !(c.perTurn > 0)) continue;
+        const used = cleanQty(c.perTurn * f * scale * inputFactor);
+        if (used > 0) removeInventory(pr, c.itemId, used);
+      }
+    }
+    // 6a. Maintenance decay: condition starts at 100 and decays each tick
+    // unless the property's maintenanceSpend covers requiredUpkeep. Condition
+    // multiplies effective output alongside inputFactor and other multipliers.
+    pr.vars = pr.vars || {};
+    if (pr.vars.condition === undefined) pr.vars.condition = 100;
+    const decayRate = db.settings.economy && db.settings.economy.conditionDecayPerHour !== undefined ? Number(db.settings.economy.conditionDecayPerHour) : 0.5;
+    const maintainSpend = pr.vars.maintenanceSpend || 0;
+    const requiredUpkeep = (pr.expenses || 0) * 0.3;
+    const shortfall = Math.max(0, requiredUpkeep - maintainSpend);
+    const decay = shortfall > 0 ? decayRate * scale * (shortfall / Math.max(1, requiredUpkeep)) : 0;
+    pr.vars.condition = Math.max(0, Math.min(100, pr.vars.condition - decay));
+    const conditionFactor = active ? pr.vars.condition / 100 : 1;
+    // 6e. Quality tier: quality nudges output value (small multiplier)
+    if (pr.vars.quality === undefined) pr.vars.quality = 50;
+    const qualityFactor = 1 + (pr.vars.quality - 50) / 500; // 0.9× at 0 … 1.1× at 100
     let gross;
-    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId), 0);
-    else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f;
-    else gross = pr.expenses || 0;
+    if (pr.prodMode === 'goods') gross = (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * f * priceOf(e.itemId) * scale * inputFactor * conditionFactor * qualityFactor, 0);
+    else if (pr.prodMode === 'cash') gross = (pr.cashPerTurn || 0) * f * scale * conditionFactor * qualityFactor;
+    else gross = (pr.expenses || 0) * scale;
     if (pr.provinceId) provGross[pr.provinceId] = (provGross[pr.provinceId] || 0) + gross;
 
     const o = own(pr.ownerId);
@@ -878,7 +923,7 @@ function runEconomy(db, actor) {
       pr._domesticMarketSalesThisTurn = [];
       for (const e of (pr.produces || [])) {
         const retail = priceOf(e.itemId);
-        const produced = cleanQty((e.perTurn || 0) * f);
+        const produced = cleanQty((e.perTurn || 0) * f * scale * inputFactor * conditionFactor * qualityFactor);
         if (produced <= 0) continue;
         const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
           ? clampPct(pr.keepPctByItem[e.itemId], keepPct)
@@ -891,7 +936,7 @@ function runEconomy(db, actor) {
         o.dom += sold * retail * domMult;
       }
     } else if (pr.prodMode === 'cash') {
-      o.dom += (pr.cashPerTurn || 0) * f;
+      o.dom += (pr.cashPerTurn || 0) * f * scale;
     }
 
     // workforce (Phase 28): morale drifts toward the wage anchor, and an
@@ -943,24 +988,24 @@ function runEconomy(db, actor) {
   }
 
   // settle each owner: net abstract money-in, government purchases, tax.
-  // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
-  // economy spends, a spooked one doesn't. Domestic consumer sales scale by
-  // confFactor.
-  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
-  const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
-  let settledOwners = 0, netTotal = 0, taxTotal = 0;
-  for (const ownerId in perOwner) {
-    const o = perOwner[ownerId];
-    const owner = db.entities.find(e => e.id === ownerId);
-    const acct = primaryAccount(ownerId, true);
-    const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
-    // The wage bill is NO LONGER deducted here at the mint: previously the
-    // wages money was destroyed at the market edge and nobody actually got
-    // paid. It rides the revenue into the owner's account, and the household
-    // pass (households.js runWages) then DEBITS that account into real
-    // household wallets — money conserved, wages paid with real balances.
-    // o.wage still feeds vars.expenses/vars.profit below for the accounting.
-    let netAbstract = dom - o.upkeep;
+    // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
+    // economy spends, a spooked one doesn't. Domestic consumer sales scale by
+    // confFactor. Phase 35: scale parameter multiplies the net result.
+    const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
+    const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
+    let settledOwners = 0, netTotal = 0, taxTotal = 0;
+    for (const ownerId in perOwner) {
+      const o = perOwner[ownerId];
+      const owner = db.entities.find(e => e.id === ownerId);
+      const acct = primaryAccount(ownerId, true);
+      const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
+      // The wage bill is NO LONGER deducted here at the mint: previously the
+      // wages money was destroyed at the market edge and nobody actually got
+      // paid. It rides the revenue into the owner's account, and the household
+      // pass (households.js runWages) then DEBITS that account into real
+      // household wallets — money conserved, wages paid with real balances.
+      // o.wage still feeds vars.expenses/vars.profit below for the accounting.
+      let netAbstract = dom - o.upkeep;
 
     // per-turn tax on positive operating net (rates are the same %; net is 1/30
     // of the old monthly figure, so the monthly burden matches the old system)
@@ -1450,8 +1495,12 @@ function runBankCrisis(db, actor) {
 // before the Working Class feels it. On month boundaries the slower forces
 // act: incomes track GDP growth and confidence, populations grow (or stall)
 // with wellbeing, and a confident economy pulls villagers into the cities.
+// Phase 35: `scale` parameter (default 1) multiplies all drift rates so
+// the cadence scheduler can fire this at sub-turn intervals while preserving
+// cumulative per-turn effects.
 const DEMO_SENS = { 'Upper Class': 1.6, 'Middle Class': 1.2, 'Urban': 1.2, 'Working Class': 0.9, 'Students': 0.8, 'Rural': 0.7, 'Retired': 0.6 };
-function runDemographics(db, monthBoundary) {
+function runDemographics(db, monthBoundary, scale) {
+  scale = typeof scale === 'number' && isFinite(scale) ? scale : 1;
   const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
   const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
   const crisis = db.globalVars.bankCrisis ? (db.globalVars.bankCrisisSeverity || 0.5) : 0;
@@ -1466,11 +1515,12 @@ function runDemographics(db, monthBoundary) {
     for (const gname in p.demographics) {
       const d = p.demographics[gname];
       const sens = DEMO_SENS[gname] || 1;
-      // fast per-turn drift toward the province/economy anchors
-      d.economicConfidence = r1(clampB(pull(d.economicConfidence, econC, 0.06 * sens)));
-      d.employment = r1(clampB(pull(d.employment, empA - crisis * 3 * sens, 0.05)));
-      d.happiness = r1(clampB(pull(d.happiness, hapA + (d.employment - empA) * 0.15, 0.04)));
-      d.governmentSupport = r1(clampB(pull(d.governmentSupport, appA - crisis * 4, 0.025)));
+      // fast per-turn drift toward the province/economy anchors (scaled by
+      // `scale` for sub-turn cadence ticks — Phase 35)
+      d.economicConfidence = r1(clampB(pull(d.economicConfidence, econC, 0.06 * sens * scale)));
+      d.employment = r1(clampB(pull(d.employment, empA - crisis * 3 * sens, 0.05 * scale)));
+      d.happiness = r1(clampB(pull(d.happiness, hapA + (d.employment - empA) * 0.15, 0.04 * scale)));
+      d.governmentSupport = r1(clampB(pull(d.governmentSupport, appA - crisis * 4, 0.025 * scale)));
       if (monthBoundary) {
         // incomes ride GDP growth and confidence, with class sensitivity
         const incF = 1 + gdpGrowth * 0.5 * sens + ((econC - 50) / 50) * 0.012 * sens - crisis * 0.02;
@@ -2030,9 +2080,9 @@ function autoTick(actor) {
 
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
-  runElection, apportionSeats, computePolling, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
+  runEconomy, runElection, apportionSeats, computePolling, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, executeTrade, holderStock, tradeTariffRate,
-  shiftRelations, relationsOf, worldClockNow,
+  shiftRelations, relationsOf, worldClockNow, runDemographics,
   findProv, findEnt, findItem
 };

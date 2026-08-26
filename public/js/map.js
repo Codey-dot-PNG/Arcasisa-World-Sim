@@ -65,7 +65,12 @@ const GameMap = {
     const wrap = document.getElementById('map-wrap');
     if (!wrap) return;
     const enabled = document.body && document.body.dataset.daynight === 'on';
-    if (!enabled || !Number.isFinite(Number(worldMs))) {
+    // A paused world clock reports null — Number(null) is 0 (finite!), so the
+    // isFinite check alone let null slip through as new Date(0): epoch
+    // midnight, i.e. the map locked into PERMANENT night whenever the clock
+    // was paused. Treat null/undefined/non-numbers uniformly as "no world
+    // time" -> clear to daylight.
+    if (!enabled || worldMs == null || !Number.isFinite(Number(worldMs))) {
       wrap.classList.remove('day-night-night');
       delete wrap.dataset.dayphase;
       return;

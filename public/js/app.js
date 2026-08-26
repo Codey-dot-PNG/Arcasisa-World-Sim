@@ -221,8 +221,10 @@ const App = {
     const c = t.clock || {};
     if (!c.enabled) { out.textContent = 'WORLD PAUSED'; if (window.GameMap) GameMap.setDayNight(null); return; }
     const rate = Math.max(0, Number(c.minutesPerRealMinute) || 59.5);
-    const sample = Number(c.nowMs);
-    const sampleAt = Number(c.serverNowMs);
+    // Number(null) is 0 — finite — so a missing sample must not read as the
+    // epoch; guard before coercing (same trap setDayNight had).
+    const sample = c.nowMs == null ? NaN : Number(c.nowMs);
+    const sampleAt = c.serverNowMs == null ? NaN : Number(c.serverNowMs);
     const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
     const anchor = Number(c.anchorRealMs) || Date.now();
     const worldMs = Number.isFinite(sample) && Number.isFinite(sampleAt)

@@ -794,38 +794,37 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 .map-light-bloom{fill:url(#lightCoreGrad);}
 .map-light-core{fill:#ffedc4;}
 .map-light-heart{fill:#fffdf4;}
-.map-light-speck{fill:#ffd98a;}
-/* gentle mains-hum shimmer, not a strobe — durations/delays come from the
-   per-cluster seeded RNG via --tw-* custom properties; unanimated specks burn
-   steady, like streetlights that never flicker */
-.tw{animation:lampTwinkle var(--tw-dur,6.5s) ease-in-out infinite; animation-delay:var(--tw-delay,0s);}
-@keyframes lampTwinkle{
-  0%,100%{opacity:.97;}
-  50%{opacity:.74;}
+.map-light-speck{fill:url(#lightSpeckWarm);}
+/* Ambient motion is exactly ONE animated element: a slow breath on the whole
+   glow field (nested inside .night-glows so it multiplies with the
+   var-driven intensity). Per-lamp CSS keyframes were tried and removed —
+   hundreds of them inside this screen-blended group forced it to
+   re-composite across the entire map every frame, making night unusably
+   slow. One group-level opacity oscillation composites as a single layer.
+   It pauses in daylight, when the layer is invisible anyway. */
+.night-breathe{
+  animation:cityBreathe 12s ease-in-out infinite;
+  will-change:opacity;
 }
-/* whole settlements breathe: a slow swell of the halo blob (per-cluster
-   timing via --br-*), so the night map feels alive rather than pasted-on */
-.breathe{animation:haloBreath var(--br-dur,11s) ease-in-out infinite; animation-delay:var(--br-delay,-2s);}
-@keyframes haloBreath{
+#map-wrap[data-dayphase="day"] .night-breathe{animation-play-state:paused;}
+@keyframes cityBreathe{
   0%,100%{opacity:1;}
-  50%{opacity:.82;}
+  50%{opacity:.86;}
 }
 
 /* ---------- vehicles at night ----------
    Each car/train carries a .veh-light set (headlight beam cone + road pool +
-   red tail lamps) whose opacity rides --dn-lights: non-existent by day,
-   shining after dusk. Bodies dim a little with darkness via calc() over
-   --dn-night so they don't glow like ghosts on the graded ground. */
+   red tail lamps) painted UNDERNEATH the body sprite; their opacity rides
+   --dn-lights: non-existent by day, shining after dusk. Bodies dim with
+   darkness via plain opacity over --dn-night — cheap to composite (a filter
+   was tried here and removed for the same reason as above). */
 .veh-light{
   opacity:var(--dn-lights,0);
   transition:opacity 2.2s ease;
   mix-blend-mode:screen;
 }
 .veh-tail{fill:#ff4b3a;}
-.map-car,.map-train{
-  transition:filter 1.8s linear;
-  filter:brightness(calc(1 - 0.3 * var(--dn-night,0))) saturate(calc(1 - 0.15 * var(--dn-night,0)));
-}
+.map-car,.map-train{opacity:calc(1 - 0.28 * var(--dn-night,0));}
 /* editor affordances (drawn INSIDE #map-svg, interactive) */
 .light-edit-halo{fill:none; stroke:var(--accent-soft); stroke-opacity:.55; stroke-width:2; stroke-dasharray:10 8; vector-effect:non-scaling-stroke;}
 .light-edit-halo.selected{stroke:var(--accent); stroke-opacity:.95;}

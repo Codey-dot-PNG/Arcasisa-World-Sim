@@ -14,7 +14,6 @@ const GameMap = {
   svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
   trafficLayer: null, trafficUnits: [], trafficFrame: null,
   drag: null,
-  _dnFilter: '',   // last applied day/night filter string (write coalescing)
 
   mount(container) {
     clear(container);
@@ -124,18 +123,14 @@ const GameMap = {
     this.applyDayNight(wrap, night, warm, lights);
   },
   applyDayNight(wrap, night, warm, lights) {
-    const n = Number(night) || 0;
-    wrap.style.setProperty('--dn-night', n.toFixed(3));
+    // Just write the three factors; all grading is opacity/blend based
+    // (multiply grades + var-driven opacities), which composites cheaply.
+    // A filter on #map-svg itself was tried and removed: it forced the whole
+    // map svg through a filter surface that every moving/highlighted element
+    // then invalidated, at enormous compositor cost.
+    wrap.style.setProperty('--dn-night', (Number(night) || 0).toFixed(3));
     wrap.style.setProperty('--dn-warm', (Number(warm) || 0).toFixed(3));
     wrap.style.setProperty('--dn-lights', (Number(lights) || 0).toFixed(3));
-    // mild desaturation/crunch at night; skip DOM writes when unchanged so a
-    // settled day or night costs nothing ('' = no filter at all)
-    const f = n <= 0 ? '' :
-      `brightness(${(1 - 0.08 * n).toFixed(3)}) saturate(${(1 - 0.34 * n).toFixed(3)}) contrast(${(1 + 0.05 * n).toFixed(3)})`;
-    if (this._dnFilter !== f) {
-      this._dnFilter = f;
-      if (this.svg) { if (f) this.svg.style.filter = f; else this.svg.style.removeProperty('filter'); }
-    }
   },
 
   /* ---------- pan & zoom ---------- */
@@ -385,6 +380,11 @@ const GameMap = {
     // tight white-hot bloom reused behind every cluster's core lamp and as
     // each vehicle's ground pool of light
     grad('lightCoreGrad', [['0%', '#fff6dc', '0.85'], ['40%', '#ffe6ad', '0.42'], ['100%', '#ffdd96', '0']]);
+    // per-speck blooms — every satellite lamp is its own soft-edged glow, in
+    // three colour temperatures (warm windows / sodium / cool floodlight)
+    grad('lightSpeckWarm', [['0%', '#fff3d0', '0.95'], ['45%', '#ffd98a', '0.55'], ['100%', '#ffb46e', '0']]);
+    grad('lightSpeckSodium', [['0%', '#ffcf9a', '0.95'], ['45%', '#ffb46e', '0.50'], ['100%', '#ff9d4a', '0']]);
+    grad('lightSpeckCool', [['0%', '#fffbe8', '0.90'], ['50%', '#ffe9c8', '0.45'], ['100%', '#ffdf9e', '0']]);
     // the night grade itself: moonlit indigo, brighter over the island,
     // falling to deep navy at the rim (a vignette, not a uniform dim)
     grad('nightGradeGrad', [
@@ -405,6 +405,14 @@ const GameMap = {
     }, this.nightLayer);
     this.lightsWorld = document.createElementNS(NS, 'g');
     this.lightsWorld.setAttribute('class', 'night-glows');
+    // ONE animated element for the whole city-glow field: a slow ambient
+    // breath on this inner group. Animating individual lamps used to force
+    // the screen-blended group to re-composite over the whole map every
+    // frame — hundreds of animations was ruinous; one group-level opacity
+    // oscillation gives the same "alive" feel at compositor cost.
+    this.lightsInner = document.createElementNS(NS, 'g');
+    this.lightsInner.setAttribute('class', 'night-breathe');
+    this.lightsWorld.appendChild(this.lightsInner);
     this.nightLayer.appendChild(this.lightsWorld);
     this.world.appendChild(this.nightLayer);
   },
@@ -415,13 +423,18 @@ const GameMap = {
      circle: the outline radius wobbles with three seeded harmonics and is
      smoothed via closed Catmull-Rom → Bézier conversion, then rotated and
      very slightly stretched per cluster, so towns read as irregular pools of
-     light instead of stamped discs. The satellite specks ("windows, side
-     streets, the odd floodlight") sample the same harmonic contour so they
-     huddle inside the town's shape, and mix three colour temperatures.
-     Placement and which lamps shimmer are all derived deterministically from
-     the light's id, so clusters look organic but render identically for every
-     operator and on every rebuild. Shimmer/breathing are pure CSS — no JS
-     frames; layer opacity rides --dn-lights (see setDayNight). */
+     light instead of stamped discs. Every lamp in the cluster — core and
+     satellite specks alike — is filled with a soft radial-gradient bloom in
+     one of three colour temperatures, and each speck bakes in its own steady
+     brightness so the texture stays organic. Placement is deterministic from
+     the light's id, so clusters render identically for every operator and on
+     every rebuild.
+
+     PERFORMANCE: nothing inside the glow field is individually animated any
+     more. Hundreds of per-lamp CSS keyframes used to force the screen-blended
+     group to re-composite across the whole map every frame; ambient motion is
+     now a single opacity oscillation on the .night-breathe wrapper (see
+     buildNightLayer), which composites as one layer. */
   seedRand(str) {
     let h = 2166136261;
     for (let i = 0; i < String(str).length; i++) { h ^= String(str).charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -452,22 +465,19 @@ const GameMap = {
     return { d: d + 'Z', wob };
   },
   buildLights(map) {
-    if (!this.lightsWorld) return;
+    if (!this.lightsInner) return;
     const NS = 'http://www.w3.org/2000/svg';
-    clear(this.lightsWorld);
+    clear(this.lightsInner);
     const lights = map.lights || [];
     const mkL = (tag, attrs, parent) => {
       const n = document.createElementNS(NS, tag);
       for (const k in attrs) if (attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
-      (parent || this.lightsWorld).appendChild(n);
+      (parent || this.lightsInner).appendChild(n);
       return n;
     };
-    const twinkle = (rand, base) =>
-      `--tw-dur:${(base + rand() * base).toFixed(2)}s; --tw-delay:${(-rand() * base).toFixed(2)}s;`;
-    const breathe = (rand) =>
-      `--br-dur:${(8 + rand() * 7).toFixed(2)}s; --br-delay:${(-rand() * 10).toFixed(2)}s;`;
-    // warm windows / sodium-orange street lamps / occasional cool floodlight
-    const speckFill = r => (r < 0.55 ? '#ffd98a' : r < 0.86 ? '#ffb46e' : '#ffe9c8');
+    // warm windows / sodium-orange street lamps / occasional cool floodlight,
+    // each a soft-edged gradient bloom rather than a flat disc
+    const speckFill = r => (r < 0.55 ? 'url(#lightSpeckWarm)' : r < 0.86 ? 'url(#lightSpeckSodium)' : 'url(#lightSpeckCool)');
     for (const lt of lights) {
       if (!lt.pos || !(lt.r > 0)) continue;
       const rand = this.seedRand(lt.id || (lt.pos.join(',') + lt.r));
@@ -478,32 +488,31 @@ const GameMap = {
       const rot = (rand() * 360).toFixed(1);
       const stretch = 0.88 + rand() * 0.24;
       mkL('path', {
-        d: blob.d, class: 'map-light-halo breathe',
+        d: blob.d, class: 'map-light-halo',
         transform: `rotate(${rot}) scale(${stretch.toFixed(3)},${(1 / stretch).toFixed(3)})`,
-        style: breathe(rand),
       }, g);
       // soft bloom behind the core lamp (gradient, not flat fill)
       mkL('circle', { r: Math.max(20, lt.r * 0.28), class: 'map-light-bloom' }, g);
-      // bright heart of the settlement: a gently breathing lamp over a steady
-      // white-hot centre, so each town always keeps one crisp anchor point
+      // bright heart of the settlement: the lamp over a steady white-hot
+      // centre, so each town keeps one crisp anchor point
       const coreR = Math.max(6, lt.r * 0.085);
-      mkL('circle', { r: coreR, class: 'map-light-core tw', style: twinkle(rand, 5) }, g);
+      mkL('circle', { r: coreR, class: 'map-light-core' }, g);
       mkL('circle', { r: coreR * 0.45, class: 'map-light-heart' }, g);
-      // satellite glows hugging the blob's contour, slightly squashed to sit
-      // on the ground plane
+      // satellite blooms hugging the blob's contour, slightly squashed to sit
+      // on the ground plane; each carries its own steady brightness so the
+      // cluster glimmers statically without any animation cost
       const specks = Math.min(12, 3 + Math.round(lt.r / 36) + Math.floor(rand() * 4));
       for (let i = 0; i < specks; i++) {
         const ang = rand() * Math.PI * 2;
         const edge = lt.r * blob.wob(ang);
         const dist = edge * (0.32 + rand() * 0.52);
-        const attrs = {
+        mkL('circle', {
           cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.86,
-          r: Math.max(2.5, lt.r * (0.028 + rand() * 0.042)),
-          fill: speckFill(rand()), class: 'map-light-speck',
-        };
-        // ~60% shimmer slowly; the rest burn steady, like real streetlights
-        if (rand() < 0.62) { attrs.class += ' tw'; attrs.style = twinkle(rand, 6); }
-        mkL('circle', attrs, g);
+          r: Math.max(3.5, lt.r * (0.038 + rand() * 0.05)),
+          fill: speckFill(rand()),
+          opacity: (0.68 + rand() * 0.32).toFixed(2),
+          class: 'map-light-speck',
+        }, g);
       }
     }
   },
@@ -624,16 +633,17 @@ const GameMap = {
           const pt = this.pointOnPath(u.path.pts, along, u.path.len);
           u.node.setAttribute('transform', `translate(${pt[0]},${pt[1]}) scale(${u.size})`);
           // aim the headlights along the tangent; on the return leg of the
-          // ping-pong the vehicle faces back the way it came, so the beam
-          // swings round and the tail lamps swap ends with it
+          // ping-pong the vehicle faces back the way it came. The tail lamps
+          // take the SAME heading — they're modelled behind the origin, so
+          // they always end up on the side opposite the beam.
           if (u.aim) {
             const ahead = this.pointOnPath(u.path.pts, along + 8, u.path.len);
             const behind = this.pointOnPath(u.path.pts, along - 8, u.path.len);
             let deg = Math.atan2(ahead[1] - behind[1], ahead[0] - behind[0]) * 180 / Math.PI;
             if (movement > 1) deg += 180;
-            deg = deg.toFixed(1);
-            u.aim.setAttribute('transform', `rotate(${deg})`);
-            u.tail.setAttribute('transform', `rotate(${(Number(deg) + 180).toFixed(1)})`);
+            const rot = `rotate(${deg.toFixed(1)})`;
+            u.aim.setAttribute('transform', rot);
+            u.tail.setAttribute('transform', rot);
           }
         }
       };

@@ -88,6 +88,7 @@ const App = {
     });
 
     this.bindShell();
+    this.bindDrawers();
     try {
       await refreshState(true); // first paint must never be skipped by the v-unchanged fast path
       this.enter();
@@ -142,6 +143,39 @@ const App = {
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape' && W.placing) GameMap.setPlacing(null);
     });
+  },
+
+  // Mobile drawers: below 900px the explorer floats over the view, below
+  // 1180px the inspector does (breakpoints live in style.css RESPONSIVE). A
+  // scrim dims the covered content; tapping it — or picking a dossier from
+  // the explorer — closes the drawer again. Visibility is derived from the
+  // panels' own classes via MutationObservers, so every existing code path
+  // that opens/closes them (Views.inspect, closeInspector, the ☰ toggle)
+  // keeps working untouched.
+  bindDrawers() {
+    const main = document.getElementById('main');
+    const explorer = document.getElementById('explorer');
+    const inspector = document.getElementById('inspector');
+    const scrim = el('div#drawer-scrim');
+    main.appendChild(scrim);
+    const expFloats = () => window.innerWidth <= 900;
+    const inspFloats = () => window.innerWidth <= 1180;
+    const sync = () => {
+      const inspOpen = !inspector.classList.contains('hidden') && inspFloats();
+      const expOpen = !explorer.classList.contains('collapsed') && expFloats();
+      // selecting from the explorer hands focus to the dossier — fold the
+      // list away so it doesn't cover half the phone screen
+      if (expOpen && !inspector.classList.contains('hidden')) explorer.classList.add('collapsed');
+      scrim.classList.toggle('visible', expOpen || inspOpen);
+    };
+    scrim.addEventListener('click', () => {
+      if (expFloats()) explorer.classList.add('collapsed');
+      if (inspFloats() && !inspector.classList.contains('hidden')) Views.closeInspector();
+    });
+    new MutationObserver(sync).observe(explorer, { attributes: true, attributeFilter: ['class'] });
+    new MutationObserver(sync).observe(inspector, { attributes: true, attributeFilter: ['class'] });
+    window.addEventListener('resize', sync);
+    if (expFloats()) explorer.classList.add('collapsed'); // phones boot folded
   },
 
   enter() {

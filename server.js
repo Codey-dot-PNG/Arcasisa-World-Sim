@@ -5,6 +5,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 const store = require('./server/store');
 const sim = require('./server/sim');
 const api = require('./server/api');
@@ -18,6 +19,75 @@ const MIME = {
   '.json': 'application/json', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
   '.svg': 'image/svg+xml', '.ico': 'image/x-icon', '.woff2': 'font/woff2', '.gif': 'image/gif'
 };
+
+// ---------- static assets: in-memory cache + gzip + ETag ----------
+// Local-mode static serving only (Vercel serves public/ itself, so api/index.js
+// never runs this). The frontend is ~1MB of hand-written JS; serving it raw
+// from disk per request wasted the most bandwidth in the app. Text assets are
+// pre-compressed once into memory and revalidated with ETags — a repeat visit
+// costs a 304 instead of a full re-read, and first visits transfer ~70% less.
+// mtime+size validation keeps hot-reload during development correct: an edit
+// bumps the ETag, the cache entry is replaced, never served stale.
+const COMPRESSIBLE = new Set(['.html', '.css', '.js', '.json', '.svg', '.txt']);
+const CACHE_MAX_BYTES = 64 * 1024 * 1024;
+const staticCache = new Map(); // absolute path -> { etag, raw, gz }
+let staticCacheBytes = 0;
+
+function cacheEntryBytes(entry) { return entry.raw.length + (entry.gz ? entry.gz.length : 0); }
+
+function cachePut(full, entry) {
+  const prev = staticCache.get(full);
+  if (prev) { staticCacheBytes -= cacheEntryBytes(prev); staticCache.delete(full); }
+  staticCache.set(full, entry); // Map iteration order = insertion order → LRU eviction below
+  staticCacheBytes += cacheEntryBytes(entry);
+  while (staticCacheBytes > CACHE_MAX_BYTES && staticCache.size > 1) {
+    const oldestKey = staticCache.keys().next().value;
+    staticCacheBytes -= cacheEntryBytes(staticCache.get(oldestKey));
+    staticCache.delete(oldestKey);
+  }
+}
+
+function sendStatic(res, req, ext, entry) {
+  const headers = {
+    'Content-Type': MIME[ext] || 'application/octet-stream',
+    'Cache-Control': ext === '.png' || ext === '.jpg' || ext === '.jpeg' || ext === '.woff2' ? 'public, max-age=86400' : 'no-cache',
+    'Vary': 'Accept-Encoding',
+    'ETag': entry.etag
+  };
+  if (req.headers['if-none-match'] === entry.etag) { res.writeHead(304, headers); return res.end(); }
+  let body = entry.raw;
+  if (entry.gz && /\bgzip\b/.test(String(req.headers['accept-encoding'] || ''))) {
+    headers['Content-Encoding'] = 'gzip';
+    body = entry.gz;
+  }
+  headers['Content-Length'] = body.length;
+  res.writeHead(200, headers);
+  res.end(body);
+}
+
+function serveFile(req, res, full, fallbackToIndex) {
+  const ext = path.extname(full).toLowerCase();
+  fs.stat(full, (statErr, st) => {
+    const notFound = () => {
+      if (fallbackToIndex) return serveFile(req, res, path.join(PUBLIC, 'index.html'), false);
+      res.writeHead(404); res.end('Not found');
+    };
+    if (statErr || !st.isFile()) return notFound();
+    const etag = '"' + st.size.toString(36) + '-' + Math.round(st.mtimeMs).toString(36) + '"';
+    const cached = staticCache.get(full);
+    if (cached && cached.etag === etag) return sendStatic(res, req, ext, cached);
+    fs.readFile(full, (readErr, data) => {
+      if (readErr) return notFound();
+      const entry = {
+        etag,
+        raw: data,
+        gz: COMPRESSIBLE.has(ext) && data.length > 1024 ? zlib.gzipSync(data, { level: 6 }) : null
+      };
+      cachePut(full, entry);
+      sendStatic(res, req, ext, entry);
+    });
+  });
+}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
@@ -35,26 +105,10 @@ const server = http.createServer(async (req, res) => {
   let file = pathname === '/' ? '/index.html' : pathname;
   file = path.normalize(file).replace(/^([.\\/])+/, '');
   const full = path.join(PUBLIC, file);
-  if (!full.startsWith(PUBLIC)) { res.writeHead(403); return res.end(); }
-  fs.readFile(full, (err, data) => {
-    if (err) {
-      // SPA fallback for unknown non-asset paths
-      if (!path.extname(full)) {
-        return fs.readFile(path.join(PUBLIC, 'index.html'), (e2, idx) => {
-          if (e2) { res.writeHead(404); return res.end('Not found'); }
-          res.writeHead(200, { 'Content-Type': MIME['.html'] });
-          res.end(idx);
-        });
-      }
-      res.writeHead(404); return res.end('Not found');
-    }
-    const ext = path.extname(full).toLowerCase();
-    res.writeHead(200, {
-      'Content-Type': MIME[ext] || 'application/octet-stream',
-      'Cache-Control': ext === '.png' || ext === '.jpg' ? 'public, max-age=86400' : 'no-cache'
-    });
-    res.end(data);
-  });
+  // require the resolved path to sit INSIDE public/ (a plain startsWith on the
+  // directory name would also admit siblings like "public-extra")
+  if (full !== PUBLIC && !full.startsWith(PUBLIC + path.sep)) { res.writeHead(403); return res.end(); }
+  serveFile(req, res, full, !path.extname(full)); // extensionless unknown paths fall back to the SPA shell
 });
 
 (async () => {

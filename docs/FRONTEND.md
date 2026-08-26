@@ -53,6 +53,12 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 
 - DOM built with the `el('tag.class', attrs?, ...children)` helper; views rebuild their
   subtree from scratch on each render (scroll positions restored by app.js).
+- All `<script>` tags in index.html carry `defer` — they still execute in the dependency
+  order above, but download in parallel without blocking first paint.
+- Mobile: below 900px the explorer floats over the view (below 1180px the inspector does);
+  `App.bindDrawers()` adds a scrim (`#drawer-scrim`) that closes them on outside tap.
+  Touch-target sizing lives in the `(pointer:coarse)` block of style.css; phones also get
+  `100dvh` shell height, safe-area padding and horizontally scrollable wide tables.
 - No client-side secrets or authority: prices, casino outcomes, election results, and
   permission checks are all server-side. Client-side control checks exist only to show/hide
   UI affordances.

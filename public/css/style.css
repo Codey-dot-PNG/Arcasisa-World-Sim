@@ -51,6 +51,7 @@ body[data-mood="gold"]{ --paper:#eedfb4; --paper-deep:#e5d098; --paper-line:#cdb
 
 *{box-sizing:border-box;}
 html,body{margin:0; padding:0; height:100%;}
+html{overscroll-behavior:none; /* no pull-to-refresh / rubber-band on phones */}
 body{
   background:var(--paper);
   color:var(--ink);
@@ -58,6 +59,7 @@ body{
   font-size:14px;
   overflow:hidden;
   transition:background-color .5s ease;
+  -webkit-tap-highlight-color:transparent; /* taps highlight via :hover/:active styles instead */
 }
 body::before{
   content:"";
@@ -203,7 +205,8 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   position:fixed; inset:0; z-index:50;
   display:flex; align-items:center; justify-content:center;
   background:var(--paper);
-  overflow:auto; padding:30px;
+  overflow:auto;
+  padding:max(30px, env(safe-area-inset-top, 0px)) max(30px, env(safe-area-inset-right, 0px)) max(30px, env(safe-area-inset-bottom, 0px)) max(30px, env(safe-area-inset-left, 0px));
 }
 .login-card{width:440px; max-width:94vw; padding:38px 42px;}
 .login-seal{text-align:center; margin-bottom:18px;}
@@ -219,11 +222,14 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 }
 
 /* ═══════════ SHELL ═══════════ */
-#app{display:flex; flex-direction:column; height:100vh;}
+/* 100dvh tracks the mobile browser's collapsing URL bar — with plain 100vh the
+   ticker sat behind Safari's bottom toolbar on iOS. The vh line is the fallback. */
+#app{display:flex; flex-direction:column; height:100vh; height:100dvh;}
 
 #topbar{
   display:flex; align-items:center; gap:14px;
-  padding:0 14px; height:46px; flex-shrink:0;
+  padding:0 calc(14px + env(safe-area-inset-right, 0px)) 0 calc(14px + env(safe-area-inset-left, 0px));
+  height:46px; flex-shrink:0;
   border-bottom:1px solid var(--rule-strong);
   background:var(--paper);
   position:relative; z-index:20;
@@ -722,7 +728,7 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 
 /* chart zoom modal */
 .chart-zoom-modal{position:fixed; inset:0; z-index:1000; background:rgba(20,16,10,.72); display:flex; align-items:center; justify-content:center;}
-.chart-zoom-inner{background:var(--paper); border:1px solid var(--rule-strong); padding:16px; box-shadow:0 8px 40px rgba(0,0,0,.5); max-width:94vw;}
+.chart-zoom-inner{background:var(--paper); border:1px solid var(--rule-strong); padding:16px; box-shadow:0 8px 40px rgba(0,0,0,.5); max-width:94vw; max-height:88vh; max-height:88dvh; overflow:auto;}
 .chart-zoom-inner .zoom-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; font-family:var(--font-mono); font-size:11px; letter-spacing:.1em; color:var(--ink-soft);}
 .chart-zoom-hint{font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); margin-top:6px;}
 .tex-building.selected{filter:drop-shadow(0 0 6px var(--accent)) drop-shadow(0 3px 3px rgba(0,0,0,.28));}
@@ -807,7 +813,8 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
   border-top:1px solid var(--rule-strong);
   background:var(--paper);
   display:flex; align-items:center; gap:12px;
-  padding:0 14px; overflow:hidden;
+  padding:0 calc(14px + env(safe-area-inset-right, 0px)) 0 calc(14px + env(safe-area-inset-left, 0px));
+  overflow:hidden;
   position:relative; z-index:20;
 }
 .ticker-label{
@@ -990,7 +997,7 @@ body[data-mood="red"] .paper-mast-radical .pm-name{color:#7a9fd4;}
 .modal{
   background:var(--paper); border:1px solid var(--rule-strong);
   box-shadow:0 30px 70px rgba(0,0,0,0.35);
-  width:560px; max-width:96vw; max-height:88vh; overflow-y:auto;
+  width:560px; max-width:96vw; max-height:88vh; max-height:88dvh; overflow-y:auto;
   padding:24px 28px;
   animation:modalIn .2s ease;
 }
@@ -1001,7 +1008,7 @@ body[data-mood="red"] .paper-mast-radical .pm-name{color:#7a9fd4;}
   border-bottom:1px solid var(--rule-strong); padding-bottom:10px; margin-bottom:6px;
 }
 .modal-title{font-family:var(--font-mono); font-size:11px; letter-spacing:0.2em; text-transform:uppercase; color:var(--ink); font-weight:700;}
-#toast-root{position:fixed; left:18px; bottom:44px; z-index:110; display:flex; flex-direction:column; gap:8px;}
+#toast-root{position:fixed; left:calc(18px + env(safe-area-inset-left, 0px)); bottom:calc(44px + env(safe-area-inset-bottom, 0px)); z-index:110; display:flex; flex-direction:column; gap:8px;}
 body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 .toast{
   font-family:var(--font-mono); font-size:11px; letter-spacing:0.06em;
@@ -1012,6 +1019,23 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 }
 .toast.err{background:var(--accent); border-left-color:var(--ink);}
 @keyframes toastIn{from{transform:translateX(-16px); opacity:0;} to{transform:none; opacity:1;}}
+
+/* ═══════════ MOBILE DRAWER SCRIM ═══════════
+   Below 900px the explorer (and below 1180px the inspector) floats OVER the
+   view instead of docking beside it (see the RESPONSIVE rules). The scrim dims
+   the covered content and closes whichever drawer is open when tapped —
+   visibility is driven from App.bindDrawers() in public/js/app.js via
+   MutationObservers on the two panels' classes; CSS alone decides whether the
+   scrim can exist at all at the current width. z-index sits UNDER both panels
+   (explorer 16, inspector 15) and over #view's unstacked descendants. */
+#drawer-scrim{
+  position:absolute; inset:0; z-index:14;
+  background:rgba(24,20,14,0.45);
+  opacity:0; pointer-events:none;
+  transition:opacity .22s ease;
+}
+#drawer-scrim.visible{opacity:1; pointer-events:auto;}
+@media (min-width:1181px){ #drawer-scrim{display:none;} }
 
 /* ═══════════ RESPONSIVE ═══════════ */
 @media (max-width:1180px){
@@ -1072,6 +1096,24 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   .modal{padding:18px 16px;}
   #ticker{gap:8px; padding:0 8px;}
   .ticker-label{display:none;}
+  /* The fullscreen grain overlay is a fixed blended layer — one of the most
+     expensive things to composite on a phone GPU. It's invisible at a glance;
+     reclaim the paint cost on small screens. */
+  body::before{display:none;}
+  /* 16px is iOS Safari's threshold below which focusing an input auto-zooms
+     the page (and the zoom sticks until blur) — bump inputs to avoid it. */
+  .text-input, select.text-input, textarea.text-input{font-size:16px;}
+  .field-label{margin-top:10px;}
+  /* Wide dossier/economy tables scroll horizontally instead of crushing their
+     columns; narrow tables are unaffected (block tables shrink-wrap). */
+  table.data{display:block; overflow-x:auto; -webkit-overflow-scrolling:touch;}
+  /* War Room overlays keep clear of screen edges on narrow viewports */
+  .war-toolbar{left:8px; right:8px; max-width:none; bottom:8px;}
+  body:has(.gm-bar:not(.hidden)) .war-toolbar{bottom:118px;}
+  .war-unit-card{max-width:min(216px, 62vw);}
+  /* parliament seat chart never overflows a 320px viewport */
+  #seat-arc{max-width:100%; height:auto;}
+  .login-card{padding:26px 20px;}
 }
 
 /* smallest phones — reclaim the brand seal's width so the theme swatches +
@@ -1080,6 +1122,33 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
   #topbar{gap:4px;}
   #brand{display:none;}
   .swatch{width:13px; height:13px;}
+}
+
+/* ---------- touch devices ---------- */
+/* Coarse pointers (phones/tablets) get comfortably sized hit targets; the
+   layout itself is untouched, so desktop rendering is byte-for-byte the same.
+   WCAG-leaning minimum of ~34-40px on interactive rows and controls. */
+@media (pointer:coarse){
+  .tab{padding:15px 13px 13px;}
+  .chip{padding:8px 13px;}
+  .dash-btn{padding:9px 14px;}
+  .outline-btn{padding:8px 12px;}
+  .solid-btn{padding:12px 18px;}
+  .danger-btn{padding:10px 16px;}
+  .icon-btn{min-width:34px; min-height:34px; font-size:15px;}
+  .music-widget .icon-btn{min-width:30px; min-height:30px; padding:4px 6px;}
+  .swatch{width:19px; height:19px;}
+  .exp-item{padding-top:9px; padding-bottom:9px;}
+  .pick-item{padding-top:10px; padding-bottom:10px;}
+  .recip-chip{padding:7px 13px; margin:3px 5px 3px 0;}
+  #map-controls button{width:38px; height:38px; font-size:17px;}
+  .bet-btn{padding:11px 4px;}
+  .bet-cell{min-height:33px;}
+  .lotto-num{font-size:14px;}
+  .venue-tab{padding:12px 16px;}
+  /* range thumbs grow from a 14px mouse target to something a finger lands on */
+  .slider-input::-webkit-slider-thumb{width:22px; height:22px; margin-top:-9px;}
+  .slider-input::-moz-range-thumb{width:20px; height:20px;}
 }
 
 /* ═══════════ ECONOMY CLUSTER — pick-lists, chips, badges (Phase 4/7) ═══════════ */

@@ -1768,7 +1768,7 @@ const Views = {
     }
     const draft = { keepPct: keep, wagePerTurn: wage };
     box.appendChild(el('div.form-grid',
-      Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(draft, 'keepPct'), 'Kept stock trades on the open market or via trade offers'),
+      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(draft, 'keepPct'), 'Kept stock trades on the open market or via trade offers'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(draft, 'wagePerTurn', '0.01'), 'Payroll is added to every company property’s total expenses')));
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
@@ -1948,7 +1948,7 @@ const Views = {
 
     inner.appendChild(this.secLabel('Operations'));
     inner.appendChild(el('div.form-grid',
-      Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
+      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(dr, 'keepPct'),
         'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01')),
       Forms.field('Training spend / turn (' + CUR() + ')', Forms.num(dr, 'trainingSpend', '1'),
@@ -2617,7 +2617,7 @@ const Views = {
     // green span left of the thumb is sold domestically, the neutral span
     // right of it is kept as stock. Slider value = domestic share.
     inner.appendChild(el('div.form-grid',
-      Forms.field('Sell domestically ↔ Keep in stock', this.mixSlider(dr, 'keepPct'),
+      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(dr, 'keepPct'),
         'Kept stock piles up on your sites — sell it abroad on the open market (Economy → International Trade) or to anyone via trade offers.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'), 'Payroll is added to upkeep for every property owned by this company')));
 

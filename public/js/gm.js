@@ -364,45 +364,76 @@ const GM = {
       if (p.prices[it.id] > 0 && it.marketValue > 0) return Math.round(p.prices[it.id] / it.marketValue * 100) / 100;
       return 1;
     };
-    // shared row builder: `listKey` is p.exports (goods they buy from us) or
-    // p.imports (goods they sell to us). Price is the item's global retail value
-    // × a per-partner MULTIPLIER slider (with typing). `lvlKey` is the
-    // demand/supply High/Med/Low level that sizes the orders.
-    const commRows = (listKey, lvlKey, label) => {
-      box.appendChild(el('div.mono-label', { style: 'margin-top:10px;' }, label));
-      comms.forEach(it => {
-        const on = p[listKey].includes(it.id);
-        const cb = el('input', {
-          type: 'checkbox', checked: on,
-          onchange: (e) => { if (e.target.checked) { p[listKey] = [...new Set([...p[listKey], it.id])]; if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it); if (p[lvlKey][it.id] === undefined) p[lvlKey][it.id] = 'Med'; } else { p[listKey] = p[listKey].filter(x => x !== it.id); } App.renderView(); }
-        });
-        const row = el('div', { style: 'display:flex; gap:10px; align-items:center; padding:3px 0; flex-wrap:wrap;' },
-          el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 200px; font-size:12.5px; cursor:pointer;' }, cb,
-            el('span', it.name, el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, ' · retail ' + CUR() + fmtNum(effPrice(it))))));
-        if (on) {
-          if (p.priceMult[it.id] === undefined) p.priceMult[it.id] = multOf(it);
-          const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); min-width:78px; text-align:right;' });
-          // demand orders are our EXPORTS, supply orders our IMPORTS — each
-          // scaled by its own GM lever on top of the partner multiplier
-          const kindMult = econMult(lvlKey === 'demand' ? 'exportMultiplier' : 'importMultiplier');
-          const paint = () => { priceOut.textContent = '= ' + CUR() + fmtNum(Math.round((it.marketValue || 0) * (p.priceMult[it.id] || 1) * kindMult * 100) / 100); };
-          paint();
-          const slider = Forms.sliderNum(p.priceMult, it.id, 0.5, 2, { step: 0.05, suffix: '×', allowBeyondRange: true, onInput: () => { delete p.prices[it.id]; paint(); } });
-          const lvlSel = F.sel(p[lvlKey], it.id, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
-          lvlSel.style.maxWidth = '84px';
-          if (lvlKey === 'demand' && p.demandMultiplierByItem[it.id] === undefined) p.demandMultiplierByItem[it.id] = 1;
-          const demandControl = lvlKey === 'demand'
-            ? el('div', { style: 'min-width:250px; flex:1 1 300px;' },
-                el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-bottom:2px;' }, 'ITEM DEMAND × · ON TOP OF PARTNER'),
-                Forms.sliderNum(p.demandMultiplierByItem, it.id, 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }))
-            : null;
-          row.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; flex:1 1 340px; flex-wrap:wrap;' }, el('div', { style: 'flex:1 1 220px;' }, slider), priceOut, demandControl, lvlSel));
+    // shared section builder: `listKey` is p.exports (goods THEY buy from us)
+    // or p.imports (goods they sell TO us). Each active item gets one card
+    // showing its effective trade price up front; new items are added via a
+    // dropdown rather than a long checkbox list.
+    const commRows = (listKey, lvlKey, heading, sub) => {
+      const isExport = listKey === 'exports';
+      box.appendChild(el('div.mono-label', { style: 'margin-top:14px; font-size:11px;' }, heading));
+      box.appendChild(el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin-bottom:6px;' }, sub));
+      const ids = [...new Set(p[listKey])];
+      ids.forEach(iid => {
+        const it = comms.find(c => c.id === iid);
+        if (!it) return;
+        const retail = effPrice(it);
+        if (p.priceMult[iid] === undefined) p.priceMult[iid] = multOf(it);
+        const kindMult = econMult(isExport ? 'exportMultiplier' : 'importMultiplier');
+        const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:12px; color:var(--accent); white-space:nowrap;' });
+        const multOut = el('span', { style: 'font-family:var(--font-mono); font-size:10px; margin-left:6px;' });
+        const paint = () => {
+          const m = p.priceMult[iid] || 1;
+          priceOut.textContent = CUR() + fmtNum(Math.round(retail * m * kindMult * 100) / 100);
+          priceOut.style.color = m >= 10 ? 'var(--bad, #c25b49)' : (m >= 3 ? '#c99a2e' : 'var(--accent)');
+          multOut.textContent = '(' + fmtNum(m) + '× retail)';
+          multOut.style.color = m >= 10 ? 'var(--bad, #c25b49)' : (m >= 3 ? '#c99a2e' : 'var(--ink-faint)');
+        };
+        paint();
+        const slider = Forms.sliderNum(p.priceMult, iid, 0.5, 2, { step: 0.05, suffix: '×', allowBeyondRange: true, onInput: () => { delete p.prices[iid]; paint(); } });
+        slider.style.flex = '1 1 180px';
+        const lvlSel = F.sel(p[lvlKey], iid, [['High', 'High'], ['Med', 'Med'], ['Low', 'Low']]);
+        lvlSel.title = isExport ? 'How much of this they want per cycle' : 'How much of this they offer per cycle';
+        lvlSel.style.maxWidth = '84px';
+        let demandControl = null;
+        if (isExport) {
+          if (p.demandMultiplierByItem[iid] === undefined) p.demandMultiplierByItem[iid] = 1;
+          demandControl = el('label', { style: 'display:flex; gap:8px; align-items:center; flex:1 1 220px; font-size:10px; color:var(--ink-faint); font-family:var(--font-mono);' },
+            'DEMAND ×',
+            (() => { const s = Forms.sliderNum(p.demandMultiplierByItem, iid, 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }); s.style.flex = '1 1 120px'; return s; })());
         }
-        box.appendChild(row);
+        const rm = el('button.icon-btn', { title: isExport ? 'Stop exporting this to them' : 'Stop importing this from them',
+          onclick: () => { p[listKey] = p[listKey].filter(x => x !== iid); App.renderView(); } }, '✕');
+        box.appendChild(el('div.stage', { style: 'margin-bottom:6px; padding:8px 10px;' },
+          el('div', { style: 'display:flex; gap:10px; align-items:center; flex-wrap:wrap;' },
+            el('span', { style: 'flex:1 1 160px; font-size:12.5px;' }, it.name),
+            el('span', { style: 'display:flex; gap:4px; align-items:baseline;' }, priceOut, multOut),
+            rm),
+          el('div', { style: 'display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-top:4px;' },
+            el('span', { style: 'font-size:10px; color:var(--ink-faint); font-family:var(--font-mono);' }, 'PRICE ×'),
+            slider,
+            el('span', { style: 'font-size:10px; color:var(--ink-faint); font-family:var(--font-mono);' }, isExport ? 'THEIR DEMAND' : 'THEIR SUPPLY'),
+            lvlSel, demandControl)));
       });
+      // add-item dropdown for everything not yet enabled
+      const remaining = comms.filter(c => !ids.includes(c.id));
+      if (remaining.length) {
+        const sel = el('select.form-input', { style: 'max-width:320px;', onchange: (e) => {
+          const id = e.target.value; if (!id) return;
+          p[listKey] = [...new Set([...p[listKey], id])];
+          if (p.priceMult[id] === undefined) p.priceMult[id] = multOf(itemById(id));
+          if (p[lvlKey][id] === undefined) p[lvlKey][id] = 'Med';
+          if (isExport && p.demandMultiplierByItem[id] === undefined) p.demandMultiplierByItem[id] = 1;
+          delete e.target.value; App.renderView();
+        } },
+          el('option', { value: '' }, '+ Add item to ' + (isExport ? 'exports' : 'imports') + '…'),
+          remaining.map(c => el('option', { value: c.id }, c.name + ' · retail ' + CUR() + fmtNum(effPrice(c)))));
+        box.appendChild(sel);
+      }
     };
-    commRows('exports', 'demand', 'Exports to this partner — price multiplier & their demand level (they buy these from us)');
-    commRows('imports', 'supply', 'Imports from this partner — price multiplier & their supply level (they sell these to us)');
+    commRows('exports', 'demand', 'EXPORTS · goods WE sell to them',
+      'Each card sets the unit price they pay (retail × multiplier) and how much they want. Multipliers ≥3× are tinted amber, ≥10× red — check before saving!');
+    commRows('imports', 'supply', 'IMPORTS · goods THEY sell to us',
+      'Same controls, mirrored: the price we pay them and how much they can supply.');
     return box;
   },
 

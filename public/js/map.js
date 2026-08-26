@@ -14,6 +14,7 @@ const GameMap = {
   svg: null, world: null, markerLayer: null, cityLayer: null, editLayer: null,
   trafficLayer: null, trafficUnits: [], trafficFrame: null,
   drag: null,
+  _dnFilter: '',   // last applied day/night filter string (write coalescing)
 
   mount(container) {
     clear(container);
@@ -35,14 +36,28 @@ const GameMap = {
     this.lightsSvg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
     this.lightsSvg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
     const ldefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    // wide settlement halo: hot amber core falling off over ~3 stops so towns
+    // read as a pool of light rather than a hard-edged disc
     const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
     grad.setAttribute('id', 'lightHaloGrad');
-    for (const [off, col, op] of [['0%', '#ffd98e', '0.62'], ['30%', '#ffc873', '0.26'], ['65%', '#ffb95e', '0.08'], ['100%', '#ffb95e', '0']]) {
+    for (const [off, col, op] of [
+      ['0%', '#ffdca4', '0.50'], ['22%', '#ffcb84', '0.30'], ['48%', '#ffb978', '0.14'],
+      ['76%', '#ffab66', '0.05'], ['100%', '#ffab66', '0'],
+    ]) {
       const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
       stop.setAttribute('offset', off); stop.setAttribute('stop-color', col); stop.setAttribute('stop-opacity', op);
       grad.appendChild(stop);
     }
     ldefs.appendChild(grad);
+    // tight white-hot bloom reused behind every cluster's core lamp
+    const core = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    core.setAttribute('id', 'lightCoreGrad');
+    for (const [off, col, op] of [['0%', '#fff6dc', '0.85'], ['40%', '#ffe6ad', '0.42'], ['100%', '#ffdd96', '0']]) {
+      const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      stop.setAttribute('offset', off); stop.setAttribute('stop-color', col); stop.setAttribute('stop-opacity', op);
+      core.appendChild(stop);
+    }
+    ldefs.appendChild(core);
     this.lightsSvg.appendChild(ldefs);
     this.lightsWorld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
     this.lightsSvg.appendChild(this.lightsWorld);
@@ -85,25 +100,64 @@ const GameMap = {
 
   editing() { return !!(window.MapEdit && MapEdit.active); },
 
+  /* ---------- day/night cycle ----------
+     A continuous solar model, not a binary flip. World minutes-of-day feed a
+     cosine "sun altitude" proxy (+1 noon … −1 midnight, 0 exactly at 06:00 /
+     18:00), which yields three smooth 0..1 factors written to #map-wrap as
+     CSS custom properties once per clock tick (1s):
+
+       --dn-night   darkness — drives the indigo multiply grade (::after)
+       --dn-warm    golden hour — drives the amber multiply grade (::before)
+       --dn-lights  city-glow intensity — drives #map-lights opacity
+
+     The overlays' opacity transitions then interpolate between ticks for free,
+     so dawn and dusk slide through over ~2½ world-hours instead of snapping.
+     data-dayphase (night/dawn/day/dusk) is kept as a styling/debug hook. */
   setDayNight(worldMs) {
     const wrap = document.getElementById('map-wrap');
     if (!wrap) return;
     const enabled = document.body && document.body.dataset.daynight === 'on';
-    // A paused world clock reports null — Number(null) is 0 (finite!), so the
-    // isFinite check alone let null slip through as new Date(0): epoch
-    // midnight, i.e. the map locked into PERMANENT night whenever the clock
-    // was paused. Treat null/undefined/non-numbers uniformly as "no world
-    // time" -> clear to daylight.
+    // A paused world clock reports null — Number(null) is 0 (finite!), so a
+    // bare isFinite check would read null as the epoch: permanent night while
+    // paused. Treat null/undefined/non-numbers uniformly as "no world time".
     if (!enabled || worldMs == null || !Number.isFinite(Number(worldMs))) {
-      wrap.classList.remove('day-night-night');
       delete wrap.dataset.dayphase;
+      this.applyDayNight(wrap, 0, 0, 0);
       return;
     }
     const d = new Date(Number(worldMs));
-    const minutes = d.getUTCHours() * 60 + d.getUTCMinutes();
-    const night = minutes < 6 * 60 || minutes >= 18 * 60;
-    wrap.dataset.dayphase = night ? 'night' : 'day';
-    wrap.classList.toggle('day-night-night', night);
+    const m = d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60;
+    const sun = Math.cos(((m - 720) / 1440) * Math.PI * 2); // +1 noon, −1 midnight
+    // daylight: smoothstep across ±K of the horizon; K≈0.32 ⇒ twilight spans
+    // roughly 04:40–07:20 and 16:40–19:20, anchored on the classic 06/18 flip
+    const K = 0.32;
+    const t = Math.min(1, Math.max(0, (sun + K) / (2 * K)));
+    const daylight = t * t * (3 - 2 * t);
+    // golden hour: bell peaking exactly at sunrise/sunset, fading both toward
+    // noon (too high) and into deep night (gated by the residual daylight)
+    const bell = Math.max(0, 1 - Math.abs(sun) / 0.55);
+    const warm = Math.pow(bell, 1.4) * Math.min(1, daylight * 5 + 0.22);
+    const night = Math.pow(1 - daylight, 1.25);
+    // lamps kindle through dusk (half-lit mid-twilight) rather than popping on
+    const lights = Math.min(1, Math.max(0, (0.72 - daylight) / 0.55));
+    wrap.dataset.dayphase = daylight <= 0.04 ? 'night'
+      : daylight >= 0.96 ? 'day'
+      : m < 720 ? 'dawn' : 'dusk';
+    this.applyDayNight(wrap, night, warm, lights);
+  },
+  applyDayNight(wrap, night, warm, lights) {
+    const n = Number(night) || 0;
+    wrap.style.setProperty('--dn-night', n.toFixed(3));
+    wrap.style.setProperty('--dn-warm', (Number(warm) || 0).toFixed(3));
+    wrap.style.setProperty('--dn-lights', (Number(lights) || 0).toFixed(3));
+    // mild desaturation/crunch at night; skip DOM writes when unchanged so a
+    // settled day or night costs nothing ('' = no filter at all)
+    const f = n <= 0 ? '' :
+      `brightness(${(1 - 0.08 * n).toFixed(3)}) saturate(${(1 - 0.34 * n).toFixed(3)}) contrast(${(1 + 0.05 * n).toFixed(3)})`;
+    if (this._dnFilter !== f) {
+      this._dnFilter = f;
+      if (this.svg) { if (f) this.svg.style.filter = f; else this.svg.style.removeProperty('filter'); }
+    }
   },
 
   /* ---------- pan & zoom ---------- */
@@ -316,11 +370,14 @@ const GameMap = {
 
   /* ---------- night city lights ----------
      Each GM-placed light (settings.map.lights — a centre + halo radius) blooms
-     into a small settlement: one warm halo, a bright core lamp, and a handful
-     of satellite specks ("windows and side streets") scattered deterministically
-     from the light's id, so clusters look organic but render identically for
-     every operator and on every rebuild. Flicker is pure CSS (per-light random
-     duration/delay), so the animation costs no JS frames. */
+     into a small settlement: a wide gradient halo, a white-hot core lamp with
+     a soft bloom, and a scatter of satellite specks — "windows, side streets
+     and the odd floodlight" — mixed across three colour temperatures so
+     clusters don't read as uniform yellow blobs. Placement, colours and which
+     specks shimmer are all derived deterministically from the light's id, so
+     clusters look organic but render identically for every operator and on
+     every rebuild. Shimmer is pure CSS (per-speck duration/delay), costing no
+     JS frames. Layer opacity is driven by --dn-lights (see setDayNight). */
   seedRand(str) {
     let h = 2166136261;
     for (let i = 0; i < String(str).length; i++) { h ^= String(str).charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -341,28 +398,35 @@ const GameMap = {
       (parent || this.lightsWorld).appendChild(n);
       return n;
     };
-    const flick = (rand, base) =>
-      `--flick-dur:${(base + rand() * base).toFixed(2)}s; --flick-delay:${(-rand() * base).toFixed(2)}s;`;
+    const twinkle = (rand, base) =>
+      `--tw-dur:${(base + rand() * base).toFixed(2)}s; --tw-delay:${(-rand() * base).toFixed(2)}s;`;
+    // warm windows / sodium-orange street lamps / occasional cool floodlight
+    const speckFill = r => (r < 0.55 ? '#ffd98a' : r < 0.86 ? '#ffb46e' : '#ffe9c8');
     for (const lt of lights) {
       if (!lt.pos || !(lt.r > 0)) continue;
       const g = mkL('g', { transform: `translate(${lt.pos[0]},${lt.pos[1]})` });
       mkL('circle', { r: lt.r, class: 'map-light-halo' }, g);
       const rand = this.seedRand(lt.id || (lt.pos.join(',') + lt.r));
-      // soft bloom behind the core lamp (cheap fake of a gaussian glow)
-      mkL('circle', { r: Math.max(16, lt.r * 0.24), fill: '#ffdf9e', opacity: 0.3 }, g);
-      mkL('circle', {
-        r: Math.max(7, lt.r * 0.1), class: 'map-light-core',
-        style: flick(rand, 3)
-      }, g);
-      const specks = 3 + Math.floor(rand() * 4); // 3–6 satellite glows per cluster
+      // soft bloom behind the core lamp (gradient, not flat fill)
+      mkL('circle', { r: Math.max(20, lt.r * 0.3), class: 'map-light-bloom' }, g);
+      // bright heart of the settlement: a gently breathing lamp over a steady
+      // white-hot centre, so each town always keeps one crisp anchor point
+      const coreR = Math.max(6, lt.r * 0.09);
+      mkL('circle', { r: coreR, class: 'map-light-core tw', style: twinkle(rand, 5) }, g);
+      mkL('circle', { r: coreR * 0.45, class: 'map-light-heart' }, g);
+      // satellite glows, slightly squashed vertically to sit on the ground plane
+      const specks = Math.min(11, 3 + Math.round(lt.r / 40) + Math.floor(rand() * 4));
       for (let i = 0; i < specks; i++) {
         const ang = rand() * Math.PI * 2;
-        const dist = lt.r * (0.38 + rand() * 0.5);
-        mkL('circle', {
-          cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.85,
-          r: Math.max(3, lt.r * (0.05 + rand() * 0.05)),
-          class: 'map-light-speck', style: flick(rand, 4)
-        }, g);
+        const dist = lt.r * (0.3 + rand() * 0.55);
+        const attrs = {
+          cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.82,
+          r: Math.max(2.5, lt.r * (0.03 + rand() * 0.045)),
+          fill: speckFill(rand()), class: 'map-light-speck',
+        };
+        // ~60% shimmer slowly; the rest burn steady, like real streetlights
+        if (rand() < 0.62) { attrs.class += ' tw'; attrs.style = twinkle(rand, 6); }
+        mkL('circle', attrs, g);
       }
     }
   },

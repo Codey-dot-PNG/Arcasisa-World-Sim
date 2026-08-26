@@ -348,10 +348,33 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .chip.active{background:var(--ink); color:var(--paper); border-color:var(--ink);}
 
 /* ═══════════ MAP ═══════════ */
-#map-wrap{position:absolute; inset:0; overflow:hidden; background:var(--map-sea); transition:background-color .8s ease;}
-#map-wrap::after{content:""; position:absolute; inset:0; z-index:1; pointer-events:none; background:rgba(7,17,36,.34); opacity:0; transition:opacity .8s ease;}
-#map-wrap.day-night-night::after{opacity:1;}
-#map-wrap.day-night-night #map-svg{filter:saturate(.82) brightness(.78);}
+#map-wrap{
+  position:absolute; inset:0; overflow:hidden; background:var(--map-sea);
+  transition:background-color .8s ease;
+  /* continuous day/night grades, written every clock tick by
+     GameMap.setDayNight (0..1 each): darkness, golden hour, city-glow */
+  --dn-night:0; --dn-warm:0; --dn-lights:0;
+}
+/* Dawn/dusk (::before) and nightfall (::after) are MULTIPLY colour grades,
+   not flat black veils — they re-tint the whole map (amber at golden hour,
+   indigo under moonlight) while preserving its contrast, and their opacity
+   tracks the sun curve so twilight slides in over ~2½ world-hours instead of
+   snapping on a class flip. */
+#map-wrap::before{
+  content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
+  opacity:var(--dn-warm); transition:opacity 1.8s linear;
+  mix-blend-mode:multiply;
+  background:linear-gradient(180deg,
+    rgba(255,176,74,.72) 0%, rgba(255,146,58,.58) 42%, rgba(255,164,92,.50) 100%);
+}
+#map-wrap::after{
+  content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
+  opacity:var(--dn-night); transition:opacity 1.8s linear;
+  mix-blend-mode:multiply;
+  /* brighter centre, darker rim — a moonlit vignette, not a uniform dim */
+  background:radial-gradient(120% 95% at 50% 42%,
+    rgba(99,116,182,.88) 0%, rgba(64,80,144,.94) 52%, rgba(36,47,102,1) 100%);
+}
 #map-svg{width:100%; height:100%; display:block; cursor:grab; touch-action:none;}
 #map-svg.dragging{cursor:grabbing;}
 #map-svg text{user-select:none; pointer-events:none;}
@@ -745,27 +768,31 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 
 /* ---------- city lights (night) ----------
    GM-placed light clusters (settings.map.lights) rendered as a warm glow
-   overlay that fades in when the day/night cycle flips the wrap to
-   .day-night-night. The layer sits ABOVE #map-wrap::after (the night dim,
-   z-index 1) at z-index 2 so lamps are not darkened by their own night —
-   and mixes with SCREEN blending so each glow literally adds light to the
-   darkened map beneath instead of painting flat yellow on top of it. */
+   overlay whose opacity tracks --dn-lights (the sun curve written by
+   GameMap.setDayNight), so lamps kindle gradually through dusk instead of
+   popping with a class flip. The layer sits ABOVE #map-wrap::after (the night
+   grade, z-index 1) at z-index 2 so lamps are never darkened by their own
+   night — and mixes with SCREEN blending so each glow literally adds light to
+   the darkened map beneath instead of painting flat yellow on top of it. */
 #map-lights{
   position:absolute; inset:0; z-index:2;
   pointer-events:none;
-  opacity:0; transition:opacity 2.4s ease;
+  opacity:var(--dn-lights,0); transition:opacity 2.2s ease;
   mix-blend-mode:screen;
 }
-#map-wrap.day-night-night #map-lights{opacity:1;}
 #map-lights svg{width:100%; height:100%; display:block;}
 .map-light-halo{fill:url(#lightHaloGrad);}
-.map-light-core{fill:#ffedc4; animation:lampFlicker var(--flick-dur,3.6s) ease-in-out infinite; animation-delay:var(--flick-delay,0s);}
-.map-light-speck{fill:#ffd98a; animation:lampFlicker var(--flick-dur,3.6s) ease-in-out infinite; animation-delay:var(--flick-delay,0s);}
-@keyframes lampFlicker{
-  0%,100%{opacity:.95;}
-  38%{opacity:.74;}
-  52%{opacity:.52;}
-  66%{opacity:.88;}
+.map-light-bloom{fill:url(#lightCoreGrad);}
+.map-light-core{fill:#ffedc4;}
+.map-light-heart{fill:#fffdf4;}
+.map-light-speck{fill:#ffd98a;}
+/* gentle mains-hum shimmer, not a strobe — durations/delays come from the
+   per-cluster seeded RNG via --tw-* custom properties; unanimated specks burn
+   steady, like streetlights that never flicker */
+.tw{animation:lampTwinkle var(--tw-dur,6.5s) ease-in-out infinite; animation-delay:var(--tw-delay,0s);}
+@keyframes lampTwinkle{
+  0%,100%{opacity:.97;}
+  50%{opacity:.74;}
 }
 /* editor affordances (drawn INSIDE #map-svg, interactive) */
 .light-edit-halo{fill:none; stroke:var(--accent-soft); stroke-opacity:.55; stroke-width:2; stroke-dasharray:10 8; vector-effect:non-scaling-stroke;}

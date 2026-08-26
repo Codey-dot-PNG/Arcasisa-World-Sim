@@ -1695,6 +1695,56 @@ function executeTrade(side, orderId, holderId, qty, actor) {
   return { qty, unit, value, tariff, tariffRate, filled: order.filled, orderQty: order.qty };
 }
 
+// ---------- ongoing trade contracts ----------------------------------------
+// A contract automates the open market: every turn, right after the fresh
+// order book opens (advanceTurn), each active contract re-fills its chosen
+// listing — matched by partner + item + side, because order ids are
+// regenerated every turn — through the SAME executeTrade() path as a manual
+// fill. Volume pricing impact, tariffs, embargoes, stock and funds checks are
+// therefore identical by construction. A turn whose book has no matching
+// order (or an already-filled / embargoed / unaffordable one) just idles: the
+// miss is noted on the record for its dossier row, and one turn of duration
+// burns anyway. turnsLeft === null means "until cancelled".
+function runTradeContracts(db, actor) {
+  const list = db.tradeContracts || [];
+  if (!list.length) return;
+  const book = db.settings.trade && db.settings.trade.orders;
+  const nameOf = (id) => { const e = db.entities.find(x => x.id === id); return e ? e.name : id; };
+  const itemName = (id) => { const it = db.items.find(x => x.id === id); return it ? it.name : id; };
+  const r2 = (v) => Math.round(v * 100) / 100;
+  for (const c of list) {
+    if (c.status !== 'active') continue;
+    c.lastTurnNote = null;
+    // duration accounting runs regardless of whether the trade fires: N turns
+    // means N turn-openings, the last of which still trades before expiry.
+    let expiring = false;
+    if (c.turnsLeft !== null && c.turnsLeft !== undefined) {
+      if (c.turnsLeft <= 0) { c.status = 'done'; continue; }
+      c.turnsLeft--;
+      expiring = c.turnsLeft <= 0;
+    }
+    const orders = book ? ((c.side === 'sell' ? book.buys : book.sells) || []) : [];
+    const order = orders.find(o => o.partnerId === c.partnerId && o.itemId === c.itemId);
+    if (!order) {
+      c.lastTurnNote = book ? 'no matching order on this turn’s book' : 'order book closed';
+    } else {
+      try {
+        const r = executeTrade(c.side, order.id, c.holderId, c.qtyPerTurn, actor || 'ENGINE');
+        c.executions++;
+        c.totalQty = r2((c.totalQty || 0) + r.qty);
+        c.totalValue = r2((c.totalValue || 0) + (c.side === 'sell' ? r.value : -r.value));
+        c.lastUnit = r.unit;
+      } catch (e) { c.lastTurnNote = e.message; } // unfunded, out of stock, embargoed… — idle, never crash the turn
+    }
+    if (expiring) {
+      c.status = 'done';
+      store.log('economy', 'Ongoing contract completed',
+        `${nameOf(c.holderId)} — ${itemName(c.itemId)} ${c.side === 'sell' ? 'exports to' : 'imports from'} ${nameOf(c.partnerId)} ran its course: ${c.executions} fill${c.executions === 1 ? '' : 's'}, ${db.settings.currency}${fmtNum(Math.abs(c.totalValue || 0))} total.`,
+        actor || 'ENGINE', [c.holderId, c.partnerId]);
+    }
+  }
+}
+
 // Bank-of-Arcasia solvency → economic crash. The Bank is the market-maker for
 // the Day Market: it funds every share sale and every capital raise from a
 // finite reserve. If players drain it below zero it can no longer honour its
@@ -1994,6 +2044,11 @@ function advanceTurn(steps, actor) {
     } else {
       try { generateTradeOrders(db); } catch (e) { console.error('generateTradeOrders failed:', e.message); }
     }
+    // ongoing contracts re-fill their orders against the CURRENT book — fresh
+    // when generateTradeOrders just reopened it, otherwise the one the hourly
+    // tradeReset cadence has been rerolling all turn (either way it matches by
+    // partner + item + side, never by order id)
+    try { runTradeContracts(db, actor || 'ENGINE'); } catch (e) { console.error('runTradeContracts failed:', e.message); }
     // demographics breathe with the economy. Fast drift lives on the
     // demographics cadence now (scaled world-hourly slices); when that
     // cadence fired this turn, the pass here runs drift-free and only

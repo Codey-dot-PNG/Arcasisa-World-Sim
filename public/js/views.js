@@ -2246,16 +2246,20 @@ const Views = {
     ]));
 
     const canTariff = isGM() || this.controlsGov();
-    const validTabs = canTariff ? ['market', 'goods', 'tariffs'] : ['market', 'goods'];
+    const validTabs = ['market', 'goods', 'contracts'];
+    if (canTariff) validTabs.push('tariffs');
     if (!W.itlTab || !validTabs.includes(W.itlTab)) W.itlTab = 'market';
     const tab = (id, label) => el('button.chip', { class: W.itlTab === id ? 'active' : '', onclick: () => { W.itlTab = id; App.renderView(); } }, label);
+    const activeCount = (S().tradeContracts || []).filter(c => c.status === 'active').length;
     inner.appendChild(el('div.chip-row', { style: 'margin:8px 0 4px;' },
       tab('market', 'Selling & Buying'),
       tab('goods', 'Goods & Prices'),
-      canTariff ? tab('tariffs', 'Tariffs') : null));
+      canTariff ? tab('tariffs', 'Tariffs') : null,
+      tab('contracts', activeCount ? 'Contracts (' + activeCount + ')' : 'Contracts')));
 
     if (W.itlTab === 'goods') return this.intlGoods(inner, trade, partners);
     if (W.itlTab === 'tariffs' && canTariff) return this.intlTariffs(inner, trade, partners);
+    if (W.itlTab === 'contracts') return this.intlContracts(inner, trade, partners);
     return this.intlMarket(inner, trade, partners);
   },
 
@@ -2390,6 +2394,177 @@ const Views = {
       ] : hist.map(h => ({ x: h.turn, y: h.exportValue || 0 })),
         { width: 560, height: 150, title: 'FOREIGN TRADE / TURN', yFormat: v => CUR() + fmtCompact(v) }));
     }
+  },
+
+  /* Ongoing Contracts — automate the open market. A contract re-fills one
+     listing (matched by partner + item + side; order ids change every turn)
+     through the very same execution path as a manual Buy/Sell, so pricing
+     impact, tariffs and stock/funds rules are identical by construction. It
+     runs for a chosen number of turns or indefinitely, can be cancelled any
+     time, and simply idles (with a note) on turns when no matching order
+     exists on the book. */
+  intlContracts(inner, trade, partners) {
+    const contracts = S().tradeContracts || [];
+    const nameOf = (eid) => { const e = entById(eid); return e ? e.name : eid; };
+    const itemName = (iid) => { const it = itemById(iid); return it ? it.name : iid; };
+    const embargoed = (order, side) => {
+      const it = itemById(order.itemId), em = trade.tariffs && trade.tariffs.embargoes && trade.tariffs.embargoes[order.itemId];
+      if (!it || it.tradable === false) return true;
+      return !!(em && em[side === 'sell' ? 'export' : 'import']);
+    };
+    const active = contracts.filter(c => c.status === 'active');
+    const ended = contracts.filter(c => c.status !== 'active').slice(-30).reverse();
+
+    // ---- active contracts ------------------------------------------------
+    inner.appendChild(this.secLabel('Active Contracts'));
+    if (!active.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:6px 0;' },
+        'No ongoing contracts yet. Sign one below and the Bureau of Trade will repeat the deal every turn.'));
+    } else {
+      const box = el('div.stage');
+      box.appendChild(el('div', { style: 'display:flex; gap:12px; font-family:var(--font-mono); font-size:9px; letter-spacing:.08em; color:var(--ink-faint); padding-bottom:4px; border-bottom:1px solid var(--rule-strong);' },
+        el('span', { style: 'width:150px;' }, 'COUNTRY'), el('span', { style: 'width:110px;' }, 'FLOW'),
+        el('span', { style: 'width:170px;' }, 'GOOD'), el('span', { style: 'width:110px; text-align:right;' }, 'EACH TURN'),
+        el('span', {}, 'PROGRESS'), el('span', { style: 'flex:1; text-align:right;' }, 'REMAINING')));
+      for (const c of active) {
+        const row = el('div', { style: 'padding:8px 0; border-bottom:1px dashed var(--rule);' });
+        row.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; flex-wrap:wrap;' },
+          el('span', { style: 'width:150px; flex-shrink:0; font-size:12.5px; cursor:pointer;', onclick: () => select('entity', c.partnerId) }, nameOf(c.partnerId)),
+          el('span', { style: 'width:110px; flex-shrink:0; font-family:var(--font-mono); font-size:10px; letter-spacing:.08em;' },
+            el('span', { style: 'color:' + (c.side === 'sell' ? 'var(--good)' : 'var(--accent-soft)') + '; font-weight:700;' }, c.side === 'sell' ? 'EXPORT' : 'IMPORT')),
+          el('span', { style: 'width:170px; flex-shrink:0; font-size:12.5px;' }, itemName(c.itemId)),
+          el('span', { style: 'width:110px; flex-shrink:0; font-family:var(--font-mono); font-size:11px; text-align:right;' }, '×' + fmtNum(c.qtyPerTurn)),
+          el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft);' },
+            c.executions + ' fill' + (c.executions === 1 ? '' : 's') +
+            (c.totalValue ? ' · ' + (c.totalValue > 0 ? '+' : '') + fmtMoney(c.totalValue) : '')),
+          el('span', { style: 'flex:1; text-align:right; display:flex; justify-content:flex-end; align-items:center; gap:8px;' },
+            el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
+              c.turnsLeft === null || c.turnsLeft === undefined ? '∞ until cancelled' : c.turnsLeft + (c.turnsLeft === 1 ? ' turn' : ' turns')),
+            el('button.dash-btn', {
+              onclick: async (ev) => {
+                ev.currentTarget.disabled = true;
+                try {
+                  await POST('/api/trade/contracts/' + c.id + '/cancel');
+                  toast('Contract cancelled.');
+                } catch (err) { toast(err.message, true); ev.currentTarget.disabled = false; }
+              }
+            }, 'Cancel'))));
+        if (c.lastTurnNote) {
+          row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--accent-soft); margin:3px 0 0 162px;' },
+            'IDLE LAST TURN — ' + String(c.lastTurnNote).toUpperCase()));
+        }
+        box.appendChild(row);
+      }
+      inner.appendChild(box);
+    }
+
+    // ---- completed / cancelled ------------------------------------------
+    if (ended.length) {
+      inner.appendChild(this.secLabel('Completed & Cancelled'));
+      const box = el('div.stage');
+      for (const c of ended) {
+        box.appendChild(el('div', { style: 'display:flex; align-items:center; gap:12px; padding:6px 0; border-bottom:1px dashed var(--rule); flex-wrap:wrap;' },
+          el('span', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.06em; width:86px; flex-shrink:0; color:' + (c.status === 'done' ? 'var(--good)' : 'var(--accent-soft)') + ';' },
+            c.status === 'done' ? 'COMPLETED' : 'CANCELLED'),
+          el('span', { style: 'flex:1; min-width:200px; font-size:12.5px;' },
+            itemName(c.itemId) + ' · ×' + fmtNum(c.qtyPerTurn) + '/turn · ' + nameOf(c.partnerId) +
+            ' — ' + c.executions + ' fill' + (c.executions === 1 ? '' : 's') +
+            (c.totalValue ? ' · ' + (c.totalValue > 0 ? '+' : '') + fmtMoney(c.totalValue) : '')),
+          el('button.icon-btn', {
+            title: 'Remove from the register', onclick: async () => {
+              try { await DEL('/api/trade/contracts/' + c.id); toast('Removed.'); }
+              catch (err) { toast(err.message, true); }
+            }
+          }, '✕')));
+      }
+      inner.appendChild(box);
+    }
+
+    // ---- sign a new contract ---------------------------------------------
+    const holders = this.tradeHolders();
+    if (!holders.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; margin-top:14px;' },
+        'You direct no stockpile, so you cannot sign contracts — the book is shown read-only.'));
+      return;
+    }
+    inner.appendChild(this.secLabel('Sign an Ongoing Contract'));
+    const dr = W.contractDraft = W.contractDraft || { side: 'sell', key: '', holderId: holders[0].id, qty: '', forever: true, dur: 10 };
+    if (!holders.some(h => h.id === dr.holderId)) dr.holderId = holders[0].id;
+    const rawBook = trade.orders || { buys: [], sells: [] };
+    const options = ((dr.side === 'sell' ? rawBook.buys : rawBook.sells) || []).filter(o => !embargoed(o, dr.side));
+
+    const holderChips = el('div.chip-row', holders.map(h => el('button.chip', {
+      class: h.id === dr.holderId ? 'active' : '',
+      onclick: () => { dr.holderId = h.id; App.renderView(); }
+    }, h.type === 'government' ? 'National Stockpile' : (h.abbrev || h.name))));
+    const sideChips = el('div.chip-row',
+      el('button.chip', { class: dr.side === 'sell' ? 'active' : '', onclick: () => { dr.side = 'sell'; App.renderView(); } }, 'Export (fill their buy orders)'),
+      el('button.chip', { class: dr.side === 'buy' ? 'active' : '', onclick: () => { dr.side = 'buy'; App.renderView(); } }, 'Import (take their sell orders)'));
+
+    if (!options.some(o => o.partnerId + '|' + o.itemId === dr.key)) {
+      dr.key = options.length ? options[0].partnerId + '|' + options[0].itemId : '';
+    }
+    const orderSel = el('select.text-input',
+      options.map(o => {
+        const v = o.partnerId + '|' + o.itemId;
+        return el('option', { value: v, selected: dr.key === v ? 'selected' : undefined },
+          nameOf(o.partnerId) + ' — ' + itemName(o.itemId) + ' @ ' + CUR() + fmtNum(o.price) + ' (' + fmtNum(o.filled || 0) + '/' + fmtNum(o.qty) + ')');
+      }));
+    orderSel.addEventListener('change', () => { dr.key = orderSel.value; renderPreview(); });
+
+    const qtyInput = el('input.text-input', { type: 'number', min: '0.000001', step: 'any', placeholder: 'Quantity per turn', value: dr.qty ?? '', oninput: (e) => { dr.qty = e.target.value; renderPreview(); } });
+    const foreverCheck = el('input', { type: 'checkbox', checked: !!dr.forever, onchange: (e) => { dr.forever = e.target.checked; syncDur(); renderPreview(); } });
+    const durInput = el('input.text-input', { type: 'number', min: '1', step: '1', value: String(dr.dur ?? 10), oninput: (e) => { dr.dur = e.target.value; } });
+    const syncDur = () => { durInput.disabled = !!dr.forever; durInput.style.display = dr.forever ? 'none' : 'block'; };
+
+    const preview = el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); margin:10px 0; min-height:16px;' });
+    const currentOrder = () => options.find(o => o.partnerId + '|' + o.itemId === dr.key) || null;
+    function renderPreview() {
+      preview.textContent = '';
+      const o = currentOrder(), q = Number(dr.qty), h = entById(dr.holderId);
+      if (!o) { preview.textContent = 'No open listing matches this direction right now — orders regenerate every turn.'; return; }
+      if (!(q > 0) || !h) { preview.textContent = 'Choose a listing and a per-turn quantity.'; return; }
+      const unit = Views.tradeUnit(o, Math.min(q, o.qty - (o.filled || 0)), dr.side);
+      const value = Math.round(unit * q * 100) / 100;
+      const tRate = tradeTariffRateClient(dr.side, h, o.partnerId, o.itemId);
+      const net = Math.round((dr.side === 'sell' ? value - value * tRate / 100 : value + value * tRate / 100) * 100) / 100;
+      preview.textContent = '~' + CUR() + fmtNum(value) + '/turn @ ~' + CUR() + fmtNum(unit) + '/unit' +
+        (tRate > 0 ? (dr.side === 'sell' ? ' − ' + tRate + '% duty → ' : ' + ' + tRate + '% tariff → ') + CUR() + fmtNum(net) : '') +
+        ' · prices drift each turn';
+    }
+
+    const signBtn = el('button.solid-btn', 'Sign contract');
+    signBtn.addEventListener('click', async () => {
+      const o = currentOrder();
+      const q = Number(dr.qty);
+      if (!o) { toast('No matching listing is open this turn.', true); return; }
+      if (!(q > 0)) { toast('Quantity per turn must be positive.', true); return; }
+      signBtn.disabled = true;
+      try {
+        await POST('/api/trade/contracts', {
+          side: dr.side, partnerId: o.partnerId, itemId: o.itemId, holderId: dr.holderId,
+          qtyPerTurn: q, durationTurns: dr.forever ? null : Number(dr.dur)
+        });
+        W.contractDraft = null;
+        toast('Ongoing contract signed.');
+      } catch (err) { toast(err.message, true); signBtn.disabled = false; }
+    });
+
+    syncDur();
+    renderPreview();
+    inner.appendChild(el('div.stage',
+      el('label.field-label', 'Trading as'), holderChips,
+      el('label.field-label', 'Direction'), sideChips,
+      el('label.field-label', 'Listing'), orderSel,
+      el('div', { style: 'display:grid; grid-template-columns:1fr 1fr; gap:0 22px;' },
+        el('div', el('label.field-label', 'Quantity per turn'), qtyInput),
+        el('div',
+          el('label.field-label', 'Duration'),
+          el('label', { style: 'display:flex; gap:8px; align-items:center; margin-top:10px; font-size:13px; cursor:pointer;' },
+            foreverCheck, 'Run indefinitely (until cancelled)'),
+          durInput)),
+      preview,
+      el('div.btn-row', { style: 'justify-content:flex-end;' }, signBtn)));
   },
 
   /* Tariffs — the government's import/export duty schedule. A global baseline

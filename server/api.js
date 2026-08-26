@@ -395,6 +395,11 @@ function filterState(u) {
   const trades = p.gm ? (db.trades || [])
     : (db.trades || []).filter(t => controlled.has(t.fromEntityId) || controlled.has(t.toEntityId));
 
+  // Ongoing trade contracts: visible to whoever controls the trading holder
+  // entity; GM sees all. Partner names/items are public book data.
+  const contracts = p.gm ? (db.tradeContracts || [])
+    : (db.tradeContracts || []).filter(c => controlled.has(c.holderId));
+
   return {
     settings,
     // Economic confidence is public market information (like share prices), so
@@ -418,6 +423,7 @@ function filterState(u) {
     // detail ships with the tender (bid prices aren't sensitive; it's how a
     // market works), but only GMs see cancelled/expired history beyond 40.
     tenders: p.gm ? (db.tenders || []) : (db.tenders || []).filter(t => t.status === 'open' || t.status === 'awarded').slice(-40),
+    contracts,
     elections: db.elections,
     // Phase 33 — the live election is a public spectacle (everyone watches
     // the count, like the war front), but the official totals and the count's
@@ -1772,6 +1778,83 @@ async function handle(req, res, pathname, method) {
         store.save(); broadcast('sync');
         return json(res, 200, r);
       } catch (e) { return bad(e.message); }
+    }
+
+    // ---- ongoing trade contracts ----
+    // Automate open-market fills: every turn the engine re-fills whichever
+    // order matches partner + item + side through sim.executeTrade (identical
+    // pricing/tariff/embargo/stock rules as a manual fill), for a chosen
+    // number of turns or until cancelled. Creation mirrors /api/trade/execute's
+    // permission model — only the holder entity's controller may sign.
+    if (pathname === '/api/trade/contracts' && method === 'POST') {
+      const b = await readBody(req);
+      const gm = u.role.perms.gm;
+      const side = b.side === 'buy' ? 'buy' : 'sell';
+      const holder = db.entities.find(e => e.id === b.holderId);
+      if (!holder) return bad('Unknown holder.');
+      if (!gm && !ownership.controls(u.user.entityId, holder.id)) return deny('You do not control that holder.');
+      const partner = db.entities.find(e => e.id === b.partnerId);
+      if (!partner) return bad('Unknown trading partner.');
+      const item = db.items.find(i => i.id === b.itemId);
+      if (!item || item.tradable === false) return bad('Unknown or untradable item.');
+      const tradeCfg = db.settings.trade || {};
+      if (!(tradeCfg.partners || []).some(p => p.entityId === partner.id)) return bad(partner.name + ' is not an active trade partner.');
+      let qty = Number(b.qtyPerTurn);
+      if (!isFinite(qty)) qty = 0;
+      qty = Math.round(qty * 1000000) / 1000000;
+      if (!(qty > 0)) return bad('Quantity per turn must be positive.');
+      let dur = null; // null = until cancelled
+      if (b.durationTurns !== undefined && b.durationTurns !== null && b.durationTurns !== '') {
+        dur = Math.floor(Number(b.durationTurns));
+        if (!isFinite(dur) || dur < 1) return bad('Duration must be at least 1 turn, or run indefinitely.');
+        if (dur > 9999) dur = 9999;
+      }
+      // refuse contracts that can never fire: an embargoed direction is a
+      // guaranteed idle-every-turn contract (the engine would just note it)
+      const dir = side === 'sell' ? 'export' : 'import';
+      const emb = tradeCfg.tariffs && tradeCfg.tariffs.embargoes && tradeCfg.tariffs.embargoes[item.id];
+      if (emb && emb[dir]) return bad(`Trade is embargoed for ${item.name} (${dir}).`);
+      db.tradeContracts = db.tradeContracts || [];
+      const t = db.settings.time;
+      const c = {
+        id: store.uid('ctr'), side, partnerId: partner.id, itemId: item.id, holderId: holder.id,
+        qtyPerTurn: qty, turnsLeft: dur, startedTurn: t.turn,
+        executions: 0, totalQty: 0, totalValue: 0, lastUnit: null, lastTurnNote: null,
+        status: 'active', createdBy: u.user.displayName, createdAt: Date.now()
+      };
+      db.tradeContracts.push(c);
+      store.log('economy', 'Ongoing contract signed',
+        `${holder.name} will ${side === 'sell' ? 'export to' : 'import from'} ${partner.name}: ${qty} × ${item.name} each turn` +
+        (dur ? ` · runs ${dur} turn${dur === 1 ? '' : 's'}` : ' · until cancelled'), u.user.displayName, [holder.id, partner.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { contract: c });
+    }
+    if (pathname.startsWith('/api/trade/contracts/') && method === 'POST' && pathname.endsWith('/cancel')) {
+      const id = pathname.slice('/api/trade/contracts/'.length, -'/cancel'.length);
+      const c = (db.tradeContracts || []).find(x => x.id === id);
+      if (!c) return bad('No such contract.');
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, c.holderId)) return deny('You do not control that contract.');
+      if (c.status !== 'active') return bad('That contract is not active.');
+      c.status = 'cancelled';
+      c.cancelledBy = u.user.displayName;
+      c.cancelledAtTurn = db.settings.time.turn;
+      store.log('economy', 'Ongoing contract cancelled',
+        `${c.executions} fill${c.executions === 1 ? '' : 's'} before cancellation.`, u.user.displayName, [c.holderId, c.partnerId]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { contract: c });
+    }
+    if (pathname.startsWith('/api/trade/contracts/') && method === 'DELETE') {
+      const id = pathname.slice('/api/trade/contracts/'.length);
+      const idx = (db.tradeContracts || []).findIndex(x => x.id === id);
+      if (idx < 0) return bad('No such contract.');
+      const c = db.tradeContracts[idx];
+      const gm = u.role.perms.gm;
+      if (!gm && !ownership.controls(u.user.entityId, c.holderId)) return deny('You do not control that contract.');
+      if (c.status === 'active') return bad('Cancel the contract before removing it.');
+      db.tradeContracts.splice(idx, 1);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true });
     }
 
     // ---- stock market (Phase 4.4) ----

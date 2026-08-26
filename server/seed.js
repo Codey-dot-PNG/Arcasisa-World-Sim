@@ -640,6 +640,7 @@ function seed() {
       { turn: -1, date: '1959-12-01', gdp: 13500, population: 39000000, avgHappiness: 52, avgApproval: 51, moneySupply: 2450000000, treasury: 1200000000, provinces: {}, shares: { ent_leika: 525, ent_satrom: 1017, ent_amco: 867, ent_alko: 500, ent_grazihall: 580, ent_arc: 900 } }
     ],
     trades: [],
+    tradeContracts: [],
     transactions: [], events, news,
     timeline: [{
       id: 'tl_genesis', ts: now, turn: 0, simDate: '1962-03-01', type: 'system',

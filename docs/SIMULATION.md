@@ -143,6 +143,21 @@ included — the Phase 27 migration authors Satrom '42E and Type 50M tank import
 Sarom/Qinal trade desks). Flows land in `trade.lastFlows` and the per-turn `trade.history`
 for graphs.
 
+### Ongoing contracts (`runTradeContracts`)
+
+An ongoing contract (`db.tradeContracts[]`) automates a fill: every turn, immediately after
+`generateTradeOrders` opens the fresh book, each **active** contract re-fills whichever
+order matches its `{side, partnerId, itemId}` — order ids are regenerated every turn, so
+the pair is the stable key — by calling the same `executeTrade` a manual fill uses
+(identical volume pricing, tariffs, embargoes, stock/funds checks). A turn with no
+matching order (or an already-filled / unaffordable one) just idles: `lastTurnNote`
+records why for the dossier row and nothing else happens. Duration counts
+turn-openings regardless of idling; `turnsLeft === null` runs until cancelled. Signed /
+cancelled via `POST /api/trade/contracts`, `POST /api/trade/contracts/:id/cancel`,
+removed (when not active) via `DELETE /api/trade/contracts/:id` — all gated on the
+holder entity's ownership chain exactly like `/api/trade/execute`. The UI lives in the
+Economy → International Trade → Contracts tab.
+
 ## Foreign military production — `runForeignMilitary` (Phase 27)
 
 Every foreign power with an authored `entity.meta.military` profile (`{ navy, army, size,

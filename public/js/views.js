@@ -2102,9 +2102,6 @@ const Views = {
         } catch (err) { toast(err.message, true); btn.disabled = false; }
       }
     }, 'Save Property Operations')));
-
-    // Capital projects (6b) — server-priced catalogue, live progress bars.
-    if (prodMode !== 'none') this.projectsSection(inner, pr);
   },
 
   // Countdown chip for the hourly production cadence: when the next slice
@@ -2163,45 +2160,6 @@ const Views = {
     wrap.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:-2px 0 6px;' },
       'INPUTS ARE DRAWN FROM THE SITE INVENTORY EVERY PRODUCTION PASS — RESTOCK VIA THE SITE INVENTORY MODAL OR A SUPPLY CONTRACT. SHORT INPUTS SCALE THE WHOLE LINE DOWN.'));
     return wrap;
-  },
-  // Capital projects panel (6b): server-priced catalogue fetched per site,
-  // active projects with progress bars, cancel with partial refund.
-  projectsSection(inner, pr) {
-    inner.appendChild(this.secLabel('Capital Projects'));
-    const activeProjects = pr.projects || [];
-    if (activeProjects.length) {
-      for (const proj of activeProjects) {
-        const pct = Math.round((proj.progress || 0) * 100);
-        inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin-bottom:6px;' },
-          el('div', { style: 'flex:0 0 190px; font-size:12px;' }, (proj.label || proj.kind) + ' · ' + CUR() + fmtNum(proj.cost)),
-          this.tradeBar(pct, 100, 'var(--good)'),
-          el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); min-width:34px;' }, pct + '%'),
-          el('button.dash-btn', {
-            onclick: async () => {
-              try { await POST('/api/property/' + pr.id + '/projects/' + proj.id + '/cancel'); toast('Project cancelled (refund issued).'); App.renderView(); }
-              catch (err) { toast(err.message, true); }
-            }
-          }, 'Cancel')));
-      }
-    } else {
-      inner.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:6px;' }, 'No projects underway.'));
-    }
-    const catWrap = el('div');
-    inner.appendChild(catWrap);
-    GET('/api/property/' + pr.id + '/projects').then(r => {
-      (r.catalog || []).forEach(spec => {
-        catWrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin-bottom:4px; font-size:12px;' },
-          el('div', { style: 'flex:1;' }, spec.label),
-          el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-soft); min-width:170px;' },
-            CUR() + fmtNum(spec.cost) + ' · ' + Math.round(spec.durationWorldMs / 3600000) + 'h · 50% refund on cancel'),
-          el('button.dash-btn', {
-            onclick: async () => {
-              try { await POST('/api/property/' + pr.id + '/projects', { kind: spec.kind }); toast(spec.label + ' commissioned.'); App.renderView(); }
-              catch (err) { toast(err.message, true); }
-            }
-          }, 'Commission')));
-      });
-    }).catch(() => { });
   },
 
   /* ---- International Trade (Phase 15 — the open market) ---- */

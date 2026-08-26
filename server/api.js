@@ -1305,69 +1305,6 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, maintenanceSpend: spend, condition: pr.vars.condition });
     }
 
-    // ---- 6b. Build queue / capital projects ----
-    // GET returns the server-priced catalogue for THIS property (the client
-    // never computes costs — see PROJECT_KINDS in sim.js).
-    const projMatch = pathname.match(/^\/api\/property\/([\w-]+)\/projects$/);
-    if (projMatch && method === 'GET') {
-      const pr = db.properties.find(p => p.id === projMatch[1]);
-      if (!pr) return bad('No such property.');
-      const catalog = Object.keys(sim.PROJECT_KINDS).map(kind => sim.projectSpecFor(kind, pr))
-        .filter(Boolean).map(s => ({ kind: s.kind, label: s.label, cost: s.cost,
-          durationWorldMs: s.durationWorldMs, cancelRefundPct: s.cancelRefundPct }));
-      return json(res, 200, { catalog, active: pr.projects || [] });
-    }
-    // POST commissions a project. The body carries ONLY the kind — cost,
-    // duration and completion effects are decided by the engine.
-    if (projMatch && method === 'POST') {
-      const pr = db.properties.find(p => p.id === projMatch[1]);
-      if (!pr) return bad('No such property.');
-      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) return deny('No permission.');
-      const b = await readBody(req);
-      const spec = sim.projectSpecFor(String(b.kind || ''), pr);
-      if (!spec) return bad('Unknown project kind.');
-      pr.projects = Array.isArray(pr.projects) ? pr.projects : [];
-      if (pr.projects.filter(p => p.status === 'active').length >= 3) return bad('This site already has 3 projects underway.');
-      const owner = db.entities.find(e => e.id === pr.ownerId);
-      if (!owner) return bad('Property has no owner.');
-      const acct = sim.primaryAccount(owner.id, true);
-      if (!acct || acct.balance < spec.cost) return bad('Insufficient funds.');
-      sim.txn(acct.id, null, spec.cost, `Project: ${spec.label}`, u.user.displayName, 'withdraw');
-      const proj = {
-        id: store.uid('proj'), kind: spec.kind, label: spec.label, cost: spec.cost,
-        startedAtWorldMs: cadence.currentWorldMs(db), durationWorldMs: spec.durationWorldMs,
-        progress: 0, cancelRefundPct: spec.cancelRefundPct, onComplete: spec.onComplete,
-        status: 'active',
-      };
-      pr.projects.push(proj);
-      store.log('economy', `${pr.name} project commissioned`, `${spec.label} — ${db.settings.currency}${spec.cost}`, u.user.displayName, [pr.id]);
-      store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, project: proj });
-    }
-    // Cancel a project (partial refund)
-    if (pathname.match(/^\/api\/property\/[\w-]+\/projects\/[\w-]+\/cancel$/) && method === 'POST') {
-      const parts = pathname.split('/');
-      const propId = parts[3];
-      const projId = parts[5];
-      const pr = db.properties.find(p => p.id === propId);
-      if (!pr || !Array.isArray(pr.projects)) return bad('No such property or project.');
-      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id })) return deny('No permission.');
-      const idx = pr.projects.findIndex(p => p.id === projId);
-      if (idx < 0) return bad('Unknown project.');
-      const proj = pr.projects[idx];
-      if (proj.status !== 'active') return bad('Project is not active.');
-      const refund = Math.round(proj.cost * (proj.cancelRefundPct || 0.5));
-      const owner = db.entities.find(e => e.id === pr.ownerId);
-      if (owner) {
-        const acct = sim.primaryAccount(owner.id, true);
-        if (acct && refund > 0) sim.txn(null, acct.id, refund, `Project refund: ${proj.kind}`, u.user.displayName, 'deposit');
-      }
-      pr.projects.splice(idx, 1);
-      store.log('economy', `${pr.name} project cancelled`, `Refunded ${db.settings.currency}${refund}`, u.user.displayName, [pr.id]);
-      store.save(); broadcast('sync');
-      return json(res, 200, { ok: true, refund });
-    }
-
     // ---- 6d. Government tenders ----
     // Open a tender: GM or a manage_tenders grantee on the opener entity.
     if (pathname === '/api/tenders' && method === 'POST') {
@@ -2486,21 +2423,60 @@ async function handle(req, res, pathname, method) {
         for (const k of ['worldName', 'currency', 'currencyName', 'parliamentSeats']) if (b[k] !== undefined) s[k] = b[k];
         if (b.time) {
           const oldDate = s.time.date;
+          const oldClock = s.time.clock || {};
+          const oldRate = Number(oldClock.minutesPerRealMinute);
           const oldWorldMs = sim.worldClockNow(s.time, Date.now());
           const requestedClock = b.time.clock && b.time.clock.currentTime;
           Object.assign(s.time, b.time);
+          // b.time.clock is the Studio form's echo and carries no anchor
+          // fields — restore the live ones so an unchanged save keeps the
+          // clock running from where it is instead of resetting to t.date.
+          s.time.clock.anchorRealMs = Number(oldClock.anchorRealMs) || Date.now();
+          s.time.clock.anchorWorldMs = Number(oldClock.anchorWorldMs) || (Date.parse(String(s.time.date || '1970-01-01') + 'T00:00:00Z') || Date.now());
           s.time.clock = s.time.clock || { enabled: true, minutesPerRealMinute: 59.5 };
           s.time.clock.rateVersion = 1;
-          if (b.time.date !== undefined || b.time.clock) {
-            const changedDate = b.time.date !== undefined && b.time.date !== oldDate;
-            let base = changedDate ? (Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now()) : oldWorldMs;
-            const m = String(requestedClock || '').match(/^(\d{1,2}):(\d{2})$/);
-            if (m) base = (Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z') || Date.now()) + (Math.min(23, Number(m[1])) * 60 + Math.min(59, Number(m[2]))) * 60000;
+          // Continuity rule (Phase 35 fix): saving World settings must never
+          // TELEPORT the world clock. The Studio form always echoes back a
+          // date and a time-of-day it rendered earlier; anchoring the clock
+          // to that echo used to yank world time to "turn-date midnight +
+          // HH:MM" on every save. With auto-advance off, the turn date drifts
+          // away from the continuous clock, so each save flung the clock
+          // days/weeks forward or backward — a forward jump let the cadence
+          // scheduler replay the whole gap at once, completing capital
+          // projects in seconds and minting days of stock instantly.
+          // Re-anchor ONLY when the GM actually moved a hand: a different
+          // date, a deliberately edited time-of-day, or a new clock rate.
+          const m = String(requestedClock || '').match(/^(\d{1,2}):(\d{2})$/);
+          const curTodMin = Math.floor((((oldWorldMs % 86400000) + 86400000) % 86400000) / 60000);
+          const reqMin = m ? Math.min(23, Number(m[1])) * 60 + Math.min(59, Number(m[2])) : null;
+          let todDist = reqMin === null ? 0 : Math.abs(reqMin - curTodMin) % 1440;
+          if (todDist > 720) todDist = 1440 - todDist;
+          // Echo tolerance: between rendering the form and hitting save the
+          // live clock moves on (a real minute ≈ an hour of world time at
+          // the default rate), so only a difference beyond ~2 hours of world
+          // time counts as a deliberate edit rather than echo lag.
+          const todEdited = reqMin !== null && todDist > 120;
+          const changedDate = b.time.date !== undefined && String(b.time.date) !== String(oldDate);
+          const rateChanged = !!(b.time.clock && b.time.clock.minutesPerRealMinute !== undefined &&
+            Number(b.time.clock.minutesPerRealMinute) !== oldRate);
+          if (changedDate || todEdited || rateChanged) {
+            const modDay = ((oldWorldMs % 86400000) + 86400000) % 86400000;
+            let base;
+            if (changedDate) {
+              // A deliberate date move keeps the current time-of-day unless
+              // the GM also set one explicitly.
+              const parsedDay = Date.parse(String(s.time.date || oldDate || '1970-01-01') + 'T00:00:00Z');
+              base = (Number.isFinite(parsedDay) ? parsedDay : oldWorldMs - modDay) + (todEdited ? reqMin * 60000 : modDay);
+            } else if (todEdited) {
+              base = oldWorldMs - modDay + reqMin * 60000; // same world day, new time-of-day
+            } else {
+              base = oldWorldMs; // rate-only change: rebase so the instant survives
+            }
             s.time.clock.anchorRealMs = Date.now();
             s.time.clock.anchorWorldMs = base;
-            delete s.time.clock.currentTime;
             if (s.time.auto) s.time.auto.lastWorldMs = sim.worldClockNow(s.time, Date.now());
           }
+          delete s.time.clock.currentTime;
           // editing the auto schedule restarts its clock — otherwise a stale
           // lastTick from a previous enable makes the serverless autoTick
           // "catch up" with a burst of turns the moment auto is re-enabled

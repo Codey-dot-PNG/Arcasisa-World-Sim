@@ -122,9 +122,6 @@ The single place the world is narrowed per operator. Key rules:
 
 | Route | Auth | Notes |
 |---|---|---|
-| GET /api/property/:id/projects | property_controls (propertyId-scoped) | server-priced project catalogue + active list |
-| POST /api/property/:id/projects | property_controls | body: { kind } only — cost/duration/effects are engine-derived |
-| POST /api/property/:id/projects/:projId/cancel | property_controls | 50% refund |
 | POST /api/property/:id/maintenance | property_controls | sets per-turn maintenanceSpend (6a) |
 | PATCH /api/entity/:id/roster | ownership chain / GM | { add \| update \| remove }, scope whitelist enforced |
 | GET /api/entity/:id/roster | chain/GM see all; members see own entry | mirrors filterState rules |

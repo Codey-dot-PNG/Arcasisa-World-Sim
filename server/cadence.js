@@ -97,10 +97,23 @@ function migrate(db) {
 
 // ---- main tick entry point ----
 // Called from GET /api/state and the local server timer. For each cadence
-// whose world-time has come due, runs its handler possibly multiple times
-// (catch-up loop capped at MAX_CATCHUP) so a long serverless sleep doesn't
-// lose ticks. lastWorldMs/nextWorldMs advance by one interval per iteration
-// (never "jump to now") so fractional accumulators stay correct.
+// whose world-time has come due, runs its handler once per scheduled slice,
+// possibly multiple times (catch-up capped at MAX_CATCHUP) so a long
+// serverless sleep doesn't lose ticks. lastWorldMs/nextWorldMs advance by
+// one interval per slice (never "jump to now") so fractional accumulators
+// stay correct.
+//
+// A FORWARD clock jump (GM moving the date, an import, a rate rebase) can
+// leave the schedule far behind the clock. The backlog is then collapsed
+// into at most MAX_CATCHUP handler calls whose world-time WINDOWS widen
+// proportionally — handlers scale their slice math to the window argument,
+// so totals still match elapsed world time, but a jump can never
+// machine-gun hundreds of full-effect slices per request (that burst was
+// completing days of accrued work in seconds and dumping days of stock at
+// once). No single window exceeds one turn (runHourlyProductionTick clamps
+// its slice at 1 turn, so wider windows would overpay), and work older
+// than MAX_CATCHUP turns is dropped rather than replayed — a multi-month
+// blackout should not mint years of stock in one poll.
 //
 // Each handler is individually guarded: one broken subsystem neither blocks
 // the others nor skips the save/broadcast signal for what did run.
@@ -116,20 +129,29 @@ function maybeRunCadences(db) {
     // Resolve the interval live so a GM tuning settings.cadence takes effect
     // immediately, even mid catch-up.
     const interval = intervalOf(db, name);
-    let steps = 0;
-    while (now >= state.nextWorldMs && steps < MAX_CATCHUP) {
-      try { handler(db); } catch (e) { /* keep the scheduler alive */ }
-      state.lastWorldMs += interval;
-      state.nextWorldMs += interval;
-      steps++;
-      anyRan = true;
+    if (!(interval > 0)) continue;
+    const steps = now >= state.nextWorldMs
+      ? Math.floor((now - state.nextWorldMs) / interval) + 1
+      : 0;
+    if (steps <= 0) continue;
+    const windowCap = Math.max(interval, turnWorldMs(db)); // ≤ one turn per call
+    const span = steps * interval;                          // scheduled world-ms
+    const skipped = Math.max(0, span - windowCap * MAX_CATCHUP); // ancient excess
+    let done = skipped;
+    while (done < span) {
+      const width = Math.min(windowCap, span - done);
+      try { handler(db, width); } catch (e) { /* keep the scheduler alive */ }
+      done += width;
     }
-    if (steps > 0) {
-      // Turn-end fallback counter: advanceTurn checks whether each cadence
-      // fired since the last turn and skips its legacy pass accordingly.
-      db._cadenceTicks = db._cadenceTicks || {};
-      db._cadenceTicks[name] = (db._cadenceTicks[name] || 0) + steps;
-    }
+    // Grid-preserving advance: both marks move by exactly the scheduled span
+    // (skipped slices included) so the schedule keeps its original phase.
+    state.lastWorldMs += span;
+    state.nextWorldMs += span;
+    anyRan = true;
+    // Turn-end fallback counter: advanceTurn checks whether each cadence
+    // fired since the last turn and skips its legacy pass accordingly.
+    db._cadenceTicks = db._cadenceTicks || {};
+    db._cadenceTicks[name] = (db._cadenceTicks[name] || 0) + steps;
   }
   return anyRan;
 }
@@ -179,22 +201,26 @@ function registerDefaults() {
   registered = true;
 
   // Hourly production slice (Parts 2 & 4) plus everything that rides the
-  // same heartbeat: condition decay/maintenance (6a), capital projects (6b)
-  // and tender closing (6d). All of the actual math lives in sim.js — this
-  // is just wiring.
-  register('production', (db) => {
+  // same heartbeat: condition decay/maintenance (6a) and tender closing
+  // (6d). All of the actual math lives in sim.js — this is just wiring.
+  register('production', (db, widthWorldMs) => {
     // Hand the handler its real world-time width so the slice math scales with
     // the configured interval (productionHours) instead of always assuming one
-    // hour per tick.
-    require('./sim').runHourlyProductionTick(db, 'CADENCE', intervalOf(db, 'production'));
+    // hour per tick — and with a catch-up window when a clock jump collapsed
+    // several scheduled slices into one call.
+    const width = Number(widthWorldMs) > 0 ? Number(widthWorldMs) : intervalOf(db, 'production');
+    require('./sim').runHourlyProductionTick(db, 'CADENCE', width);
   });
 
   // Demographic fast drift (Part 3b): the per-turn drift moved off
   // advanceTurn onto the demographics cadence, scaled so cumulative drift
   // per turn is preserved whatever the interval. Month-boundary passes stay
-  // on advanceTurn (see runDemographics' scale=0 mode).
-  register('demographics', (db) => {
-    const scale = 1 / hoursPerTurnOf(db, 'demographics');
+  // on advanceTurn (see runDemographics' scale=0 mode). The scale follows
+  // the window argument so a collapsed catch-up backlog drifts by exactly
+  // the elapsed share instead of one slice's worth.
+  register('demographics', (db, widthWorldMs) => {
+    const width = Number(widthWorldMs) > 0 ? Number(widthWorldMs) : intervalOf(db, 'demographics');
+    const scale = width / turnWorldMs(db);
     require('./sim').runDemographics(db, false, scale);
   });
 

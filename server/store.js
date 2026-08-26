@@ -1888,6 +1888,16 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- Capital projects removed (schema < 16) -------------------------------
+  // Shed per-property project queues from worlds that predate the removal.
+  if ((world.schema || 1) < 16) {
+    for (const pr of (world.properties || [])) {
+      if (pr.projects !== undefined) delete pr.projects;
+    }
+    world.schema = 16;
+    changed = true;
+  }
+
   // The standing-contracts feature is retired (tenders settle one-shot at
   // award instead). Shed any data old worlds still carry — idempotent.
   if (world.contracts !== undefined) { delete world.contracts; changed = true; }

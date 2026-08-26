@@ -1213,7 +1213,7 @@ function runEconomy(db, actor, scale) {
 //     scales ALL outputs, and persists as vars.supplyFulfillment for UI.
 //   · 6a — condition decay vs maintenanceSpend (training's accident effect
 //     lives in runEconomy's accident roll — it is a per-turn mechanic).
-//   · 6b — capital project advancement; 6d — tender closing/award.
+//   · 6d — tender closing/award.
 // When the clock is paused or turns advance manually, nothing here fires and
 // runEconomy's legacy lump pass covers production instead (see its
 // `hourlyAccrued` flag), so a stopped world still has a working economy.
@@ -1291,61 +1291,7 @@ function runHourlyProductionTick(db, actor, tickWorldMs) {
     }
   }
 
-  advanceProjects(db, actor, tickWorldMs);
   closeDueTenders(db, actor);
-}
-
-// ---- 6b. Capital projects -------------------------------------------------
-// Server-defined catalogue: the client picks a kind, the ENGINE prices it
-// from the property's own value and decides what completion applies. A
-// player can never commission arbitrary effects for a self-chosen price.
-const PROJECT_KINDS = {
-  expand_capacity:    { label: 'Expand capacity',    costOfValue: 0.6,  days: 5 },
-  efficiency_refit:   { label: 'Efficiency refit',   costOfValue: 0.45, days: 4 },
-  condition_overhaul: { label: 'Condition overhaul', costOfValue: 0.25, days: 2 },
-};
-function projectSpecFor(kind, pr) {
-  const def = PROJECT_KINDS[kind];
-  if (!def) return null;
-  const value = Math.max(0, Number(pr.value) || 0);
-  const spec = {
-    kind,
-    cost: Math.round(Math.max(250, value * def.costOfValue)),
-    durationWorldMs: def.days * 86400000,
-    cancelRefundPct: 0.5,
-    onComplete: {},
-    label: def.label,
-  };
-  if (kind === 'expand_capacity') spec.onComplete.maxEmployees = Math.ceil((pr.maxEmployees !== undefined ? pr.maxEmployees : Math.max(1, Math.round(pr.employees || 1))) * 1.5);
-  if (kind === 'efficiency_refit') spec.onComplete.upgradeInvested = Math.round((pr.upgradeInvested || 0) + value * 0.35);
-  if (kind === 'condition_overhaul') spec.onComplete.condition = 100;
-  return spec;
-}
-function applyProjectComplete(pr, proj) {
-  const oc = proj.onComplete || {};
-  // A project proposes its new cap and it applies automatically — it already
-  // went through a real spend/wait cost, so no GM click is needed. Never
-  // shrinks an existing cap.
-  if (oc.maxEmployees !== undefined) pr.maxEmployees = Math.max(pr.maxEmployees || 0, Math.round(oc.maxEmployees));
-  if (oc.upgradeInvested !== undefined) pr.upgradeInvested = Math.max(pr.upgradeInvested || 0, Math.round(oc.upgradeInvested));
-  if (oc.condition !== undefined) { pr.vars = pr.vars || {}; pr.vars.condition = Math.max(pr.vars.condition || 0, oc.condition); }
-  if (Array.isArray(oc.produces)) pr.produces = oc.produces; // reserved for future kinds
-}
-function advanceProjects(db, actor, tickWorldMs) {
-  for (const pr of db.properties) {
-    if (!Array.isArray(pr.projects)) continue;
-    for (let i = pr.projects.length - 1; i >= 0; i--) {
-      const proj = pr.projects[i];
-      if (proj.status !== 'active') continue;
-      proj.progress = Math.min(1, Math.round(((proj.progress || 0) + tickWorldMs / Math.max(1, proj.durationWorldMs)) * 10000) / 10000);
-      if (proj.progress >= 1) {
-        applyProjectComplete(pr, proj);
-        store.log('economy', `${pr.name} completed a ${PROJECT_KINDS[proj.kind] ? PROJECT_KINDS[proj.kind].label.toLowerCase() : proj.kind} project`,
-          `${db.settings.currency}${Math.round(proj.cost)} commissioned`, actor || 'ENGINE', [pr.id, pr.ownerId]);
-        pr.projects.splice(i, 1);
-      }
-    }
-  }
 }
 
 // ---- 6d. Government tenders (competitive bidding) --------------------------
@@ -2442,7 +2388,7 @@ module.exports = {
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, rerollTradeBook, resetTradeFlows, executeTrade, holderStock, tradeTariffRate,
   shiftRelations, relationsOf, worldClockNow, runDemographics,
-  runHourlyProductionTick, advanceProjects, PROJECT_KINDS, projectSpecFor,
+  runHourlyProductionTick,
   createTenderObj, closeDueTenders,
   findProv, findEnt, findItem
 };

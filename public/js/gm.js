@@ -773,7 +773,14 @@ const GM = {
     main.appendChild(this.check(d, 'clockEnabled', 'Run the wall-clock world time'));
     main.appendChild(el('div.form-grid',
       this.field('World minutes per real minute', this.num(d, 'clockSpeed')),
-      this.field('Current world time (HH:MM)', this.text(d, 'clockTime')),
+      // Only report the time-of-day when the GM actually edits it — echoing
+      // back the rendered value made every settings save re-anchor the world
+      // clock to a stale instant (the live clock moves ~an hour per real
+      // minute), teleporting world time and machine-gunning the cadences.
+      this.field('Current world time (HH:MM)', el('input.text-input', {
+        value: d.clockTime,
+        oninput: (e) => { d.clockTime = e.target.value; d._clockEdited = true; }
+      })),
       this.field('Auto mode', this.sel(d, 'autoMode', [['interval', 'Every real-time interval'], ['clock', 'At world-clock time']]))));
     main.appendChild(el('div.form-grid',
       this.field('Real seconds per turn (interval mode)', this.num(d, 'autoSeconds')),
@@ -802,7 +809,7 @@ const GM = {
             worldName: d.worldName, currency: d.currency, currencyName: d.currencyName, parliamentSeats: Number(d.parliamentSeats) || 150,
             time: {
               unit: d.unit, perTurn: Number(d.perTurn) || 1, date: d.date,
-              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 59.5, currentTime: d.clockTime },
+              clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 59.5, currentTime: d._clockEdited ? d.clockTime : undefined },
               auto: { enabled: !!d.autoEnabled, mode: d.autoMode, at: d.autoAt, seconds: Number(d.autoSeconds) || 3600 }
             },
             ambience: { traffic: {

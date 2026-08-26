@@ -322,10 +322,18 @@ paused clocks pause everything. State: world._cadence (per-cadence
 lastWorldMs/
 extWorldMs), seeded idempotently by cadence.migrate(), which runs from
 store.migrate() **unconditionally** so new cadences self-seed on old worlds. Ticks ride
-requests (GET /api/state) and a local timer; catch-up is capped at 50 iterations and
-advances one interval per run, never jumping to "now". Intervals are GM-tunable via
+requests (GET /api/state) and a local timer; catch-up is capped at 50 handler calls and
+advances one interval per scheduled slice, never jumping to "now". Intervals are GM-tunable via
 settings.cadence.{productionHours,demographicsHours,tradeResetHours} (0.25–72h clamp);
 progress ships in GET /api/state as cadence.{name}.{progress,nextAt,hours}.
+
+Catch-up after a forward clock jump (GM date move, import, rate rebase) collapses the
+backlog into at most 50 handler calls with proportionally wider world-time windows —
+handlers scale their slice math to the window argument, so totals match elapsed world
+time without machine-gunning per-request bursts. No single window exceeds one turn, and
+backlog older than ~50 turns is dropped rather than replayed. The GM settings PATCH
+preserves clock continuity: it re-anchors the world clock only when the date,
+time-of-day, or rate was actually changed — never on a plain echo of the Studio form.
 
 Cadences:
 - production (1h): the hourly production engine below + condition decay/maintenance,
@@ -356,16 +364,13 @@ property.requires = [{ itemId, perUnit }] — inputs consumed from the SITE inve
 ALL outputs and persists as ars.supplyFulfillment. Absent equires ⇒ byte-identical
 behaviour. Edited via PATCH /api/property/:id/controls (equires), GM Studio editor.
 
-## Capital projects, tenders
+## Tenders
 
-- Projects (6b): server-priced catalogue (sim.PROJECT_KINDS: expand_capacity /
-  efficiency_refit / condition_overhaul) — clients pick a KIND, the engine derives cost
-  from the property's value, duration, and completion effects. GET/POST
-  /api/property/:id/projects, cancel refunds 50%. Max 3 active per site.
 - Tenders (6d): db.tenders, lowest qualifying bid before the world-clock deadline wins;
   the full order is delivered and paid in ONE SHOT at award time through the pooled-stock
   trade helpers + txn. Opened by the government or any manage_tenders grantee.
-  (The standing-contracts feature was retired — no db.contracts.)
+  (The standing-contracts feature was retired — no db.contracts. Capital projects were
+  removed; migrate() sheds any pr.projects data from older worlds.)
 
 ## Roster delegation
 

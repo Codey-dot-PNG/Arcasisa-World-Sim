@@ -3441,6 +3441,16 @@ const Views = {
   startPriceTicker() {
     if (this._priceTicker) return;
     this._priceTicker = setInterval(() => {
+      // Self-stop: nothing clears this interval on view switch, so once the
+      // Exchange had been visited the callback kept sweeping absent nodes
+      // every 900ms for the life of the page. When none of its targets are
+      // in the document any more, retire it (the next Exchange render
+      // restarts it).
+      if (!document.querySelector('.live-price[data-co], [data-x100-value], [data-hold-value], [data-day-chart], #day-tick-countdown')) {
+        clearInterval(this._priceTicker);
+        this._priceTicker = null;
+        return;
+      }
       // Market liveness: day ticks no longer broadcast at all (a per-tick
       // 'sync' forced EVERY client into a full refetch every ~5s, whatever
       // page it was on) — so while the Exchange UI is on screen, nudge a

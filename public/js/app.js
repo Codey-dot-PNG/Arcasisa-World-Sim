@@ -160,7 +160,14 @@ const App = {
       // reader's scroll instead of snapping to the top.
       lastRenderedView = view;
       this.renderTabs();
-      this.renderView(true);
+      // Route through renderAll's serialization: renderView is async (Elections,
+      // Entertainment…), and a fire-and-forget call here used to interleave with
+      // an in-flight sync render — the loser appended into a detached node
+      // (dropping its async sections) and restored the OLD view's scroll.
+      // _freshSwitch makes renderAll treat it as a real switch (top-of-page,
+      // forced view build).
+      this._freshSwitch = true;
+      this.renderAll();
     }
   },
 
@@ -254,10 +261,12 @@ const App = {
     // one render at a time; anything that lands meanwhile re-renders after.
     if (this._rendering) { this._rerenderQueued = true; return; }
     this._rendering = true;
+    const freshSwitch = !!this._freshSwitch;
+    this._freshSwitch = false;
     try {
       // only preserve scroll when this is a re-render of the same view (a
       // periodic refresh) — an actual view switch should land at the top
-      const sameView = W.view === lastRenderedView;
+      const sameView = W.view === lastRenderedView && !freshSwitch;
       const saved = sameView ? captureScroll() : null;
       this.renderTopbar();
       this.renderTabs();
@@ -267,7 +276,7 @@ const App = {
       // Entertainment) append content after their first frame, and restoring
       // the scroll before that happens clamps it toward the top (a browser
       // can't scroll past the end of a momentarily-short page).
-      await this.renderView();
+      await this.renderView(freshSwitch);
       // refresh open inspector with new data
       if (W.selection && !document.getElementById('inspector').classList.contains('hidden')) {
         Views.inspect(W.selection.kind, W.selection.id);

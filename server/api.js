@@ -22,7 +22,7 @@ const { currentWorldMs } = cadence;
 // (idempotent). Must run after all modules are imported above.
 cadence.registerDefaults();
 
-const COOKIE_EXTRA = process.env.VERCEL ? '; Secure' : '';
+const COOKIE_EXTRA = (process.env.VERCEL || process.env.RENDER || process.env.RAILWAY_ENVIRONMENT || process.env.K_SERVICE) ? '; Secure' : '';
 const cleanQty = (v) => Math.round((Number(v) || 0) * 1000000) / 1000000;
 
 // ---------- SSE hub (file mode) / realtime ping (cloud mode) ---------------
@@ -155,9 +155,20 @@ function readBody(req, maxBytes) {
     return Promise.resolve(typeof req.body === 'string' ? JSON.parse(req.body || '{}') : req.body);
   }
   return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (c) => { data += c; if (data.length > cap) { reject(new Error('Body too large')); req.destroy(); } });
-    req.on('end', () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(new Error('Invalid JSON')); } });
+    // Accumulate raw buffers and decode ONCE — string concatenation per chunk
+    // splits multi-byte UTF-8 characters across chunk boundaries and turned
+    // them into U+FFFD garbage ("Invalid JSON" on valid payloads).
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > cap) { reject(new Error('Body too large')); req.destroy(); return; }
+      chunks.push(c);
+    });
+    req.on('end', () => {
+      try { const data = Buffer.concat(chunks).toString('utf8'); resolve(data ? JSON.parse(data) : {}); }
+      catch (e) { reject(new Error('Invalid JSON')); }
+    });
     req.on('error', reject);
   });
 }
@@ -168,6 +179,14 @@ function getCookie(req, name) {
     if (k === name) return decodeURIComponent(v.join('='));
   }
   return null;
+}
+// Length-safe constant-time compare for fixed-digest hex strings; returns
+// false (rather than throwing, like crypto.timingSafeEqual) on any mismatch.
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a || ''), 'utf8');
+  const bb = Buffer.from(String(b || ''), 'utf8');
+  if (ba.length !== bb.length || !ba.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
 }
 function getUser(req) {
   const db = store.get();
@@ -457,8 +476,19 @@ function cascadeDelete(coll, obj) {
       if (e.ownerId === obj.id) e.ownerId = null;
       if (e.ceoId === obj.id) e.ceoId = null;
       if (e.shareholders) e.shareholders = e.shareholders.filter(s => s.entityId !== obj.id);
+      // ×100 derivative book: phantom entries for a deleted entity inflated
+      // heldTotal forever (unsellable shares permanently shrinking the float).
+      if (e.x100) delete e.x100[obj.id];
     }
     for (const uu of db.users) if (uu.entityId === obj.id) uu.entityId = null;
+    // A deleted COMPANY leaves its share certificates (and ×100 mirror items)
+    // orphaned in inventories — untradeable items that detonated trade-accept
+    // validation. Retire them like deeds.js retires deeds of dead properties.
+    const goneCo = obj.type === 'company';
+    for (const it of db.items.filter(i => i.meta && i.meta.companyId && goneCo && i.meta.companyId === obj.id)) {
+      db.items = db.items.filter(x => x.id !== it.id);
+      for (const e of db.entities) if (e.inventory) e.inventory = e.inventory.filter(r => r.itemId !== it.id);
+    }
   }
   if (coll === 'items') {
     for (const e of db.entities) if (e.inventory) e.inventory = e.inventory.filter(r => r.itemId !== obj.id);
@@ -532,7 +562,8 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/cron' && (method === 'GET' || method === 'POST')) {
       const secret = process.env.CRON_SECRET;
       const q = new URL(req.url, 'http://localhost').searchParams;
-      const authed = (secret && (req.headers.authorization === 'Bearer ' + secret || q.get('key') === secret)) || (u && u.role.perms.gm);
+      const authed = (secret && (safeEqual(String(req.headers.authorization || ''), 'Bearer ' + secret)
+        || safeEqual(q.get('key') || '', secret))) || (u && u.role.perms.gm);
       if (!authed) return deny('Cron secret or GM session required.');
       const result = sim.autoTick('AUTO');
       return json(res, 200, result);
@@ -542,9 +573,14 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/auth/login' && method === 'POST') {
       const b = await readBody(req);
       const user = db.users.find(x => x.username.toLowerCase() === String(b.username || '').toLowerCase());
-      if (!user) return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
+      if (!user) {
+        // Burn a scrypt round for unknown users too so response timing doesn't
+        // enumerate valid operator names.
+        crypto.scryptSync(String(b.password || ''), 'timing-equalizer', 32);
+        return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
+      }
       const hash = crypto.scryptSync(String(b.password || ''), user.salt, 32).toString('hex');
-      if (hash !== user.passHash) return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
+      if (!safeEqual(hash, user.passHash)) return json(res, 401, { error: 'Unknown operator or wrong passphrase.' });
       // prune sessions past the cookie's own 30-day Max-Age — they can never
       // authenticate again but used to accumulate in the world doc forever
       const sessionCutoff = Date.now() - 2592000e3;
@@ -595,7 +631,7 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/me/password' && method === 'PATCH') {
       const b = await readBody(req);
       const cur = crypto.scryptSync(String(b.old || ''), u.user.salt, 32).toString('hex');
-      if (cur !== u.user.passHash) return bad('Current passphrase incorrect.');
+      if (!safeEqual(cur, u.user.passHash)) return bad('Current passphrase incorrect.');
       if (String(b.new || '').length < 4) return bad('New passphrase too short.');
       const { salt, hash } = hashPassword(String(b.new));
       u.user.salt = salt; u.user.passHash = hash;
@@ -702,15 +738,18 @@ async function handle(req, res, pathname, method) {
       // exact transfer, so approving replays the real intent.
       if (!isGm && !ownership.canAct(db, u.user.entityId, from.ownerId, 'spend', { amount, accountId: from.id })) {
         // Check if there's a roster grant but amount exceeds cap - create pending request
+        // The grant must actually cover the SPEND scope — canAct can fail at
+        // the scope gate (e.g. a trade-only grantee), and the queue must not
+        // accept an action the grant was never allowed to perform.
         const grant = ownership.findGrant(db.entities.find(e => e.id === from.ownerId), u.user.entityId);
-        if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined
+        if (grant && ownership.grantCoversScope(grant, 'spend') && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined
             && ownership.grantCoversAccount(grant, from.id) && amount > grant.grants.spendLimitPerTurn) {
           const req = ownership.createRequest(db, from.ownerId, u.user.entityId, 'spend', {
             amount, accountId: from.id,
             description: b.memo || `Transfer ${db.settings.currency}${amount}`,
             action: { kind: 'transfer', fromAccountId: from.id, toAccountId: to.id, amount, memo: String(b.memo || '').slice(0, 140) },
           });
-          store.log('roster', `Over-cap transfer request created`, `${db.settings.currency}${amount} from ${from.name}`, u.user.displayName, [from.ownerId]);
+          store.log('economy', `Over-cap transfer request created`, `${db.settings.currency}${amount} from ${from.name}`, u.user.displayName, [from.ownerId]);
           store.save(); broadcast('sync');
           return json(res, 202, { ok: false, pending: true, requestId: req.id, message: 'Transfer exceeds your spend limit. Request submitted for owner approval.' });
         }
@@ -928,7 +967,10 @@ async function handle(req, res, pathname, method) {
       const result = war.setProtestControl(db, patch, u.user.displayName);
       if (!result.ok) return bad(result.error);
       store.save(); broadcast('sync');
-      return json(res, 200, { protest: db.protest });
+      // Same redaction as every other conflict view — never ship the raw doc
+      // (ai notes / command bookkeeping must stay server-side).
+      const p = db.protest ? (u.role.perms.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null;
+      return json(res, 200, { protest: p });
     }
 
     if (pathname === '/api/trade' && method === 'POST') {
@@ -1460,7 +1502,6 @@ async function handle(req, res, pathname, method) {
       if (!u.role.perms.manageNews) return deny('Press credentials required.');
       const turn = db.settings.time.turn;
       if ((u.user.lastInvestigateTurn ?? -1) >= turn) return bad('You have already worked your sources this turn — file again after the next turn.');
-      u.user.lastInvestigateTurn = turn;
       const fmt = (n) => Math.round(Number(n) || 0).toLocaleString('en-US');
       const scoops = [];
       const cos = db.entities.filter(e => e.type === 'company');
@@ -1497,6 +1538,10 @@ async function handle(req, res, pathname, method) {
         });
       }
       if (!scoops.length) return bad('Your sources have nothing tonight.');
+      // The once-per-turn token is only consumed when a scoop is actually
+      // drafted — burning it before the bail-out wasted the turn on a 400
+      // (and cloud mode commits even rejected responses).
+      u.user.lastInvestigateTurn = turn;
       const scoop = scoops[Math.floor(Math.random() * scoops.length)];
       const article = sim.draftNews(scoop.headline, scoop.body, 'Politics', false, u.user.displayName, u.user.newspaperId || undefined);
       store.save(); broadcast('sync');
@@ -1519,7 +1564,17 @@ async function handle(req, res, pathname, method) {
       if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
       const cleanRows = (arr) => (Array.isArray(arr) ? arr : [])
         .map(r => ({ itemId: String(r.itemId || ''), qty: cleanQty(r.qty) }))
-        .filter(r => r.itemId && r.qty > 0 && db.items.some(i => i.id === r.itemId));
+        .filter(r => {
+          if (!r.itemId || !(r.qty > 0)) return false;
+          const item = db.items.find(i => i.id === r.itemId);
+          if (!item) return false;
+          // Same rules as the instant /api/trade route — an untradable or
+          // leveraged row used to sail through creation and detonate at
+          // accept time, mid-move.
+          if (item.meta && item.meta.leveraged) return false;
+          if (!item.tradable && !gm) return false;
+          return true;
+        });
       const give = cleanRows(b.give);
       const get = cleanRows(b.get);
       const money = { give: Math.max(0, Number((b.money || {}).give) || 0), get: Math.max(0, Number((b.money || {}).get) || 0) };
@@ -1563,12 +1618,50 @@ async function handle(req, res, pathname, method) {
 
       // accept — validate everything before mutating anything
       if (!gm && !ownership.controls(u.user.entityId, trade.toEntityId)) return deny('Only the receiving party may accept this trade.');
-      const hasQty = (ent, itemId, qty) => {
-        const row = (ent.inventory || []).find(r => r.itemId === itemId);
-        return row && row.qty >= qty;
+      // Aggregate demand per item: two rows for the same item must not
+      // individually pass a stock check that their SUM fails (the second
+      // moveItem used to throw mid-trade with earlier rows already moved).
+      const needBy = (rows) => {
+        const need = {};
+        for (const r of rows) need[r.itemId] = cleanQty((need[r.itemId] || 0) + r.qty);
+        return need;
       };
-      for (const r of trade.give) if (!hasQty(fromEnt, r.itemId, r.qty)) return bad(`${fromEnt.name} no longer holds enough ${(db.items.find(i => i.id === r.itemId) || {}).name || r.itemId}.`);
-      for (const r of trade.get) if (!hasQty(toEnt, r.itemId, r.qty)) return bad(`${toEnt.name} no longer holds enough ${(db.items.find(i => i.id === r.itemId) || {}).name || r.itemId}.`);
+      const giveNeed = needBy(trade.give), getNeed = needBy(trade.get);
+      // Pre-flight every row's ROUTING too — moveItem throws on leveraged /
+      // unroutable rows, and a mid-loop throw left earlier rows moved with no
+      // compensation (file mode persisted the half-applied trade on the next
+      // successful request's save).
+      const routingProblem = (fromE, itemId, qty) => {
+        const item = db.items.find(i => i.id === itemId);
+        if (!item) return 'Unknown item.';
+        if (item.meta && item.meta.leveraged) return 'Leveraged positions cannot be traded — sell them back through the exchange.';
+        if (!item.tradable && !u.role.perms.gm) return `${item.name} is not tradable.`;
+        if (item.meta && item.meta.companyId) {
+          const co = db.entities.find(e => e.id === item.meta.companyId);
+          if (!co || co.type !== 'company') return 'The issuing company no longer exists.';
+          if (market.holdingOf(co, fromE.id) < qty) return `${fromE.name} holds fewer registered shares than the offer needs.`;
+          return null; // register is authoritative for certificates
+        }
+        if (item.meta && item.meta.propertyId) {
+          const prop = db.properties.find(p => p.id === item.meta.propertyId);
+          if (!prop) return 'That deed’s property no longer exists.';
+          if (prop.ownerId !== fromE.id) return 'Only the property’s owner may convey its deed.';
+          return null; // deeds are qty-1 by construction
+        }
+        return null; // plain items: stock checked below
+      };
+      { // stock + routing checks for BOTH directions before any mutation
+        for (const [ent, need] of [[fromEnt, giveNeed], [toEnt, getNeed]]) {
+          for (const itemId of Object.keys(need)) {
+            const item = db.items.find(i => i.id === itemId);
+            const prob = routingProblem(ent, itemId, need[itemId]);
+            if (prob) return bad(prob);
+            if (item && item.meta && (item.meta.companyId || item.meta.propertyId)) continue;
+            const row = (ent.inventory || []).find(r => r.itemId === itemId);
+            if (!row || row.qty < need[itemId]) return bad(`${ent.name} no longer holds enough ${(item || {}).name || itemId}.`);
+          }
+        }
+      }
       const fromAcct = sim.primaryAccount(fromEnt.id, false);
       const toAcct = sim.primaryAccount(toEnt.id, false);
       if (trade.money.give > 0 && !gm && (!fromAcct || fromAcct.balance < trade.money.give)) return bad(`${fromEnt.name} has insufficient funds.`);
@@ -1748,7 +1841,14 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/market/buy' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
-      const buyerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
+      // A requested-but-uncontrolled entityId is a DENY, not a silent fallback
+      // to the caller's own entity (a mistyped company id used to spend YOUR
+      // money instead of erroring).
+      let buyerId = u.user.entityId;
+      if (b.entityId && b.entityId !== buyerId) {
+        if (!gm && !ownership.controls(u.user.entityId, b.entityId)) return deny('You do not control that holder.');
+        buyerId = b.entityId;
+      }
       if (!buyerId) return bad('No entity to trade for.');
       try { const r = market.buy(b.companyId, buyerId, b.shares, u.user.displayName, { gm, x100: !!b.x100 }); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
@@ -1756,17 +1856,24 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/market/sell' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
-      const sellerId = b.entityId && (gm || ownership.controls(u.user.entityId, b.entityId)) ? b.entityId : u.user.entityId;
+      let sellerId = u.user.entityId;
+      if (b.entityId && b.entityId !== sellerId) {
+        if (!gm && !ownership.controls(u.user.entityId, b.entityId)) return deny('You do not control that holder.');
+        sellerId = b.entityId;
+      }
       if (!sellerId) return bad('No entity to trade for.');
-      if (!gm && !ownership.controls(u.user.entityId, sellerId)) return deny('You do not control that holder.');
       try { const r = market.sell(b.companyId, sellerId, b.shares, u.user.displayName, { gm, x100: !!b.x100 }); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
     }
     if (pathname === '/api/market/transfer' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
-      const fromId = b.fromEntityId && (gm || ownership.controls(u.user.entityId, b.fromEntityId)) ? b.fromEntityId : u.user.entityId;
-      if (!gm && !ownership.controls(u.user.entityId, fromId)) return deny('You do not control that holder.');
+      let fromId = u.user.entityId;
+      if (b.fromEntityId && b.fromEntityId !== fromId) {
+        if (!gm && !ownership.controls(u.user.entityId, b.fromEntityId)) return deny('You do not control that holder.');
+        fromId = b.fromEntityId;
+      }
+      if (!fromId) return bad('No entity to trade for.');
       if (!b.toEntityId) return bad('Recipient required.');
       try { const r = market.transfer(b.companyId, fromId, b.toEntityId, b.shares, u.user.displayName); store.save(); broadcast('sync'); return json(res, 200, r); }
       catch (e) { return bad(e.message); }
@@ -1820,8 +1927,8 @@ async function handle(req, res, pathname, method) {
     }
     // Mark-news-as-read: one ping per News-tab visit that advances the user's
     // news waterline (the "News (n)" badge's only source of truth). High-
-    // frequency like lastLogin, so no store.log and no broadcast — the
-    // response-sync payload carries the updated user record back.
+    // frequency like lastLogin, so no store.log and no broadcast — the route
+    // is in SYNC_SKIP (see above), so the response carries no world payload.
     if (pathname === '/api/news/read' && method === 'POST') {
       const now = Date.now();
       if ((u.user.lastReadNewsTs || 0) < now) u.user.lastReadNewsTs = now;
@@ -1847,7 +1954,13 @@ async function handle(req, res, pathname, method) {
           if (!gm && b.paperId !== u.user.newspaperId) return deny('You may only file to your own newspaper.');
         }
         const a = db.news[idx];
-        for (const k of ['headline', 'body', 'category', 'status', 'paperId']) if (b[k] !== undefined) a[k] = String(b[k]);
+        // Same caps as POST /api/news — an unbounded PATCH let a journalist
+        // rewrite a body to the full 4MB request cap.
+        if (b.headline !== undefined) a.headline = String(b.headline).slice(0, 200);
+        if (b.body !== undefined) a.body = String(b.body).slice(0, 8000);
+        if (b.category !== undefined) a.category = String(b.category).slice(0, 40);
+        if (b.status !== undefined) a.status = String(b.status).slice(0, 20);
+        if (b.paperId !== undefined) a.paperId = String(b.paperId);
         if (b.status === 'published') {
           store.log('news', 'Published: ' + a.headline, a.category, u.user.displayName, [a.id]);
           if ((u.user.lastReadNewsTs || 0) < Date.now()) u.user.lastReadNewsTs = Date.now();
@@ -1877,15 +1990,18 @@ async function handle(req, res, pathname, method) {
       if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, party.id, scope)) {
         // Over-cap spend by a capped grantee → approval queue with the full
         // campaign snapshot so the leader's approval can execute it verbatim.
+        // The grant must cover THIS campaign's scope (minor vs major) — canAct
+        // fails at the scope gate too, and a minor-scoped grantee must not be
+        // able to queue a major campaign for one-click approval.
         const grant = ownership.findGrant(party, u.user.entityId);
-        if (grant && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined && campaignCost > grant.grants.spendLimitPerTurn) {
+        if (grant && ownership.grantCoversScope(grant, scope) && grant.grants && grant.grants.spendLimitPerTurn !== null && grant.grants.spendLimitPerTurn !== undefined && campaignCost > grant.grants.spendLimitPerTurn) {
           const req = ownership.createRequest(db, party.id, u.user.entityId, scope, {
             amount: campaignCost, description: `Campaign in ${b.province}`,
             action: { kind: 'campaign', partyId: party.id, province: b.province, campaignId: b.campaignId,
               money: campaignCost, materials: Array.isArray(b.materials) ? b.materials : [],
               targetGroup: b.targetGroup || null, defamePartyId: b.defamePartyId || null },
           });
-          store.log('roster', `Over-cap campaign request created`, `${party.name} — ₳${campaignCost}`, u.user.displayName, [party.id]);
+          store.log('economy', `Over-cap campaign request created`, `${party.name} — ₳${campaignCost}`, u.user.displayName, [party.id]);
           store.save(); broadcast('sync');
           return json(res, 202, { ok: false, pending: true, requestId: req.id, message: 'Campaign exceeds your spend limit. Request submitted for party leader approval.' });
         }
@@ -1954,15 +2070,23 @@ async function handle(req, res, pathname, method) {
         if (b.preview) {
           // Turn preview (Phase 25 QoL): the event Simulate button's
           // snapshot → run → diff → restore dance, applied to a whole turn.
-          // Same accepted cloud-mode caveat as below: pending timeline/txn
-          // rows flush even though the doc is restored.
+          // Snapshot suppression keeps the simulated turn from archiving a
+          // cloud snapshot row over the real one for this turn. Same accepted
+          // cloud-mode caveat as below: pending timeline/txn rows flush even
+          // though the doc is restored.
           const before = JSON.parse(JSON.stringify(store.get()));
           let err = null;
+          store.setSnapshotSuppression(true);
           try { sim.advanceTurn(steps, actor + ' (preview)'); } catch (e) { err = e.message; }
+          store.setSnapshotSuppression(false);
           const diff = computeWorldDiff(before, store.get());
           const live = store.get();
           for (const k of Object.keys(live)) delete live[k];
           Object.assign(live, before);
+          // Flush the restored doc NOW: store.log() inside the simulation
+          // scheduled a debounced write, and relying on the 400ms timer
+          // landing after the restore was a crash-window data-loss bet.
+          if (store.MODE === 'file') { try { store.saveNow(); } catch (e) { /* retried by safety interval */ } }
           return json(res, 200, { preview: true, steps, error: err, diff });
         }
         const time = sim.advanceTurn(steps, actor);
@@ -1990,7 +2114,9 @@ async function handle(req, res, pathname, method) {
           // Acceptable for now — flag if that drift becomes a problem.
           const before = JSON.parse(JSON.stringify(store.get()));
           let ran = false, err = null;
+          store.setSnapshotSuppression(true);
           try { ran = sim.runEvent(ev, actor); } catch (e) { err = e.message; }
+          store.setSnapshotSuppression(false);
           const diff = ran ? computeWorldDiff(before, store.get()) : { globalVars: [], provinces: [], moneyMoved: 0, news: [] };
           // restore the live db in place — callers elsewhere hold the same
           // reference returned by store.get(), so we mutate it rather than
@@ -1998,6 +2124,7 @@ async function handle(req, res, pathname, method) {
           const live = store.get();
           for (const k of Object.keys(live)) delete live[k];
           Object.assign(live, before);
+          if (store.MODE === 'file') { try { store.saveNow(); } catch (e) { /* retried by safety interval */ } }
           if (err) return json(res, 200, { dryRun: true, ran: false, error: err, diff });
           return json(res, 200, { dryRun: true, ran, diff });
         }

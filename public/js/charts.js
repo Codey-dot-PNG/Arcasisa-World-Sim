@@ -198,8 +198,12 @@ const Charts = {
     inner.appendChild(head); inner.appendChild(plot); inner.appendChild(readout);
     root.appendChild(inner);
     document.body.appendChild(root);
-    const close = () => root.remove();
-    document.addEventListener('keydown', function esc(e) { if (e.key === 'Escape') { close(); document.removeEventListener('keydown', esc); } });
+    // close() removes the document-level Escape listener too — it used to
+    // linger when the modal closed via the ✕ button or backdrop click, and
+    // every open/close pair accumulated another stale handler.
+    const escHandler = (e) => { if (e.key === 'Escape') close(); };
+    const close = () => { document.removeEventListener('keydown', escHandler); root.remove(); };
+    document.addEventListener('keydown', escHandler);
 
     const W_ = Math.min(900, window.innerWidth - 120), H_ = Math.min(460, window.innerHeight - 200);
     const pad = { top: 40, right: 20, bottom: 34, left: 60 };

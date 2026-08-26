@@ -102,42 +102,74 @@ function publicHand(h, reveal) {
   };
 }
 
+// A hand resolves against ITS OWN venue — hit/stand/double used to trust the
+// venue object deserialized from whatever request carried the action, so a
+// hand dealt at one table could settle under another table's rules
+// (dealerStandsOn/blackjackPays) and pay a different owner.
+function handVenue(db, h) {
+  const v = venueById(db, h.venueId);
+  if (!v || !v.enabled) throw new Error('That table has closed.');
+  return v;
+}
+// Return an escrowed stake (closed table / abandoned hand superseded by a new deal).
+function bjRefund(db, h, memo, actor) {
+  const v = venueById(db, h.venueId);
+  if (!v || !(h.escrowed > 0)) return;
+  sim.txn(sim.primaryAccount(v.ownerId, true).id, sim.primaryAccount(h.entityId, true).id,
+    Math.round(h.escrowed), `${memo} — stake returned`, actor, 'transfer');
+}
+
 function bjDeal(db, venue, entityId, userId, bet, actor) {
   bet = Math.round(Number(bet) || 0);
   const min = venue.minBet || 1, max = venue.maxBet || 1e9;
   if (bet < min || bet > max) throw new Error(`Stake must be between ${min} and ${max}.`);
-  requireFunds(db, entityId, bet);
   db.casinoHands = db.casinoHands || {};
+  // An abandoned open hand refunds its escrow before the seat is reused.
+  const prev = db.casinoHands[userId];
+  if (prev && !prev.done) bjRefund(db, prev, 'Blackjack', actor);
+  requireFunds(db, entityId, bet);
+  // Escrow the stake at deal: it moves to the house NOW, so the resolution can
+  // never debit money the player stopped holding between requests (the old
+  // check-at-deal/settle-at-end scheme let another tab's spin or a market buy
+  // drain the account mid-hand and settle against funds that weren't there).
   const shoe = freshShoe();
-  const h = { venueId: venue.id, entityId, bet, shoe, player: [shoe.pop(), shoe.pop()], dealer: [shoe.pop(), shoe.pop()], done: false, doubled: false };
+  const h = { venueId: venue.id, entityId, bet, escrowed: bet, shoe, player: [shoe.pop(), shoe.pop()], dealer: [shoe.pop(), shoe.pop()], done: false, doubled: false };
+  sim.txn(sim.primaryAccount(entityId, true).id, sim.primaryAccount(venue.ownerId, true).id,
+    bet, `Blackjack at ${venue.name} — stake`, actor, 'transfer');
   db.casinoHands[userId] = h;
   // naturals resolve immediately
   const pN = isNatural(h.player), dN = isNatural(h.dealer);
   if (pN || dN) return bjResolve(db, venue, userId, actor);
   return { state: publicHand(h, false) };
 }
-function bjHit(db, venue, userId, actor) {
+function bjHit(db, venueIn, userId, actor) {
   const h = db.casinoHands && db.casinoHands[userId];
   if (!h || h.done) throw new Error('No hand in play.');
+  const venue = handVenue(db, h);
   h.player.push(h.shoe.pop());
   if (handValue(h.player) >= 21) return bjResolve(db, venue, userId, actor);
   return { state: publicHand(h, false) };
 }
-function bjDouble(db, venue, userId, actor) {
+function bjDouble(db, venueIn, userId, actor) {
   const h = db.casinoHands && db.casinoHands[userId];
   if (!h || h.done || h.player.length !== 2) throw new Error('Can only double on the opening two cards.');
+  const venue = handVenue(db, h);
   requireFunds(db, h.entityId, h.bet); // the extra stake
+  sim.txn(sim.primaryAccount(h.entityId, true).id, sim.primaryAccount(venue.ownerId, true).id,
+    h.bet, `Blackjack at ${venue.name} — doubled stake`, actor, 'transfer');
+  h.escrowed = (h.escrowed || 0) + h.bet;
   h.bet *= 2; h.doubled = true;
   h.player.push(h.shoe.pop());
   return bjResolve(db, venue, userId, actor);
 }
-function bjStand(db, venue, userId, actor) {
+function bjStand(db, venueIn, userId, actor) {
   const h = db.casinoHands && db.casinoHands[userId];
   if (!h || h.done) throw new Error('No hand in play.');
-  return bjResolve(db, venue, userId, actor);
+  return bjResolve(db, handVenue(db, h), userId, actor);
 }
-function bjResolve(db, venue, userId, actor) {
+function bjResolve(db, venueIn, userId, actor) {
   const h = db.casinoHands[userId];
+  const venue = handVenue(db, h);
   const standOn = (venue.blackjack || {}).dealerStandsOn || 17;
   const bjPays = (venue.blackjack || {}).blackjackPays || 1.5;
   const pv = handValue(h.player);
@@ -145,19 +177,55 @@ function bjResolve(db, venue, userId, actor) {
   const dv = handValue(h.dealer);
   const pN = isNatural(h.player), dN = isNatural(h.dealer);
 
-  let delta;
-  if (pN && !dN) { delta = Math.round(h.bet * bjPays); h.outcome = 'blackjack'; }
-  else if (pv > 21) { delta = -h.bet; h.outcome = 'bust'; }
-  else if (dv > 21) { delta = h.bet; h.outcome = 'dealer_bust'; }
-  else if (pv > dv) { delta = h.bet; h.outcome = 'win'; }
-  else if (pv < dv) { delta = -h.bet; h.outcome = 'lose'; }
-  else { delta = 0; h.outcome = 'push'; }
+  if (!(h.escrowed > 0)) {
+    // Legacy in-flight hand from before escrowing existed — settle the old
+    // ±bet way so we never pay out a stake that was never taken.
+    let delta;
+    if (pN && !dN) { delta = Math.round(h.bet * bjPays); h.outcome = 'blackjack'; }
+    else if (pv > 21) { delta = -h.bet; h.outcome = 'bust'; }
+    else if (dv > 21) { delta = h.bet; h.outcome = 'dealer_bust'; }
+    else if (pv > dv) { delta = h.bet; h.outcome = 'win'; }
+    else if (pv < dv) { delta = -h.bet; h.outcome = 'lose'; }
+    else { delta = 0; h.outcome = 'push'; }
+    h.done = true;
+    const balance = settle(db, venue, h.entityId, delta, `Blackjack at ${venue.name}`, actor);
+    const state = publicHand(h, true);
+    delete h.shoe; delete db.casinoHands[userId];
+    return { state, playerDelta: delta, balance };
+  }
+
+  // Escrowed hand: the house already HOLDS the stake; compute the winnings on
+  // top and pay the full return. House net win (= escrow − return) pays the
+  // gambling duty, exactly like the old loss-side skim.
+  let winnings;
+  if (pN && !dN) { winnings = Math.round(h.bet * bjPays); h.outcome = 'blackjack'; }
+  else if (pv > 21) { winnings = 0; h.outcome = 'bust'; }
+  else if (dv > 21) { winnings = h.bet; h.outcome = 'dealer_bust'; }
+  else if (pv > dv) { winnings = h.bet; h.outcome = 'win'; }
+  else if (pv < dv) { winnings = 0; h.outcome = 'lose'; }
+  else { winnings = 0; h.outcome = 'push'; }
 
   h.done = true;
-  const balance = settle(db, venue, h.entityId, delta, `Blackjack at ${venue.name}`, actor);
+  const escrowed = Math.round(h.escrowed);
+  const playerReturn = escrowed + winnings;
+  const houseAcct = sim.primaryAccount(venue.ownerId, true);
+  if (playerReturn > 0) {
+    sim.txn(houseAcct.id, sim.primaryAccount(h.entityId, true).id, playerReturn,
+      `Blackjack at ${venue.name} — payout`, actor, 'transfer');
+  }
+  const netHouse = escrowed - playerReturn;
+  if (netHouse > 0) {
+    const gr = ((db.settings.taxation || {}).gamblingRate) || 0;
+    if (gr > 0) {
+      const treasury = db.accounts.find(a => a.id === 'acct_treasury');
+      const tax = Math.round(netHouse * gr / 100);
+      if (treasury && tax > 0) sim.txn(houseAcct.id, treasury.id, tax, `Gambling duty (${gr}%) — ${venue.name}`, 'TREASURY', 'transfer');
+    }
+  }
+  const fresh = sim.primaryAccount(h.entityId, false);
   const state = publicHand(h, true);
-  delete h.shoe; delete db.casinoHands[userId]; // clear the round
-  return { state, playerDelta: delta, balance };
+  delete h.shoe; delete db.casinoHands[userId];
+  return { state, playerDelta: winnings, balance: fresh ? fresh.balance : 0 };
 }
 
 /* ---------- Lottery ---------- */

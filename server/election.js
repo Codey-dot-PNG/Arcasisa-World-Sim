@@ -546,8 +546,12 @@ function startCampaign(db, actor) {
   sim.draftNews('ELECTION CALLED — CAMPAIGN SEASON OPENS',
     `The Republic goes to the country. Parliament is dissolved and the campaign trail opens; the Election Commission will announce polling day in due course.`,
     'Politics', true, 'Election Commission');
+  const snapshot = db.election.pollingAtCall || {};
+  const leaderPct = Object.values(snapshot).sort((a, b) => b - a)[0];
   store.log('election', 'General election called — campaign season opens',
-    `Polling at call: ${fmtNum(db.election.pollingAtCall[Object.keys(db.election.pollingAtCall)[0]] || 0)}% for the leading party`,
+    Number.isFinite(leaderPct)
+      ? `Polling at call: ${fmtNum(leaderPct)}% for the leading party`
+      : 'No polling data available at call.',
     actor || 'GM', [db.election.id]);
 }
 
@@ -589,6 +593,7 @@ function startVoting(db, actor) {
   el.provinceOrder = shuffleArray(db.provinces.map(p => p.id));
   el.baseTargets = byProvince;
   el.targets = deviationTargets(el, byProvince, parties);
+  el._appliedDeviationPct = clampPct(el.deviationPct); // tuning saves only re-roll when this changes
   el.counted = {};
   el.provProgress = {};
   el.provComplete = {};
@@ -719,6 +724,23 @@ function advanceRealtimeCount(db, el, nowWorldMs, actor) {
 
     const targets = el.targets[pid];
     const counted = el.counted[pid];
+
+    // A province with no ballot line in the sealed targets (population wiped
+    // mid-war, annexed/ceded while the count ran) used to throw right here —
+    // Object.values(undefined) — and both callers swallowed it silently, so
+    // the count froze at that province forever. It simply completes empty.
+    if (!counted) { el.counted[pid] = {}; continue; }
+    if (!targets || !parties.some(pt => (targets[pt.id] || 0) > 0)) {
+      if (newProg >= 1) {
+        for (const pt of parties) counted[pt.id] = Math.max(0, Math.round((targets && targets[pt.id]) || 0));
+        el.provProgress[pid] = 1;
+        el.provComplete[pid] = true;
+        anyChange = true;
+      } else {
+        el.provProgress[pid] = newProg;
+      }
+      continue;
+    }
     const provTotal = Object.values(targets).reduce((s, v) => s + v, 0) || 1;
 
     if (newProg >= 1) {
@@ -767,6 +789,8 @@ function advanceRealtimeCount(db, el, nowWorldMs, actor) {
       finalize(db, actor);
     }
   }
+
+  return anyChange;
 }
 
 // Minimum real-world gap between actual count updates. The count's PACE is
@@ -791,6 +815,13 @@ function maybeTick(db, actor) {
   if (el._lastTickRealMs && (nowReal - el._lastTickRealMs) < MIN_TICK_REAL_MS) return { ticked: false, milestone: false };
   el._lastTickRealMs = nowReal;
   const nowWorldMs = sim.worldClockNow(db.settings.time, nowReal);
+  // A paused world clock (rate 0) freezes the count silently — say so once,
+  // loudly, instead of letting operators wonder why ballots never move.
+  const rateCfg = Number((((db.settings || {}).time || {}).clock || {}).minutesPerRealMinute);
+  if (el.phase === 'voting' && Number.isFinite(rateCfg) && rateCfg === 0 && !el._warnedClockPaused) {
+    el._warnedClockPaused = true;
+    console.error('election: world clock is paused (minutesPerRealMinute=0) — the count cannot progress until time resumes.');
+  }
   if (el.phase !== 'voting') {
     // Campaign season: nothing to count, but finished campaigns must wind
     // down so the party's launch slot frees up (support stays permanent).
@@ -798,10 +829,13 @@ function maybeTick(db, actor) {
     return { ticked: expired > 0, milestone: expired > 0 };
   }
   const beforePct = el.loggedPct || 0;
-  advanceRealtimeCount(db, el, nowWorldMs, actor);
+  const changed = advanceRealtimeCount(db, el, nowWorldMs, actor);
   const finalized = !db.election; // finalize() sets db.election = null
   const milestone = finalized || (db.election && (db.election.loggedPct || 0) > beforePct);
-  return { ticked: true, milestone: !!milestone };
+  // ticked means "the world changed, persist it" — a no-progress poll (the
+  // common case between world-clock movements) used to store.save() every 3s
+  // for the whole multi-day count.
+  return { ticked: !!(changed || finalized), milestone: !!milestone };
 }
 
 // Kept as a turn-advance nudge too — cheap, self-gated by maybeTick's own
@@ -991,8 +1025,13 @@ function applyTuning(db, b) {
   el.durationDays = cfg.durationDays || 14;
   el.supportToVotes = cfg.supportToVotes;
   el.deviationPct = cfg.deviationPct;
-  if (el.phase === 'voting' && el.baseTargets) {
+  // Re-roll the sealed true result ONLY when the deviation lever actually
+  // moved. Re-applying on every tuning save drew fresh random nudges, so the
+  // officially announced final result could diverge from the per-province
+  // numbers viewers had already watched come in.
+  if (el.phase === 'voting' && el.baseTargets && el._appliedDeviationPct !== el.deviationPct) {
     el.targets = deviationTargets(el, el.baseTargets, db.entities.filter(e => e.type === 'party'));
+    el._appliedDeviationPct = el.deviationPct;
     updateProgress(el);
   }
 }

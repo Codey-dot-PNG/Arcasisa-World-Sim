@@ -140,7 +140,9 @@ async function handleRequest(req, res) {
     if (!res.writableEnded) {
       res.statusCode = 500;
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ error: e.message }));
+      // Generic on purpose — e.message can carry Supabase/infra detail that
+      // must not reach clients. Full context is in the server log above.
+      res.end(JSON.stringify({ error: 'Internal error' }));
     }
   }
 };

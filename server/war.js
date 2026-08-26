@@ -445,9 +445,11 @@ function nationPools(db, war, nationId) {
   const pools = [];
   const e = db.entities.find(x => x.id === nationId);
   if (e) { e.inventory = e.inventory || []; pools.push(e.inventory); }
-  // the defending nation also draws on its military depots
+  // the defending nation also draws on its OWN military depots — ownership
+  // matters: applyOccupationTransfers flips a captured depot's ownerId to the
+  // attacker, and the defender must stop resupplying from lost ground.
   if (nationId === war.defenderId) {
-    for (const p of db.properties) if (p.type === 'military' && Array.isArray(p.inventory)) pools.push(p.inventory);
+    for (const p of db.properties) if (p.type === 'military' && p.ownerId === war.defenderId && Array.isArray(p.inventory)) pools.push(p.inventory);
   }
   return pools;
 }
@@ -815,7 +817,9 @@ function aircraftPools(db, war, entityId) {
     pools.push(entity.inventory);
   }
   if (war && war.defenderId === entityId) {
-    for (const p of db.properties) if (p.type === 'military' && Array.isArray(p.inventory)) pools.push(p.inventory);
+    // Same ownership rule as nationPools: only depots the defender still
+    // holds are airworthy — a captured airfield stops arming the loser's jets.
+    for (const p of db.properties) if (p.type === 'military' && p.ownerId === entityId && Array.isArray(p.inventory)) pools.push(p.inventory);
   }
   return pools;
 }
@@ -915,7 +919,9 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
     const spawnPos = engine.clampToWorld(war, [capitalPos[0] + rand(-45, 45), capitalPos[1] + rand(-45, 45)]);
     war.units.push({
       id: store.uid('warunit'), side: 'def',
-      name: `${toRoman(i + 1)} Armoured Division`,
+      // Name armour after its best hull type like squadrons do (bestTankName
+      // was computed and then ignored).
+      name: `${bestTankName} Division ${toRoman(i + 1)}`,
       kind: 'armored', pos: spawnPos, dest: null,
       strength: s, maxStrength: s, org: 100,
       speed: armDef.speed, atk: armDef.atk, state: 'holding', objectiveId: null,
@@ -1262,12 +1268,16 @@ function startWar(db, scenario) {
   // their own homeland when they have one. scenario.allies:false opts a
   // scenario out; scenario.coAttackers force-joins specific entities.
   autoJoinAllies(db, db.war, scenario, attacker, defender, 'WAR ENGINE');
+  // A GM-authored roster with zero units would throw on units[0].pos below,
+  // leaving a half-initialized active war doc behind.
+  const firstPos = (Array.isArray(units) && units[0] && units[0].pos)
+    || [db.war.grid.cols * db.war.grid.cell / 2, db.war.grid.rows * db.war.grid.cell / 2];
   if (landStart) {
-    engine.pushEvent(db.war, 'battle', units[0].pos, `${attacker.name} forces cross the border — invasion begins.`);
+    engine.pushEvent(db.war, 'battle', firstPos, `${attacker.name} forces cross the border — invasion begins.`);
     SERVER_CTX.news(`WAR: ${attacker.name} FORCES CROSS THE BORDER`,
       `Armed columns belonging to ${attacker.name} have crossed into Arcasian territory. The government has not yet issued a statement.`);
   } else {
-    engine.pushEvent(db.war, 'landing', units[0].pos, `${attacker.name} war fleet sighted offshore — invasion begins.`);
+    engine.pushEvent(db.war, 'landing', firstPos, `${attacker.name} war fleet sighted offshore — invasion begins.`);
     SERVER_CTX.news(`WAR: ${attacker.name} FORCES SIGHTED OFF THE COAST`,
       `Naval assets belonging to ${attacker.name} have been sighted massing offshore. The government has not yet issued a statement.`);
   }

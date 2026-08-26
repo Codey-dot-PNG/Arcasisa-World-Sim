@@ -86,7 +86,17 @@ function fmtVal(v, format) {
   if (format === 'text') return v === undefined ? '—' : String(v);
   return fmtNum(v);
 }
-function esc(s) { return String(s ?? ''); }
+// HTML-escape a string for safe interpolation into innerHTML templates.
+// (This used to be an identity function with an escaper's name — a footgun
+// waiting for its first caller; nothing calls it yet.)
+function esc(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 /* ---------- lookups ---------- */
 const S = () => W.state;
@@ -293,12 +303,16 @@ async function api(method, path, body, opts) {
     // Response-sync: mutating responses carry the freshly-committed,
     // permission-filtered world (server/api.js attachSync) — apply it here
     // and the write is on screen in ONE round-trip, no refetch. Fallback to
-    // the old forced refetch when the payload is absent (older server, or an
-    // endpoint that opted out). War orders do neither: the war heartbeat +
+    // the old forced refetch when the payload is absent. The fallback MUST
+    // mirror the server's SYNC_SKIP list: those endpoints deliberately opt
+    // out of carrying a sync payload, and forcing a refetch for them anyway
+    // defeated that (every News "mark read" ping re-fetched + re-rendered
+    // the whole app). War orders do neither: the war heartbeat +
     // client prediction own that path, and the old per-order full refetch
     // was pure overhead on top of them.
+    const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$)/;
     if (data && data.sync) applySync(data.sync);
-    else if (!path.startsWith('/api/war/')) scheduleRefresh(true);
+    else if (!SYNC_SKIP.test(path)) scheduleRefresh(true);
   }
   return data;
 }
@@ -542,8 +556,9 @@ const Forms = {
   // Draggable slider WITH a typing box — both bound to obj[key], kept in sync.
   // opts: { step, suffix, onInput, allowBeyondRange }. Used anywhere a value
   // wants both a quick drag and an exact keyed entry (tariffs, GM editors,
-  // trade multipliers, …). When allowBeyondRange is true, the range remains
-  // a quick-pick aid but typed values are not clamped to its min/max.
+  // trade multipliers, …). When allowBeyondRange is true there is NO upper
+  // cap: typed values beyond the slider's quick-pick range are kept verbatim
+  // and the track itself stretches to follow them.
   sliderNum(obj, key, min, max, opts) {
     opts = opts || {};
     const step = opts.step || 1;
@@ -553,12 +568,14 @@ const Forms = {
       : clampRange(v);
     const val = clamp(Number(obj[key]));
     obj[key] = val;
-    const range = el('input.slider-input', { type: 'range', min: String(min), max: String(max), step: String(step), value: String(clampRange(val)), style: 'flex:1;' });
+    const grow = (v) => { if (opts.allowBeyondRange && isFinite(v) && v > max) return v; return max; };
+    const range = el('input.slider-input', { type: 'range', min: String(min), max: String(grow(val)), step: String(step), value: String(clampRange(Math.min(val, grow(val)))), style: 'flex:1;' });
     const box = el('input.text-input', { type: 'number', min: opts.allowBeyondRange ? undefined : String(min), max: opts.allowBeyondRange ? undefined : String(max), step: String(step), value: String(val), style: 'width:72px; flex:0 0 auto; text-align:right;' });
     const suffix = opts.suffix ? el('span', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-faint);' }, opts.suffix) : null;
     const sync = (v, from) => {
       v = clamp(Number(v)); obj[key] = v;
-      if (from !== 'range') range.value = String(clampRange(v));
+      range.max = String(grow(v));
+      if (from !== 'range') range.value = String(clampRange(Math.min(v, grow(v))));
       if (from !== 'box') box.value = String(v);
       if (opts.onInput) opts.onInput(v);
     };

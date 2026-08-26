@@ -500,3 +500,7 @@ const Music = {
 };
 
 document.addEventListener('DOMContentLoaded', () => Music.init());
+
+// Expose for cross-module volume sharing (sfx.js reads Music.vol — a top-level
+// const is NOT a window property, so the guard was always false).
+window.Music = Music;

@@ -356,7 +356,7 @@ const GM = {
       F.field('Net balance (Trade table)', F.num(p, 'netBalance')),
       F.field('Price drift ±', F.num(p, 'priceDrift', '0.01')),
       F.field('Partner demand ×', Forms.sliderNum(p, 'demandMultiplier', 0, 2, { step: 0.05, suffix: '×', allowBeyondRange: true }),
-        'Scales all goods this partner wants to buy. Typed values may exceed the slider range.')));
+        'Scales all goods this partner wants to buy. No upper cap — type any value and the slider stretches to match.')));
     // implied multiplier for a legacy absolute price, so old worlds show a
     // sensible starting multiplier before they're re-authored
     const multOf = (it) => {

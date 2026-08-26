@@ -84,6 +84,14 @@ function payWages(db, owner, actor, received) {
   // negative overnight). allowNegative accounts (government) pay in full.
   const allowNeg = !!(acct.meta && acct.meta.allowNegative);
   let available = allowNeg ? total : Math.min(total, Math.max(0, Math.round(acct.balance * 100) / 100));
+  // If we can't cover everything, proportionally scale the whole turn's
+  // disbursement rather than stiffing whole provinces. The scale is computed
+  // ONCE up front: the old `(available + paid) / total` rose as `paid`
+  // accumulated, so late bills were paid at a HIGHER rate than early ones and
+  // the total overshot `available` — exactly the deep-negative balances this
+  // cap exists to prevent. The company's own wagePerTurn IS the wage — no
+  // global multiplier layers on top of it.
+  const shareScale = Math.min(1, available / total);
   let paid = 0;
 
   for (const { pr, bill } of bills) {
@@ -92,10 +100,6 @@ function payWages(db, owner, actor, received) {
     const pool = db.households.filter(h => h.provinceId === pr.provinceId && working.includes(h.group));
     const totalPop = pool.reduce((s, h) => s + (h.population || 0), 0);
     if (!(totalPop > 0)) continue;
-    // If we can't cover everything, proportionally scale the whole turn's
-    // disbursement rather than stiffing whole provinces. The company's own
-    // wagePerTurn IS the wage — no global multiplier layers on top of it.
-    const shareScale = Math.min(1, (available + paid) / total);
     const provShare = bill * shareScale;
     paid += provShare;
     for (const h of pool) {

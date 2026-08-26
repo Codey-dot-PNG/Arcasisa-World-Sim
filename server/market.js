@@ -58,7 +58,11 @@ function newSeed() { return (Math.floor(Math.random() * 0x7fffffff) + 1) >>> 0; 
 function bankAccount() { return sim.primaryAccount(BANK_ID, true); }
 
 function shareItemFor(companyId) {
-  return store.get().items.find(i => i.meta && i.meta.companyId === companyId) || null;
+  // Exclude the ×100 leveraged mirror item — it also carries meta.companyId,
+  // and if the plain certificate is ever absent these lookups used to resolve
+  // to the derivative item, merging ordinary holdings into the leveraged book
+  // (which syncAllX100Certificates then deleted as "stale" on next load).
+  return store.get().items.find(i => i.meta && i.meta.companyId === companyId && !i.meta.leveraged) || null;
 }
 
 // ---- Day Market (speculation) --------------------------------------------
@@ -352,7 +356,7 @@ function syncAllCertificates(world) {
   let changed = false;
   const companies = (world.entities || []).filter(e => e.type === 'company' && e.sharesOutstanding);
   for (const co of companies) {
-    const item = (world.items || []).find(i => i.meta && i.meta.companyId === co.id);
+    const item = (world.items || []).find(i => i.meta && i.meta.companyId === co.id && !i.meta.leveraged);
     if (!item) continue;
     const registered = new Set((co.shareholders || []).map(s => s.entityId));
     // register → certificate: ensure each shareholder holds a matching cert

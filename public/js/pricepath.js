@@ -4,8 +4,8 @@
 // bounded, seeded wiggle that gently mean-reverts toward `target`. Because it
 // is pure and seeded, the server and every client evaluating it at the same
 // `now` produce the SAME number — clients render the live ticker, they never
-// invent it. This file MUST stay behaviourally identical to
-// server/pricepath.js (Node copy).
+// invent it. This file MUST stay BYTE-identical to its twin copy in
+// server/pricepath.js and public/js/pricepath.js.
 //
 //   price(anchorPrice, anchorTurnMs, seed, nowMs, vol, meanRevTarget) -> number
 (function (global) {

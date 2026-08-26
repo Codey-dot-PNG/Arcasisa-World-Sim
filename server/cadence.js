@@ -183,7 +183,10 @@ function registerDefaults() {
   // and tender closing (6d). All of the actual math lives in sim.js — this
   // is just wiring.
   register('production', (db) => {
-    require('./sim').runHourlyProductionTick(db, 'CADENCE');
+    // Hand the handler its real world-time width so the slice math scales with
+    // the configured interval (productionHours) instead of always assuming one
+    // hour per tick.
+    require('./sim').runHourlyProductionTick(db, 'CADENCE', intervalOf(db, 'production'));
   });
 
   // Demographic fast drift (Part 3b): the per-turn drift moved off

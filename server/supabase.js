@@ -16,7 +16,9 @@ async function req(method, path, body, prefer) {
     'Content-Type': 'application/json'
   };
   if (prefer) headers.Prefer = prefer;
-  const r = await fetch(URL_ + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+  // Hard timeout: api/index.js serializes every request on this instance
+  // through one begin/commit chain — a hung REST call used to stall them all.
+  const r = await fetch(URL_ + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined, signal: AbortSignal.timeout(20000) });
   if (!r.ok) {
     const detail = await r.text().catch(() => '');
     throw new Error(`Supabase ${method} ${path} → ${r.status} ${detail}`.slice(0, 400));

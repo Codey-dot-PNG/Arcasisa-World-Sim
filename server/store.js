@@ -46,6 +46,10 @@ let broadcastPending = false;
 let pendingTimeline = [];
 let pendingTxns = [];
 let pendingSnapshot = null; // at most one snapshot per request
+// True while the committed world doc may be AHEAD of its buffered log rows
+// (CAS landed, log flush failed). Those buffers must survive begin() reloads
+// and retry on the next successful commit.
+let bufferStranded = false;
 let saveTimer = null;
 
 function uid(prefix) {
@@ -330,7 +334,12 @@ function migrate(world) {
     const defaultPaper = validPaperIds.has('paper_today') ? 'paper_today' : (world.settings.newspapers || [])[0] && world.settings.newspapers[0].id;
     for (const n of (world.news || [])) {
       if (!n.paperId || !validPaperIds.has(n.paperId)) {
-        n.paperId = routing[n.category] || defaultPaper;
+        // Only re-route when a fallback actually exists — assigning undefined
+        // here kept failing the test below, so migrate() reported `changed`
+        // (and cloud mode CAS-bumped the world) on EVERY load forever.
+        const target = routing[n.category] || defaultPaper;
+        if (!target) break;
+        n.paperId = target;
         changed = true;
       }
     }
@@ -1159,6 +1168,7 @@ function migrate(world) {
     }
     world._armsWorksMoved = true; // keep the legacy v1 flag set so the old block never fires on old worlds
     world._armsWorksMoved2 = true;
+    changed = true; // flag writes are changes too — keep migrate()'s return honest
   }
 
   // ---- Phase 26 — retire the generic "Weapons (crate)" trade good ---------
@@ -1542,11 +1552,16 @@ function migrate(world) {
   // ~68B against a ~13B seed target). This block re-pins gdpScale so the
   // recomputed GDP lands on GDP_TARGET again, then writes the matching
   // province gdp vars + globalVars.gdp so the value is correct on load without
-  // waiting for the first turn. Idempotent: it recomputes from CURRENT
-  // production every run and converges (re-running with production unchanged
-  // reproduces the same scale). Runs LAST so every other production-touching
+  // waiting for the first turn. Runs LAST so every other production-touching
   // migration has already settled.
-  {
+  //
+  // ONE-SHOT (gated on _gdpRepinned): ungated, this block re-pinned GDP to the
+  // authored figure on EVERY load — played growth/decline (war damage,
+  // industrialisation, GM edits) was silently rescaled back to ₳13B at the
+  // next boot or cloud reload, and warm vs freshly-loaded instances reported
+  // different GDPs in between. Future production-touching migrations must
+  // re-pin explicitly in their own one-shot block instead.
+  if (!world._gdpRepinned) {
     const GDP_TARGET = 13000; // authored seed GDP (₳13B; see the pre-1962 history seed, ~13k at turn 0)
     const items = world.items || [];
     const priceOf = (id) => { const it = items.find(i => i.id === id); return it ? (it.marketValue || 0) : 0; };
@@ -1576,6 +1591,8 @@ function migrate(world) {
         changed = true;
       }
     }
+    world._gdpRepinned = true;
+    changed = true;
   }
 
   // Direct company wages. Existing companies begin at the requested
@@ -1873,7 +1890,7 @@ function migrate(world) {
 
   // The standing-contracts feature is retired (tenders settle one-shot at
   // award instead). Shed any data old worlds still carry — idempotent.
-  if (world.contracts !== undefined) delete world.contracts;
+  if (world.contracts !== undefined) { delete world.contracts; changed = true; }
 
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed
@@ -1905,13 +1922,35 @@ async function load(seed, reseed) {
   configure(seed);
   if (MODE === 'file') {
     fs.mkdirSync(SNAP_DIR, { recursive: true });
-    if (!reseed && fs.existsSync(DB_FILE)) { db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); if (migrate(db)) saveNow(); }
+    if (!reseed && fs.existsSync(DB_FILE)) {
+      try {
+        db = JSON.parse(fs.readFileSync(DB_FILE, 'utf8'));
+      } catch (e) {
+        // A truncated/corrupt world file must not brick the boot: fall back
+        // to the newest snapshot (snapshots are written before every turn).
+        const fallback = newestSnapshotFile();
+        if (!fallback) throw e;
+        console.error(`world.json is corrupt (${e.message}) — recovering from ${path.basename(fallback)}`);
+        db = JSON.parse(fs.readFileSync(fallback, 'utf8'));
+      }
+      if (migrate(db)) saveNow();
+    }
     else { db = seedFn(); migrate(db); saveNow(); } // run migrations on a fresh seed too, so structural upgrades live only in migrate()
     return db;
   }
   if (reseed) await reset(seedFn);
   else await begin();
   return db;
+}
+
+// Newest turn-*.json in the snapshot dir by write time (mtime), or null.
+function newestSnapshotFile() {
+  try {
+    const all = fs.readdirSync(SNAP_DIR).filter(f => f.startsWith('turn-'))
+      .map(f => ({ f, mtime: fs.statSync(path.join(SNAP_DIR, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    return all.length ? path.join(SNAP_DIR, all[0].f) : null;
+  } catch (e) { return null; }
 }
 
 // Per-request entry point. Loads the world (or reuses the warm in-memory
@@ -1921,7 +1960,14 @@ async function begin() {
     if (!db) await load(seedFn);
     return db;
   }
-  pendingTimeline = []; pendingTxns = []; pendingSnapshot = null;
+  // Stranded buffers (a commit that landed its CAS but failed mid log-flush)
+  // survive reloads so the next successful commit retries them (idempotent
+  // merge-duplicates on the stable row id). Any other pending state is
+  // request-local and resets here — a WORLD_CONFLICT retry regenerates its
+  // own rows against fresh state, so the stale ones must be dropped.
+  if (!bufferStranded) { pendingTimeline = []; pendingTxns = []; }
+  bufferStranded = false;
+  pendingSnapshot = null;
   dirty = false; broadcastPending = false;
 
   const meta = await sb.select('world', 'id=eq.1&select=version');
@@ -1929,6 +1975,7 @@ async function begin() {
 
   if (!db || Number(meta[0].version) !== version) {
     const rows = await sb.select('world', 'id=eq.1&select=version,doc');
+    if (!rows || !rows.length) return firstSeed(); // row vanished mid-flight (concurrent cold boot)
     version = Number(rows[0].version);
     db = rows[0].doc;
     const tl = await sb.select('timeline', `select=*&order=ts.desc&limit=${LOG_FETCH}`);
@@ -1945,11 +1992,20 @@ async function firstSeed() {
   const seedTl = db.timeline.slice();
   const seedTx = db.transactions.slice();
   version = Date.now();
-  await sb.insert('world', [{ id: 1, version, doc: coreDoc() }]);
+  // Two instances cold-booting together can both see an empty world table;
+  // the loser's plain insert 409s. Upsert semantics keep boot idempotent.
+  try {
+    await sb.insert('world', [{ id: 1, version, doc: coreDoc() }]);
+  } catch (e) {
+    if (!/409|duplicate|conflict/i.test(e.message)) throw e;
+    const existing = await sb.select('world', 'id=eq.1&select=version,doc');
+    if (existing && existing.length) { version = Number(existing[0].version); db = existing[0].doc; return db; }
+    throw e;
+  }
   await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // realtime signal table; optional on older deployments
-  if (seedTl.length) await sb.insert('timeline', seedTl.map(tlRow));
-  if (seedTx.length) await sb.insert('transactions', seedTx.map(txRow));
-  dirty = false;
+  if (seedTl.length) await sb.insert('timeline?on_conflict=id', seedTl.map(tlRow), 'return=minimal,resolution=merge-duplicates');
+  if (seedTx.length) await sb.insert('transactions?on_conflict=id', seedTx.map(txRow), 'return=minimal,resolution=merge-duplicates');
+  dirty = false; bufferStranded = false; pendingTimeline = []; pendingTxns = [];
   return db;
 }
 
@@ -1976,13 +2032,27 @@ async function commit() {
     // conflict nothing below must run, so a retry never duplicates log rows.
     if (pendingSnapshot) {
       await sb.upsert('snapshots', [pendingSnapshot]);
+      pendingSnapshot = null;
       // Transaction history is permanent. Do not call the legacy prune
       // function here: older Supabase installations delete rows past 12,000.
       // Timeline/snapshot housekeeping can be handled separately without
       // touching the bank ledger.
     }
-    if (pendingTimeline.length) await sb.insert('timeline', pendingTimeline.map(tlRow));
-    if (pendingTxns.length) await sb.insert('transactions', pendingTxns.map(txRow));
+    // Buffered audit/ledger rows flush AFTER the CAS. The inserts are
+    // idempotent (merge-duplicates on the stable row id), and the buffers are
+    // only cleared once every insert has landed — a transient failure after a
+    // successful CAS used to wipe them in the finally block below, permanently
+    // losing ledger rows for changes that WERE committed. begin() preserves
+    // stranded buffers across reloads so the next commit retries them.
+    bufferStranded = true; // from here the world doc is committed; rows must not be lost
+    if (pendingTimeline.length) {
+      await sb.insert('timeline?on_conflict=id', pendingTimeline.map(tlRow), 'return=minimal,resolution=merge-duplicates');
+    }
+    if (pendingTxns.length) {
+      await sb.insert('transactions?on_conflict=id', pendingTxns.map(txRow), 'return=minimal,resolution=merge-duplicates');
+    }
+    pendingTimeline = []; pendingTxns = [];
+    bufferStranded = false;
     // Ping clients only when a handler explicitly asked (broadcast('sync') →
     // requestBroadcast). Pinging on ANY dirty commit made cloud hosting
     // broadcast-storm every client during a war: each war-tick save (ridden
@@ -1997,9 +2067,12 @@ async function commit() {
       await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // table may not exist on older deployments
       await sb.broadcast('world', 'sync');
     }
-  } finally {
-    pendingTimeline = []; pendingTxns = []; pendingSnapshot = null;
     dirty = false; broadcastPending = false;
+  } finally {
+    // NOTE: pending buffers are intentionally NOT cleared here. A failure
+    // after the CAS strands them (bufferStranded=true) until a later commit
+    // retries them; a WORLD_CONFLICT leaves them for begin() to drop, since
+    // the whole request replays against fresh state and regenerates its rows.
   }
 }
 
@@ -2027,8 +2100,15 @@ function invalidate() { db = null; version = 0; }
 function saveNow() {
   if (MODE !== 'file' || !db) return;
   const tmp = DB_FILE + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(db));
-  fs.renameSync(tmp, DB_FILE);
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(db));
+    fs.renameSync(tmp, DB_FILE);
+  } catch (e) {
+    // Windows: rename can EPERM while AV/backup holds the dest open. Clean
+    // the stray tmp so it can't accumulate; the 60s safety interval retries.
+    try { fs.unlinkSync(tmp); } catch (e2) { /* already gone */ }
+    throw e;
+  }
   fileRev++;
 }
 
@@ -2048,7 +2128,13 @@ function save() {
 function requestBroadcast() { broadcastPending = true; }
 
 /* ---------- snapshots ---------- */
+// Preview/dry-run suppression: a simulated turn must not archive a snapshot
+// (cloud mode would otherwise upsert preview-tainted state over the real
+// snapshot row for that turn; see /api/gm/advance preview in api.js).
+let snapshotsSuppressed = false;
+function setSnapshotSuppression(v) { snapshotsSuppressed = !!v; }
 function snapshot() {
+  if (snapshotsSuppressed) return;
   if (MODE === 'file') {
     const file = path.join(SNAP_DIR, `turn-${String(db.settings.time.turn).padStart(5, '0')}.json`);
     fs.writeFileSync(file, JSON.stringify(db));
@@ -2060,8 +2146,11 @@ function snapshot() {
     while (all.length > SNAP_KEEP) fs.unlinkSync(path.join(SNAP_DIR, all.shift().f));
     return;
   }
-  // one snapshot per request: a multi-turn advance archives the state it started from
-  if (!pendingSnapshot) pendingSnapshot = { turn: db.settings.time.turn, ts: Date.now(), doc: { ...db } };
+  // one snapshot per request: a multi-turn advance archives the state it started
+  // from. Deep-clone — a shallow {...db} aliases every nested collection, so by
+  // commit() time the "archive" had silently become the END-of-request state
+  // (rollback restored the wrong world; a preview clobbered the real snapshot).
+  if (!pendingSnapshot) pendingSnapshot = { turn: db.settings.time.turn, ts: Date.now(), doc: JSON.parse(JSON.stringify(db)) };
 }
 
 async function listSnapshots() {
@@ -2094,6 +2183,10 @@ async function rollback(turn) {
   restored.sessions = db.sessions;
   restored.roles = db.roles;
   db = restored;
+  // A snapshot can predate a schema-bumping deploy — bring it up to the
+  // current shape before any new-engine code touches it (same rule as boot,
+  // seeds and imports; migrate is idempotent).
+  try { migrate(db); } catch (e) { console.error('rollback migrate failed:', e.message); }
   if (MODE === 'file') saveNow(); else save();
   return db;
 }
@@ -2119,6 +2212,13 @@ async function importWorld(world, currentGmUser) {
     return db;
   }
   await sb.del('snapshots', 'turn=gte.0');
+  // The imported world replaces the old one wholesale — its audit tables must
+  // go too, or the predecessor world's last-400 timeline/ledger rows load
+  // into the imported world's view on the next begin() (the imported doc's
+  // own embedded history is stripped by coreDoc()).
+  await sb.del('timeline', 'ts=gt.0');
+  await sb.del('transactions', 'ts=gt.0');
+  pendingTimeline = []; pendingTxns = []; bufferStranded = false;
   save();
   return db;
 }
@@ -2138,8 +2238,9 @@ async function reset(seed) {
   await sb.del('timeline', 'ts=gt.0');
   await sb.del('transactions', 'ts=gt.0');
   await sb.del('snapshots', 'turn=gte.0');
-  if (seedTl.length) await sb.insert('timeline', seedTl.map(tlRow));
-  if (seedTx.length) await sb.insert('transactions', seedTx.map(txRow));
+  if (seedTl.length) await sb.insert('timeline?on_conflict=id', seedTl.map(tlRow), 'return=minimal,resolution=merge-duplicates');
+  if (seedTx.length) await sb.insert('transactions?on_conflict=id', seedTx.map(txRow), 'return=minimal,resolution=merge-duplicates');
+  pendingTimeline = []; pendingTxns = []; bufferStranded = false;
   save();
   return db;
 }
@@ -2165,9 +2266,12 @@ function log(type, title, detail, actor, refs) {
 }
 
 // Transactions are appended here so the cloud backend can mirror them into
-// their own table.
+// their own table. Capped at TXN_CAP like the timeline: an uncapped in-doc
+// ledger grew world.json without bound and slowed every debounced serialize.
+const TXN_CAP = 12000;
 function recordTxn(t) {
   db.transactions.push(t);
+  if (db.transactions.length > TXN_CAP) db.transactions.splice(0, db.transactions.length - TXN_CAP);
   if (MODE !== 'file') pendingTxns.push(t);
 }
 
@@ -2176,5 +2280,5 @@ function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 module.exports = {
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
   snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR,
-  getVersion, hasUncommitted, invalidate, migrate
+  getVersion, hasUncommitted, invalidate, migrate, setSnapshotSuppression
 };

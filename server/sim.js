@@ -380,6 +380,10 @@ function applyEffect(fx, meta) {
       if (!pr || !to) throw new Error('transfer_property: unknown property or entity');
       const prev = db.entities.find(e => e.id === pr.ownerId);
       pr.ownerId = to.id;
+      // ownerId is canonical but the deed item mirrors it — reconcile both
+      // sides through the choke point's sync pass so the old owner doesn't
+      // keep holding a deed the register says they no longer own.
+      try { require('./deeds').syncAllDeeds(db); } catch (e) { /* deed sync optional */ }
       store.log('ownership', `${pr.name} changes hands`, `${prev ? prev.name : 'Unknown'} → ${to.name}`, actor, [pr.id, to.id]);
       draftNews(`${pr.name} changes hands`, `${pr.name} has been transferred from ${prev ? prev.name : 'unknown ownership'} to ${to.name}. The parties did not disclose terms.`, 'Business');
       break;
@@ -548,10 +552,14 @@ function checkConditions(ev) {
 
 function runEvent(ev, actor) {
   if (!checkConditions(ev)) return false;
+  let succeeded = 0;
   for (const fx of (ev.effects || [])) {
-    try { applyEffect(fx, { actor: actor || 'ENGINE', eventName: ev.name }); }
+    try { applyEffect(fx, { actor: actor || 'ENGINE', eventName: ev.name }); succeeded++; }
     catch (e) { store.log('error', `Effect failed in “${ev.name}”`, e.message, 'ENGINE', [ev.id]); }
   }
+  // Interval events whose EVERY effect failed keep their cadence slot: marking
+  // lastTurn here would let a broken event silently skip turn after turn.
+  if ((ev.effects || []).length && succeeded === 0) return false;
   ev.lastTurn = store.get().settings.time.turn;
   ev.runs = (ev.runs || 0) + 1;
   return true;
@@ -695,6 +703,20 @@ function ledgerTxn(fromAcctId, toAcctId, amount, memo, actor, kind) {
   if (!(amount > 0)) return;
   const from = fromAcctId ? db.accounts.find(a => a.id === fromAcctId) : null;
   const to = toAcctId ? db.accounts.find(a => a.id === toAcctId) : null;
+  // An unresolvable non-null endpoint is a data bug (e.g. a dangling household
+  // accountId after a GM deletion) — silently skipping the leg used to make
+  // wages/stipends vanish without a trace. Surface it; skip the move so a bad
+  // row can't wedge the whole turn.
+  if (fromAcctId && !from) {
+    console.error('ledgerTxn: unknown source account ' + fromAcctId + ' (' + memo + ')');
+    store.log('error', 'Ledger move skipped — unknown account', `${memo || kind || 'transfer'}: source ${fromAcctId} no longer exists`, 'ENGINE', []);
+    return;
+  }
+  if (toAcctId && !to) {
+    console.error('ledgerTxn: unknown destination account ' + toAcctId + ' (' + memo + ')');
+    store.log('error', 'Ledger move skipped — unknown account', `${memo || kind || 'transfer'}: destination ${toAcctId} no longer exists`, 'ENGINE', []);
+    return;
+  }
   if (from) from.balance = Math.round((from.balance - amount) * 100) / 100;
   if (to) to.balance = Math.round((to.balance + amount) * 100) / 100;
   store.recordTxn({
@@ -1061,20 +1083,25 @@ function runEconomy(db, actor, scale) {
     // o.wage still feeds vars.expenses/vars.profit below for the accounting.
     let netAbstract = dom - o.upkeep;
 
-    // per-turn tax on positive operating net (rates are the same %; net is 1/30
-    // of the old monthly figure, so the monthly burden matches the old system)
-    if (tax && owner && owner.id !== 'ent_gov' && owner.id !== 'ent_bank' && owner.type !== 'government') {
-      const rate = owner.type === 'company' ? (tax.corporateRate || 0) : (tax.propertyRate || 0);
-      if (netAbstract > 0 && rate > 0 && treasury) {
-        const t = Math.round(netAbstract * rate / 100 * 100) / 100;
-        if (t > 0) { ledgerTxn(acct.id, treasury.id, t, 'Tax', 'TREASURY', 'transfer'); taxTotal += t; netAbstract -= t; }
-      }
-    }
-
+    // Settle the abstract net FIRST (mint on profit, capped draw on loss), then
+    // collect tax as a straight account→treasury transfer. The previous order
+    // (withhold t from the deposit AND debit t from the account) taxed every
+    // profitable owner twice: balance delta was net − 2·rate% instead of
+    // net − rate%, silently impoverishing companies and landowners each turn.
     if (netAbstract > 0) ledgerTxn(null, acct.id, netAbstract, 'Daily operations', actor, 'deposit');
     else if (netAbstract < 0) {
       const draw = Math.min(-netAbstract, Math.max(0, acct.balance)); // never overdraw below zero
       if (draw > 0) ledgerTxn(acct.id, null, draw, 'Daily upkeep', actor, 'withdraw');
+    }
+
+    // per-turn tax on positive operating net (rates are the same %; net is 1/30
+    // of the old monthly figure, so the monthly burden matches the old system)
+    if (tax && netAbstract > 0 && owner && owner.id !== 'ent_gov' && owner.id !== 'ent_bank' && owner.type !== 'government') {
+      const rate = owner.type === 'company' ? (tax.corporateRate || 0) : (tax.propertyRate || 0);
+      if (rate > 0 && treasury) {
+        const t = Math.round(netAbstract * rate / 100 * 100) / 100;
+        if (t > 0) { ledgerTxn(acct.id, treasury.id, t, 'Tax', 'TREASURY', 'transfer'); taxTotal += t; }
+      }
     }
 
     // company earnings vars (annualised run-rate keeps parity with authored figures)
@@ -1191,13 +1218,17 @@ function runEconomy(db, actor, scale) {
 // runEconomy's legacy lump pass covers production instead (see its
 // `hourlyAccrued` flag), so a stopped world still has a working economy.
 const HOUR_MS = 3600000;
-function runHourlyProductionTick(db, actor) {
+// tickWorldMs: the world-time width ONE call covers (the cadence's configured
+// interval). Callers that don't pass it get the legacy one-hour slice. Without
+// this, a GM raising productionHours to 2 got HALF the perTurn economy (12
+// one-hour slices per turn regardless), and lowering it to 0.25 minted 4×.
+function runHourlyProductionTick(db, actor, tickWorldMs) {
   actor = actor || 'CADENCE';
+  tickWorldMs = Number(tickWorldMs) > 0 ? Number(tickWorldMs) : HOUR_MS;
   db._prodTicksThisTurn = (db._prodTicksThisTurn || 0) + 1;
   const econ = db.settings.economy || {};
   const decayRate = econ.conditionDecayPerHour !== undefined ? Number(econ.conditionDecayPerHour) : 0.5;
-  const hoursPerTurn = Math.max(1, require('./cadence').turnWorldMs(db) / HOUR_MS);
-  const slice = 1 / hoursPerTurn;
+  const slice = Math.min(1, tickWorldMs / require('./cadence').turnWorldMs(db));
 
   for (const pr of db.properties) {
     if (!pr.ownerId) continue;
@@ -1260,7 +1291,7 @@ function runHourlyProductionTick(db, actor) {
     }
   }
 
-  advanceProjects(db, actor, HOUR_MS);
+  advanceProjects(db, actor, tickWorldMs);
   closeDueTenders(db, actor);
 }
 
@@ -1748,7 +1779,19 @@ function runBankCrisis(db, actor) {
   for (const co of db.entities) {
     if (co.type !== 'company' || co.confidence === undefined) continue;
     co.confidence = clamp01(Math.round((co.confidence - 12 * sev) * 10) / 10, 0, 100);
-    if (co.dayPrice !== undefined) co.dayPrice = Math.max(0.01, Math.round(co.dayPrice * (1 - 0.05 * sev) * 100) / 100);
+    if (co.dayPrice !== undefined) {
+      co.dayPrice = Math.max(0.01, Math.round(co.dayPrice * (1 - 0.05 * sev) * 100) / 100);
+      // Direct day-price writes must reanchor the pricepath wander and sync
+      // the certificate item's marketValue (two-price invariants) — otherwise
+      // trades kept filling near pre-crash quotes until the next day-tick,
+      // which on an idle serverless deployment could be a long time.
+      try {
+        const market = require('./market');
+        market.dayReanchor(co);
+        const it = market.shareItemFor(co.id);
+        if (it) it.marketValue = co.dayPrice;
+      } catch (e) { /* market optional */ }
+    }
   }
   const hHit = 2.2 * sev, eHit = 1.6 * sev, aHit = 1.4 * sev;
   for (const p of db.provinces) {
@@ -2230,12 +2273,26 @@ function apportionSeats(byProvince, totalSeats) {
   quotas.sort((a, b) => (b.q - Math.floor(b.q)) - (a.q - Math.floor(a.q)));
   let k = 0;
   while (used < totalSeats) { seatsByProv[quotas[k % quotas.length].id]++; used++; k++; }
-  while (used > totalSeats) { const q = quotas[quotas.length - 1 - (k % quotas.length)]; if (seatsByProv[q.id] > 2) { seatsByProv[q.id]--; used--; } k++; }
+  // The over-allocation drain must bail when a full rotation removes nothing
+  // — with min 2 seats/province and parliamentSeats < 2×provinces every
+  // province sits at its floor and the loop never terminated (it ran inside
+  // election finalize, freezing the whole process on a GM-set seat count).
+  while (used > totalSeats) {
+    let removed = false;
+    for (const q of quotas) {
+      if (used <= totalSeats) break;
+      if (seatsByProv[q.id] > 2) { seatsByProv[q.id]--; used--; removed = true; }
+    }
+    if (!removed) break; // floor-bound: accept the small overshoot rather than hang
+    if (++k > 100000) break; // absolute paranoia bound
+  }
 
   const seatTotals = {}; db.entities.filter(e => e.type === 'party').forEach(p => seatTotals[p.id] = 0);
   const provResults = {};
   for (const p of db.provinces) {
-    const won = dhondt(byProvince[p.id], seatsByProv[p.id]);
+    // byProvince can lack a province that joined/ceded mid-count — an empty
+    // tally beats Object.keys(undefined) throwing inside finalize.
+    const won = dhondt(byProvince[p.id] || {}, seatsByProv[p.id]);
     provResults[p.id] = { seats: won, votes: byProvince[p.id] };
     for (const pid in won) seatTotals[pid] += won[pid];
   }
@@ -2306,8 +2363,11 @@ function worldClockNow(t, now) {
   const base = Number(c.anchorWorldMs) || Date.parse(String(t.date || '1970-01-01') + 'T00:00:00Z') || Date.now();
   const anchor = Number(c.anchorRealMs) || Date.now();
   // Both sides are milliseconds after conversion: N world minutes per real
-  // minute means N world milliseconds per real millisecond.
-  const rate = Math.max(0, Number(c.minutesPerRealMinute) || 59.5);
+  // minute means N world milliseconds per real millisecond. An explicitly
+  // configured 0 must PAUSE the clock (rate 0), not fall back to the default
+  // — `Number(x) || 59.5` turned a deliberate pause into fast-forward.
+  const cfgRate = Number(c.minutesPerRealMinute);
+  const rate = Number.isFinite(cfgRate) ? Math.max(0, cfgRate) : 59.5;
   return base + ((Number(now) || Date.now()) - anchor) * rate;
 }
 

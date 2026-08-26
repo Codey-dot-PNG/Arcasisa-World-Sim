@@ -342,8 +342,11 @@ const GameMap = {
     choose(railPaths, Math.min(6, railPaths.length)).forEach((p, i) => add(p, i + 30, 'train'));
     if (!this.trafficFrame) {
       const tick = (now) => {
+        // Stop the loop once the map layer is detached (view switch / map
+        // rebuild) — it used to keep waking the tab at refresh rate forever,
+        // animating nodes that were no longer in any document.
+        if (!this.trafficLayer || !this.trafficLayer.isConnected) { this.trafficFrame = null; return; }
         this.trafficFrame = requestAnimationFrame(tick);
-        if (!this.trafficLayer) return;
         for (const u of this.trafficUnits) {
           const phase = (now + u.phase) % u.cycle;
           const visibleMs = u.fadeMs + u.fadeOutMs + u.fadeMs;
@@ -1070,3 +1073,8 @@ const GameMap = {
     }
   }
 };
+
+// Expose for cross-module guards (app.js's day/night driver checks the global �
+// a top-level const is NOT a window property, so window.GameMap was always
+// undefined and setDayNight silently no-op'd).
+window.GameMap = GameMap;

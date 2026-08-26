@@ -359,7 +359,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
    not flat black veils — they re-tint the whole map (amber at golden hour,
    indigo under moonlight) while preserving its contrast, and their opacity
    tracks the sun curve so twilight slides in over ~2½ world-hours instead of
-   snapping on a class flip. */
+   snapping on a class flip. They are the MOOD layer only: the heavy darkness
+   for terrain is the in-svg .night-grade (see buildNightLayer), which sits
+   under buildings and labels — these wrap-level grades are kept mild so text,
+   markers and building art merely get dusked, never buried. */
 #map-wrap::before{
   content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
   opacity:var(--dn-warm); transition:opacity 1.8s linear;
@@ -371,9 +374,9 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
   content:""; position:absolute; inset:0; z-index:1; pointer-events:none;
   opacity:var(--dn-night); transition:opacity 1.8s linear;
   mix-blend-mode:multiply;
-  /* brighter centre, darker rim — a moonlit vignette, not a uniform dim */
+  /* brighter centre, darker rim — a gentle moonlit vignette over everything */
   background:radial-gradient(120% 95% at 50% 42%,
-    rgba(99,116,182,.88) 0%, rgba(64,80,144,.94) 52%, rgba(36,47,102,1) 100%);
+    rgba(112,128,190,.42) 0%, rgba(78,94,158,.52) 52%, rgba(40,52,108,.72) 100%);
 }
 #map-svg{width:100%; height:100%; display:block; cursor:grab; touch-action:none;}
 #map-svg.dragging{cursor:grabbing;}
@@ -766,21 +769,27 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 }
 .graticule{stroke:#ffffff; stroke-opacity:.06;}
 
-/* ---------- city lights (night) ----------
-   GM-placed light clusters (settings.map.lights) rendered as a warm glow
-   overlay whose opacity tracks --dn-lights (the sun curve written by
-   GameMap.setDayNight), so lamps kindle gradually through dusk instead of
-   popping with a class flip. The layer sits ABOVE #map-wrap::after (the night
-   grade, z-index 1) at z-index 2 so lamps are never darkened by their own
-   night — and mixes with SCREEN blending so each glow literally adds light to
-   the darkened map beneath instead of painting flat yellow on top of it. */
-#map-lights{
-  position:absolute; inset:0; z-index:2;
-  pointer-events:none;
+/* ---------- night: in-svg grade + city lights ----------
+   The heavy darkness for terrain and the city glows live INSIDE #map-svg as
+   siblings sandwiched between the roads and the traffic (built by
+   GameMap.buildNightLayer). That ordering is the whole trick:
+
+     .night-grade  multiply-blended indigo — darkens terrain/roads only
+     .night-glows  the city lights, screen-blended onto that graded ground AS
+                   ONE GROUP, so overlapping halos don't double-brighten
+
+   Everything painted later in the svg (vehicles with their headlight beams,
+   building art, city dots, labels, markers) sits ABOVE both — structures stay
+   crisp silhouettes against the pools of light and text never gets washed
+   out. Opacities ride --dn-night / --dn-lights from GameMap.setDayNight. */
+.night-grade{
+  opacity:var(--dn-night,0); transition:opacity 1.8s linear;
+  mix-blend-mode:multiply;
+}
+.night-glows{
   opacity:var(--dn-lights,0); transition:opacity 2.2s ease;
   mix-blend-mode:screen;
 }
-#map-lights svg{width:100%; height:100%; display:block;}
 .map-light-halo{fill:url(#lightHaloGrad);}
 .map-light-bloom{fill:url(#lightCoreGrad);}
 .map-light-core{fill:#ffedc4;}
@@ -793,6 +802,29 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 @keyframes lampTwinkle{
   0%,100%{opacity:.97;}
   50%{opacity:.74;}
+}
+/* whole settlements breathe: a slow swell of the halo blob (per-cluster
+   timing via --br-*), so the night map feels alive rather than pasted-on */
+.breathe{animation:haloBreath var(--br-dur,11s) ease-in-out infinite; animation-delay:var(--br-delay,-2s);}
+@keyframes haloBreath{
+  0%,100%{opacity:1;}
+  50%{opacity:.82;}
+}
+
+/* ---------- vehicles at night ----------
+   Each car/train carries a .veh-light set (headlight beam cone + road pool +
+   red tail lamps) whose opacity rides --dn-lights: non-existent by day,
+   shining after dusk. Bodies dim a little with darkness via calc() over
+   --dn-night so they don't glow like ghosts on the graded ground. */
+.veh-light{
+  opacity:var(--dn-lights,0);
+  transition:opacity 2.2s ease;
+  mix-blend-mode:screen;
+}
+.veh-tail{fill:#ff4b3a;}
+.map-car,.map-train{
+  transition:filter 1.8s linear;
+  filter:brightness(calc(1 - 0.3 * var(--dn-night,0))) saturate(calc(1 - 0.15 * var(--dn-night,0)));
 }
 /* editor affordances (drawn INSIDE #map-svg, interactive) */
 .light-edit-halo{fill:none; stroke:var(--accent-soft); stroke-opacity:.55; stroke-width:2; stroke-dasharray:10 8; vector-effect:non-scaling-stroke;}

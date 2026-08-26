@@ -27,43 +27,11 @@ const GameMap = {
     this.svg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
     wrap.appendChild(this.svg);
 
-    // Night city-lights overlay. A SECOND svg that mirrors #map-svg's viewBox,
-    // aspect handling and pan/zoom transform exactly — it exists so the glows
-    // can sit ABOVE the night-dim ::after (z-index 2 vs 1) and screen-blend
-    // onto the darkened map, which SVG children of #map-svg cannot (the dim
-    // covers them). Pointer-events pass straight through to the map below.
-    this.lightsSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    this.lightsSvg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
-    this.lightsSvg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
-    const ldefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-    // wide settlement halo: hot amber core falling off over ~3 stops so towns
-    // read as a pool of light rather than a hard-edged disc
-    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
-    grad.setAttribute('id', 'lightHaloGrad');
-    for (const [off, col, op] of [
-      ['0%', '#ffdca4', '0.50'], ['22%', '#ffcb84', '0.30'], ['48%', '#ffb978', '0.14'],
-      ['76%', '#ffab66', '0.05'], ['100%', '#ffab66', '0'],
-    ]) {
-      const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      stop.setAttribute('offset', off); stop.setAttribute('stop-color', col); stop.setAttribute('stop-opacity', op);
-      grad.appendChild(stop);
-    }
-    ldefs.appendChild(grad);
-    // tight white-hot bloom reused behind every cluster's core lamp
-    const core = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
-    core.setAttribute('id', 'lightCoreGrad');
-    for (const [off, col, op] of [['0%', '#fff6dc', '0.85'], ['40%', '#ffe6ad', '0.42'], ['100%', '#ffdd96', '0']]) {
-      const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
-      stop.setAttribute('offset', off); stop.setAttribute('stop-color', col); stop.setAttribute('stop-opacity', op);
-      core.appendChild(stop);
-    }
-    ldefs.appendChild(core);
-    this.lightsSvg.appendChild(ldefs);
-    this.lightsWorld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
-    this.lightsSvg.appendChild(this.lightsWorld);
-    const lightsBox = el('div#map-lights');
-    lightsBox.appendChild(this.lightsSvg);
-    wrap.appendChild(lightsBox);
+    // Night lighting lives INSIDE this svg now (see buildNightLayer in
+    // render()): a multiply grade rect + a screen-blended city-glow group,
+    // sandwiched between the roads and the traffic so buildings, labels and
+    // markers stay ABOVE the glows — crisp silhouettes against the light,
+    // never washed out by it. Gradients for it are (re)created per render.
 
     // controls
     wrap.appendChild(el('div#map-controls',
@@ -108,11 +76,15 @@ const GameMap = {
 
        --dn-night   darkness — drives the indigo multiply grade (::after)
        --dn-warm    golden hour — drives the amber multiply grade (::before)
-       --dn-lights  city-glow intensity — drives #map-lights opacity
+       --dn-night   darkness — drives the in-svg night grade + the wrap's
+                    indigo mood tint (::after)
+       --dn-warm    golden hour — drives the amber multiply grade (::before)
+       --dn-lights  city-glow intensity — drives the glow group + vehicle
+                    lights' opacity
 
-     The overlays' opacity transitions then interpolate between ticks for free,
-     so dawn and dusk slide through over ~2½ world-hours instead of snapping.
-     data-dayphase (night/dawn/day/dusk) is kept as a styling/debug hook. */
+    The layers' opacity transitions then interpolate between ticks for free,
+    so dawn and dusk slide through over ~2½ world-hours instead of snapping.
+    data-dayphase (night/dawn/day/dusk) is kept as a styling/debug hook. */
   setDayNight(worldMs) {
     const wrap = document.getElementById('map-wrap');
     if (!wrap) return;
@@ -136,10 +108,16 @@ const GameMap = {
     // golden hour: bell peaking exactly at sunrise/sunset, fading both toward
     // noon (too high) and into deep night (gated by the residual daylight)
     const bell = Math.max(0, 1 - Math.abs(sun) / 0.55);
-    const warm = Math.pow(bell, 1.4) * Math.min(1, daylight * 5 + 0.22);
-    const night = Math.pow(1 - daylight, 1.25);
+    let warm = Math.pow(bell, 1.4) * Math.min(1, daylight * 5 + 0.22);
+    let night = Math.pow(1 - daylight, 1.25);
     // lamps kindle through dusk (half-lit mid-twilight) rather than popping on
-    const lights = Math.min(1, Math.max(0, (0.72 - daylight) / 0.55));
+    let lights = Math.min(1, Math.max(0, (0.72 - daylight) / 0.55));
+    // GM Studio lights tool: preview the glow even in broad daylight so the
+    // editor isn't placing blobs blind — lift darkness just enough for the
+    // screen-blended halos to register on the map.
+    if (window.MapEdit && MapEdit.active && MapEdit.mode === 'lights') {
+      night = Math.max(night, 0.42); warm = Math.min(warm, 0.15); lights = Math.max(lights, 0.85);
+    }
     wrap.dataset.dayphase = daylight <= 0.04 ? 'night'
       : daylight >= 0.96 ? 'day'
       : m < 720 ? 'dawn' : 'dusk';
@@ -363,21 +341,87 @@ const GameMap = {
     if (!this.world) return;
     const t = `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`;
     this.world.setAttribute('transform', t);
-    // the night-lights overlay mirrors the main svg's world transform exactly
-    if (this.lightsWorld) this.lightsWorld.setAttribute('transform', t);
     this.updateMarkerScale();
   },
 
+  /* ---------- night: in-svg grade + city lights ----------
+     The night pipeline is two siblings inside #map-svg's world group,
+     inserted between the roads and the traffic (see render()):
+
+       .night-grade  a full-bleed rect, multiply-blended, that darkens and
+                     blue-shifts the terrain/roads beneath it
+       .night-glows  the city lights proper, screen-blended ONTO the graded
+                     terrain as one composited group — so overlapping halos
+                     don't double-brighten, and lamps are never darkened by
+                     their own night
+
+     Everything painted later in the world group (traffic with their beams,
+     buildings, city dots, labels, markers) sits ABOVE both, which is the
+     whole point: structures stay crisp silhouettes against the pools of
+     light and text never gets washed out by a glow. Opacities ride the
+     --dn-night / --dn-lights custom properties written by setDayNight. */
+  buildNightLayer() {
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = this.mk;
+    // shared gradients — recreated every render (render() clears the svg)
+    const defs = document.createElementNS(NS, 'defs');
+    const grad = (id, stops, attrs) => {
+      const g = document.createElementNS(NS, 'radialGradient');
+      g.setAttribute('id', id);
+      for (const k in (attrs || {})) g.setAttribute(k, attrs[k]);
+      for (const [off, col, op] of stops) {
+        const s = document.createElementNS(NS, 'stop');
+        s.setAttribute('offset', off); s.setAttribute('stop-color', col); s.setAttribute('stop-opacity', op);
+        g.appendChild(s);
+      }
+      defs.appendChild(g);
+    };
+    // wide settlement halo — hot amber heart falling off over four stops so
+    // towns read as a pool of light rather than a hard-edged disc
+    grad('lightHaloGrad', [
+      ['0%', '#ffdca4', '0.55'], ['22%', '#ffcb84', '0.32'], ['48%', '#ffb978', '0.15'],
+      ['76%', '#ffab66', '0.05'], ['100%', '#ffab66', '0'],
+    ]);
+    // tight white-hot bloom reused behind every cluster's core lamp and as
+    // each vehicle's ground pool of light
+    grad('lightCoreGrad', [['0%', '#fff6dc', '0.85'], ['40%', '#ffe6ad', '0.42'], ['100%', '#ffdd96', '0']]);
+    // the night grade itself: moonlit indigo, brighter over the island,
+    // falling to deep navy at the rim (a vignette, not a uniform dim)
+    grad('nightGradeGrad', [
+      ['0%', '#7184cd', '0.80'], ['48%', '#48589e', '0.90'], ['100%', '#242f66', '0.97'],
+    ], { gradientUnits: 'userSpaceOnUse', cx: this.VIEW.w / 2, cy: this.VIEW.h / 2, r: Math.max(this.VIEW.w, this.VIEW.h) * 0.68 });
+    // vehicle headlight beam: bright at the lamp, fading down the cone
+    grad('carBeamGrad', [
+      ['0%', '#fff3c9', '0.85'], ['35%', '#ffedb8', '0.38'], ['100%', '#ffe8ae', '0'],
+    ], { gradientUnits: 'userSpaceOnUse', cx: 0, cy: 0, r: 60 });
+    this.svg.appendChild(defs);
+
+    this.nightLayer = document.createElementNS(NS, 'g');
+    this.nightLayer.setAttribute('class', 'night-layer');
+    this.nightLayer.setAttribute('pointer-events', 'none');
+    mk('rect', {
+      x: -8000, y: -8000, width: this.VIEW.w + 16000, height: this.VIEW.h + 16000,
+      class: 'night-grade', fill: 'url(#nightGradeGrad)',
+    }, this.nightLayer);
+    this.lightsWorld = document.createElementNS(NS, 'g');
+    this.lightsWorld.setAttribute('class', 'night-glows');
+    this.nightLayer.appendChild(this.lightsWorld);
+    this.world.appendChild(this.nightLayer);
+  },
+
   /* ---------- night city lights ----------
-     Each GM-placed light (settings.map.lights — a centre + halo radius) blooms
-     into a small settlement: a wide gradient halo, a white-hot core lamp with
-     a soft bloom, and a scatter of satellite specks — "windows, side streets
-     and the odd floodlight" — mixed across three colour temperatures so
-     clusters don't read as uniform yellow blobs. Placement, colours and which
-     specks shimmer are all derived deterministically from the light's id, so
-     clusters look organic but render identically for every operator and on
-     every rebuild. Shimmer is pure CSS (per-speck duration/delay), costing no
-     JS frames. Layer opacity is driven by --dn-lights (see setDayNight). */
+     Each GM-placed light (settings.map.lights — a centre + halo radius)
+     blooms into a small settlement whose footprint is an ORGANIC BLOB, not a
+     circle: the outline radius wobbles with three seeded harmonics and is
+     smoothed via closed Catmull-Rom → Bézier conversion, then rotated and
+     very slightly stretched per cluster, so towns read as irregular pools of
+     light instead of stamped discs. The satellite specks ("windows, side
+     streets, the odd floodlight") sample the same harmonic contour so they
+     huddle inside the town's shape, and mix three colour temperatures.
+     Placement and which lamps shimmer are all derived deterministically from
+     the light's id, so clusters look organic but render identically for every
+     operator and on every rebuild. Shimmer/breathing are pure CSS — no JS
+     frames; layer opacity rides --dn-lights (see setDayNight). */
   seedRand(str) {
     let h = 2166136261;
     for (let i = 0; i < String(str).length; i++) { h ^= String(str).charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -386,6 +430,26 @@ const GameMap = {
       h = Math.imul(h ^ (h >>> 13), 3266489909);
       return ((h ^= h >>> 16) >>> 0) / 4294967296;
     };
+  },
+  blobShape(rand, r) {
+    const N = 14;
+    const ph = [rand() * Math.PI * 2, rand() * Math.PI * 2, rand() * Math.PI * 2];
+    const am = [0.1 + rand() * 0.08, 0.06 + rand() * 0.05, 0.03 + rand() * 0.04];
+    const wob = a => 1 + am[0] * Math.sin(2 * a + ph[0]) + am[1] * Math.sin(3 * a + ph[1]) + am[2] * Math.sin(5 * a + ph[2]);
+    const pts = [];
+    for (let i = 0; i < N; i++) {
+      const a = (i / N) * Math.PI * 2;
+      const rr = r * wob(a);
+      pts.push([Math.cos(a) * rr, Math.sin(a) * rr * 0.92]); // slight ground-plane squash
+    }
+    let d = `M${pts[0][0].toFixed(1)} ${pts[0][1].toFixed(1)}`;
+    for (let i = 0; i < N; i++) {
+      const p0 = pts[(i + N - 1) % N], p1 = pts[i], p2 = pts[(i + 1) % N], p3 = pts[(i + 2) % N];
+      const c1 = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6];
+      const c2 = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6];
+      d += `C${c1[0].toFixed(1)} ${c1[1].toFixed(1)} ${c2[0].toFixed(1)} ${c2[1].toFixed(1)} ${p2[0].toFixed(1)} ${p2[1].toFixed(1)}`;
+    }
+    return { d: d + 'Z', wob };
   },
   buildLights(map) {
     if (!this.lightsWorld) return;
@@ -400,28 +464,41 @@ const GameMap = {
     };
     const twinkle = (rand, base) =>
       `--tw-dur:${(base + rand() * base).toFixed(2)}s; --tw-delay:${(-rand() * base).toFixed(2)}s;`;
+    const breathe = (rand) =>
+      `--br-dur:${(8 + rand() * 7).toFixed(2)}s; --br-delay:${(-rand() * 10).toFixed(2)}s;`;
     // warm windows / sodium-orange street lamps / occasional cool floodlight
     const speckFill = r => (r < 0.55 ? '#ffd98a' : r < 0.86 ? '#ffb46e' : '#ffe9c8');
     for (const lt of lights) {
       if (!lt.pos || !(lt.r > 0)) continue;
-      const g = mkL('g', { transform: `translate(${lt.pos[0]},${lt.pos[1]})` });
-      mkL('circle', { r: lt.r, class: 'map-light-halo' }, g);
       const rand = this.seedRand(lt.id || (lt.pos.join(',') + lt.r));
+      const g = mkL('g', { transform: `translate(${lt.pos[0]},${lt.pos[1]})` });
+      // the organic halo blob — rotated/stretched per cluster so no two
+      // settlements cast the same shape of light
+      const blob = this.blobShape(rand, lt.r);
+      const rot = (rand() * 360).toFixed(1);
+      const stretch = 0.88 + rand() * 0.24;
+      mkL('path', {
+        d: blob.d, class: 'map-light-halo breathe',
+        transform: `rotate(${rot}) scale(${stretch.toFixed(3)},${(1 / stretch).toFixed(3)})`,
+        style: breathe(rand),
+      }, g);
       // soft bloom behind the core lamp (gradient, not flat fill)
-      mkL('circle', { r: Math.max(20, lt.r * 0.3), class: 'map-light-bloom' }, g);
+      mkL('circle', { r: Math.max(20, lt.r * 0.28), class: 'map-light-bloom' }, g);
       // bright heart of the settlement: a gently breathing lamp over a steady
       // white-hot centre, so each town always keeps one crisp anchor point
-      const coreR = Math.max(6, lt.r * 0.09);
+      const coreR = Math.max(6, lt.r * 0.085);
       mkL('circle', { r: coreR, class: 'map-light-core tw', style: twinkle(rand, 5) }, g);
       mkL('circle', { r: coreR * 0.45, class: 'map-light-heart' }, g);
-      // satellite glows, slightly squashed vertically to sit on the ground plane
-      const specks = Math.min(11, 3 + Math.round(lt.r / 40) + Math.floor(rand() * 4));
+      // satellite glows hugging the blob's contour, slightly squashed to sit
+      // on the ground plane
+      const specks = Math.min(12, 3 + Math.round(lt.r / 36) + Math.floor(rand() * 4));
       for (let i = 0; i < specks; i++) {
         const ang = rand() * Math.PI * 2;
-        const dist = lt.r * (0.3 + rand() * 0.55);
+        const edge = lt.r * blob.wob(ang);
+        const dist = edge * (0.32 + rand() * 0.52);
         const attrs = {
-          cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.82,
-          r: Math.max(2.5, lt.r * (0.03 + rand() * 0.045)),
+          cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.86,
+          r: Math.max(2.5, lt.r * (0.028 + rand() * 0.042)),
           fill: speckFill(rand()), class: 'map-light-speck',
         };
         // ~60% shimmer slowly; the rest burn steady, like real streetlights
@@ -467,14 +544,42 @@ const GameMap = {
     const paths = [];
     for (const r of (map.roads || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'car' });
     for (const r of (map.rails || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'train' });
+    // Each unit is a <g> holding the body plus its night lights: a headlight
+    // beam cone (rotated to the heading each frame), a warm pool of light on
+    // the road and a pair of red tail lamps — all .veh-light, whose opacity
+    // rides --dn-lights so they only exist after dark.
     const add = (path, i, kind) => {
-      const node = document.createElementNS(NS, kind === 'train' ? 'rect' : 'circle');
-      node.setAttribute('class', kind === 'train' ? 'map-train' : 'map-car');
-      if (kind === 'train') { node.setAttribute('width', 34); node.setAttribute('height', 18); node.setAttribute('rx', 3); node.setAttribute('x', -17); node.setAttribute('y', -9); }
-      else node.setAttribute('r', 11);
-      this.trafficLayer.appendChild(node);
+      const g = document.createElementNS(NS, 'g');
+      const body = document.createElementNS(NS, kind === 'train' ? 'rect' : 'circle');
+      body.setAttribute('class', kind === 'train' ? 'map-train' : 'map-car');
+      if (kind === 'train') { body.setAttribute('width', 34); body.setAttribute('height', 18); body.setAttribute('rx', 3); body.setAttribute('x', -17); body.setAttribute('y', -9); }
+      else body.setAttribute('r', 11);
+      const beamLen = kind === 'train' ? 64 : 46;
+      const beamW = kind === 'train' ? 19 : 16;
+      // everything that shines forwards lives in one "aim" group so a single
+      // rotate() per frame swings the beam cone and its road-pool together
+      const aim = document.createElementNS(NS, 'g');
+      const beam = document.createElementNS(NS, 'path');
+      beam.setAttribute('class', 'veh-light veh-beam');
+      beam.setAttribute('d', `M${kind === 'train' ? 17 : 5} 0 L${beamLen} ${-beamW} Q${beamLen + beamW * 0.6} 0 ${beamLen} ${beamW} Z`);
+      beam.setAttribute('fill', 'url(#carBeamGrad)');
+      const pool = document.createElementNS(NS, 'ellipse');
+      pool.setAttribute('class', 'veh-light veh-pool');
+      pool.setAttribute('rx', beamLen * 0.62); pool.setAttribute('ry', beamLen * 0.34);
+      pool.setAttribute('cx', beamLen * 0.34);
+      pool.setAttribute('fill', 'url(#lightCoreGrad)');
+      aim.appendChild(pool); aim.appendChild(beam);
+      const tail = document.createElementNS(NS, 'g');
+      tail.setAttribute('class', 'veh-light veh-tail');
+      for (const dy of (kind === 'train' ? [-5, 5] : [-4.5, 4.5])) {
+        const t2 = document.createElementNS(NS, 'circle');
+        t2.setAttribute('cx', kind === 'train' ? -15 : -9); t2.setAttribute('cy', dy); t2.setAttribute('r', 2.4);
+        tail.appendChild(t2);
+      }
+      g.appendChild(aim); g.appendChild(body); g.appendChild(tail);
+      this.trafficLayer.appendChild(g);
       this.trafficUnits.push({
-        node, path, kind,
+        node: g, aim, tail, path, kind,
         phase: (i * 1731 + (kind === 'train' ? 9000 : 0)) % 26000,
         fadeMs, fadeOutMs, size, speed,
         cycle: fadeMs + fadeOutMs + fadeMs + 5000 + (i % 4) * 1700
@@ -513,6 +618,18 @@ const GameMap = {
           const along = (movement <= 1 ? movement : 2 - movement) * u.path.len;
           const pt = this.pointOnPath(u.path.pts, along, u.path.len);
           u.node.setAttribute('transform', `translate(${pt[0]},${pt[1]}) scale(${u.size})`);
+          // aim the headlights along the tangent; on the return leg of the
+          // ping-pong the vehicle faces back the way it came, so the beam
+          // swings round and the tail lamps swap ends with it
+          if (u.aim) {
+            const ahead = this.pointOnPath(u.path.pts, along + 8, u.path.len);
+            const behind = this.pointOnPath(u.path.pts, along - 8, u.path.len);
+            let deg = Math.atan2(ahead[1] - behind[1], ahead[0] - behind[0]) * 180 / Math.PI;
+            if (movement > 1) deg += 180;
+            deg = deg.toFixed(1);
+            u.aim.setAttribute('transform', `rotate(${deg})`);
+            u.tail.setAttribute('transform', `rotate(${(Number(deg) + 180).toFixed(1)})`);
+          }
         }
       };
       this.trafficFrame = requestAnimationFrame(tick);
@@ -762,6 +879,10 @@ const GameMap = {
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-base', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
       mk('polyline', { points: ptsStr(r.pts), class: 'map-rail-dash', 'vector-effect': 'non-scaling-stroke', 'data-mapedit': 'rails:' + r.id });
     }
+    // night grade + city-glow layer — sits between the roads and the traffic
+    // so vehicles (and everything above: buildings, labels, markers) stay
+    // crisp above the pools of light; see the buildNightLayer note
+    this.buildNightLayer();
     this.buildTraffic(map);
     // wide invisible strokes so the pen tool can pick a line up easily
     if (editing && (MapEdit.mode === 'roads' || MapEdit.mode === 'rails')) {

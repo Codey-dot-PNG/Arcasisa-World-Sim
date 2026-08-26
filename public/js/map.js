@@ -26,6 +26,30 @@ const GameMap = {
     this.svg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
     wrap.appendChild(this.svg);
 
+    // Night city-lights overlay. A SECOND svg that mirrors #map-svg's viewBox,
+    // aspect handling and pan/zoom transform exactly — it exists so the glows
+    // can sit ABOVE the night-dim ::after (z-index 2 vs 1) and screen-blend
+    // onto the darkened map, which SVG children of #map-svg cannot (the dim
+    // covers them). Pointer-events pass straight through to the map below.
+    this.lightsSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.lightsSvg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
+    this.lightsSvg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+    const ldefs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const grad = document.createElementNS('http://www.w3.org/2000/svg', 'radialGradient');
+    grad.setAttribute('id', 'lightHaloGrad');
+    for (const [off, col, op] of [['0%', '#ffd98e', '0.62'], ['30%', '#ffc873', '0.26'], ['65%', '#ffb95e', '0.08'], ['100%', '#ffb95e', '0']]) {
+      const stop = document.createElementNS('http://www.w3.org/2000/svg', 'stop');
+      stop.setAttribute('offset', off); stop.setAttribute('stop-color', col); stop.setAttribute('stop-opacity', op);
+      grad.appendChild(stop);
+    }
+    ldefs.appendChild(grad);
+    this.lightsSvg.appendChild(ldefs);
+    this.lightsWorld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    this.lightsSvg.appendChild(this.lightsWorld);
+    const lightsBox = el('div#map-lights');
+    lightsBox.appendChild(this.lightsSvg);
+    wrap.appendChild(lightsBox);
+
     // controls
     wrap.appendChild(el('div#map-controls',
       el('button', { title: 'Zoom in', onclick: () => this.zoomBy(1.5) }, '+'),
@@ -283,8 +307,64 @@ const GameMap = {
   },
   applyTransform() {
     if (!this.world) return;
-    this.world.setAttribute('transform', `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`);
+    const t = `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`;
+    this.world.setAttribute('transform', t);
+    // the night-lights overlay mirrors the main svg's world transform exactly
+    if (this.lightsWorld) this.lightsWorld.setAttribute('transform', t);
     this.updateMarkerScale();
+  },
+
+  /* ---------- night city lights ----------
+     Each GM-placed light (settings.map.lights — a centre + halo radius) blooms
+     into a small settlement: one warm halo, a bright core lamp, and a handful
+     of satellite specks ("windows and side streets") scattered deterministically
+     from the light's id, so clusters look organic but render identically for
+     every operator and on every rebuild. Flicker is pure CSS (per-light random
+     duration/delay), so the animation costs no JS frames. */
+  seedRand(str) {
+    let h = 2166136261;
+    for (let i = 0; i < String(str).length; i++) { h ^= String(str).charCodeAt(i); h = Math.imul(h, 16777619); }
+    return () => {
+      h = Math.imul(h ^ (h >>> 15), 2246822507);
+      h = Math.imul(h ^ (h >>> 13), 3266489909);
+      return ((h ^= h >>> 16) >>> 0) / 4294967296;
+    };
+  },
+  buildLights(map) {
+    if (!this.lightsWorld) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    clear(this.lightsWorld);
+    const lights = map.lights || [];
+    const mkL = (tag, attrs, parent) => {
+      const n = document.createElementNS(NS, tag);
+      for (const k in attrs) if (attrs[k] !== undefined) n.setAttribute(k, attrs[k]);
+      (parent || this.lightsWorld).appendChild(n);
+      return n;
+    };
+    const flick = (rand, base) =>
+      `--flick-dur:${(base + rand() * base).toFixed(2)}s; --flick-delay:${(-rand() * base).toFixed(2)}s;`;
+    for (const lt of lights) {
+      if (!lt.pos || !(lt.r > 0)) continue;
+      const g = mkL('g', { transform: `translate(${lt.pos[0]},${lt.pos[1]})` });
+      mkL('circle', { r: lt.r, class: 'map-light-halo' }, g);
+      const rand = this.seedRand(lt.id || (lt.pos.join(',') + lt.r));
+      // soft bloom behind the core lamp (cheap fake of a gaussian glow)
+      mkL('circle', { r: Math.max(16, lt.r * 0.24), fill: '#ffdf9e', opacity: 0.3 }, g);
+      mkL('circle', {
+        r: Math.max(7, lt.r * 0.1), class: 'map-light-core',
+        style: flick(rand, 3)
+      }, g);
+      const specks = 3 + Math.floor(rand() * 4); // 3–6 satellite glows per cluster
+      for (let i = 0; i < specks; i++) {
+        const ang = rand() * Math.PI * 2;
+        const dist = lt.r * (0.38 + rand() * 0.5);
+        mkL('circle', {
+          cx: Math.cos(ang) * dist, cy: Math.sin(ang) * dist * 0.85,
+          r: Math.max(3, lt.r * (0.05 + rand() * 0.05)),
+          class: 'map-light-speck', style: flick(rand, 4)
+        }, g);
+      }
+    }
   },
 
   /* ---------- ambient transport traffic ---------- */
@@ -857,6 +937,9 @@ const GameMap = {
     // above cities/markers so the front line is never hidden underneath them
     this.warLayer = null;
     if (window.War) War.renderMapLayer(this, mk, NS);
+
+    // night city-lights overlay (separate svg — see mount())
+    this.buildLights(map);
 
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;

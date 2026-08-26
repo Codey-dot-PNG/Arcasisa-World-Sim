@@ -1,38 +1,46 @@
 'use strict';
 /* Gamemaster map editor. Lives on top of GameMap and edits settings.map:
      · labels — the free text markers (country names, seas, notes):
-                add, drag to move, click to edit text/style/rotation, delete
+                 add, drag to move, click to edit text/style/rotation, delete
      · roads / rails — pen tool: draw new lines point by point, drag vertex
-                handles, insert points on the ◆ midpoints, double-click a
-                vertex to remove it, delete whole lines
+                 handles, insert points on the ◆ midpoints, double-click a
+                 vertex to remove it, delete whole lines
+     · lights — night city-light clusters: place (stays armed for clusters),
+                 drag to move, S/M/L halo sizes, delete
    Everything saves through PATCH /api/gm/settings { map: … } (GM only). */
 
 const MapEdit = {
   active: false,
-  mode: 'labels',       // labels | roads | rails | properties
+  mode: 'labels',       // labels | roads | rails | properties | markers | lights
   sel: null,            // selected road/rail id (within current mode)
   selLabel: null,
+  selLight: null,       // selected city-light id
+  lightBrush: 95,       // halo radius (world units) for newly placed lights
   drawing: null,        // { pts: [...] } while the pen is down
   addingLabel: false,
   addingProperty: false,
   addingMarker: false,
+  addingLight: false,
   dragging: false,      // true while a vertex/marker/label is being dragged (suppresses GameMap.render)
   saveTimer: null,
 
   map() { return S().settings.map; },
   coll() { return this.mode === 'rails' ? this.map().rails : this.map().roads; },
+  lightsArr() { const m = this.map(); return m.lights = m.lights || []; },
   uid(p) { return p + '_' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); },
 
   toggle(on) {
     if (!isGM()) return;
     if (!this.map()) return toast('This world has no map document — reset or migrate it first.', true);
     this.active = on === undefined ? !this.active : on;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false; this.addingMarker = false;
+    this.sel = null; this.selLabel = null; this.selLight = null; this.drawing = null;
+    this.addingLabel = false; this.addingProperty = false; this.addingMarker = false; this.addingLight = false;
     GameMap.render();
   },
   setMode(m) {
     this.mode = m;
-    this.sel = null; this.selLabel = null; this.drawing = null; this.addingLabel = false; this.addingProperty = false; this.addingMarker = false;
+    this.sel = null; this.selLabel = null; this.selLight = null; this.drawing = null;
+    this.addingLabel = false; this.addingProperty = false; this.addingMarker = false; this.addingLight = false;
     GameMap.render();
   },
 
@@ -42,7 +50,7 @@ const MapEdit = {
     // lands before a debounced save fires replaces W.state with server data —
     // reading at run time would silently save the unedited world back.
     const m = this.map();
-    const payload = { labels: m.labels, roads: m.roads, rails: m.rails };
+    const payload = { labels: m.labels, roads: m.roads, rails: m.rails, lights: m.lights || [] };
     const run = async () => {
       this.saveTimer = null; // fired (or immediate) — no longer an unsaved-changes signal
       try { await PATCH('/api/gm/settings', { map: payload }); }
@@ -59,7 +67,7 @@ const MapEdit = {
       return;
     }
     bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '✎ MAP EDITOR'));
-    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties'], ['markers', 'Markers']]) {
+    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties'], ['markers', 'Markers'], ['lights', 'Lights']]) {
       bar.appendChild(el('button.chip', { class: this.mode === m ? 'active' : '', onclick: () => this.setMode(m) }, label));
     }
     if (this.mode === 'labels') {
@@ -71,6 +79,22 @@ const MapEdit = {
     } else if (this.mode === 'markers') {
       bar.appendChild(el('button.chip', { class: this.addingMarker ? 'active' : '', onclick: () => { this.addingMarker = !this.addingMarker; GameMap.renderLayerBar(); } },
         this.addingMarker ? '⌖ click the map…' : '+ Marker'));
+    } else if (this.mode === 'lights') {
+      bar.appendChild(el('button.chip', { class: this.addingLight ? 'active' : '', onclick: () => { this.addingLight = !this.addingLight; GameMap.renderLayerBar(); } },
+        this.addingLight ? '⌖ click to place…' : '+ Light'));
+      for (const [r, label] of [[55, 'S'], [95, 'M'], [150, 'L']]) {
+        bar.appendChild(el('button.chip', {
+          class: this.lightBrush === r && !this.selLight ? 'active' : '',
+          title: 'Halo size for new lights' + (this.selLight ? ' — click again to resize the selected one' : ''),
+          onclick: () => {
+            const sel = this.selLight && this.lightsArr().find(l => l.id === this.selLight);
+            if (sel) { sel.r = r; this.save(); }
+            else this.lightBrush = r;
+            GameMap.render();
+          }
+        }, label));
+      }
+      if (this.selLight) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSelLight() }, '🗑 Delete light'));
     } else {
       const noun = this.mode === 'roads' ? 'road' : 'railway';
       if (this.drawing) {
@@ -88,7 +112,8 @@ const MapEdit = {
       roads: 'click a road to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
       rails: 'click a railway to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
       properties: 'drag a marker to move it · click one to open its file · "+ Property" places a new one',
-      markers: 'drag a pin to move it · click one to edit or delete · "+ Marker" places a new one'
+      markers: 'drag a pin to move it · click one to edit or delete · "+ Marker" places a new one',
+      lights: '"+ Light" then click to place a cluster (stays armed) · drag the dot to move · S/M/L sizes new or selected lights · Delete removes'
     };
     bar.appendChild(el('span.map-edit-hint', hints[this.mode]));
   },
@@ -122,6 +147,19 @@ const MapEdit = {
       if (this.addingMarker) {
         this.addingMarker = false;
         this.createMarker(pt);
+      }
+      return;
+    }
+    if (this.mode === 'lights') {
+      if (this.addingLight) {
+        // stay armed so a cluster can be dotted in with several clicks —
+        // Escape or the toolbar button disarms
+        this.lightsArr().push({ id: this.uid('lgt'), pos: pt, r: this.lightBrush });
+        this.save();
+        GameMap.render();
+      } else if (this.selLight) {
+        this.selLight = null;
+        GameMap.render();
       }
       return;
     }
@@ -167,6 +205,56 @@ const MapEdit = {
     this.save();
     GameMap.render();
     toast('Removed from the map.');
+  },
+
+  deleteSelLight() {
+    const arr = this.lightsArr();
+    const i = arr.findIndex(l => l.id === this.selLight);
+    if (i < 0) return;
+    arr.splice(i, 1);
+    this.selLight = null;
+    this.save();
+    GameMap.render();
+    toast('Light removed.');
+  },
+
+  /* ---------- city lights: place, drag, select ---------- */
+  lightPointerDown(e, lt, dot) {
+    if (!this.active || this.mode !== 'lights') return;
+    e.stopPropagation();
+    const start = GameMap.clientToWorld(e.clientX, e.clientY);
+    const orig = lt.pos.slice();
+    let moved = false;
+    this.dragging = true;
+    const onMove = (ev) => {
+      const cur = GameMap.clientToWorld(ev.clientX, ev.clientY);
+      const nx = Math.round(orig[0] + cur[0] - start[0]);
+      const ny = Math.round(orig[1] + cur[1] - start[1]);
+      if (!moved && Math.abs(nx - orig[0]) + Math.abs(ny - orig[1]) > 2) moved = true;
+      lt.pos = [nx, ny];
+      // live-move the whole cluster: the counter-scaled dot group AND the
+      // world-sized halo outline (a sibling in the edit layer, found by id)
+      const g = dot.parentNode;
+      g.setAttribute('data-x', nx); g.setAttribute('data-y', ny);
+      const halo = GameMap.editLayer && GameMap.editLayer.querySelector(`.light-edit-halo[data-light="${lt.id}"]`);
+      if (halo) { halo.setAttribute('cx', nx); halo.setAttribute('cy', ny); }
+      GameMap.updateMarkerScale();
+    };
+    const onUp = () => {
+      dot.removeEventListener('pointermove', onMove);
+      dot.removeEventListener('pointerup', onUp);
+      this.dragging = false;
+      // a sync may have swapped W.state mid-drag, orphaning `lt` — re-apply
+      // the final position to whatever the current state holds for this id
+      const cur = this.lightsArr().find(l => l.id === lt.id);
+      if (cur && cur !== lt) cur.pos = lt.pos;
+      if (moved) { this.selLight = lt.id; this.save(true); }
+      else this.selLight = (this.selLight === lt.id) ? null : lt.id;
+      GameMap.render();
+    };
+    try { dot.setPointerCapture(e.pointerId); } catch (err) { /* stylus/touch edge cases */ }
+    dot.addEventListener('pointermove', onMove);
+    dot.addEventListener('pointerup', onUp);
   },
 
   /* ---------- labels: drag to move, click to edit ---------- */
@@ -382,6 +470,35 @@ const MapEdit = {
     };
     if (this.mode === 'labels') return;
 
+    // city lights: a world-sized halo outline per light (so the GM sees the
+    // glow's true footprint at daytime) plus a counter-scaled draggable dot.
+    // Only the dot carries data-x/data-y — updateMarkerScale must not
+    // counter-scale the halo, which lives in real world units.
+    if (this.mode === 'lights') {
+      for (const lt of this.lightsArr()) {
+        if (!lt.pos) continue;
+        const halo = mk('circle', {
+          cx: lt.pos[0], cy: lt.pos[1], r: lt.r,
+          class: 'light-edit-halo' + (this.selLight === lt.id ? ' selected' : ''),
+          'data-light': lt.id
+        });
+        halo.addEventListener('pointerup', (e) => {
+          if (this.dragMoved() || this.addingLight) return;
+          e.stopPropagation();
+          this.selLight = this.selLight === lt.id ? null : lt.id;
+          GameMap.render();
+        });
+        const g = mk('g', { 'data-x': lt.pos[0], 'data-y': lt.pos[1] });
+        const c = document.createElementNS(NS, 'circle');
+        c.setAttribute('r', 14);
+        c.setAttribute('class', 'light-edit-dot' + (this.selLight === lt.id ? ' selected' : ''));
+        g.appendChild(c);
+        g.addEventListener('pointerdown', (e) => { e.stopPropagation(); this.lightPointerDown(e, lt, c); });
+      }
+      gm.updateMarkerScale();
+      return;
+    }
+
     if (this.drawing && this.drawing.pts.length) {
       if (this.drawing.pts.length > 1) {
         mk('polyline', { points: this.drawing.pts.map(p => p.join(',')).join(' '), class: 'edit-preview', 'vector-effect': 'non-scaling-stroke' });
@@ -479,7 +596,11 @@ document.addEventListener('keydown', (e) => {
     else if (MapEdit.addingLabel) { MapEdit.addingLabel = false; GameMap.renderLayerBar(); }
     else if (MapEdit.addingProperty) { MapEdit.addingProperty = false; GameMap.renderLayerBar(); }
     else if (MapEdit.addingMarker) { MapEdit.addingMarker = false; GameMap.renderLayerBar(); }
-    else if (MapEdit.sel || MapEdit.selLabel) { MapEdit.sel = null; MapEdit.selLabel = null; GameMap.render(); }
+    else if (MapEdit.addingLight) { MapEdit.addingLight = false; GameMap.renderLayerBar(); }
+    else if (MapEdit.sel || MapEdit.selLabel || MapEdit.selLight) { MapEdit.sel = null; MapEdit.selLabel = null; MapEdit.selLight = null; GameMap.render(); }
     else MapEdit.toggle(false);
-  } else if ((e.key === 'Delete' || e.key === 'Backspace') && MapEdit.sel) { e.preventDefault(); MapEdit.deleteSel(); }
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && (MapEdit.sel || MapEdit.selLight)) {
+    e.preventDefault();
+    if (MapEdit.sel) MapEdit.deleteSel(); else MapEdit.deleteSelLight();
+  }
 });

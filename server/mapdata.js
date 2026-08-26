@@ -90,6 +90,30 @@ const RAILS = [
   { id: 'rail_madrosia_intl', pts: [[1853, 282], [1880, 405], [1910, 518]] }
 ];
 
+/* ---------- night city lights (GM-editable with the Lights tool) ----------
+   One entry per town so a fresh world wakes up already twinkling after dark;
+   the GM can move, resize, add or delete them on the map editor. Halo radius
+   is in world units on the 3840×2160 grid. */
+const LIGHT_SEEDS = [
+  { marker: 'Lacheven', r: 170 },
+  { marker: 'Port Kradon', r: 115 },
+  { marker: 'Razno', r: 85 },
+  { marker: 'Surat', r: 90 },
+  { marker: 'Mezdov', r: 85 },
+  { marker: 'Cape Valgos', r: 70 },
+  { marker: 'Grazile', r: 70 },
+  { marker: 'Kradeno', r: 75 }
+];
+function buildLights() {
+  const out = [];
+  for (const s of LIGHT_SEEDS) {
+    const p = GEO.MARKERS[s.marker];
+    if (!p) continue;
+    out.push({ id: 'lgt_' + s.marker.toLowerCase().replace(/[^a-z]+/g, '_'), pos: rnd(p), r: s.r });
+  }
+  return out;
+}
+
 /* ---------- cities ----------
    Marker centres from the SVG are authoritative for existing cities;
    Grazile and Kradeno are new towns introduced by the map. */
@@ -118,13 +142,25 @@ function buildMapSettings() {
     countries: COUNTRIES.map(c => ({ ...c, shape: GEO.COUNTRIES[c.id] })),
     labels: deep(LABELS),
     roads: deep(ROADS),
-    rails: deep(RAILS)
+    rails: deep(RAILS),
+    lights: buildLights()
   };
 }
 
-/* Upgrade a world in place. Returns false when it is already on the new map. */
+/* Upgrade a world in place. Returns true when anything changed (a fresh map
+   was authored, or the additive lights backfill materialised) so callers know
+   to persist; false when the world already carries a current map document. */
 function applyMap(db) {
-  if (db.settings.map && db.settings.map.schema >= 1) return false;
+  if (db.settings.map && db.settings.map.schema >= 1) {
+    // additive backfill: worlds mapped before the night-lights feature get a
+    // starter constellation around their towns. Idempotent — the array only
+    // materialises once, and a GM's own edits (present array) are never touched.
+    if (!Array.isArray(db.settings.map.lights)) {
+      db.settings.map.lights = buildLights();
+      return true;
+    }
+    return false;
+  }
 
   // anchors: existing cities on the old grid → their SVG marker centres.
   // Everything placed on the old map moves with its nearest city so property

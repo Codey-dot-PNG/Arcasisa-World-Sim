@@ -19,8 +19,8 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `app.js` | Boot, login screen, navigation (`App.go(view)`), `renderAll()` orchestration, scroll preservation across periodic re-renders |
 | `views.js` | All player-facing views (map dossier panels, parliament, companies/exchange, economy, population, news, timeline) + the contextual inspector panel |
 | `charts.js` | Zero-dep SVG charts: `Charts.chartLine(series, opts)`, `Charts.chartBars(rows, opts)` |
-| `map.js` | `GameMap` — SVG world on the **3840×2160** master grid, pan/zoom, layers (political/data/ownership/military), all drawn from state (`settings.map`, provinces, cities, properties) |
-| `mapedit.js` | GM map editor for `settings.map` labels/roads/rails (saves via `PATCH /api/gm/settings {map}`) |
+| `map.js` | `GameMap` — SVG world on the **3840×2160** master grid, pan/zoom, layers (political/data/ownership/military), all drawn from state (`settings.map`, provinces, cities, properties). Also owns the night city-lights overlay (`#map-lights`, a second svg that mirrors the pan/zoom transform and screen-blends above the day/night dim) |
+| `mapedit.js` | GM map editor for `settings.map` labels/roads/rails/lights (saves via `PATCH /api/gm/settings {map}`) |
 | `war.js` | War Room — territory-fracture map overlay + unit markers (drawn into `GameMap` via a hook) and the War Room panel (status/objectives/casualties/controls); see docs/WAR.md |
 | `gm.js` | GM Studio — visual CRUD editors for every collection, Event Engine, templates |
 | `gmbar.js` | GM Command Bar (bottom toolbar): advance turns, quick actions. Touches only its own `#gm-bar` subtree |

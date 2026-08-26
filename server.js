@@ -115,8 +115,9 @@ const server = http.createServer(async (req, res) => {
   await store.load(seed, process.argv.includes('--reseed'));
   // self-heal: a world file loaded from disk (or a rollback target) may
   // predate the SVG map — upgrade it in place rather than surface
-  // "no map document" errors in the client.
-  if (mapdata.applyMap(store.get())) { store.saveNow(); console.log('  Map document upgraded on load.'); }
+  // "no map document" errors in the client. Also backfills additive map
+  // additions (night city lights) onto worlds that already have the map.
+  if (mapdata.applyMap(store.get())) { store.saveNow(); console.log('  Map document updated on load.'); }
   sim.setLongLived(true); // enables real auto-advance timers in this process
   sim.init(api.broadcast);
   sim.updateDerived();

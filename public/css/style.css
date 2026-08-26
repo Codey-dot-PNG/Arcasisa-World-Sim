@@ -743,6 +743,37 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 }
 .graticule{stroke:#ffffff; stroke-opacity:.06;}
 
+/* ---------- city lights (night) ----------
+   GM-placed light clusters (settings.map.lights) rendered as a warm glow
+   overlay that fades in when the day/night cycle flips the wrap to
+   .day-night-night. The layer sits ABOVE #map-wrap::after (the night dim,
+   z-index 1) at z-index 2 so lamps are not darkened by their own night —
+   and mixes with SCREEN blending so each glow literally adds light to the
+   darkened map beneath instead of painting flat yellow on top of it. */
+#map-lights{
+  position:absolute; inset:0; z-index:2;
+  pointer-events:none;
+  opacity:0; transition:opacity 2.4s ease;
+  mix-blend-mode:screen;
+}
+#map-wrap.day-night-night #map-lights{opacity:1;}
+#map-lights svg{width:100%; height:100%; display:block;}
+.map-light-halo{fill:url(#lightHaloGrad);}
+.map-light-core{fill:#ffedc4; animation:lampFlicker var(--flick-dur,3.6s) ease-in-out infinite; animation-delay:var(--flick-delay,0s);}
+.map-light-speck{fill:#ffd98a; animation:lampFlicker var(--flick-dur,3.6s) ease-in-out infinite; animation-delay:var(--flick-delay,0s);}
+@keyframes lampFlicker{
+  0%,100%{opacity:.95;}
+  38%{opacity:.74;}
+  52%{opacity:.52;}
+  66%{opacity:.88;}
+}
+/* editor affordances (drawn INSIDE #map-svg, interactive) */
+.light-edit-halo{fill:none; stroke:var(--accent-soft); stroke-opacity:.55; stroke-width:2; stroke-dasharray:10 8; vector-effect:non-scaling-stroke;}
+.light-edit-halo.selected{stroke:var(--accent); stroke-opacity:.95;}
+.light-edit-dot{fill:#e8b04a; stroke:var(--ink); stroke-width:2; cursor:grab; vector-effect:non-scaling-stroke;}
+.light-edit-dot:hover{fill:var(--accent);}
+.light-edit-dot.selected{fill:var(--accent); stroke-width:3;}
+
 #map-controls{
   position:absolute; top:14px; right:14px; z-index:5;
   display:flex; flex-direction:column; gap:5px;

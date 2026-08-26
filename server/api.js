@@ -395,10 +395,13 @@ function filterState(u) {
   const trades = p.gm ? (db.trades || [])
     : (db.trades || []).filter(t => controlled.has(t.fromEntityId) || controlled.has(t.toEntityId));
 
-  // Ongoing trade contracts: visible to whoever controls the trading holder
-  // entity; GM sees all. Partner names/items are public book data.
+  // Ongoing trade contracts: open-market orders are visible to whoever
+  // controls the trading holder; player-to-player transfers to either party.
+  // GM sees all.
   const contracts = p.gm ? (db.tradeContracts || [])
-    : (db.tradeContracts || []).filter(c => controlled.has(c.holderId));
+    : (db.tradeContracts || []).filter(c =>
+      (c.holderId && controlled.has(c.holderId)) ||
+      (c.fromEntityId && (controlled.has(c.fromEntityId) || controlled.has(c.toEntityId))));
 
   return {
     settings,
@@ -1789,6 +1792,66 @@ async function handle(req, res, pathname, method) {
     if (pathname === '/api/trade/contracts' && method === 'POST') {
       const b = await readBody(req);
       const gm = u.role.perms.gm;
+
+      // ---- player-to-player / party-to-party recurring transfer ----
+      // One agreed item flows FROM → TO every turn (optionally with an agreed
+      // payment in either direction), for a set number of turns or until
+      // cancelled — a standing supply agreement. Because it keeps executing
+      // unattended, ownership instruments are refused outright: certificates
+      // and deeds are canonical-record mirrors that must move one-shot through
+      // the routes that update both sides (market.transfer / deeds.transfer).
+      // The counterparty consents once: unless the creator controls BOTH ends
+      // (or is GM), the contract starts 'proposed' and activates on accept.
+      if (b.kind === 'transfer') {
+        const fromEnt = db.entities.find(e => e.id === b.fromEntityId);
+        const toEnt = db.entities.find(e => e.id === b.toEntityId);
+        if (!fromEnt || !toEnt) return bad('Unknown entity.');
+        if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control the delivering entity.');
+        if (fromEnt.id === toEnt.id) return bad('Cannot contract with yourself.');
+        const item = db.items.find(i => i.id === b.itemId);
+        if (!item) return bad('Unknown item.');
+        if (!item.tradable && !gm) return deny('That item is not tradable.');
+        if (item.meta && item.meta.leveraged) return bad('Leveraged positions cannot be transferred — sell them back through the exchange.');
+        if (item.meta && (item.meta.companyId || item.meta.propertyId)) return bad('Certificates and deeds must move one-shot through a trade offer or instant send.');
+        let qty = cleanQty(b.qtyPerTurn);
+        if (!(qty > 0)) return bad('Quantity per turn must be positive.');
+        const r2m = (v) => Math.round(Number(v) * 100) / 100;
+        let payByFrom = r2m(b.payByFrom);
+        let payByTo = r2m(b.payByTo);
+        if (!isFinite(payByFrom) || payByFrom < 0) payByFrom = 0;
+        if (!isFinite(payByTo) || payByTo < 0) payByTo = 0;
+        let dur = null; // null = until cancelled
+        if (b.durationTurns !== undefined && b.durationTurns !== null && b.durationTurns !== '') {
+          dur = Math.floor(Number(b.durationTurns));
+          if (!isFinite(dur) || dur < 1) return bad('Duration must be at least 1 turn, or run indefinitely.');
+          if (dur > 9999) dur = 9999;
+        }
+        const memo = String(b.memo || '').slice(0, 300);
+        const counterpartySigns = !gm && !ownership.controls(u.user.entityId, toEnt.id);
+        db.tradeContracts = db.tradeContracts || [];
+        const t = db.settings.time;
+        const c = {
+          id: store.uid('ctr'), kind: 'transfer',
+          fromEntityId: fromEnt.id, toEntityId: toEnt.id,
+          itemId: item.id, qtyPerTurn: qty, payByFrom, payByTo, memo,
+          turnsLeft: dur, startedTurn: t.turn,
+          executions: 0, totalQty: 0, totalValue: 0, lastUnit: null, lastTurnNote: null,
+          status: counterpartySigns ? 'proposed' : 'active',
+          createdBy: u.user.displayName, createdAt: Date.now()
+        };
+        db.tradeContracts.push(c);
+        store.log('economy', counterpartySigns ? 'Ongoing contract proposed' : 'Ongoing contract signed',
+          `${fromEnt.name} will deliver ${qty} × ${item.name} to ${toEnt.name} each turn` +
+          (payByFrom ? `, paid ${db.settings.currency}${payByFrom.toLocaleString('en-US')}/turn` : '') +
+          (payByTo ? `, rebating ${db.settings.currency}${payByTo.toLocaleString('en-US')}/turn` : '') +
+          `${memo ? ' · ' + memo : ''}` +
+          (dur ? ` · runs ${dur} turn${dur === 1 ? '' : 's'}` : ' · until cancelled'),
+          u.user.displayName, [fromEnt.id, toEnt.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { contract: c });
+      }
+
+      // ---- open-market order automation ----
       const side = b.side === 'buy' ? 'buy' : 'sell';
       const holder = db.entities.find(e => e.id === b.holderId);
       if (!holder) return bad('Unknown holder.');
@@ -1817,7 +1880,7 @@ async function handle(req, res, pathname, method) {
       db.tradeContracts = db.tradeContracts || [];
       const t = db.settings.time;
       const c = {
-        id: store.uid('ctr'), side, partnerId: partner.id, itemId: item.id, holderId: holder.id,
+        id: store.uid('ctr'), kind: 'order', side, partnerId: partner.id, itemId: item.id, holderId: holder.id,
         qtyPerTurn: qty, turnsLeft: dur, startedTurn: t.turn,
         executions: 0, totalQty: 0, totalValue: 0, lastUnit: null, lastTurnNote: null,
         status: 'active', createdBy: u.user.displayName, createdAt: Date.now()
@@ -1829,18 +1892,44 @@ async function handle(req, res, pathname, method) {
       store.save(); broadcast('sync');
       return json(res, 200, { contract: c });
     }
+    if (pathname.startsWith('/api/trade/contracts/') && method === 'POST' && pathname.endsWith('/accept')) {
+      const id = pathname.slice('/api/trade/contracts/'.length, -'/accept'.length);
+      const c = (db.tradeContracts || []).find(x => x.id === id);
+      if (!c) return bad('No such contract.');
+      if (c.kind !== 'transfer') return bad('Only player-to-player contracts need acceptance.');
+      if (c.status !== 'proposed') return bad('That contract is not awaiting approval.');
+      const gm = u.role.perms.gm;
+      // only the RECEIVING side (or GM) may accept a proposal — the offering
+      // side authored it and can only cancel it
+      if (!gm && !ownership.controls(u.user.entityId, c.toEntityId)) return deny('Only the receiving entity may accept.');
+      c.status = 'active';
+      c.acceptedBy = u.user.displayName;
+      c.acceptedAtTurn = db.settings.time.turn;
+      const fromEnt = db.entities.find(e => e.id === c.fromEntityId) || { name: c.fromEntityId };
+      const toEnt = db.entities.find(e => e.id === c.toEntityId) || { name: c.toEntityId };
+      store.log('economy', 'Ongoing contract accepted',
+        `${toEnt.name} approved the standing ${c.qtyPerTurn} × item transfer from ${fromEnt.name}.`, u.user.displayName, [c.fromEntityId, c.toEntityId]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { contract: c });
+    }
     if (pathname.startsWith('/api/trade/contracts/') && method === 'POST' && pathname.endsWith('/cancel')) {
       const id = pathname.slice('/api/trade/contracts/'.length, -'/cancel'.length);
       const c = (db.tradeContracts || []).find(x => x.id === id);
       if (!c) return bad('No such contract.');
       const gm = u.role.perms.gm;
-      if (!gm && !ownership.controls(u.user.entityId, c.holderId)) return deny('You do not control that contract.');
-      if (c.status !== 'active') return bad('That contract is not active.');
+      // either party to a transfer — or the holder of an order contract — may
+      // cancel; on a proposal this doubles as declining
+      const partyControlled = c.kind === 'transfer'
+        ? (ownership.controls(u.user.entityId, c.fromEntityId) || ownership.controls(u.user.entityId, c.toEntityId))
+        : ownership.controls(u.user.entityId, c.holderId);
+      if (!gm && !partyControlled) return deny('You are not a party to that contract.');
+      if (c.status !== 'active' && c.status !== 'proposed') return bad('That contract is not running.');
       c.status = 'cancelled';
       c.cancelledBy = u.user.displayName;
       c.cancelledAtTurn = db.settings.time.turn;
-      store.log('economy', 'Ongoing contract cancelled',
-        `${c.executions} fill${c.executions === 1 ? '' : 's'} before cancellation.`, u.user.displayName, [c.holderId, c.partnerId]);
+      store.log('economy', c.status === 'cancelled' && c.executions === 0 && !c.acceptedAtTurn ? 'Ongoing contract declined' : 'Ongoing contract cancelled',
+        `${c.executions} fill${c.executions === 1 ? '' : 's'} before cancellation.`, u.user.displayName,
+        [c.holderId || c.fromEntityId, c.partnerId || c.toEntityId]);
       store.save(); broadcast('sync');
       return json(res, 200, { contract: c });
     }
@@ -1850,8 +1939,11 @@ async function handle(req, res, pathname, method) {
       if (idx < 0) return bad('No such contract.');
       const c = db.tradeContracts[idx];
       const gm = u.role.perms.gm;
-      if (!gm && !ownership.controls(u.user.entityId, c.holderId)) return deny('You do not control that contract.');
-      if (c.status === 'active') return bad('Cancel the contract before removing it.');
+      const partyControlled = c.kind === 'transfer'
+        ? (ownership.controls(u.user.entityId, c.fromEntityId) || ownership.controls(u.user.entityId, c.toEntityId))
+        : ownership.controls(u.user.entityId, c.holderId);
+      if (!gm && !partyControlled) return deny('You are not a party to that contract.');
+      if (c.status === 'active' || c.status === 'proposed') return bad('Cancel the contract before removing it.');
       db.tradeContracts.splice(idx, 1);
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });

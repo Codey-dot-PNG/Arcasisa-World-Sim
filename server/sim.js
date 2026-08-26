@@ -1709,6 +1709,7 @@ function runTradeContracts(db, actor) {
   const list = db.tradeContracts || [];
   if (!list.length) return;
   const book = db.settings.trade && db.settings.trade.orders;
+  const cur = db.settings.currency;
   const nameOf = (id) => { const e = db.entities.find(x => x.id === id); return e ? e.name : id; };
   const itemName = (id) => { const it = db.items.find(x => x.id === id); return it ? it.name : id; };
   const r2 = (v) => Math.round(v * 100) / 100;
@@ -1723,24 +1724,66 @@ function runTradeContracts(db, actor) {
       c.turnsLeft--;
       expiring = c.turnsLeft <= 0;
     }
-    const orders = book ? ((c.side === 'sell' ? book.buys : book.sells) || []) : [];
-    const order = orders.find(o => o.partnerId === c.partnerId && o.itemId === c.itemId);
-    if (!order) {
-      c.lastTurnNote = book ? 'no matching order on this turn’s book' : 'order book closed';
+
+    if (c.kind === 'transfer') {
+      // ---- standing player-to-player supply agreement ----
+      // Goods flow FROM → TO (drawn from the delivering entity's own stock
+      // AND its sites, exactly like an open-market export), plus any agreed
+      // payments in either direction through the ledger. A short stock
+      // delivers partially and a broke payer is noted — neither ever crashes
+      // the turn or voids the rest of the agreement.
+      const from = db.entities.find(e => e.id === c.fromEntityId);
+      const to = db.entities.find(e => e.id === c.toEntityId);
+      const item = db.items.find(i => i.id === c.itemId);
+      if (!from || !to || !item) {
+        c.lastTurnNote = 'a party or the item no longer exists';
+      } else {
+        const notes = [];
+        try {
+          const drawn = drawHolderStock(db, from, c.itemId, c.qtyPerTurn);
+          if (!(drawn > 0)) throw new Error(from.name + ' holds no ' + item.name + ' to deliver');
+          addInventory(to, c.itemId, drawn);
+          c.totalQty = r2((c.totalQty || 0) + drawn);
+          if (drawn < c.qtyPerTurn) notes.push('stock short — delivered ' + drawn + ' of ' + c.qtyPerTurn);
+        } catch (e) { notes.push(e.message); }
+        const pay = (payer, payee, amount, label) => {
+          const fa = primaryAccount(payer.id, true);
+          const ta = primaryAccount(payee.id, true);
+          if (fa.balance < amount) { notes.push(label + ' failed — ' + payer.name + ' lacks funds'); return; }
+          ledgerTxn(fa.id, ta.id, amount, 'Contract payment — ' + item.name + ' supply' + (c.memo ? ' (' + c.memo + ')' : ''), actor || 'ENGINE', 'transfer');
+        };
+        if (c.payByFrom > 0) pay(from, to, c.payByFrom, 'payment');
+        if (c.payByTo > 0) pay(to, from, c.payByTo, 'rebate');
+        c.lastTurnNote = notes.join(' · ') || null;
+        store.log('inventory', `Contract delivery — ${item.name}`,
+          `${from.name} → ${to.name}${c.payByFrom ? ' · paid ' + cur + c.payByFrom : ''}${c.payByTo ? ' · rebated ' + cur + c.payByTo : ''}${c.memo ? ' · ' + c.memo : ''}`,
+          actor || 'ENGINE', [from.id, to.id, item.id]);
+      }
     } else {
-      try {
-        const r = executeTrade(c.side, order.id, c.holderId, c.qtyPerTurn, actor || 'ENGINE');
-        c.executions++;
-        c.totalQty = r2((c.totalQty || 0) + r.qty);
-        c.totalValue = r2((c.totalValue || 0) + (c.side === 'sell' ? r.value : -r.value));
-        c.lastUnit = r.unit;
-      } catch (e) { c.lastTurnNote = e.message; } // unfunded, out of stock, embargoed… — idle, never crash the turn
+      // ---- open-market order automation (matched by partner+item+side,
+      // because order ids regenerate every turn) ----
+      const orders = book ? ((c.side === 'sell' ? book.buys : book.sells) || []) : [];
+      const order = orders.find(o => o.partnerId === c.partnerId && o.itemId === c.itemId);
+      if (!order) {
+        c.lastTurnNote = book ? 'no matching order on this turn’s book' : 'order book closed';
+      } else {
+        try {
+          const r = executeTrade(c.side, order.id, c.holderId, c.qtyPerTurn, actor || 'ENGINE');
+          c.executions++;
+          c.totalQty = r2((c.totalQty || 0) + r.qty);
+          c.totalValue = r2((c.totalValue || 0) + (c.side === 'sell' ? r.value : -r.value));
+          c.lastUnit = r.unit;
+        } catch (e) { c.lastTurnNote = e.message; } // unfunded, out of stock, embargoed… — idle, never crash the turn
+      }
     }
+
     if (expiring) {
       c.status = 'done';
       store.log('economy', 'Ongoing contract completed',
-        `${nameOf(c.holderId)} — ${itemName(c.itemId)} ${c.side === 'sell' ? 'exports to' : 'imports from'} ${nameOf(c.partnerId)} ran its course: ${c.executions} fill${c.executions === 1 ? '' : 's'}, ${db.settings.currency}${fmtNum(Math.abs(c.totalValue || 0))} total.`,
-        actor || 'ENGINE', [c.holderId, c.partnerId]);
+        c.kind === 'transfer'
+          ? `${nameOf(c.fromEntityId)} → ${nameOf(c.toEntityId)} (${itemName(c.itemId)} ×${c.qtyPerTurn}/turn${c.memo ? ' · ' + c.memo : ''}) ran its course: ${c.executions} deliver${c.executions === 1 ? 'y' : 'ies'}.`
+          : `${nameOf(c.holderId)} — ${itemName(c.itemId)} ${c.side === 'sell' ? 'exports to' : 'imports from'} ${nameOf(c.partnerId)} ran its course: ${c.executions} fill${c.executions === 1 ? '' : 's'}, ${db.settings.currency}${fmtNum(Math.abs(c.totalValue || 0))} total.`,
+        actor || 'ENGINE', [c.holderId || c.fromEntityId, c.partnerId || c.toEntityId]);
     }
   }
 }

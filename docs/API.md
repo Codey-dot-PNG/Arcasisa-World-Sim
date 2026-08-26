@@ -34,6 +34,9 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `POST /api/property/items` | deposit/withdraw goods between a property site and its owner (`direction: 'withdraw'`) |
 | `POST /api/trades` | create negotiated offer `{fromEntityId, toEntityId, give[], get[], money{give,get}, memo}`; no escrow |
 | `POST /api/trades/:id/(accept\|decline\|cancel)` | accept validates everything first, then moves items/money; single-company cert-vs-cash trades re-mark the day quote |
+| `POST /api/trade/contracts` | sign an ongoing contract. `kind:'order'` (default): repeat an open-market fill `{side, partnerId, itemId, holderId, qtyPerTurn, durationTurns}` each turn through `executeTrade` — holder's controller or GM. `kind:'transfer'`: recurring P2P supply `{fromEntityId, toEntityId, itemId, qtyPerTurn, payByFrom, payByTo, durationTurns, memo}` — deliverer's controller proposes; starts 'proposed' unless the creator controls both ends (or is GM), then executes via stock/ledger primitives like an export + payment. Certs/deeds/leveraged items refused (canonical-record mirrors must move one-shot) |
+| `POST /api/trade/contracts/:id/(accept\|cancel)` | transfer kind: recipient accepts a proposal; either party (order kind: holder's controller) cancels/declines |
+| `DELETE /api/trade/contracts/:id` | remove a finished/cancelled contract from the register; a party of the contract or GM |
 | `PATCH /api/entity/:id` | owner-editable descriptive fields only (description, color, logo) |
 | `PATCH /api/company/:id/controls` | CEO/owner: `keepPct, govMix, govPriceMult, wage, govMixByItem` |
 | `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |

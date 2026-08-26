@@ -2412,8 +2412,8 @@ const Views = {
       if (!it || it.tradable === false) return true;
       return !!(em && em[side === 'sell' ? 'export' : 'import']);
     };
-    const active = contracts.filter(c => c.status === 'active');
-    const ended = contracts.filter(c => c.status !== 'active').slice(-30).reverse();
+    const active = contracts.filter(c => c.status === 'active' && c.kind !== 'transfer');
+    const ended = contracts.filter(c => c.status !== 'active' && c.kind !== 'transfer').slice(-30).reverse();
 
     // ---- active contracts ------------------------------------------------
     inner.appendChild(this.secLabel('Active Contracts'));
@@ -3867,7 +3867,7 @@ const Views = {
     render();
   },
 
-  /* ---- Trade offers (Phase 4.3) ---- */
+  /* ---- Trade offers (Phase 4.3) + ongoing P2P contracts ---- */
   viewTrade(inner) {
     const myEnt = myEntity();
     const mine = ownershipSetClient();
@@ -3877,7 +3877,24 @@ const Views = {
 
     inner.appendChild(el('div.btn-row',
       el('button.solid-btn', { onclick: () => this.tradeOfferComposer() }, '⇄ New Trade Offer'),
+      el('button.dash-btn', { onclick: () => this.contractComposer() }, '⟳ New Ongoing Contract'),
       myEnt ? el('button.dash-btn', { onclick: () => this.tradeModal() }, '▣ Send Items (instant)') : null));
+
+    // ongoing player-to-player contracts — standing agreements that repeat
+    // every turn until they run out or a party cancels
+    const contracts = (S().tradeContracts || []).filter(c => c.kind === 'transfer');
+    const running = contracts.filter(c => c.status === 'active' || c.status === 'proposed');
+    const closedContracts = contracts.filter(c => c.status !== 'active' && c.status !== 'proposed').slice(-12).reverse();
+    inner.appendChild(this.secLabel('Ongoing Contracts (' + running.length + ')'));
+    if (!running.length) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:4px 0;' },
+        'No standing agreements. One repeats the same item (with optional payments in either direction) between two entities every turn, for a set number of turns or indefinitely.'));
+    }
+    for (const c of running) inner.appendChild(this.tradeContractRow(c, mine));
+    if (closedContracts.length) {
+      inner.appendChild(this.secLabel('Closed Contracts'));
+      for (const c of closedContracts) inner.appendChild(this.tradeContractRow(c, mine));
+    }
 
     inner.appendChild(this.secLabel('Open Offers (' + open.length + ')'));
     if (!open.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint);' }, 'No open offers.'));
@@ -3887,6 +3904,113 @@ const Views = {
       inner.appendChild(this.secLabel('Recently Closed'));
       for (const t of closed) inner.appendChild(this.tradeOfferRow(t, mine));
     }
+  },
+
+  /* one row of the ongoing-contracts register */
+  tradeContractRow(c, mine) {
+    const from = entById(c.fromEntityId), to = entById(c.toEntityId);
+    const it = itemById(c.itemId);
+    const running = c.status === 'active' || c.status === 'proposed';
+    const row = el('div.trade-row');
+    row.appendChild(el('div.tr-parties', (from ? from.name : '—') + '  →  ' + (to ? to.name : '—')));
+    row.appendChild(el('div.tr-meta',
+      `T${c.startedTurn} · ${c.status.toUpperCase()}` +
+      (c.memo ? ' · ' + c.memo : '') +
+      ' · ' + (c.turnsLeft === null || c.turnsLeft === undefined ? '∞ until cancelled' : c.turnsLeft + (c.turnsLeft === 1 ? ' turn left' : ' turns left'))));
+    row.appendChild(el('div.trade-cols',
+      el('div',
+        el('div.tc-head', 'Delivered each turn'),
+        el('div', { style: 'font-size:12.5px;' }, (it ? it.name : c.itemId) + ' ×' + fmtNum(c.qtyPerTurn)),
+        c.payByFrom ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(c.payByFrom) + ' paid to recipient') : null),
+      el('div',
+        el('div.tc-head', 'Recipient pays back'),
+        el('div', { style: 'font-size:12.5px;' }, c.payByTo ? fmtMoney(c.payByTo) + ' per turn' : '—')),
+      el('div',
+        el('div.tc-head', 'Fulfilment'),
+        el('div', { style: 'font-size:12.5px;' }, fmtNum(c.totalQty || 0) + ' delivered over ' + c.executions + ' turn' + (c.executions === 1 ? '' : 's')))));
+    if (running && c.lastTurnNote) {
+      row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--accent-soft); margin-top:2px;' },
+        'LAST TURN — ' + String(c.lastTurnNote).toUpperCase()));
+    }
+    if (running) {
+      const btns = el('div.btn-row');
+      if (c.status === 'proposed' && (isGM() || mine.has(c.toEntityId))) {
+        btns.appendChild(el('button.solid-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST('/api/trade/contracts/' + c.id + '/accept'); toast('Contract accepted — it now runs each turn.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, 'Accept'));
+        btns.appendChild(el('button.dash-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST('/api/trade/contracts/' + c.id + '/cancel'); toast('Contract declined.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, 'Decline'));
+      }
+      if (isGM() || mine.has(c.fromEntityId) || mine.has(c.toEntityId)) {
+        btns.appendChild(el('button.dash-btn', {
+          onclick: async (e) => { const b = e.currentTarget; b.disabled = true; try { await POST('/api/trade/contracts/' + c.id + '/cancel'); toast('Contract cancelled.'); } catch (err) { toast(err.message, true); b.disabled = false; } }
+        }, c.status === 'proposed' && !mine.has(c.toEntityId) ? 'Withdraw' : 'Cancel'));
+      }
+      if (btns.children.length) row.appendChild(btns);
+    } else if (isGM() || mine.has(c.fromEntityId) || mine.has(c.toEntityId)) {
+      row.appendChild(el('div.btn-row',
+        el('button.icon-btn', {
+          title: 'Remove from the register', onclick: async (e) => {
+            e.currentTarget.disabled = true;
+            try { await DEL('/api/trade/contracts/' + c.id); toast('Removed.'); }
+            catch (err) { toast(err.message, true); e.currentTarget.disabled = false; }
+          }
+        }, '✕ Remove')));
+    }
+    return row;
+  },
+
+  /* composer for a recurring entity-to-entity contract: one agreed item per
+     turn, optional payment in either direction, duration, memo */
+  contractComposer() {
+    const mine = ownershipSetClient();
+    const sources = S().entities.filter(e => isGM() || mine.has(e.id));
+    if (!sources.length) return toast('You have no entity to contract from.', true);
+    const fromSel = el('select.text-input', sources.map(e =>
+      el('option', { value: e.id, selected: e.id === W.me.entityId ? 'selected' : undefined }, e.name)));
+    const toSel = el('select.text-input', S().entities.filter(e => e.id !== fromSel.value).map(e => el('option', { value: e.id }, e.name)));
+    const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
+    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
+    const payByFrom = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+    const payByTo = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+    const foreverCheck = el('input', { type: 'checkbox', checked: true });
+    const durInput = el('input.text-input', { type: 'number', min: '1', step: '1', value: '10', disabled: 'disabled', style: 'width:110px;' });
+    foreverCheck.addEventListener('change', () => { durInput.disabled = foreverCheck.checked; });
+    const memo = el('input.text-input', { placeholder: 'e.g. Monthly steel supply agreement' });
+
+    openModal('NEW ONGOING CONTRACT', el('div',
+      el('p', { style: 'font-size:12.5px; color:var(--ink-soft); line-height:1.5; margin:0 0 6px;' },
+        'A standing agreement: every turn the engine delivers the agreed items and settles any agreed payments automatically, until the duration runs out or either party cancels. If you also control the receiving entity it starts immediately; otherwise the recipient must accept first.'),
+      el('label.field-label', 'Delivering entity'), fromSel,
+      el('label.field-label', 'Receiving entity'), toSel,
+      el('label.field-label', 'Item delivered each turn'), itemSel,
+      el('label.field-label', 'Quantity per turn'), qty,
+      el('div.form-grid',
+        el('div', el('label.field-label', 'Deliverer also pays / turn (' + CUR() + ')'), payByFrom),
+        el('div', el('label.field-label', 'Recipient pays back / turn (' + CUR() + ')'), payByTo)),
+      el('label.field-label', 'Duration'),
+      el('div', { style: 'display:flex; gap:14px; align-items:center;' },
+        el('label', { style: 'display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;' }, foreverCheck, 'Run indefinitely'),
+        durInput, el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, 'turns')),
+      el('label.field-label', 'Memo'), memo
+    ), [{
+      label: 'Send Contract', onClick: async () => {
+        if (fromSel.value === toSel.value) throw new Error('The two parties must differ.');
+        if (!(Number(qty.value) > 0)) throw new Error('Quantity per turn must be positive.');
+        const r = await POST('/api/trade/contracts', {
+          kind: 'transfer',
+          fromEntityId: fromSel.value, toEntityId: toSel.value,
+          itemId: itemSel.value, qtyPerTurn: Number(qty.value),
+          payByFrom: Number(payByFrom.value) || 0, payByTo: Number(payByTo.value) || 0,
+          durationTurns: foreverCheck.checked ? null : Number(durInput.value),
+          memo: memo.value
+        });
+        toast(r.contract && r.contract.status === 'proposed'
+          ? 'Contract sent — it starts once the recipient accepts.'
+          : 'Ongoing contract signed.');
+      }
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   tradeOfferRow(t, mine) {

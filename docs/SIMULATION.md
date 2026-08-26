@@ -145,18 +145,32 @@ for graphs.
 
 ### Ongoing contracts (`runTradeContracts`)
 
-An ongoing contract (`db.tradeContracts[]`) automates a fill: every turn, immediately after
-`generateTradeOrders` opens the fresh book, each **active** contract re-fills whichever
-order matches its `{side, partnerId, itemId}` — order ids are regenerated every turn, so
-the pair is the stable key — by calling the same `executeTrade` a manual fill uses
-(identical volume pricing, tariffs, embargoes, stock/funds checks). A turn with no
-matching order (or an already-filled / unaffordable one) just idles: `lastTurnNote`
-records why for the dossier row and nothing else happens. Duration counts
-turn-openings regardless of idling; `turnsLeft === null` runs until cancelled. Signed /
-cancelled via `POST /api/trade/contracts`, `POST /api/trade/contracts/:id/cancel`,
-removed (when not active) via `DELETE /api/trade/contracts/:id` — all gated on the
-holder entity's ownership chain exactly like `/api/trade/execute`. The UI lives in the
-Economy → International Trade → Contracts tab.
+Two kinds share one register (`db.tradeContracts[]`) and one per-turn pass, which runs
+immediately after `generateTradeOrders` opens the fresh book (or right after a
+tradeReset-cadence turn's flow reset — matching never uses order ids):
+
+- **`kind:'order'`** — automates an open-market fill. Every turn it re-fills whichever
+  listing matches its `{side, partnerId, itemId}` — ids are regenerated every turn, so
+  the pair is the stable key — by calling the same `executeTrade` a manual fill uses
+  (identical volume pricing, tariffs, embargoes, stock/funds checks). A turn with no
+  matching order (or an already-filled / unaffordable one) just idles: `lastTurnNote`
+  records why for the dossier row and nothing else happens.
+- **`kind:'transfer'`** — a standing player-to-player supply agreement
+  (`{fromEntityId, toEntityId, itemId, qtyPerTurn, payByFrom, payByTo, memo}`): goods
+  drawn from the deliverer's own stock *and its sites* (`drawHolderStock`, like any
+  export) land in the recipient's inventory, and agreed payments move through
+  `ledgerTxn`. Short stock delivers partially; a broke payer is noted — neither voids
+  the agreement. Certificates/deeds/leveraged items are refused at signing so the
+  canonical-record mirrors can't be bypassed by an unattended loop. The counterparty
+  consents once: unless the creator controls both ends (or is GM) it starts
+  'proposed' and only activates on accept (`POST …/:id/accept`); either party can
+  cancel any time.
+
+Duration counts turn-openings regardless of idling; `turnsLeft === null` runs until
+cancelled. Signed / cancelled via `POST /api/trade/contracts`,
+`POST /api/trade/contracts/:id/cancel`, removed (when not running) via
+`DELETE /api/trade/contracts/:id`. Order contracts are managed from Economy →
+International Trade → Contracts; transfer contracts from Economy → Trade.
 
 ## Foreign military production — `runForeignMilitary` (Phase 27)
 

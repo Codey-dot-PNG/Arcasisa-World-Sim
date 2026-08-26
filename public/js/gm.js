@@ -379,11 +379,20 @@ const GM = {
         const retail = effPrice(it);
         if (p.priceMult[iid] === undefined) p.priceMult[iid] = multOf(it);
         const kindMult = econMult(isExport ? 'exportMultiplier' : 'importMultiplier');
+        // mirror the engine (server/sim.js rerollTradeBook): level scales the
+        // ask/bid (High 1.08 / Med 1 / Low 0.92, inverted for supply) and
+        // diplomacy nudges EXPORTS by relations (0.9–1.1). Random ±priceDrift
+        // is applied per reroll server-side, so this is an estimate.
+        const LVL_PRICE = { High: 1.08, Med: 1, Low: 0.92 };
+        const rel = (() => { const pe = entById(p.entityId); const v = pe && pe.vars && Number(pe.vars.relations); return Number.isFinite(v) ? Math.max(0, Math.min(100, v)) : 50; })();
+        const relMult = isExport ? (0.9 + rel / 500) : 1 / (0.9 + rel / 500);
         const priceOut = el('span', { style: 'font-family:var(--font-mono); font-size:12px; color:var(--accent); white-space:nowrap;' });
         const multOut = el('span', { style: 'font-family:var(--font-mono); font-size:10px; margin-left:6px;' });
         const paint = () => {
           const m = p.priceMult[iid] || 1;
-          priceOut.textContent = CUR() + fmtNum(Math.round(retail * m * kindMult * 100) / 100);
+          const lvl = p[lvlKey][iid] || 'Med';
+          const lvlMult = isExport ? (LVL_PRICE[lvl] || 1) : 1 / (LVL_PRICE[lvl] || 1);
+          priceOut.textContent = '≈' + CUR() + fmtNum(Math.round(retail * m * relMult * kindMult * lvlMult * 100) / 100);
           priceOut.style.color = m >= 10 ? 'var(--bad, #c25b49)' : (m >= 3 ? '#c99a2e' : 'var(--accent)');
           multOut.textContent = '(' + fmtNum(m) + '× retail)';
           multOut.style.color = m >= 10 ? 'var(--bad, #c25b49)' : (m >= 3 ? '#c99a2e' : 'var(--ink-faint)');

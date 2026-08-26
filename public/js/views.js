@@ -2505,13 +2505,19 @@ const Views = {
       }))));
 
     // what the world pays (partner price comparison per item)
-    // partner base price = item retail × partner multiplier (legacy absolute
-    // prices honoured as an implied multiplier) × the GM export lever,
-    // mirroring the trade engine's demand orders
+    // mirrors the trade engine's demand-order price: retail × partner
+    // multiplier × the GM export lever × demand level (High 1.08 / Med 1 /
+    // Low 0.92) × diplomacy relations nudge — minus the random ±priceDrift
+    // applied per reroll server-side, so figures are estimates.
+    const LVL_PRICE = { High: 1.08, Med: 1, Low: 0.92 };
     const partnerBase = (p, it) => {
       const mult = (p.priceMult && p.priceMult[it.id] > 0) ? p.priceMult[it.id]
         : (p.prices && p.prices[it.id] > 0 && it.marketValue > 0 ? p.prices[it.id] / it.marketValue : 1);
-      return Math.round((it.marketValue || 0) * mult * econMult('exportMultiplier') * 100) / 100;
+      const pe = entById(p.entityId);
+      const relV = pe && pe.vars && Number(pe.vars.relations);
+      const rel = Number.isFinite(relV) ? Math.max(0, Math.min(100, relV)) : 50;
+      const lvl = (p.demand || {})[it.id] || 'Med';
+      return Math.round((it.marketValue || 0) * mult * econMult('exportMultiplier') * (LVL_PRICE[lvl] || 1) * (0.9 + rel / 500) * 100) / 100;
     };
     const priced = {};
     partners.forEach(p => new Set([...(p.exports || []), ...Object.keys(p.demand || {})]).forEach(iid => {

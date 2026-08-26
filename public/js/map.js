@@ -544,10 +544,13 @@ const GameMap = {
     const paths = [];
     for (const r of (map.roads || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'car' });
     for (const r of (map.rails || [])) if (r.pts && r.pts.length > 1) paths.push({ pts: r.pts, len: this.pathLength(r.pts), kind: 'train' });
-    // Each unit is a <g> holding the body plus its night lights: a headlight
-    // beam cone (rotated to the heading each frame), a warm pool of light on
-    // the road and a pair of red tail lamps — all .veh-light, whose opacity
-    // rides --dn-lights so they only exist after dark.
+    // Each unit is a <g> holding its night lights UNDERNEATH the body: the
+    // headlight beam cone (rotated to the heading each frame) + warm pool of
+    // light on the road are painted first, then the red tail lamps tucked
+    // just behind the rear edge, and the body LAST — so the sprite stays
+    // crisp on top of its own glow instead of being washed out by it. All
+    // lights carry .veh-light, whose opacity rides --dn-lights so they only
+    // exist after dark.
     const add = (path, i, kind) => {
       const g = document.createElementNS(NS, 'g');
       const body = document.createElementNS(NS, kind === 'train' ? 'rect' : 'circle');
@@ -555,28 +558,30 @@ const GameMap = {
       if (kind === 'train') { body.setAttribute('width', 34); body.setAttribute('height', 18); body.setAttribute('rx', 3); body.setAttribute('x', -17); body.setAttribute('y', -9); }
       else body.setAttribute('r', 11);
       const beamLen = kind === 'train' ? 64 : 46;
-      const beamW = kind === 'train' ? 19 : 16;
+      const beamW = kind === 'train' ? 19 : 14;
       // everything that shines forwards lives in one "aim" group so a single
       // rotate() per frame swings the beam cone and its road-pool together
       const aim = document.createElementNS(NS, 'g');
       const beam = document.createElementNS(NS, 'path');
       beam.setAttribute('class', 'veh-light veh-beam');
-      beam.setAttribute('d', `M${kind === 'train' ? 17 : 5} 0 L${beamLen} ${-beamW} Q${beamLen + beamW * 0.6} 0 ${beamLen} ${beamW} Z`);
+      beam.setAttribute('d', `M${kind === 'train' ? 17 : 9} 0 L${beamLen} ${-beamW} Q${beamLen + beamW * 0.6} 0 ${beamLen} ${beamW} Z`);
       beam.setAttribute('fill', 'url(#carBeamGrad)');
       const pool = document.createElementNS(NS, 'ellipse');
       pool.setAttribute('class', 'veh-light veh-pool');
-      pool.setAttribute('rx', beamLen * 0.62); pool.setAttribute('ry', beamLen * 0.34);
-      pool.setAttribute('cx', beamLen * 0.34);
+      pool.setAttribute('rx', beamLen * 0.52); pool.setAttribute('ry', beamLen * 0.30);
+      pool.setAttribute('cx', beamLen * 0.42);
       pool.setAttribute('fill', 'url(#lightCoreGrad)');
       aim.appendChild(pool); aim.appendChild(beam);
+      // tail lamps sit just OUTSIDE the rear edge (they'd vanish under the
+      // body otherwise, now that the body paints on top)
       const tail = document.createElementNS(NS, 'g');
       tail.setAttribute('class', 'veh-light veh-tail');
       for (const dy of (kind === 'train' ? [-5, 5] : [-4.5, 4.5])) {
         const t2 = document.createElementNS(NS, 'circle');
-        t2.setAttribute('cx', kind === 'train' ? -15 : -9); t2.setAttribute('cy', dy); t2.setAttribute('r', 2.4);
+        t2.setAttribute('cx', kind === 'train' ? -19.5 : -13.5); t2.setAttribute('cy', dy); t2.setAttribute('r', 2.2);
         tail.appendChild(t2);
       }
-      g.appendChild(aim); g.appendChild(body); g.appendChild(tail);
+      g.appendChild(aim); g.appendChild(tail); g.appendChild(body);
       this.trafficLayer.appendChild(g);
       this.trafficUnits.push({
         node: g, aim, tail, path, kind,

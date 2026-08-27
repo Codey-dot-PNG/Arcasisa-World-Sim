@@ -427,6 +427,7 @@ function filterState(u) {
     // market works), but only GMs see cancelled/expired history beyond 40.
     tenders: p.gm ? (db.tenders || []) : (db.tenders || []).filter(t => t.status === 'open' || t.status === 'awarded').slice(-40),
     contracts,
+    tradeContracts: contracts,
     elections: db.elections,
     // Phase 33 — the live election is a public spectacle (everyone watches
     // the count, like the war front), but the official totals and the count's

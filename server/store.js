@@ -101,6 +101,25 @@ function migrate(world) {
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
   need('tradeContracts', []);             // Phase 4.3 — ongoing trade contracts
+  // Migrate legacy single-item transfer contracts (itemId/qtyPerTurn/payByFrom/payByTo)
+  // into the unified give/get/money shape used by negotiated trades.
+  if (Array.isArray(world.tradeContracts)) {
+    for (const c of world.tradeContracts) {
+      if (c.kind === 'transfer') {
+        if (c.itemId && (!c.give || !c.give.length)) {
+          c.give = [{ itemId: c.itemId, qty: c.qtyPerTurn || 0 }];
+          c.get = Array.isArray(c.get) ? c.get : [];
+          c.money = { give: c.payByFrom || 0, get: c.payByTo || 0 };
+          changed = true;
+        }
+        if (!Array.isArray(c.give)) { c.give = []; changed = true; }
+        if (!Array.isArray(c.get)) { c.get = []; changed = true; }
+        if (!c.money || typeof c.money !== 'object') { c.money = { give: c.payByFrom || 0, get: c.payByTo || 0 }; changed = true; }
+        if (c.executions === undefined) { c.executions = 0; changed = true; }
+        if (c.totalQty === undefined) { c.totalQty = 0; changed = true; }
+      }
+    }
+  }
   if (!world.settings) { world.settings = {}; changed = true; }
   if (!world.settings.ambience) {
     world.settings.ambience = { traffic: {

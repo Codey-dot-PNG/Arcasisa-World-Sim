@@ -1726,38 +1726,90 @@ function runTradeContracts(db, actor) {
     }
 
     if (c.kind === 'transfer') {
-      // ---- standing player-to-player supply agreement ----
-      // Goods flow FROM → TO (drawn from the delivering entity's own stock
-      // AND its sites, exactly like an open-market export), plus any agreed
-      // payments in either direction through the ledger. A short stock
-      // delivers partially and a broke payer is noted — neither ever crashes
-      // the turn or voids the rest of the agreement.
+      // ---- standing player-to-player trade (the repeat of a negotiated offer) ----
+      // Mirrors the one-shot /api/trades flow but as a standing agreement:
+      // every active turn the engine replays the same give/get/money that a
+      // manual trade would have moved, drawn from pooled stock (entity +
+      // its sites, like any export) and through the ledger. Short stock
+      // delivers partially, broke payers are noted — neither crashes the turn
+      // nor voids the rest of the agreement. Legacy contracts (single
+      // itemId/qtyPerTurn/payByFrom/payByTo) are normalized on the fly.
+      // Normalize legacy → trade shape
+      if (!c.give && c.itemId) {
+        c.give = [{ itemId: c.itemId, qty: c.qtyPerTurn || 0 }];
+        c.get = c.get || [];
+        c.money = c.money || { give: c.payByFrom || 0, get: c.payByTo || 0 };
+      }
+      if (!Array.isArray(c.give)) c.give = [];
+      if (!Array.isArray(c.get)) c.get = [];
+      if (!c.money || typeof c.money !== 'object') c.money = { give: 0, get: 0 };
       const from = db.entities.find(e => e.id === c.fromEntityId);
       const to = db.entities.find(e => e.id === c.toEntityId);
-      const item = db.items.find(i => i.id === c.itemId);
-      if (!from || !to || !item) {
-        c.lastTurnNote = 'a party or the item no longer exists';
+      if (!from || !to) {
+        c.lastTurnNote = 'a party no longer exists';
       } else {
         const notes = [];
-        try {
-          const drawn = drawHolderStock(db, from, c.itemId, c.qtyPerTurn);
-          if (!(drawn > 0)) throw new Error(from.name + ' holds no ' + item.name + ' to deliver');
-          addInventory(to, c.itemId, drawn);
-          c.totalQty = r2((c.totalQty || 0) + drawn);
-          if (drawn < c.qtyPerTurn) notes.push('stock short — delivered ' + drawn + ' of ' + c.qtyPerTurn);
-        } catch (e) { notes.push(e.message); }
+        let deliveredAny = false;
+        // Give: from → to
+        for (const r of c.give) {
+          const it = db.items.find(i => i.id === r.itemId);
+          if (!it) { notes.push('unknown item ' + r.itemId); continue; }
+          const want = cleanQty(r.qty);
+          if (!(want > 0)) continue;
+          const drawn = drawHolderStock(db, from, r.itemId, want);
+          if (drawn > 0) {
+            addInventory(to, r.itemId, drawn);
+            c.totalQty = r2((c.totalQty || 0) + drawn);
+            deliveredAny = true;
+          }
+          if (drawn < want) notes.push((it.name || r.itemId) + ' short — delivered ' + drawn + ' of ' + want + ' from ' + from.name);
+        }
+        // Get: to → from (the counter-give)
+        for (const r of c.get) {
+          const it = db.items.find(i => i.id === r.itemId);
+          if (!it) { notes.push('unknown item ' + r.itemId); continue; }
+          const want = cleanQty(r.qty);
+          if (!(want > 0)) continue;
+          const drawn = drawHolderStock(db, to, r.itemId, want);
+          if (drawn > 0) {
+            addInventory(from, r.itemId, drawn);
+            c.totalQty = r2((c.totalQty || 0) + drawn);
+            deliveredAny = true;
+          }
+          if (drawn < want) notes.push((it.name || r.itemId) + ' short — delivered ' + drawn + ' of ' + want + ' from ' + to.name);
+        }
         const pay = (payer, payee, amount, label) => {
+          if (!(amount > 0)) return;
           const fa = primaryAccount(payer.id, true);
           const ta = primaryAccount(payee.id, true);
           if (fa.balance < amount) { notes.push(label + ' failed — ' + payer.name + ' lacks funds'); return; }
-          ledgerTxn(fa.id, ta.id, amount, 'Contract payment — ' + item.name + ' supply' + (c.memo ? ' (' + c.memo + ')' : ''), actor || 'ENGINE', 'transfer');
+          // Use generic contract payment memo so the ledger stays readable
+          const memo = 'Contract payment' + (c.memo ? ' — ' + c.memo : '');
+          ledgerTxn(fa.id, ta.id, amount, memo, actor || 'ENGINE', 'transfer');
+          deliveredAny = true;
         };
-        if (c.payByFrom > 0) pay(from, to, c.payByFrom, 'payment');
-        if (c.payByTo > 0) pay(to, from, c.payByTo, 'rebate');
+        const mGive = Math.round(Number(c.money.give) * 100) / 100;
+        const mGet = Math.round(Number(c.money.get) * 100) / 100;
+        if (mGive > 0) pay(from, to, mGive, 'payment');
+        if (mGet > 0) pay(to, from, mGet, 'rebate');
+        // Legacy money fields kept for old UI, but prefer c.money
+        if ((!c.money || (!mGive && !mGet)) && (c.payByFrom || c.payByTo)) {
+          if (c.payByFrom > 0) pay(from, to, c.payByFrom, 'payment');
+          if (c.payByTo > 0) pay(to, from, c.payByTo, 'rebate');
+        }
+        if (deliveredAny) c.executions = (c.executions || 0) + 1;
         c.lastTurnNote = notes.join(' · ') || null;
-        store.log('inventory', `Contract delivery — ${item.name}`,
-          `${from.name} → ${to.name}${c.payByFrom ? ' · paid ' + cur + c.payByFrom : ''}${c.payByTo ? ' · rebated ' + cur + c.payByTo : ''}${c.memo ? ' · ' + c.memo : ''}`,
-          actor || 'ENGINE', [from.id, to.id, item.id]);
+        const giveDesc = c.give.map(r => {
+          const it = db.items.find(i => i.id === r.itemId);
+          return (it ? it.name : r.itemId) + ' ×' + r.qty;
+        }).join(', ');
+        const getDesc = c.get.map(r => {
+          const it = db.items.find(i => i.id === r.itemId);
+          return (it ? it.name : r.itemId) + ' ×' + r.qty;
+        }).join(', ');
+        store.log('inventory', `Contract delivery — ${giveDesc || 'no goods'}${getDesc ? ' ⇄ ' + getDesc : ''}`,
+          `${from.name} → ${to.name}${mGive ? ' · paid ' + cur + mGive : ''}${mGet ? ' · rebated ' + cur + mGet : ''}${c.memo ? ' · ' + c.memo : ''}${notes.length ? ' · ' + notes.join('; ') : ''}`,
+          actor || 'ENGINE', [from.id, to.id, ...c.give.map(r => r.itemId), ...c.get.map(r => r.itemId)]);
       }
     } else {
       // ---- open-market order automation (matched by partner+item+side,
@@ -1779,9 +1831,19 @@ function runTradeContracts(db, actor) {
 
     if (expiring) {
       c.status = 'done';
+      // For transfer contracts, build a give/get summary (handles both legacy and new shape)
+      const transferSummary = (() => {
+        if (c.give && c.give.length) {
+          const g = c.give.map(r => `${itemName(r.itemId)} ×${r.qty}`).join(', ');
+          const gg = c.get && c.get.length ? ' ⇄ ' + c.get.map(r => `${itemName(r.itemId)} ×${r.qty}`).join(', ') : '';
+          return `${g}${gg}`;
+        }
+        if (c.itemId) return `${itemName(c.itemId)} ×${c.qtyPerTurn}/turn`;
+        return 'standing trade';
+      })();
       store.log('economy', 'Ongoing contract completed',
         c.kind === 'transfer'
-          ? `${nameOf(c.fromEntityId)} → ${nameOf(c.toEntityId)} (${itemName(c.itemId)} ×${c.qtyPerTurn}/turn${c.memo ? ' · ' + c.memo : ''}) ran its course: ${c.executions} deliver${c.executions === 1 ? 'y' : 'ies'}.`
+          ? `${nameOf(c.fromEntityId)} → ${nameOf(c.toEntityId)} (${transferSummary}${c.memo ? ' · ' + c.memo : ''}) ran its course: ${c.executions} deliver${c.executions === 1 ? 'y' : 'ies'}.`
           : `${nameOf(c.holderId)} — ${itemName(c.itemId)} ${c.side === 'sell' ? 'exports to' : 'imports from'} ${nameOf(c.partnerId)} ran its course: ${c.executions} fill${c.executions === 1 ? '' : 's'}, ${db.settings.currency}${fmtNum(Math.abs(c.totalValue || 0))} total.`,
         actor || 'ENGINE', [c.holderId || c.fromEntityId, c.partnerId || c.toEntityId]);
     }

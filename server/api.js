@@ -1794,32 +1794,74 @@ async function handle(req, res, pathname, method) {
       const gm = u.role.perms.gm;
 
       // ---- player-to-player / party-to-party recurring transfer ----
-      // One agreed item flows FROM → TO every turn (optionally with an agreed
-      // payment in either direction), for a set number of turns or until
-      // cancelled — a standing supply agreement. Because it keeps executing
-      // unattended, ownership instruments are refused outright: certificates
-      // and deeds are canonical-record mirrors that must move one-shot through
-      // the routes that update both sides (market.transfer / deeds.transfer).
+      // A standing trade that re-executes every turn until it expires or a
+      // party cancels. Uses the SAME give/get/money shape as /api/trades
+      // (negotiated trade offers), so contracts are simply "trades that repeat".
+      // Back-compat: legacy single-item fields (itemId/qtyPerTurn/payByFrom/
+      // payByTo) are still honoured and normalized into give/money.
+      // Certificates/deeds/leveraged items are refused outright: they are
+      // canonical-record mirrors that must move one-shot through
+      // market.transfer / deeds.transfer.
       // The counterparty consents once: unless the creator controls BOTH ends
       // (or is GM), the contract starts 'proposed' and activates on accept.
       if (b.kind === 'transfer') {
         const fromEnt = db.entities.find(e => e.id === b.fromEntityId);
         const toEnt = db.entities.find(e => e.id === b.toEntityId);
         if (!fromEnt || !toEnt) return bad('Unknown entity.');
-        if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control the delivering entity.');
+        if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control the offering entity.');
         if (fromEnt.id === toEnt.id) return bad('Cannot contract with yourself.');
-        const item = db.items.find(i => i.id === b.itemId);
-        if (!item) return bad('Unknown item.');
-        if (!item.tradable && !gm) return deny('That item is not tradable.');
-        if (item.meta && item.meta.leveraged) return bad('Leveraged positions cannot be transferred — sell them back through the exchange.');
-        if (item.meta && (item.meta.companyId || item.meta.propertyId)) return bad('Certificates and deeds must move one-shot through a trade offer or instant send.');
-        let qty = cleanQty(b.qtyPerTurn);
-        if (!(qty > 0)) return bad('Quantity per turn must be positive.');
-        const r2m = (v) => Math.round(Number(v) * 100) / 100;
-        let payByFrom = r2m(b.payByFrom);
-        let payByTo = r2m(b.payByTo);
-        if (!isFinite(payByFrom) || payByFrom < 0) payByFrom = 0;
-        if (!isFinite(payByTo) || payByTo < 0) payByTo = 0;
+
+        // Normalise into the trade shape: give[], get[], money{give,get}
+        let give = [], get = [], money = { give: 0, get: 0 };
+        const hasNewShape = Array.isArray(b.give) || Array.isArray(b.get) || (b.money && typeof b.money === 'object');
+        if (hasNewShape) {
+          const cleanRows = (arr) => (Array.isArray(arr) ? arr : [])
+            .map(r => ({ itemId: String(r.itemId || ''), qty: cleanQty(r.qty) }))
+            .filter(r => r.itemId && r.qty > 0);
+          give = cleanRows(b.give);
+          get = cleanRows(b.get);
+          money = {
+            give: Math.max(0, Math.round((Number((b.money || {}).give) || 0) * 100) / 100),
+            get: Math.max(0, Math.round((Number((b.money || {}).get) || 0) * 100) / 100)
+          };
+          // Validate each row's routing (same checks as /api/trades creation)
+          for (const r of [...give, ...get]) {
+            const it = db.items.find(i => i.id === r.itemId);
+            if (!it) return bad('Unknown item: ' + r.itemId);
+            if (it.meta && it.meta.leveraged) return bad('Leveraged positions cannot be transferred — sell them back through the exchange.');
+            if (it.meta && (it.meta.companyId || it.meta.propertyId)) return bad('Certificates and deeds must move one-shot through a trade offer or instant send.');
+            if (!it.tradable && !gm) return deny(`${it.name} is not tradable.`);
+          }
+        } else if (b.itemId) {
+          // Legacy single-item contract → normalize to give + money
+          const item = db.items.find(i => i.id === b.itemId);
+          if (!item) return bad('Unknown item.');
+          if (!item.tradable && !gm) return deny('That item is not tradable.');
+          if (item.meta && item.meta.leveraged) return bad('Leveraged positions cannot be transferred — sell them back through the exchange.');
+          if (item.meta && (item.meta.companyId || item.meta.propertyId)) return bad('Certificates and deeds must move one-shot through a trade offer or instant send.');
+          const qty = cleanQty(b.qtyPerTurn);
+          if (!(qty > 0)) return bad('Quantity per turn must be positive.');
+          const r2m = (v) => Math.round(Number(v) * 100) / 100;
+          let payByFrom = r2m(b.payByFrom);
+          let payByTo = r2m(b.payByTo);
+          if (!isFinite(payByFrom) || payByFrom < 0) payByFrom = 0;
+          if (!isFinite(payByTo) || payByTo < 0) payByTo = 0;
+          give = [{ itemId: item.id, qty }];
+          money = { give: payByFrom, get: payByTo };
+        } else {
+          // Also accept the old qtyPerTurn style without explicit kind distinction
+          return bad('A contract needs at least one item or amount of money.');
+        }
+        if (!give.length && !get.length && !money.give && !money.get) return bad('An offer needs at least one item or amount of money.');
+        // Aggregate duplicate item rows for cleaner storage / execution
+        const agg = (rows) => {
+          const m = {};
+          for (const r of rows) m[r.itemId] = cleanQty((m[r.itemId] || 0) + r.qty);
+          return Object.entries(m).map(([itemId, qty]) => ({ itemId, qty }));
+        };
+        give = agg(give);
+        get = agg(get);
+
         let dur = null; // null = until cancelled
         if (b.durationTurns !== undefined && b.durationTurns !== null && b.durationTurns !== '') {
           dur = Math.floor(Number(b.durationTurns));
@@ -1833,17 +1875,29 @@ async function handle(req, res, pathname, method) {
         const c = {
           id: store.uid('ctr'), kind: 'transfer',
           fromEntityId: fromEnt.id, toEntityId: toEnt.id,
-          itemId: item.id, qtyPerTurn: qty, payByFrom, payByTo, memo,
+          give, get, money, memo,
+          // legacy fields kept for old clients / migration transparency
+          ...(give.length === 1 && !get.length ? { itemId: give[0].itemId, qtyPerTurn: give[0].qty, payByFrom: money.give, payByTo: money.get } : {}),
           turnsLeft: dur, startedTurn: t.turn,
           executions: 0, totalQty: 0, totalValue: 0, lastUnit: null, lastTurnNote: null,
           status: counterpartySigns ? 'proposed' : 'active',
           createdBy: u.user.displayName, createdAt: Date.now()
         };
         db.tradeContracts.push(c);
+        const fmtGive = give.length ? give.map(r => {
+          const it = db.items.find(i => i.id === r.itemId);
+          return `${r.qty} × ${(it || {}).name || r.itemId}`;
+        }).join(', ') : '';
+        const fmtGet = get.length ? get.map(r => {
+          const it = db.items.find(i => i.id === r.itemId);
+          return `${r.qty} × ${(it || {}).name || r.itemId}`;
+        }).join(', ') : '';
         store.log('economy', counterpartySigns ? 'Ongoing contract proposed' : 'Ongoing contract signed',
-          `${fromEnt.name} will deliver ${qty} × ${item.name} to ${toEnt.name} each turn` +
-          (payByFrom ? `, paid ${db.settings.currency}${payByFrom.toLocaleString('en-US')}/turn` : '') +
-          (payByTo ? `, rebating ${db.settings.currency}${payByTo.toLocaleString('en-US')}/turn` : '') +
+          `${fromEnt.name} → ${toEnt.name}` +
+          (fmtGive ? `: gives ${fmtGive}` : '') +
+          (fmtGet ? `${fmtGive ? '; ' : ': '}gets ${fmtGet}` : '') +
+          (money.give ? ` · pays ${db.settings.currency}${money.give}/turn` : '') +
+          (money.get ? ` · rebated ${db.settings.currency}${money.get}/turn` : '') +
           `${memo ? ' · ' + memo : ''}` +
           (dur ? ` · runs ${dur} turn${dur === 1 ? '' : 's'}` : ' · until cancelled'),
           u.user.displayName, [fromEnt.id, toEnt.id]);

@@ -3888,7 +3888,7 @@ const Views = {
     inner.appendChild(this.secLabel('Ongoing Contracts (' + running.length + ')'));
     if (!running.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:4px 0;' },
-        'No standing agreements. One repeats the same item (with optional payments in either direction) between two entities every turn, for a set number of turns or indefinitely.'));
+        'No standing agreements. A contract is a standing trade — the same give/get/money you would send as a one-shot offer, replayed automatically every turn until the duration runs out or either party cancels. It uses the same items, money and routing as a normal trade offer.'));
     }
     for (const c of running) inner.appendChild(this.tradeContractRow(c, mine));
     if (closedContracts.length) {
@@ -3906,10 +3906,21 @@ const Views = {
     }
   },
 
-  /* one row of the ongoing-contracts register */
+  /* one row of the ongoing-contracts register — mirrors tradeOfferRow:
+     the same give/get/money shape as a negotiated trade, but as a standing
+     agreement that repeats every turn. Legacy single-item contracts
+     (itemId/qtyPerTurn/payByFrom/payByTo) are normalized on the fly. */
   tradeContractRow(c, mine) {
     const from = entById(c.fromEntityId), to = entById(c.toEntityId);
-    const it = itemById(c.itemId);
+    // Normalize legacy → trade shape for display
+    let give = c.give, get = c.get, money = c.money;
+    if ((!give || !give.length) && c.itemId) {
+      give = [{ itemId: c.itemId, qty: c.qtyPerTurn || 0 }];
+      money = { give: c.payByFrom || 0, get: c.payByTo || 0 };
+      get = get || [];
+    }
+    give = give || []; get = get || []; money = money || { give: 0, get: 0 };
+    const rowsText = (rows) => rows.length ? rows.map(r => (itemById(r.itemId) || { name: r.itemId }).name + ' ×' + fmtNum(r.qty)).join(', ') : '—';
     const running = c.status === 'active' || c.status === 'proposed';
     const row = el('div.trade-row');
     row.appendChild(el('div.tr-parties', (from ? from.name : '—') + '  →  ' + (to ? to.name : '—')));
@@ -3919,15 +3930,16 @@ const Views = {
       ' · ' + (c.turnsLeft === null || c.turnsLeft === undefined ? '∞ until cancelled' : c.turnsLeft + (c.turnsLeft === 1 ? ' turn left' : ' turns left'))));
     row.appendChild(el('div.trade-cols',
       el('div',
-        el('div.tc-head', 'Delivered each turn'),
-        el('div', { style: 'font-size:12.5px;' }, (it ? it.name : c.itemId) + ' ×' + fmtNum(c.qtyPerTurn)),
-        c.payByFrom ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(c.payByFrom) + ' paid to recipient') : null),
+        el('div.tc-head', from ? from.name + ' gives each turn' : 'Gives each turn'),
+        el('div', { style: 'font-size:12.5px;' }, rowsText(give)),
+        money.give ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(money.give) + ' each turn') : null),
       el('div',
-        el('div.tc-head', 'Recipient pays back'),
-        el('div', { style: 'font-size:12.5px;' }, c.payByTo ? fmtMoney(c.payByTo) + ' per turn' : '—')),
+        el('div.tc-head', to ? to.name + ' gives each turn' : 'Gets each turn'),
+        el('div', { style: 'font-size:12.5px;' }, rowsText(get)),
+        money.get ? el('div', { style: 'font-size:12.5px; margin-top:4px;' }, 'Plus ' + fmtMoney(money.get) + ' each turn') : null),
       el('div',
         el('div.tc-head', 'Fulfilment'),
-        el('div', { style: 'font-size:12.5px;' }, fmtNum(c.totalQty || 0) + ' delivered over ' + c.executions + ' turn' + (c.executions === 1 ? '' : 's')))));
+        el('div', { style: 'font-size:12.5px;' }, fmtNum(c.totalQty || 0) + ' delivered over ' + (c.executions || 0) + ' turn' + ((c.executions || 0) === 1 ? '' : 's')))));
     if (running && c.lastTurnNote) {
       row.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--accent-soft); margin-top:2px;' },
         'LAST TURN — ' + String(c.lastTurnNote).toUpperCase()));
@@ -3961,34 +3973,81 @@ const Views = {
     return row;
   },
 
-  /* composer for a recurring entity-to-entity contract: one agreed item per
-     turn, optional payment in either direction, duration, memo */
+  /* composer for a recurring entity-to-entity contract: the SAME give/get/money
+     shape as a negotiated trade offer (see tradeOfferComposer), plus a duration.
+     Every turn the engine replays that trade as a standing agreement. */
   contractComposer() {
     const mine = ownershipSetClient();
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to contract from.', true);
     const fromSel = el('select.text-input', sources.map(e =>
       el('option', { value: e.id, selected: e.id === W.me.entityId ? 'selected' : undefined }, e.name)));
-    const toSel = el('select.text-input', S().entities.filter(e => e.id !== fromSel.value).map(e => el('option', { value: e.id }, e.name)));
-    const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
-    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
-    const payByFrom = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
-    const payByTo = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+    const toSel = el('select.text-input', S().entities.map(e => el('option', { value: e.id }, e.name)));
+    const memo = el('input.text-input', { placeholder: 'e.g. Monthly steel supply agreement' });
+    const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
+    const moneyGet = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
     const foreverCheck = el('input', { type: 'checkbox', checked: true });
     const durInput = el('input.text-input', { type: 'number', min: '1', step: '1', value: '10', disabled: 'disabled', style: 'width:110px;' });
     foreverCheck.addEventListener('change', () => { durInput.disabled = foreverCheck.checked; });
-    const memo = el('input.text-input', { placeholder: 'e.g. Monthly steel supply agreement' });
+
+    // give: checkboxes + qty over the offering entity's inventory, rebuilt
+    // whenever the From entity changes — identical to tradeOfferComposer,
+    // plus an extra "add any item" lane so a contract can promise future
+    // production you don't yet hold (stock is checked each turn, not at signing).
+    let giveRows = [];
+    const giveBox = el('div');
+    const manualGiveRows = [];
+    const manualGiveBox = el('div');
+    const renderGive = () => {
+      const src = entById(fromSel.value);
+      clear(giveBox);
+      giveRows = ((src && src.inventory) || []).map(r => {
+        const it = itemById(r.itemId);
+        if (!it) return null;
+        const check = el('input', { type: 'checkbox' });
+        const qty = el('input.text-input', { type: 'number', min: '0.000001', max: String(r.qty), step: '0.000001', value: '1', style: 'width:80px;' });
+        return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
+      }).filter(Boolean);
+      if (giveRows.length) giveRows.forEach(r => giveBox.appendChild(r.node));
+      else giveBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'That entity holds no items — use the manual lane below or just use money.'));
+    };
+    fromSel.addEventListener('change', renderGive);
+    renderGive();
+    const addManualGiveRow = () => {
+      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
+      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
+      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
+        el('button.icon-btn', { onclick: () => { manualGiveBox.removeChild(rowNode); manualGiveRows.splice(manualGiveRows.indexOf(entry), 1); } }, '✕'));
+      const entry = { itemSel, qty };
+      manualGiveRows.push(entry);
+      manualGiveBox.appendChild(rowNode);
+    };
+
+    // get: any tradable item + free qty (validated server-side at execution)
+    const getRows = [];
+    const getBox = el('div');
+    const addGetRow = () => {
+      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
+      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
+      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
+        el('button.icon-btn', { onclick: () => { getBox.removeChild(rowNode); getRows.splice(getRows.indexOf(entry), 1); } }, '✕'));
+      const entry = { itemSel, qty };
+      getRows.push(entry);
+      getBox.appendChild(rowNode);
+    };
 
     openModal('NEW ONGOING CONTRACT', el('div',
       el('p', { style: 'font-size:12.5px; color:var(--ink-soft); line-height:1.5; margin:0 0 6px;' },
-        'A standing agreement: every turn the engine delivers the agreed items and settles any agreed payments automatically, until the duration runs out or either party cancels. If you also control the receiving entity it starts immediately; otherwise the recipient must accept first.'),
-      el('label.field-label', 'Delivering entity'), fromSel,
-      el('label.field-label', 'Receiving entity'), toSel,
-      el('label.field-label', 'Item delivered each turn'), itemSel,
-      el('label.field-label', 'Quantity per turn'), qty,
-      el('div.form-grid',
-        el('div', el('label.field-label', 'Deliverer also pays / turn (' + CUR() + ')'), payByFrom),
-        el('div', el('label.field-label', 'Recipient pays back / turn (' + CUR() + ')'), payByTo)),
+        'A standing trade — the same deal you would send as a one-shot offer, but replayed automatically every turn until the duration runs out or either party cancels. Give/get items and money are the same as in a normal trade offer. If you also control the receiving entity it starts immediately; otherwise the recipient must accept first.'),
+      el('label.field-label', 'Contract from'), fromSel,
+      el('label.field-label', 'Contract to'), toSel,
+      el('label.field-label', 'You give each turn (from current stock)'), giveBox,
+      el('div', { style: 'margin:4px 0 8px;' }, manualGiveBox,
+        el('button.dash-btn', { style: 'margin-top:4px;', onclick: addManualGiveRow }, '+ Add give item (any good — for future production)')),
+      el('label.field-label', 'Plus money you give each turn (' + CUR() + ')'), moneyGive,
+      el('label.field-label', 'You request each turn (items)'), getBox,
+      el('button.dash-btn', { style: 'margin:4px 0 10px;', onclick: addGetRow }, '+ Add requested item each turn'),
+      el('label.field-label', 'Plus money you request each turn (' + CUR() + ')'), moneyGet,
       el('label.field-label', 'Duration'),
       el('div', { style: 'display:flex; gap:14px; align-items:center;' },
         el('label', { style: 'display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;' }, foreverCheck, 'Run indefinitely'),
@@ -3997,12 +4056,16 @@ const Views = {
     ), [{
       label: 'Send Contract', onClick: async () => {
         if (fromSel.value === toSel.value) throw new Error('The two parties must differ.');
-        if (!(Number(qty.value) > 0)) throw new Error('Quantity per turn must be positive.');
+        const checkedGive = giveRows.filter(r => r.check.checked).map(r => ({ itemId: r.itemId, qty: Number(r.qty.value) }));
+        const manualGive = manualGiveRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
+        const give = [...checkedGive, ...manualGive];
+        const get = getRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
+        const money = { give: Number(moneyGive.value) || 0, get: Number(moneyGet.value) || 0 };
+        if (!give.length && !get.length && !money.give && !money.get) throw new Error('An offer needs at least one item or amount of money.');
         const r = await POST('/api/trade/contracts', {
           kind: 'transfer',
           fromEntityId: fromSel.value, toEntityId: toSel.value,
-          itemId: itemSel.value, qtyPerTurn: Number(qty.value),
-          payByFrom: Number(payByFrom.value) || 0, payByTo: Number(payByTo.value) || 0,
+          give, get, money,
           durationTurns: foreverCheck.checked ? null : Number(durInput.value),
           memo: memo.value
         });

@@ -4562,7 +4562,7 @@ const Views = {
         bodyEl.textContent = '…';
         this.newsBody(n.id).then(paint).catch(() => { bodyEl.textContent = ''; bodyEl._filled = false; });
       };
-      art.appendChild(el('div.headline', { onclick: () => { fillBody(); art.querySelector('.body').classList.toggle('hidden'); } }, n.headline,
+      art.appendChild(el('div.headline', { onclick: () => { fillBody(); bodyEl.classList.toggle('hidden'); } }, n.headline,
         n.status === 'draft' ? el('span.status-stamp.draft', 'DRAFT') : null));
       art.appendChild(el('div.meta', `${n.category} · ${n.author} · ${fmtDate(n.simDate)} · TURN ${n.turn}`));
       if (isLead) fillBody();

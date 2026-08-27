@@ -100,6 +100,7 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
+  need('tradeContracts', []);             // Phase 4.3 — ongoing trade contracts
   if (!world.settings) { world.settings = {}; changed = true; }
   if (!world.settings.ambience) {
     world.settings.ambience = { traffic: {

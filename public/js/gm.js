@@ -1,6 +1,15 @@
 'use strict';
 /* GM Studio: visual editors for every collection. No SQL, no code. */
 
+// Phase 36 — role abilities (what a role may DO in a conflict). Keys must
+// match server/api.js ABILITIES, which enforces them.
+const ROLE_ABILITIES = [
+  ['command_police', 'Command the police (protests)'],
+  ['authorize_force', 'Authorize force against protestors'],
+  ['command_military', 'Command the national defence (wars)'],
+  ['order_airstrikes', 'Order airstrikes']
+];
+
 // Phase 13 — quick-start templates so a GM can stand up a producing property or
 // a new item in one click. Property patches reference the default commodity
 // items; if an item is missing in a custom world the GM just repicks it.
@@ -2599,7 +2608,7 @@ const GM = {
   /* ═══════════ ROLES & OPERATORS ═══════════ */
   tabRoles(main) {
     main.appendChild(el('div.doc-title', 'Roles & Operators'));
-    main.appendChild(el('div.doc-sub', 'who may see what — actions stay generic, information is clearance'));
+    main.appendChild(el('div.doc-sub', 'who may see what (clearance) and who may do what (abilities)'));
 
     if (!W.gmSub2) W.gmSub2 = 'roles';
     main.appendChild(el('div.chip-row',
@@ -2615,7 +2624,7 @@ const GM = {
     if (!selId) return;
     const isNew = selId === '__new__';
     const source = isNew
-      ? { name: 'New Role', perms: { pages: ['map', 'news', 'timeline'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false } }
+      ? { name: 'New Role', perms: { pages: ['map', 'news', 'timeline'], inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false, abilities: [] } }
       : (S().roles || []).find(r => r.id === selId);
     if (!source) return;
     const d = this.getDraft('role:' + selId, source);
@@ -2657,6 +2666,22 @@ const GM = {
         llabel));
     }
     main.appendChild(layerGrid);
+
+    // Phase 36 — ACTIONS ride explicit abilities, never the clearances above
+    // (keys mirror server/api.js ABILITIES). Ownership still counts on its
+    // own: whoever controls the government commands its forces regardless,
+    // and a protest's organizer can never command the side policing it.
+    main.appendChild(Views.secLabel('Abilities — conflict command'));
+    const abGrid = el('div.perm-grid');
+    d.perms.abilities = Array.isArray(d.perms.abilities) ? d.perms.abilities : [];
+    for (const [aid, alabel] of ROLE_ABILITIES) {
+      abGrid.appendChild(el('label',
+        el('input', { type: 'checkbox', checked: d.perms.abilities.includes(aid), onchange: (e) => { d.perms.abilities = e.target.checked ? [...new Set([...d.perms.abilities, aid])] : d.perms.abilities.filter(x => x !== aid); } }),
+        alabel));
+    }
+    main.appendChild(abGrid);
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-top:4px;' },
+      'Information clearance (above) decides what a role may SEE; abilities decide what it may DO in a war or protest. Controlling the government entity (the President) grants every defence lever regardless.'));
     main.appendChild(this.saveBar('roles', d, isNew));
   },
 

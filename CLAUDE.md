@@ -42,7 +42,7 @@ see [docs/WORLD-DATA.md](docs/WORLD-DATA.md)) — passphrase `arcasia` for all.
    work rides requests through gated ticks (see `market.maybeDayTick`).
 4. **`store.migrate()` is the only place for schema upgrades.** It must stay idempotent and
    additive — it runs on *every* load (every request, in cloud mode). Gate one-shot changes on
-   `world.schema` (currently 4) or a `world._flag`.
+   `world.schema` (currently 16) or a `world._flag`.
 5. **Canonical record + mirror:** shareholder register ↔ share-certificate items
    (`market.setHolding`), `property.ownerId` ↔ deed items (`deeds.transfer`), presidency ↔
    `ent_gov.ceoId/executives` (`sim.syncPresidency`). Always go through the choke point; never

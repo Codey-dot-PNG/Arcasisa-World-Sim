@@ -323,16 +323,16 @@ function seed() {
   const PAGES_ALL = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'war'];
   function role(id, name, perms) { return { id, name, builtin: true, perms }; }
   const roles = [
-    role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['timeline', 'gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true }),
+    role('gamemaster', 'Gamemaster', { pages: PAGES_ALL.concat(['timeline', 'gm']), inventories: 'all', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: true, gm: true, abilities: ['command_police', 'authorize_force', 'command_military', 'order_airstrikes'] }),
     role('citizen', 'Citizen', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political'], manageNews: false, gm: false }),
     role('mp', 'MP', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
     role('judge', 'Judge', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data'], manageNews: false, gm: false }),
     role('executive', 'Executive (Company)', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: true, government: false, statistics: true, mapLayers: ['political', 'ownership'], manageNews: false, gm: false }),
-    role('president', 'President', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: false, gm: false }),
-    role('minister', 'Cabinet Minister', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
+    role('president', 'President', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'ownership', 'military'], manageNews: false, gm: false, abilities: ['command_police', 'authorize_force', 'command_military', 'order_airstrikes'] }),
+    role('minister', 'Cabinet Minister', { pages: PAGES_ALL, inventories: 'own', accounts: 'all', companyFinancials: true, government: true, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false, abilities: ['command_police', 'authorize_force', 'command_military'] }),
     role('journalist', 'Journalist', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data'], manageNews: true, gm: false }),
-    role('police', 'Police', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false }),
-    role('military', 'Military', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false })
+    role('police', 'Police', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: true, mapLayers: ['political', 'data', 'military'], manageNews: false, gm: false, abilities: ['command_police'] }),
+    role('military', 'Military', { pages: PAGES_ALL, inventories: 'own', accounts: 'own', companyFinancials: false, government: false, statistics: false, mapLayers: ['political', 'military'], manageNews: false, gm: false, abilities: ['command_military', 'order_airstrikes'] })
   ];
 
   // ---- users -------------------------------------------------------------

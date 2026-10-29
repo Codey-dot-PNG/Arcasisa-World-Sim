@@ -70,8 +70,20 @@ const PROTEST_DEFAULTS = {
   refugeeRiotFrac: 0.04,   // fraction of a province's population fleeing per riot wave
   refugeeRiotEvery: 4,     // riot refugee wave cadence (ticks)
   dmg: 1,                  // default violence multiplier (GM-adjustable)
-  hp: 1
+  hp: 1,
+  // Phase 36 — public opinion (applyProtestPolitics). Every politicsEvery
+  // ticks each province's crowd presence (live protestor strength ÷
+  // refCrowd, capped 1.5) moves opinion by these per-pass amounts:
+  politicsEvery: 15,       // ticks between opinion passes (~30s at 1×)
+  refCrowd: 10000,         // crowd size that counts as full intensity
+  sympathyPerPass: 0.15,   // organizer's party support gained (peaceful)
+  pressurePerPass: 0.12,   // government approval lost
+  backlashPerPass: 0.2,    // organizer's party support LOST while the crowds riot
+  crackdownMult: 3,        // force against a peaceful crowd: approval loss ×this, sympathy ×2
+  concedeSupport: 3,       // one-off support for the organizer when the government concedes
+  applications: true       // players may petition the GM to start a protest
 };
+const MAX_PROTEST_UNITS = 300;
 function protestCfg(db) {
   return Object.assign({}, PROTEST_DEFAULTS, (((db.settings || {}).war || {}).protest) || {});
 }
@@ -235,7 +247,12 @@ function logAiNotes(db, war) {
 function applyDevastation(db, key) {
   const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active) return;
-  if (war.kind === 'protest') { applyRiotDevastation(db, war); return; }
+  if (war.kind === 'protest') {
+    applyProtestPolitics(db, war);
+    trackUnrestCities(db, war);
+    applyRiotDevastation(db, war);
+    return;
+  }
   const cfg = warCfg(db);
   war.stats._refStage = war.stats._refStage || {};
 
@@ -322,6 +339,106 @@ function applyRiotDevastation(db, war) {
     SERVER_CTX.news('CIVILIAN TOLL OF THE UNREST MOUNTS',
       `Officials now put the number of civilians killed since the unrest began at more than ${Math.round(civ / 1000) * 1000}. Hospitals near the affected districts are past capacity.`);
   }
+}
+
+// ---------- protest public opinion (Phase 36) ----------
+// A movement exists to change minds, yet a protest used to touch only the
+// economy (strikes) and — once violent — the population. AUTHORITY-ONLY like
+// the riot toll: every `politicsEvery` ticks (tick-accounted, so a catch-up
+// burst of several ticks in one call still applies the right number of
+// passes) each province's crowd presence moves opinion there:
+//   peaceful, no force   → the organizer's party gains sympathy (permanent
+//                          `support`, the same bucket campaigns fill) and the
+//                          government's approval erodes;
+//   force vs a peaceful  → a crackdown: sympathy doubles and the approval
+//   crowd                  loss is multiplied by crackdownMult;
+//   violent crowds       → backlash: the party LOSES support, the government
+//                          only loses half the usual approval.
+// Riots and crackdowns also dent happiness. Running totals live on
+// war.stats.politics for the War Room's "Public Opinion" readout.
+// Which party a protest's support flows to: the organizer itself when it is
+// a party, otherwise the party the organizer leads (a party leader marching
+// under their own name still builds their party). Generic — no ids.
+function protestParty(db, organizerId) {
+  const org = db.entities.find(e => e.id === organizerId);
+  if (!org) return null;
+  if (org.type === 'party') return org;
+  return db.entities.find(e => e.type === 'party' && e.leaderId === org.id) || null;
+}
+const r2 = (n) => Math.round(n * 100) / 100;
+function applyProtestPolitics(db, war) {
+  const p = war.protest;
+  if (!p) return;
+  const cfg = protestCfg(db);
+  const every = Math.max(2, Math.round(Number(cfg.politicsEvery) || 15));
+  war.stats = war.stats || {};
+  const last = Number.isFinite(war.stats._politicsAt) ? war.stats._politicsAt : 0;
+  const passes = Math.floor((war.tick - last) / every);
+  if (passes <= 0) return;
+  war.stats._politicsAt = last + passes * every;
+  const ref = Math.max(100, Number(cfg.refCrowd) || 10000);
+  const crowd = {};
+  for (const u of war.units) {
+    if (u.side !== 'att' || !isLive(u) || !Array.isArray(u.pos)) continue;
+    const pid = geometry.provinceAt(db.provinces, u.pos);
+    if (pid) crowd[pid] = (crowd[pid] || 0) + (u.strength || 0);
+  }
+  const violent = !!p.protestorsViolent;
+  const crackdown = !violent && !!p.govViolent;
+  const sym = Math.max(0, Number(cfg.sympathyPerPass) || 0);
+  const pres = Math.max(0, Number(cfg.pressurePerPass) || 0);
+  const back = Math.max(0, Number(cfg.backlashPerPass) || 0);
+  const mult = Math.max(1, Number(cfg.crackdownMult) || 1);
+  const party = protestParty(db, p.organizerId || war.attackerId);
+  const pol = war.stats.politics = war.stats.politics || { support: {}, approval: {} };
+  pol.partyId = party ? party.id : null;
+  pol.mood = violent ? 'backlash' : (crackdown ? 'crackdown' : 'sympathy');
+  for (const pid in crowd) {
+    const prov = db.provinces.find(x => x.id === pid);
+    if (!prov) continue;
+    const k = Math.min(1.5, crowd[pid] / ref) * passes;
+    const dSupport = violent ? -back * k : sym * k * (crackdown ? 2 : 1);
+    const dApproval = -pres * k * (violent ? 0.5 : (crackdown ? mult : 1));
+    if (party && dSupport) {
+      party.support = party.support || {};
+      const bucket = party.support[pid] = party.support[pid] || {};
+      bucket.all = r2((bucket.all || 0) + dSupport);
+      pol.support[pid] = r2((pol.support[pid] || 0) + dSupport);
+    }
+    if (dApproval && prov.vars && Number.isFinite(Number(prov.vars.approval))) {
+      const before = Number(prov.vars.approval);
+      prov.vars.approval = Math.max(0, Math.min(100, r2(before + dApproval)));
+      pol.approval[pid] = r2((pol.approval[pid] || 0) + (prov.vars.approval - before));
+    }
+    if ((violent || crackdown) && prov.vars && Number.isFinite(Number(prov.vars.happiness))) {
+      prov.vars.happiness = Math.max(0, Math.min(100, r2(Number(prov.vars.happiness) - 0.1 * k)));
+    }
+  }
+}
+// Cities with a live crowd within UNREST_RADIUS — the War Room's "Cities in
+// unrest" counter (a protest never captures cities, so citiesHeld stayed 0).
+const UNREST_RADIUS = 150;
+function trackUnrestCities(db, war) {
+  const crowds = war.units.filter(u => u.side === 'att' && isLive(u) && Array.isArray(u.pos));
+  war.stats.unrestCities = (db.cities || [])
+    .filter(c => Array.isArray(c.pos) && crowds.some(u => dist(u.pos, c.pos) <= UNREST_RADIUS))
+    .map(c => c.id);
+}
+// One closing line for the record when a protest ends by ANY path (GM end,
+// call-off, concession, dispersal): what the movement did to public opinion.
+function summarizeProtestPolitics(db, war, actor) {
+  if (!war || war.kind !== 'protest' || war._politicsSummarized) return;
+  war._politicsSummarized = true;
+  const pol = (war.stats || {}).politics;
+  if (!pol) return;
+  const sum = (o) => Object.values(o || {}).reduce((s, v) => s + (Number(v) || 0), 0);
+  const party = pol.partyId ? db.entities.find(e => e.id === pol.partyId) : null;
+  const sup = r2(sum(pol.support)), appr = r2(sum(pol.approval));
+  if (!sup && !appr) return;
+  store.log('politics', `${war.name}: the protest’s political toll`,
+    (party ? `${party.name} support ${sup >= 0 ? '+' : ''}${sup} (summed over provinces)` : 'No party carried the movement') +
+    ` · government approval ${appr >= 0 ? '+' : ''}${appr} points across affected provinces.`,
+    actor || 'WAR ENGINE', [war.attackerId, war.defenderId].filter(Boolean));
 }
 
 // ---------- occupation ownership (Task 2: occupation transfers property) ----------
@@ -509,7 +626,13 @@ function resupplyUnits(db, war) {
       for (const t of tanks) { const row = invGet(u.inv, t.id); if (row && row.qty > 0) { fu += (Number(t.meta.weapon.fuelUse) || 0.5) * row.qty; fn += row.qty; } }
       if (fn > 0) fuelUseMul = 0.5 + fu / fn; // ~1 for a mid tank, up to ~1.6 for the thirstiest
     }
-    const tankSize = (u.strength || 0) * fuelPerStrength * fuelUseMul;
+    // Phase 36 — a protest crowd marches on foot: no fuel tank (it neither
+    // drinks the organizer's fuel stock nor gets a motor-speed bonus), and it
+    // only breaks out the movement's weapons once it has turned violent — a
+    // peaceful march used to strip the organizer's arsenal into its packs.
+    const onFoot = u.kind === 'protestor';
+    const armsDrawn = !onFoot || !!(war.protest && war.protest.protestorsViolent);
+    const tankSize = onFoot ? 0 : (u.strength || 0) * fuelPerStrength * fuelUseMul;
 
     if (spec) {
       const fighting = u.state === 'fighting';
@@ -542,7 +665,7 @@ function resupplyUnits(db, war) {
     if (u.supplied !== false) {
       const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
       const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
-      if (spec) {
+      if (spec && armsDrawn) {
         let carriedNow = 0;
         for (const r of u.inv) if (spec.ids.has(r.itemId)) carriedNow += (r.qty || 0);
         let need = spec.capacity - carriedNow;
@@ -1324,9 +1447,11 @@ function demobilizeUnits(db, war, actor) {
   });
   if (parts.length) store.log('event', 'Forces demobilised', `Surviving formations returned their equipment to the national stockpiles: ${parts.join('; ')}.`, actor || 'WAR ENGINE', [war.attackerId, war.defenderId]);
 }
-function endWar(db, actor, reason, key) {
+function endWar(db, actor, reason, key, opts) {
   // Protests share the war lifecycle (dual conflict docs — see startProtest):
   // `key` picks which document ends, defaulting to the invasion war.
+  // opts.quiet skips the generic closing wire piece (concludeProtest drafts
+  // its own, more specific one).
   const war = key === 'protest' ? db.protest : db.war;
   if (!war) return null;
   war.active = false;
@@ -1340,18 +1465,144 @@ function endWar(db, actor, reason, key) {
     }
     war.refugees = [];
   }
-  // Task 2: occupied properties stay with their occupier permanently — this
-  // does NOT touch property.ownerId, only clears the stash so a FUTURE war
-  // re-stashes fresh original owners instead of reaching back through this one.
-  for (const prop of (db.properties || [])) {
-    if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+  // Occupation ownership bookkeeping belongs only to the invasion war. A
+  // protest can end while that war is still active; clearing its stash here
+  // would prevent the active war from restoring property on recapture.
+  if (war.kind !== 'protest') {
+    for (const prop of (db.properties || [])) {
+      if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+    }
   }
   demobilizeUnits(db, war, actor);
   store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   if (war.kind === 'protest') {
-    SERVER_CTX.news('THE STREETS FALL QUIET', 'The protests have ended. Banners are being folded away and the affected districts return to their daily routines.');
+    summarizeProtestPolitics(db, war, actor);
+    if (!(opts && opts.quiet)) SERVER_CTX.news('THE STREETS FALL QUIET', 'The protests have ended. Banners are being folded away and the affected districts return to their daily routines.');
   }
   return war;
+}
+
+// ---------- protest exits & applications (Phase 36) ----------
+// The political ends of a protest, beside the GM's abort and the engine's
+// dispersal: the organizer CALLS IT OFF ('disband' — no winner, nothing
+// more), or the government CONCEDES ('concede' — the movement wins and its
+// party banks settings concedeSupport in every province the movement
+// touched). Route-level authority lives in api.js cmdAccessOf.
+function concludeProtest(db, kind, actor) {
+  const war = db.protest;
+  if (!war || !war.active) return { ok: false, error: 'No protest is active.' };
+  const p = war.protest || {};
+  const org = db.entities.find(e => e.id === (p.organizerId || war.attackerId));
+  const orgName = org ? org.name : 'the organizers';
+  const endedAt = new Date().toISOString();
+  if (kind === 'concede') {
+    war.result = { winner: 'att', endedAt, reason: 'The government conceded to the protestors’ demands' };
+    const cfg = protestCfg(db);
+    const bonus = Math.max(0, Number(cfg.concedeSupport) || 0);
+    const party = protestParty(db, p.organizerId || war.attackerId);
+    if (party && bonus) {
+      // provinces the movement touched: its rally cities plus anywhere a
+      // crowd stands right now
+      const provs = new Set();
+      for (const cid of (p.baseCities || [])) { const c = db.cities.find(x => x.id === cid); if (c && c.provinceId) provs.add(c.provinceId); }
+      for (const u of war.units) {
+        if (u.side !== 'att' || !isLive(u) || !Array.isArray(u.pos)) continue;
+        const pid = geometry.provinceAt(db.provinces, u.pos);
+        if (pid) provs.add(pid);
+      }
+      war.stats.politics = war.stats.politics || { support: {}, approval: {} };
+      war.stats.politics.partyId = party.id;
+      party.support = party.support || {};
+      for (const pid of provs) {
+        const bucket = party.support[pid] = party.support[pid] || {};
+        bucket.all = r2((bucket.all || 0) + bonus);
+        war.stats.politics.support[pid] = r2((war.stats.politics.support[pid] || 0) + bonus);
+      }
+    }
+    SERVER_CTX.news('GOVERNMENT BOWS TO THE STREETS',
+      `The government has conceded to the demands of ${orgName}${p.demands ? ` — “${p.demands}”` : ''}. Jubilant crowds are dispersing, claiming victory.`);
+  } else {
+    war.result = { winner: null, endedAt, reason: 'Called off by the organizers' };
+    SERVER_CTX.news('ORGANIZERS CALL OFF THE PROTEST',
+      `${orgName} has called on its supporters to leave the streets. The crowds are dispersing peacefully.`);
+  }
+  store.log('politics', kind === 'concede' ? `Government concedes to ${war.name}` : `${war.name} called off`,
+    war.result.reason, actor || 'WAR ENGINE', [war.attackerId, war.defenderId].filter(Boolean));
+  endWar(db, actor, war.result.reason, 'protest', { quiet: true });
+  return { ok: true, result: war.result };
+}
+
+const APP_MAX_CITIES = 3, APP_MAX_CROWDS = 3, APP_MIN_SIZE = 500, APP_MAX_SIZE = 5000;
+const APP_ORGANIZER_TYPES = ['party', 'person', 'org', 'company'];
+// A player's petition to take a movement to the streets — sized well below
+// the GM's own start form (≤3 cities × ≤3 crowds × ≤5000) so an approval can
+// never surprise the GM with a city-swamping deployment; the GM may resize
+// at approval. The caller (api.js) has already checked the filer controls
+// the organizer.
+function fileProtestApplication(db, b, actor, byEntityId) {
+  const cfg = protestCfg(db);
+  if (cfg.applications === false) throw new Error('The Gamemaster is not accepting protest applications right now.');
+  const organizer = db.entities.find(e => e.id === b.organizerId);
+  if (!organizer) throw new Error('Unknown organizer.');
+  if (!APP_ORGANIZER_TYPES.includes(organizer.type)) throw new Error('Only a party, organisation, company or person can organize a protest.');
+  db.protestApplications = Array.isArray(db.protestApplications) ? db.protestApplications : [];
+  if (db.protestApplications.some(a => a.organizerId === organizer.id && a.status === 'pending')) {
+    throw new Error(`${organizer.name} already has an application awaiting the Gamemaster.`);
+  }
+  const baseCities = [...new Set((Array.isArray(b.baseCities) ? b.baseCities : []).filter(id => db.cities.some(c => c.id === id)))];
+  if (!baseCities.length) throw new Error('Choose at least one city to rally in.');
+  if (baseCities.length > APP_MAX_CITIES) throw new Error(`A petition may name at most ${APP_MAX_CITIES} cities.`);
+  const app = {
+    id: store.uid('papp'),
+    organizerId: organizer.id,
+    name: (typeof b.name === 'string' && b.name.trim().slice(0, 60)) || `${organizer.name} rally`,
+    demands: String(b.demands || '').trim().slice(0, 400),
+    baseCities,
+    crowds: engine.clamp(Math.round(Number(b.crowds) || 1), 1, APP_MAX_CROWDS),
+    perCity: engine.clamp(Math.round(Number(b.perCity) || 2000), APP_MIN_SIZE, APP_MAX_SIZE),
+    status: 'pending', filedBy: actor, filedByEntityId: byEntityId || null,
+    ts: Date.now(), turn: db.settings.time.turn
+  };
+  db.protestApplications.push(app);
+  // Keep the queue bounded: drop the oldest DECIDED entries first.
+  while (db.protestApplications.length > 60) {
+    const i = db.protestApplications.findIndex(a => a.status !== 'pending');
+    db.protestApplications.splice(i >= 0 ? i : 0, 1);
+  }
+  const where = baseCities.map(id => (db.cities.find(c => c.id === id) || {}).name || id).join(', ');
+  store.log('politics', `Protest application filed: ${app.name}`, `${organizer.name} petitions to rally in ${where}.`, actor, [organizer.id]);
+  return app;
+}
+// The GM's verdict. Approval starts the protest from the petition (name/
+// crowds/perCity overridable) with police in opts.policeCities — defaulting
+// to the capital, the one deployment every world has.
+function decideProtestApplication(db, id, verdict, opts, actor) {
+  const app = (db.protestApplications || []).find(a => a.id === id);
+  if (!app) throw new Error('No such application.');
+  if (app.status !== 'pending') throw new Error('That application has already been decided.');
+  if (verdict === 'deny') {
+    app.status = 'denied';
+    app.note = String(opts.note || '').trim().slice(0, 240);
+    app.decidedBy = actor; app.decidedAt = Date.now();
+    store.log('politics', `Protest application denied: ${app.name}`, app.note, actor, [app.organizerId]);
+    return app;
+  }
+  let police = Array.isArray(opts.policeCities) ? opts.policeCities : null;
+  if (!police) {
+    const cap = db.cities.find(c => c.isCapital) || db.cities[0];
+    police = cap ? [cap.id] : [];
+  }
+  startProtest(db, {
+    name: opts.name || app.name, organizerId: app.organizerId,
+    baseCities: app.baseCities, policeCities: police,
+    crowds: opts.crowds !== undefined ? opts.crowds : app.crowds,
+    perCity: opts.perCity !== undefined ? opts.perCity : app.perCity,
+    demands: app.demands, applicationId: app.id
+  }, actor);
+  app.status = 'approved';
+  app.note = String(opts.note || '').trim().slice(0, 240);
+  app.decidedBy = actor; app.decidedAt = Date.now();
+  return app;
 }
 
 // ---------- player command entry point ----------
@@ -1387,6 +1638,9 @@ function spawnUnits(db, opts, actor, key) {
     return { ok: false, error: 'Invalid spawn position.' };
   }
   const count = engine.clamp(Math.round(Number(opts.count) || 1), SPAWN_MIN_COUNT, SPAWN_MAX_COUNT);
+  if (war.kind === 'protest' && war.units.filter(isLive).length + count > MAX_PROTEST_UNITS) {
+    return { ok: false, error: `A protest is limited to ${MAX_PROTEST_UNITS} live units. Disperse units before spawning more.` };
+  }
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
   const kind = (typeof opts.kind === 'string' && opts.kind.trim()) || 'infantry';
   const def = unitDefaults[kind] || { strength: 2000, speed: 4, atk: 1 };
@@ -1647,16 +1901,20 @@ function startProtest(db, opts, actor) {
   const defender = db.entities.find(e => e.id === opts.defenderId) || db.entities.find(e => e.type === 'government');
   if (!defender) throw new Error('Unknown defender entity.');
   const cityOf = (id) => db.cities.find(c => c.id === id);
-  const baseIds = Array.isArray(opts.baseCities) ? opts.baseCities.filter(id => !!cityOf(id)) : [];
-  const policeIds = (Array.isArray(opts.policeCities) ? opts.policeCities.filter(id => !!cityOf(id)) : []).filter(id => !baseIds.includes(id));
+  const baseIds = Array.isArray(opts.baseCities) ? [...new Set(opts.baseCities.filter(id => !!cityOf(id)))] : [];
+  const policeIds = (Array.isArray(opts.policeCities) ? [...new Set(opts.policeCities.filter(id => !!cityOf(id)))] : []).filter(id => !baseIds.includes(id));
   if (!baseIds.length) throw new Error('At least one base city is required.');
+  const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
+  const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
+  const deploymentSize = baseIds.length * crowdCount + policeIds.length * 2;
+  if (deploymentSize > MAX_PROTEST_UNITS) {
+    throw new Error(`Protest deployment is ${deploymentSize} units; the limit is ${MAX_PROTEST_UNITS}. Reduce the cities or crowds per city.`);
+  }
   const cfg = protestCfg(db);
   const grid = buildGrid(db);
   engine.ensureNavalGrid(db);
   const wf = { grid }; // grid facade for clampToWorld
   const cityPt = (c) => engine.clampToWorld(wf, [c.pos[0] + rand(-30, 30), c.pos[1] + rand(-30, 30)]);
-  const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
-  const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
   const units = [];
   let n = 0;
   for (const cid of baseIds) {
@@ -1713,7 +1971,11 @@ function startProtest(db, opts, actor) {
         refugeeFrac: cfg.refugeeRiotFrac,
         refugeeEvery: cfg.refugeeRiotEvery
       },
-      strikeCityNames: baseIds.map(id => cityOf(id).name)
+      strikeCityNames: baseIds.map(id => cityOf(id).name),
+      // Phase 36 — what the movement wants (shown in the War Room and the
+      // opening wire piece) and, for a player petition, its application id.
+      demands: String(opts.demands || '').trim().slice(0, 400),
+      applicationId: opts.applicationId || null
     },
     result: null
   };
@@ -1721,8 +1983,11 @@ function startProtest(db, opts, actor) {
   store.log('gm', 'Protest started',
     `${name}: ${units.filter(u => u.side === 'att').length} crowd${units.filter(u => u.side === 'att').length === 1 ? '' : 's'} (${attTotal.toLocaleString('en-US')} strong) gathered in ${civNames}; police deployed in ${policeIds.length} cit${policeIds.length === 1 ? 'y' : 'ies'}.`,
     actor || 'WAR ENGINE', [organizer.id, defender.id]);
+  const demands = db.protest.protest.demands;
   SERVER_CTX.news(`${name.toUpperCase()}: CROWDS GATHER IN THE STREETS`,
-    `Mass demonstrations are underway in ${civNames} as supporters of ${organizer.name} take to the streets. The government has ordered police to the affected districts.`);
+    `Mass demonstrations are underway in ${civNames} as supporters of ${organizer.name} take to the streets.` +
+    (demands ? ` Their demand: “${demands}”` : '') +
+    ` The government has ordered police to the affected districts.`);
   return db.protest;
 }
 
@@ -1957,6 +2222,12 @@ function dropBomb(db, side, pos, actor, key) {
   if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
   const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
+  // Phase 36 — a protest climbs the same escalation ladder as its ground
+  // forces: no bombs until force has been authorized (a peaceful sit-in used
+  // to be a legitimate air target at any stage).
+  if (war.kind === 'protest' && !(war.protest && war.protest.govViolent)) {
+    return { ok: false, error: 'Force has not been authorized against the protest — the air wing stays grounded.' };
+  }
   war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };
   const bomb = war.bombs[side] = war.bombs[side] || { cooldownUntil: 0 };
   const now = Date.now();
@@ -2121,7 +2392,10 @@ function tickConflict(db, key, force) {
   // The engine ends conflicts itself (annihilation, total conquest, protest
   // dispersal) without going through endWar — catch that here so the
   // survivors still demobilise.
-  if (ticked && doc && !doc.active) demobilizeUnits(db, doc, 'WAR ENGINE');
+  if (ticked && doc && !doc.active) {
+    demobilizeUnits(db, doc, 'WAR ENGINE');
+    if (doc.kind === 'protest') summarizeProtestPolitics(db, doc, 'WAR ENGINE');
+  }
   return ticked;
 }
 function warTick(db) {
@@ -2161,4 +2435,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

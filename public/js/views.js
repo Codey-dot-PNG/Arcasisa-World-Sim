@@ -833,9 +833,10 @@ const Views = {
   },
   transferModal(prefToAcct) {
     // "my" accounts = the whole ownership chain (own entity + controlled
-    // companies + their subsidiaries), matching what the server lets us move
+    // companies + their subsidiaries) plus accounts delegated to us with a
+    // 'spend' grant (Phase 36), matching what the server lets us move
     const mine = ownershipSetClient();
-    const my = isGM() ? S().accounts : (S().accounts || []).filter(a => mine.has(a.ownerId));
+    const my = isGM() ? S().accounts : (S().accounts || []).filter(a => canSpendFromClient(a, mine));
     if (!my.length) return toast('You control no accounts.', true);
 
     let fromId = my[0].id;
@@ -933,8 +934,9 @@ const Views = {
   },
 
   tradeModal(prefItem, prefTo) {
-    // sender can be any entity in the controlled chain that holds something
-    const mine = ownershipSetClient();
+    // sender can be any entity in the controlled chain (or one we hold a
+    // trade grant on — Phase 36) that holds something
+    const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => (isGM() || mine.has(e.id)) && (e.inventory || []).length);
     if (!sources.length) return toast('No inventory to send — you and your companies hold nothing.', true);
     let fromId = sources.some(s => s.id === W.me.entityId) ? W.me.entityId : sources[0].id;
@@ -3123,7 +3125,7 @@ const Views = {
      Economy tab badge and the Trade sub-tab badge */
   openIncomingTrades() {
     if (!W.me || !W.me.entityId) return [];
-    const mine = ownershipSetClient();
+    const mine = actsForSetClient('trade');
     return (S().trades || []).filter(t => t.status === 'open' && mine.has(t.toEntityId));
   },
 
@@ -3134,7 +3136,7 @@ const Views = {
     if (!S()) return [];
     const mine = W.me && W.me.entityId;
     return S().entities.filter(e => e.type === 'company' &&
-      (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id)))));
+      (isGM() || (mine && (e.ceoId === mine || ownership_controlsClient(mine, e.id) || grantCoversClient(e.id, 'company_controls')))));
   },
   // Any property whose owner sits in the current user's control chain is
   // actionable here, including properties owned directly by a person. Sales &
@@ -3144,8 +3146,12 @@ const Views = {
   opsProperties() {
     if (!S()) return [];
     const mine = W.me && W.me.entityId;
+    // Phase 36: a property_controls grant (optionally narrowed to listed
+    // sites) on the owner opens the site desk too
+    const delegated = (pr) => grantCoversClient(pr.ownerId, 'property_controls') &&
+      (!S().myGrants[pr.ownerId].properties.length || S().myGrants[pr.ownerId].properties.includes(pr.id));
     return S().properties.filter(pr => pr.ownerId &&
-      (isGM() || (mine && ownership_controlsClient(mine, pr.ownerId))));
+      (isGM() || (mine && (ownership_controlsClient(mine, pr.ownerId) || delegated(pr)))));
   },
   govEntity() {
     return S().entities.find(e => e.id === 'ent_gov') || S().entities.find(e => e.type === 'government');
@@ -3197,7 +3203,7 @@ const Views = {
 
   /* ---- Inventory (everything the operator's ownership chain holds) ---- */
   viewInventory(inner) {
-    const mine = ownershipSetClient();
+    const mine = actsForSetClient('trade'); // chain + entities delegated to us for trading
     const gm = isGM();
     const holders = S().entities.filter(e => (gm || mine.has(e.id)) && (e.inventory || []).length);
     const sites = S().properties.filter(pr => (pr.inventory || []).length && (gm || (pr.ownerId && mine.has(pr.ownerId))));
@@ -3248,11 +3254,14 @@ const Views = {
     inner.appendChild(this.statStrip(cells));
 
     const mineSet = ownershipSetClient();
-    const myAccts = (S().accounts || []).filter(a => mineSet.has(a.ownerId));
+    const myAccts = (S().accounts || []).filter(a => canSpendFromClient(a, mineSet) && (isGM() ? mineSet.has(a.ownerId) : true));
     if (myAccts.length) {
       inner.appendChild(this.secLabel('Your Accounts'));
       const box = el('div.stage');
-      myAccts.forEach(a => box.appendChild(this.kv((a.ownerId === W.me.entityId ? '' : entName(a.ownerId) + ' — ') + a.name, fmtMoney(a.balance))));
+      // accounts held only through a roster 'spend' grant are labelled as
+      // delegated — they are the grantor's money, not the operator's
+      myAccts.forEach(a => box.appendChild(this.kv((a.ownerId === W.me.entityId ? '' : entName(a.ownerId) + ' — ') + a.name +
+        (mineSet.has(a.ownerId) || isGM() ? '' : ' (delegated)'), fmtMoney(a.balance))));
       box.appendChild(el('div.btn-row', el('button.solid-btn', { onclick: () => this.transferModal() }, CUR() + ' Wire Transfer')));
       inner.appendChild(box);
     }
@@ -3261,7 +3270,10 @@ const Views = {
     // values the listed companies
     const pies = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
     const byOwner = {};
-    for (const a of S().accounts) byOwner[a.ownerId] = (byOwner[a.ownerId] || 0) + a.balance;
+    const seeAll = perms().accounts === 'all' || isGM();
+    // "Your Money" means the chain's money — not accounts visible only
+    // through a delegation grant (Phase 36)
+    for (const a of S().accounts) if (seeAll || mineSet.has(a.ownerId)) byOwner[a.ownerId] = (byOwner[a.ownerId] || 0) + a.balance;
     const holderRows = Object.keys(byOwner)
       .map(oid => ({ label: entName(oid), value: byOwner[oid], color: (entById(oid) || {}).color, onClick: () => select('entity', oid) }));
     if (holderRows.filter(r => r.value > 0).length > 1) {
@@ -3870,7 +3882,7 @@ const Views = {
   /* ---- Trade offers (Phase 4.3) + ongoing P2P contracts ---- */
   viewTrade(inner) {
     const myEnt = myEntity();
-    const mine = ownershipSetClient();
+    const mine = actsForSetClient('trade');
     const trades = [...(S().trades || [])].reverse();
     const open = trades.filter(t => t.status === 'open');
     const closed = trades.filter(t => t.status !== 'open').slice(0, 20);
@@ -3977,7 +3989,7 @@ const Views = {
      shape as a negotiated trade offer (see tradeOfferComposer), plus a duration.
      Every turn the engine replays that trade as a standing agreement. */
   contractComposer() {
-    const mine = ownershipSetClient();
+    const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to contract from.', true);
     const fromSel = el('select.text-input', sources.map(e =>
@@ -4116,8 +4128,9 @@ const Views = {
   tradeOfferComposer() {
     const myEnt = myEntity();
     if (!myEnt && !isGM()) return toast('You have no entity to trade from.', true);
-    // offer can come from any entity in the controlled chain
-    const mine = ownershipSetClient();
+    // offer can come from any entity in the controlled chain (or one we
+    // hold a trade grant on)
+    const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to trade from.', true);
     const fromSel = el('select.text-input', sources.map(e =>

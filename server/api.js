@@ -257,25 +257,69 @@ function warForPlayers(war, db, u) {
   }
   return out;
 }
-// Who may command what in a conflict (Phase 31 protests): attacker-side
-// commands belong to the GM or whichever operator CONTROLS the organizer
-// entity (a party leader commands their own party's crowds — the ownership
-// chain covers person → party leader); the defence belongs to the GM,
-// controllers of the defender entity, government-clearance operators and
-// anyone holding the 'military' map layer (the National Police file under
-// the military staff). Enforced server-side on every command/bomb route and
-// shipped inside warForPlayers so the client only offers command UI to
-// operators with a side to command.
+// Role abilities (Phase 36 — permissions overhaul). ACTIONS in a conflict
+// ride these explicit, GM-editable flags on `role.perms.abilities`, never the
+// information clearances (government info, map layers) that used to imply
+// them. The client mirrors this catalogue for the Roles editor (gm.js
+// ROLE_ABILITIES) — keep the keys in lockstep. Seeded per builtin role by
+// store.migrate (`world._abilitiesSeeded`).
+const ABILITIES = {
+  command_police: 'Command the police in a protest',
+  authorize_force: 'Authorize force against protestors',
+  command_military: 'Command the national defence in a war',
+  order_airstrikes: 'Order airstrikes'
+};
+function hasAbility(u, key) {
+  const p = (u && u.role && u.role.perms) || {};
+  return !!(p.gm || (Array.isArray(p.abilities) && p.abilities.includes(key)));
+}
+// Who may do what in a conflict (Phase 31 protests, reworked in Phase 36).
+// Every field is enforced server-side on its route and shipped inside the
+// conflict view so the client only offers what the server will accept:
+//   att      move attacker-side units — controllers of the attacker (a
+//            protest's organizer, a war's invading power) or a
+//            command_units roster grantee on it
+//   attLead  direct the attacking side itself (protest violence/capture
+//            toggles, calling the protest off) — the ownership chain only
+//   def      move defender-side units — controllers of the defender, a
+//            command_units grantee, or the role ability for this conflict
+//            kind (command_police in a protest, command_military in a war)
+//   defAll   def without a grantee's unit filter
+//   force    authorize force against a protest — defender chain or the
+//            authorize_force ability
+//   air      order airstrikes — defender chain or order_airstrikes
+//   concede  concede a protest's demands — the defender chain only
+// Conflict-of-interest guard: whoever directs the attacking side can never
+// also command, authorize force against, or bomb it (an opposition leader
+// with an MP's clearance used to be able to order the police to charge their
+// own rally). The GM holds every lever.
 function cmdAccessOf(db, war, u) {
-  const perms = u.role.perms;
-  // Phase 35: use canAct with command_units scope; falls back to roster grants
-  const def = !!(perms.gm || perms.government ||
-    (perms.mapLayers || []).includes('military') ||
-    (war && war.defenderId && ownership.canAct(db, u.user.entityId, war.defenderId, 'command_units')));
-  const att = !!(perms.gm ||
-    (war && war.kind === 'protest' && war.protest && war.protest.organizerId &&
-      ownership.canAct(db, u.user.entityId, war.protest.organizerId, 'command_units')));
-  return { att, def };
+  if (u.role.perms.gm) return { att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true };
+  const me = u.user.entityId;
+  const protest = !!(war && war.kind === 'protest');
+  const attackerId = war ? (protest && war.protest && war.protest.organizerId) || war.attackerId : null;
+  const defenderId = war && war.defenderId;
+  const attLead = !!(me && attackerId && ownership.controls(me, attackerId));
+  const att = attLead || !!(me && attackerId && ownership.canAct(db, me, attackerId, 'command_units'));
+  const defChain = !att && !!(me && defenderId && ownership.controls(me, defenderId));
+  const defAbility = !att && hasAbility(u, protest ? 'command_police' : 'command_military');
+  const defGrant = !att && !!(me && defenderId && ownership.canAct(db, me, defenderId, 'command_units'));
+  return {
+    att, attLead,
+    def: defChain || defAbility || defGrant,
+    defAll: defChain || defAbility,
+    force: protest && !att && (defChain || hasAbility(u, 'authorize_force')),
+    air: !att && (defChain || hasAbility(u, 'order_airstrikes')),
+    concede: protest && defChain
+  };
+}
+// One conflict doc (war or protest) as `u` sees it: the GM gets the raw doc,
+// everyone else the redacted fog-of-war view; both carry cmdAccess (the GM's
+// used to be missing, so the War Room never drew the GM's protest toggles).
+function conflictView(doc, db, u) {
+  if (!doc) return null;
+  if (u.role.perms.gm) return { ...warWithAircraftCapacity(doc, db), cmdAccess: cmdAccessOf(db, doc, u) };
+  return warForPlayers(doc, db, u);
 }
 
 // Phase 35 — approval-queue replay. An over-cap request stores a snapshot of
@@ -304,6 +348,28 @@ function executeRequestAction(db, rq, actor) {
   // replay — the recorded approval itself is the grant of record.
   return null;
 }
+// Phase 36 — the live roster grants `own` holds on entities outside its
+// control chain, keyed by granting entity (see filterState's myGrants).
+function liveGrantsFor(db, own, controlled) {
+  const grants = {};
+  if (!own) return grants;
+  for (const e of db.entities) {
+    if (controlled.has(e.id)) continue;
+    const g = ownership.findGrant(e, own);
+    if (!g) continue;
+    const gg = g.grants || {};
+    grants[e.id] = {
+      title: g.title || '', scopes: Array.isArray(gg.scopes) ? gg.scopes : [],
+      spendLimitPerTurn: gg.spendLimitPerTurn === undefined ? null : gg.spendLimitPerTurn,
+      accounts: Array.isArray(gg.accounts) ? gg.accounts : [], properties: Array.isArray(gg.properties) ? gg.properties : [],
+      expiresAt: g.expiresAt || null
+    };
+  }
+  return grants;
+}
+const grantCovers = (grants, id, scope) => !!grants[id] && (grants[id].scopes.includes('all') || grants[id].scopes.includes(scope));
+const grantCoversAcct = (grants, a) => grantCovers(grants, a.ownerId, 'spend') &&
+  (!grants[a.ownerId].accounts.length || grants[a.ownerId].accounts.includes(a.id));
 function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
@@ -327,15 +393,26 @@ function filterState(u) {
   // accounts/inventories of controlled companies and the President sees the
   // government's holdings — the Bank of Arcasia included.
   const controlled = own ? ownership.controlledSet(own) : new Set();
+  // Phase 36 — live roster grants this operator holds on entities OUTSIDE
+  // their chain, keyed by the granting entity. Delegation used to be
+  // enforced server-side but invisible client-side: a treasurer with a
+  // 'spend' grant could not even see the account they were trusted with, and
+  // a 'trade' grantee never saw the stock. The grantor's own visibility rules
+  // stay intact — only the delegated slice opens up (spend → the granted
+  // accounts, trade → the entity's inventory). Shipped as `myGrants` so the
+  // client offers delegated entities in its pickers (core.js actsForSet).
+  const grants = liveGrantsFor(db, own, controlled);
+  const grantHas = (id, scope) => grantCovers(grants, id, scope);
+  const grantAcct = (a) => grantCoversAcct(grants, a);
 
   const accounts = p.accounts === 'all' ? db.accounts
-    : p.accounts === 'own' ? db.accounts.filter(a => controlled.has(a.ownerId)) : [];
+    : db.accounts.filter(a => (p.accounts === 'own' && controlled.has(a.ownerId)) || grantAcct(a));
   const visAcct = new Set(accounts.map(a => a.id));
 
   const transactions = (p.accounts === 'all' ? db.transactions
     : db.transactions.filter(t => (t.from && visAcct.has(t.from)) || (t.to && visAcct.has(t.to)))).slice(-400);
 
-  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId));
+  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId)) || grantHas(ownerId, 'trade');
   const military = (p.mapLayers || []).includes('military');
 
   const entities = db.entities.map(e => {
@@ -391,17 +468,21 @@ function filterState(u) {
     : db.timeline.filter(e => playerTlTypes.has(e.type) && e.refs && e.refs.some(r => controlled.has(r)))).slice(-400);
 
   // Trade offers (Phase 4.3): a user sees offers where either side is in their
-  // ownership chain; GM sees all.
+  // ownership chain — or an entity they hold a trade grant on (Phase 36:
+  // a delegated trader must see the offers they are trusted to answer);
+  // GM sees all.
+  const tradesFor = new Set(controlled);
+  for (const id in grants) if (grantHas(id, 'trade')) tradesFor.add(id);
   const trades = p.gm ? (db.trades || [])
-    : (db.trades || []).filter(t => controlled.has(t.fromEntityId) || controlled.has(t.toEntityId));
+    : (db.trades || []).filter(t => tradesFor.has(t.fromEntityId) || tradesFor.has(t.toEntityId));
 
   // Ongoing trade contracts: open-market orders are visible to whoever
   // controls the trading holder; player-to-player transfers to either party.
   // GM sees all.
   const contracts = p.gm ? (db.tradeContracts || [])
     : (db.tradeContracts || []).filter(c =>
-      (c.holderId && controlled.has(c.holderId)) ||
-      (c.fromEntityId && (controlled.has(c.fromEntityId) || controlled.has(c.toEntityId))));
+      (c.holderId && tradesFor.has(c.holderId)) ||
+      (c.fromEntityId && (tradesFor.has(c.fromEntityId) || tradesFor.has(c.toEntityId))));
 
   return {
     settings,
@@ -437,11 +518,17 @@ function filterState(u) {
     // units, objectives, casualties — plus the AI's numeric plan state so
     // client prediction can replay replans; only ai.notes (the reasoning)
     // stays GM-only. See warForPlayers above.
-    war: db.war ? (p.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db, u)) : null,
+    war: conflictView(db.war, db, u),
     // Protests (Phase 31): a second conflict document — same fog-of-war
-    // treatment, and cmdAccess (att = organizer's control chain) rides along
-    // for every operator via warForPlayers.
-    protest: db.protest ? (p.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null,
+    // treatment; both docs carry the caller's cmdAccess (see conflictView).
+    protest: conflictView(db.protest, db, u),
+    // Phase 36 — player-called protests awaiting the GM: the GM sees the
+    // whole queue, an operator only applications filed for organizers in
+    // their own control chain (an application is a private petition until
+    // the GM lets the crowds out).
+    protestApplications: p.gm ? (db.protestApplications || [])
+      : (db.protestApplications || []).filter(a => controlled.has(a.organizerId)).slice(-20),
+    myGrants: grants,
     // Day Market tick clock — same "expose the wall-clock gate so the client
     // can predict the next tick" idea as war.tick/tickMs (see docs/WAR.md's
     // heartbeat), applied read-only to market.maybeDayTick's gate: not
@@ -517,9 +604,10 @@ async function ledgerPage(u, query) {
   const db = store.get();
   const p = u.role.perms;
   const controlled = u.user.entityId ? ownership.controlledSet(u.user.entityId) : new Set();
+  const grants = liveGrantsFor(db, u.user.entityId, controlled);
   const visible = p.accounts === 'all'
     ? db.accounts
-    : p.accounts === 'own' ? db.accounts.filter(a => controlled.has(a.ownerId)) : [];
+    : db.accounts.filter(a => (p.accounts === 'own' && controlled.has(a.ownerId)) || grantCoversAcct(grants, a));
   const visibleIds = new Set(visible.map(a => a.id));
   const requested = query.get('account');
   const accountIds = requested ? new Set([requested].filter(id => visibleIds.has(id))) : visibleIds;
@@ -548,8 +636,42 @@ async function ledgerPage(u, query) {
 }
 
 // ---------- request handling ----------------------------------------------
+// Hosting rewrites (vercel.json sends /api/:path* to /api/index) can hand
+// the process the REWRITTEN url instead of the one the browser asked for —
+// on the live Vercel deployment every request arrived as /api/index and
+// 404'd/401'd. Recover the original path from the forwarded ?__path= query
+// or the headers platforms use for it. Done here, in the one handler every
+// entry point (server.js, api/index.js, api/[...path].js) shares.
+function originalApiPath(req, pathname) {
+  if (pathname !== '/api/index' && pathname !== '/api/index.js' && pathname !== '/api' && pathname !== '/api/') return pathname;
+  const url = new URL(req.url, 'http://localhost');
+  let orig = url.searchParams.get('__path');
+  if (orig === null) orig = url.searchParams.get('path');
+  if (orig === null) {
+    const m = String(req.headers['x-now-route-matches'] || '').match(/(?:^|&)(?:__)?path=([^&]*)/);
+    if (m) orig = decodeURIComponent(m[1]);
+  }
+  if (orig === null) {
+    for (const h of ['x-matched-path', 'x-invoke-path', 'x-forwarded-uri', 'x-original-url', 'x-rewrite-url']) {
+      const v = req.headers[h];
+      if (v && String(v).startsWith('/api/') && !String(v).startsWith('/api/index')) { orig = String(v).split('?')[0].slice(5); break; }
+    }
+  }
+  return orig === null ? pathname : '/api/' + String(orig).replace(/^\/+/, '');
+}
 async function handle(req, res, pathname, method) {
+  if (pathname === '/api' || pathname === '/api/') pathname = '/api/index';
   if (!pathname.startsWith('/api/')) return false;
+  pathname = originalApiPath(req, pathname);
+  // TEMPORARY routing diagnostic (remove once the Vercel path issue is
+  // settled): ?__debug=1 on any /api url echoes what the process received.
+  if (/[?&]__debug=1\b/.test(String(req.url))) {
+    const h = {};
+    for (const k of Object.keys(req.headers)) if (!/cookie|authorization/i.test(k)) h[k] = req.headers[k];
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ reqUrl: req.url, pathname, headers: h, entry: require.main && require.main.filename }));
+    return true;
+  }
   const db = store.get();
   const u = getUser(req);
   // response-sync context (see attachSync) — per-response, never module state
@@ -636,6 +758,12 @@ async function handle(req, res, pathname, method) {
 
     // everything below requires a session
     if (!u) return json(res, 401, { error: 'Not authenticated' });
+    // Phase 36 — acting for an entity in trade: its control chain, or a live
+    // roster grant carrying the 'trade' scope (cash the entity pays out
+    // counts against that grant's spend cap). The roster editor has offered
+    // "Buy/sell items" since Phase 35, but no trade route ever consulted it.
+    const canTrade = (entityId, amount) => !!(u.role.perms.gm ||
+      ownership.canAct(db, u.user.entityId, entityId, 'trade', amount > 0 ? { amount } : undefined));
 
     if (pathname === '/api/me' && method === 'GET') return json(res, 200, { user: userPayload(u) });
     if (pathname === '/api/me/password' && method === 'PATCH') {
@@ -858,11 +986,11 @@ async function handle(req, res, pathname, method) {
       }
     }
 
-    // ---- War: interactive command routes (Phase 16). Any logged-in operator
-    // may command the defender; only the GM may pick 'att' (and only the GM
-    // sees war.ai at all — see filterState). The client only sends orders;
-    // the server is authoritative for everything that actually moves a unit
-    // or detonates a bomb.
+    // ---- War: interactive command routes (Phase 16). Who may command which
+    // side is cmdAccessOf's answer (Phase 36: role abilities + ownership
+    // chain, with the organizer/defender conflict-of-interest guard). The
+    // client only sends orders; the server is authoritative for everything
+    // that actually moves a unit or detonates a bomb.
     // Lightweight war heartbeat (Phase 18 — client prediction). Clients
     // watching an active war poll this at ~tick cadence instead of the full
     // /api/state: it drives the wall-clock tick gate (the broadcast → refetch
@@ -873,18 +1001,16 @@ async function handle(req, res, pathname, method) {
     // simulation onto. Same fog-of-war filtering as filterState.
     if (pathname === '/api/war/state' && method === 'GET') {
       try { const sig = war.maybeWarTickSignal(db); if (sig.ticked) { store.save(); if (sig.milestone) broadcast('sync'); } } catch (e) { /* war optional */ }
-      const w = db.war ? (u.role.perms.gm ? warWithAircraftCapacity(db.war, db) : warForPlayers(db.war, db, u)) : null;
-      const pt = db.protest ? (u.role.perms.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null;
-      return json(res, 200, { war: w, protest: pt, v: store.getVersion() });
+      return json(res, 200, { war: conflictView(db.war, db, u), protest: conflictView(db.protest, db, u), v: store.getVersion() });
     }
     if (pathname === '/api/war/command' && method === 'POST') {
       const b = await readBody(req);
       const key = b.conflict === 'protest' ? 'protest' : 'war';
       const doc = key === 'protest' ? db.protest : db.war;
       if (!doc || !doc.active) return bad('No conflict is active.');
-      // Attacker-side commands need the GM or the organizer's control chain
+      // Attacker-side commands need the GM or the attacker's control chain
       // (a party leader commands their party's protest); the defence needs
-      // government/military clearance or control of the defender entity.
+      // the defender's chain or the conflict's command ability.
       const ca = cmdAccessOf(db, doc, u);
       const side = b.side === 'att' ? (ca.att ? 'att' : null) : (ca.def ? 'def' : null);
       if (!side) return deny('You cannot command that side of the conflict.');
@@ -907,13 +1033,10 @@ async function handle(req, res, pathname, method) {
       });
       // Phase 5 delegation: a command_units roster grantee whose grant
       // carries unitFilter may only command the units its grant covers.
-      // Chain/GM/government clearance commands everything, as before.
+      // Chain/GM/role-ability command covers everything.
       const controllerId = side === 'def' ? doc.defenderId
-        : (doc.kind === 'protest' && doc.protest ? doc.protest.organizerId : null);
-      const perms = u.role.perms;
-      const fullAccess = !!(perms.gm ||
-        (side === 'def' && (perms.government || (perms.mapLayers || []).includes('military'))) ||
-        (controllerId && ownership.controls(u.user.entityId, controllerId)));
+        : ((doc.kind === 'protest' && doc.protest && doc.protest.organizerId) || doc.attackerId);
+      const fullAccess = side === 'att' ? ca.attLead : ca.defAll;
       let finalOrders = orders;
       if (!fullAccess && controllerId) {
         finalOrders = orders.filter(o => ownership.canAct(db, u.user.entityId, controllerId, 'command_units', { unitId: o.unitId }));
@@ -934,7 +1057,7 @@ async function handle(req, res, pathname, method) {
       const key = b.conflict === 'protest' ? 'protest' : 'war';
       const doc = key === 'protest' ? db.protest : db.war;
       if (!doc || !doc.active) return bad('No conflict is active.');
-      if (!cmdAccessOf(db, doc, u).def) return deny('You cannot call in airstrikes.');
+      if (!cmdAccessOf(db, doc, u).air) return deny('You are not cleared to order airstrikes.');
       // Bombs are defender-only (server/war.js's dropBomb also enforces this
       // itself) — even a GM commanding the attacker side has no air arm to
       // call in for this scenario, so unlike /api/war/command there is no
@@ -961,16 +1084,19 @@ async function handle(req, res, pathname, method) {
       if (!db.protest || !db.protest.active) return bad('No protest is active.');
       const ca = cmdAccessOf(db, db.protest, u);
       const patch = {};
+      // The crowd's own escalation is a decision for the movement's
+      // leadership (ownership chain) — a command_units grantee marshals
+      // crowds but doesn't decide to riot.
       if (b.protestorsViolent !== undefined) {
-        if (!ca.att) return deny('Only the organizer or the GM may direct the protestors.');
+        if (!ca.attLead) return deny('Only the organizer’s leadership or the GM may direct the protestors.');
         patch.protestorsViolent = !!b.protestorsViolent;
       }
       if (b.captureMode !== undefined) {
-        if (!ca.att) return deny('Only the organizer or the GM may set capture mode.');
+        if (!ca.attLead) return deny('Only the organizer’s leadership or the GM may set capture mode.');
         patch.captureMode = !!b.captureMode;
       }
       if (b.govViolent !== undefined) {
-        if (!ca.def) return deny('Only the government or the GM may order the security forces.');
+        if (!ca.force) return deny('Only the government’s leadership (or a role cleared to authorize force) may order the security forces to use force.');
         patch.govViolent = !!b.govViolent;
       }
       if (!Object.keys(patch).length) return bad('Nothing to update.');
@@ -979,8 +1105,54 @@ async function handle(req, res, pathname, method) {
       store.save(); broadcast('sync');
       // Same redaction as every other conflict view — never ship the raw doc
       // (ai notes / command bookkeeping must stay server-side).
-      const p = db.protest ? (u.role.perms.gm ? warWithAircraftCapacity(db.protest, db) : warForPlayers(db.protest, db, u)) : null;
-      return json(res, 200, { protest: p });
+      return json(res, 200, { protest: conflictView(db.protest, db, u) });
+    }
+    // Phase 36 — the two political exits from a live protest. The organizer's
+    // leadership may CALL IT OFF (crowds go home, nothing more); the
+    // government (defender chain) may CONCEDE the demands — the movement wins
+    // and its party banks a support bonus in the affected provinces (see
+    // war.concludeProtest). The GM keeps its own abort (/api/gm/protest/end).
+    if ((pathname === '/api/protest/disband' || pathname === '/api/protest/concede') && method === 'POST') {
+      if (!db.protest || !db.protest.active) return bad('No protest is active.');
+      const ca = cmdAccessOf(db, db.protest, u);
+      const conceding = pathname.endsWith('/concede');
+      if (conceding ? !ca.concede : !ca.attLead) {
+        return deny(conceding ? 'Only the government’s leadership may concede to the protestors.' : 'Only the organizer’s leadership may call the protest off.');
+      }
+      const result = war.concludeProtest(db, conceding ? 'concede' : 'disband', u.user.displayName);
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, { protest: conflictView(db.protest, db, u) });
+    }
+    // Phase 36 — player-called protests. Whoever controls a party, org,
+    // company or their own person may petition the GM to let a movement take
+    // to the streets; the GM approves (choosing the police deployment) or
+    // denies from the War Room. One pending application per organizer; the
+    // GM may switch the whole channel off (settings.war.protest.applications).
+    if (pathname === '/api/protest/apply' && method === 'POST') {
+      const b = await readBody(req);
+      const organizer = db.entities.find(e => e.id === b.organizerId);
+      if (!organizer) return bad('Choose who is organizing the protest.');
+      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, organizer.id)) return deny('You may only organize protests for an entity you lead.');
+      try {
+        const app = war.fileProtestApplication(db, b, u.user.displayName, u.user.entityId);
+        store.save(); broadcast('sync');
+        return json(res, 200, { application: app });
+      } catch (e) { return bad(e.message); }
+    }
+    {
+      const wm = pathname.match(/^\/api\/protest\/applications\/([\w-]+)\/withdraw$/);
+      if (wm && method === 'POST') {
+        const app = (db.protestApplications || []).find(a => a.id === wm[1]);
+        if (!app) return bad('No such application.');
+        if (!u.role.perms.gm && !ownership.controls(u.user.entityId, app.organizerId)) return deny('That application is not yours to withdraw.');
+        if (app.status !== 'pending') return bad('That application has already been decided.');
+        app.status = 'withdrawn';
+        app.decidedAt = Date.now(); app.decidedBy = u.user.displayName;
+        store.log('politics', `Protest application withdrawn: ${app.name}`, '', u.user.displayName, [app.organizerId]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { application: app });
+      }
     }
 
     if (pathname === '/api/trade' && method === 'POST') {
@@ -992,7 +1164,7 @@ async function handle(req, res, pathname, method) {
       const item = db.items.find(i => i.id === b.itemId);
       const qty = cleanQty(b.qty);
       if (!fromEnt || !toEnt || !item) return bad('Unknown entity or item.');
-      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
+      if (!canTrade(fromEnt.id)) return deny('You do not control that entity.');
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
       if (!(qty > 0)) return bad('Quantity must be positive.');
       if (!item.tradable && !u.role.perms.gm) return deny('That item is not tradable.');
@@ -1032,7 +1204,7 @@ async function handle(req, res, pathname, method) {
       const pr = db.properties.find(p => p.id === b.propertyId);
       if (!pr) return bad('Unknown property.');
       const gm = u.role.perms.gm;
-      if (!gm && (!pr.ownerId || !ownership.controls(u.user.entityId, pr.ownerId))) return deny('You do not control this property.');
+      if (!gm && (!pr.ownerId || !ownership.canAct(db, u.user.entityId, pr.ownerId, 'property_controls', { propertyId: pr.id }))) return deny('You do not control this property.');
       const owner = db.entities.find(e => e.id === pr.ownerId);
       if (!owner) return bad('The property has no owner entity to move goods to.');
       const item = db.items.find(i => i.id === b.itemId);
@@ -1349,7 +1521,7 @@ async function handle(req, res, pathname, method) {
       const b = await readBody(req);
       const entityId = String(b.entityId || '');
       if (!entityId) return bad('Choose which company is bidding.');
-      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, entityId)) return deny('You do not control that entity.');
+      if (!canTrade(entityId)) return deny('You do not control that entity.');
       const price = Math.round(Number(b.price) * 100) / 100;
       if (!(price > 0)) return bad('Bid price must be positive.');
       tender.bids = Array.isArray(tender.bids) ? tender.bids : [];
@@ -1508,7 +1680,7 @@ async function handle(req, res, pathname, method) {
       const toEnt = db.entities.find(e => e.id === b.toEntityId);
       if (!fromEnt || !toEnt) return bad('Unknown entity.');
       if (fromEnt.id === toEnt.id) return bad('Cannot trade with yourself.');
-      if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control that entity.');
+      if (!canTrade(fromEnt.id)) return deny('You do not control that entity.');
       const cleanRows = (arr) => (Array.isArray(arr) ? arr : [])
         .map(r => ({ itemId: String(r.itemId || ''), qty: cleanQty(r.qty) }))
         .filter(r => {
@@ -1526,6 +1698,7 @@ async function handle(req, res, pathname, method) {
       const get = cleanRows(b.get);
       const money = { give: Math.max(0, Number((b.money || {}).give) || 0), get: Math.max(0, Number((b.money || {}).get) || 0) };
       if (!give.length && !get.length && !money.give && !money.get) return bad('An offer needs at least one item or amount of money.');
+      if (money.give > 0 && !canTrade(fromEnt.id, money.give)) return deny('That payment exceeds the spend limit on your trade grant.');
       const trade = {
         id: store.uid('trade'), fromEntityId: fromEnt.id, toEntityId: toEnt.id,
         give, get, money, memo: String(b.memo || '').slice(0, 240),
@@ -1549,14 +1722,14 @@ async function handle(req, res, pathname, method) {
       if (!fromEnt || !toEnt) return bad('A party to this trade no longer exists.');
 
       if (action === 'cancel') {
-        if (!gm && !ownership.controls(u.user.entityId, trade.fromEntityId)) return deny('Only the offering party may cancel this trade.');
+        if (!canTrade(trade.fromEntityId)) return deny('Only the offering party may cancel this trade.');
         trade.status = 'cancelled';
         store.log('ownership', 'Trade offer cancelled', `${fromEnt.name} → ${toEnt.name}`, u.user.displayName, [fromEnt.id, toEnt.id]);
         store.save(); broadcast('sync');
         return json(res, 200, { trade });
       }
       if (action === 'decline') {
-        if (!gm && !ownership.controls(u.user.entityId, trade.toEntityId)) return deny('Only the receiving party may decline this trade.');
+        if (!canTrade(trade.toEntityId)) return deny('Only the receiving party may decline this trade.');
         trade.status = 'declined';
         store.log('ownership', 'Trade offer declined', `${toEnt.name} declined an offer from ${fromEnt.name}`, u.user.displayName, [fromEnt.id, toEnt.id]);
         store.save(); broadcast('sync');
@@ -1564,7 +1737,8 @@ async function handle(req, res, pathname, method) {
       }
 
       // accept — validate everything before mutating anything
-      if (!gm && !ownership.controls(u.user.entityId, trade.toEntityId)) return deny('Only the receiving party may accept this trade.');
+      if (!canTrade(trade.toEntityId)) return deny('Only the receiving party may accept this trade.');
+      if (trade.money.get > 0 && !canTrade(trade.toEntityId, trade.money.get)) return deny('That payment exceeds the spend limit on your trade grant.');
       // Aggregate demand per item: two rows for the same item must not
       // individually pass a stock check that their SUM fails (the second
       // moveItem used to throw mid-trade with earlier rows already moved).
@@ -1760,7 +1934,7 @@ async function handle(req, res, pathname, method) {
       const holder = db.entities.find(e => e.id === b.holderId);
       if (!holder) return bad('Unknown holder.');
       const gm = u.role.perms.gm;
-      if (!gm && !ownership.controls(u.user.entityId, holder.id)) return deny('You do not control that holder.');
+      if (!canTrade(holder.id)) return deny('You do not control that holder.');
       try {
         const r = sim.executeTrade(side, String(b.orderId || ''), holder.id, b.qty, u.user.displayName);
         store.save(); broadcast('sync');
@@ -1809,7 +1983,7 @@ async function handle(req, res, pathname, method) {
         const fromEnt = db.entities.find(e => e.id === b.fromEntityId);
         const toEnt = db.entities.find(e => e.id === b.toEntityId);
         if (!fromEnt || !toEnt) return bad('Unknown entity.');
-        if (!gm && !ownership.controls(u.user.entityId, fromEnt.id)) return deny('You do not control the offering entity.');
+        if (!canTrade(fromEnt.id)) return deny('You do not control the offering entity.');
         if (fromEnt.id === toEnt.id) return bad('Cannot contract with yourself.');
 
         // Normalise into the trade shape: give[], get[], money{give,get}
@@ -1870,7 +2044,7 @@ async function handle(req, res, pathname, method) {
           if (dur > 9999) dur = 9999;
         }
         const memo = String(b.memo || '').slice(0, 300);
-        const counterpartySigns = !gm && !ownership.controls(u.user.entityId, toEnt.id);
+        const counterpartySigns = !canTrade(toEnt.id);
         db.tradeContracts = db.tradeContracts || [];
         const t = db.settings.time;
         const c = {
@@ -1910,7 +2084,7 @@ async function handle(req, res, pathname, method) {
       const side = b.side === 'buy' ? 'buy' : 'sell';
       const holder = db.entities.find(e => e.id === b.holderId);
       if (!holder) return bad('Unknown holder.');
-      if (!gm && !ownership.controls(u.user.entityId, holder.id)) return deny('You do not control that holder.');
+      if (!canTrade(holder.id)) return deny('You do not control that holder.');
       const partner = db.entities.find(e => e.id === b.partnerId);
       if (!partner) return bad('Unknown trading partner.');
       const item = db.items.find(i => i.id === b.itemId);
@@ -1956,7 +2130,7 @@ async function handle(req, res, pathname, method) {
       const gm = u.role.perms.gm;
       // only the RECEIVING side (or GM) may accept a proposal — the offering
       // side authored it and can only cancel it
-      if (!gm && !ownership.controls(u.user.entityId, c.toEntityId)) return deny('Only the receiving entity may accept.');
+      if (!canTrade(c.toEntityId)) return deny('Only the receiving entity may accept.');
       c.status = 'active';
       c.acceptedBy = u.user.displayName;
       c.acceptedAtTurn = db.settings.time.turn;
@@ -1975,8 +2149,8 @@ async function handle(req, res, pathname, method) {
       // either party to a transfer — or the holder of an order contract — may
       // cancel; on a proposal this doubles as declining
       const partyControlled = c.kind === 'transfer'
-        ? (ownership.controls(u.user.entityId, c.fromEntityId) || ownership.controls(u.user.entityId, c.toEntityId))
-        : ownership.controls(u.user.entityId, c.holderId);
+        ? (canTrade(c.fromEntityId) || canTrade(c.toEntityId))
+        : canTrade(c.holderId);
       if (!gm && !partyControlled) return deny('You are not a party to that contract.');
       if (c.status !== 'active' && c.status !== 'proposed') return bad('That contract is not running.');
       c.status = 'cancelled';
@@ -1995,8 +2169,8 @@ async function handle(req, res, pathname, method) {
       const c = db.tradeContracts[idx];
       const gm = u.role.perms.gm;
       const partyControlled = c.kind === 'transfer'
-        ? (ownership.controls(u.user.entityId, c.fromEntityId) || ownership.controls(u.user.entityId, c.toEntityId))
-        : ownership.controls(u.user.entityId, c.holderId);
+        ? (canTrade(c.fromEntityId) || canTrade(c.toEntityId))
+        : canTrade(c.holderId);
       if (!gm && !partyControlled) return deny('You are not a party to that contract.');
       if (c.status === 'active' || c.status === 'proposed') return bad('Cancel the contract before removing it.');
       db.tradeContracts.splice(idx, 1);
@@ -2013,7 +2187,7 @@ async function handle(req, res, pathname, method) {
       // money instead of erroring).
       let buyerId = u.user.entityId;
       if (b.entityId && b.entityId !== buyerId) {
-        if (!gm && !ownership.controls(u.user.entityId, b.entityId)) return deny('You do not control that holder.');
+        if (!canTrade(b.entityId)) return deny('You do not control that holder.');
         buyerId = b.entityId;
       }
       if (!buyerId) return bad('No entity to trade for.');
@@ -2025,7 +2199,7 @@ async function handle(req, res, pathname, method) {
       const gm = u.role.perms.gm;
       let sellerId = u.user.entityId;
       if (b.entityId && b.entityId !== sellerId) {
-        if (!gm && !ownership.controls(u.user.entityId, b.entityId)) return deny('You do not control that holder.');
+        if (!canTrade(b.entityId)) return deny('You do not control that holder.');
         sellerId = b.entityId;
       }
       if (!sellerId) return bad('No entity to trade for.');
@@ -2037,7 +2211,7 @@ async function handle(req, res, pathname, method) {
       const gm = u.role.perms.gm;
       let fromId = u.user.entityId;
       if (b.fromEntityId && b.fromEntityId !== fromId) {
-        if (!gm && !ownership.controls(u.user.entityId, b.fromEntityId)) return deny('You do not control that holder.');
+        if (!canTrade(b.fromEntityId)) return deny('You do not control that holder.');
         fromId = b.fromEntityId;
       }
       if (!fromId) return bad('No entity to trade for.');
@@ -2197,7 +2371,9 @@ async function handle(req, res, pathname, method) {
       if (typeof b.materials === 'string') { try { b.materials = JSON.parse(b.materials); } catch (e) { b.materials = []; } }
       const party = b && b.partyId ? db.entities.find(e => e.id === b.partyId) : null;
       if (!party || party.type !== 'party') return bad('Unknown party.');
-      if (!u.role.perms.gm && !ownership.controls(u.user.entityId, party.id)) return deny('You do not control that party.');
+      // A campaign grantee may price the drives they're allowed to run.
+      if (!u.role.perms.gm && !ownership.canAct(db, u.user.entityId, party.id, 'campaign_minor') &&
+          !ownership.canAct(db, u.user.entityId, party.id, 'campaign_major')) return deny('You do not control that party.');
       if (!b.province || !db.provinces.some(p => p.id === b.province)) return bad('Choose a province to campaign in.');
       if (!b.campaignId) return bad('Choose a campaign from the catalogue.');
       try {
@@ -2332,7 +2508,7 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         const key = (b && b.conflict === 'protest') ? 'protest' : 'war';
         const doc = key === 'protest' ? db.protest : db.war;
-        if (!doc) return bad('No conflict is active.');
+        if (!doc || !doc.active) return bad('No conflict is active.');
         war.endWar(db, actor, key === 'protest' ? 'Protest ended by the Gamemaster' : 'Ended by the Gamemaster', key);
         store.save(); broadcast('sync');
         return json(res, 200, { war: db.war, protest: db.protest });
@@ -2435,10 +2611,28 @@ async function handle(req, res, pathname, method) {
         return json(res, 200, { protest: db.protest });
       }
       if (pathname === '/api/gm/protest/end' && method === 'POST') {
-        if (!db.protest) return bad('No protest is active.');
+        // An already-ended protest must not end twice (a second "streets fall
+        // quiet" news draft and log line for a double-clicked button).
+        if (!db.protest || !db.protest.active) return bad('No protest is active.');
         war.endWar(db, actor, 'Protest ended by the Gamemaster', 'protest');
         store.save(); broadcast('sync');
         return json(res, 200, { protest: db.protest });
+      }
+      // Phase 36 — the GM's verdict on a player's protest application.
+      // Approve starts the protest exactly as petitioned (the GM may override
+      // name/crowd sizing and picks where the police deploy); deny records a
+      // note the applicant sees in their War Room.
+      {
+        const am = pathname.match(/^\/api\/gm\/protest\/applications\/([\w-]+)\/(approve|deny)$/);
+        if (am && method === 'POST') {
+          const b = await readBody(req);
+          if (am[2] === 'approve' && db.protest && db.protest.active) return json(res, 409, { error: 'A protest is already underway — end it before approving another.' });
+          try {
+            const app = war.decideProtestApplication(db, am[1], am[2], b || {}, actor);
+            store.save(); broadcast('sync');
+            return json(res, 200, { application: app, protest: db.protest || null });
+          } catch (e) { return bad(e.message); }
+        }
       }
       // Peace treaty (Phase 24 — GM-only): reparations, province cession,
       // nation annexation, in any combination; an active war ends first.
@@ -2773,6 +2967,27 @@ async function handle(req, res, pathname, method) {
             tr.enabled = tr.enabled !== false;
           }
         }
+        // Phase 36 — protest rules (War Room → Protest Rules): the public-
+        // opinion knobs, the player-petition switch and the defaults every
+        // NEW protest starts from. Merged key by key and clamped — there was
+        // no settings route for settings.war at all before this.
+        if (b.war && b.war.protest && typeof b.war.protest === 'object') {
+          s.war = s.war || {};
+          const pr = s.war.protest = s.war.protest || {};
+          const q = b.war.protest;
+          const num = (k, lo, hi) => {
+            if (q[k] === undefined) return;
+            const n = Number(q[k]);
+            if (Number.isFinite(n)) pr[k] = Math.max(lo, Math.min(hi, n));
+          };
+          num('politicsEvery', 2, 300); num('refCrowd', 100, 1000000);
+          num('sympathyPerPass', 0, 10); num('pressurePerPass', 0, 10); num('backlashPerPass', 0, 10);
+          num('crackdownMult', 1, 20); num('concedeSupport', 0, 50);
+          num('strikeFrac', 0, 1); num('civPerRiotFrac', 0, 10); num('refugeeRiotFrac', 0, 0.5); num('refugeeRiotEvery', 2, 12);
+          if (pr.politicsEvery !== undefined) pr.politicsEvery = Math.round(pr.politicsEvery);
+          if (pr.refugeeRiotEvery !== undefined) pr.refugeeRiotEvery = Math.round(pr.refugeeRiotEvery);
+          if (q.applications !== undefined) pr.applications = !!q.applications;
+        }
         if (b.entertainment) s.entertainment = b.entertainment; // GM Studio entertainment editor writes the whole object
         if (b.mapDecor && s.mapDecor) Object.assign(s.mapDecor, b.mapDecor);
         if (b.map) Object.assign(s.map = s.map || {}, b.map); // labels / roads / rails from the map editor
@@ -2825,6 +3040,11 @@ async function handle(req, res, pathname, method) {
         const username = String(b.username || '').trim().toLowerCase();
         if (!/^[a-z0-9_.-]{3,24}$/.test(username)) return bad('Bad username.');
         if (db.users.some(x => x.username === username)) return bad('Username taken.');
+        // A role/persona that doesn't exist used to be stored verbatim and
+        // silently fall back to Citizen at login (getUser) — refuse instead.
+        if (b.entityId === '__null__') b.entityId = null; // the editor's "— none —" option
+        if (b.roleId && !db.roles.some(r => r.id === b.roleId)) return bad('Unknown role.');
+        if (b.entityId && !db.entities.some(e => e.id === b.entityId)) return bad('Unknown persona entity.');
         const { salt, hash } = hashPassword(String(b.password || 'arcasia'));
         const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
         const nu = {
@@ -2851,8 +3071,15 @@ async function handle(req, res, pathname, method) {
         } else {
           const b = await readBody(req);
           if (b.displayName !== undefined) target.displayName = String(b.displayName).slice(0, 60);
-          if (b.roleId !== undefined) target.roleId = b.roleId;
-          if (b.entityId !== undefined) target.entityId = b.entityId || null;
+          if (b.roleId !== undefined) {
+            if (!db.roles.some(r => r.id === b.roleId)) return bad('Unknown role.');
+            target.roleId = b.roleId;
+          }
+          if (b.entityId !== undefined) {
+            if (b.entityId === '__null__') b.entityId = null; // the editor's "— none —" option
+            if (b.entityId && !db.entities.some(e => e.id === b.entityId)) return bad('Unknown persona entity.');
+            target.entityId = b.entityId || null;
+          }
           if (b.newspaperId !== undefined) {
             const validPaperIds = new Set((db.settings.newspapers || []).map(p => p.id));
             target.newspaperId = (b.newspaperId && validPaperIds.has(b.newspaperId)) ? b.newspaperId : null;
@@ -2954,10 +3181,14 @@ async function handle(req, res, pathname, method) {
           return json(res, 200, { ok: true });
         }
       }
-      return json(res, 404, { error: 'Unknown GM endpoint' });
+      return json(res, 404, { error: `Unknown GM endpoint: ${method} ${pathname}` });
     }
 
-    return json(res, 404, { error: 'Unknown API endpoint' });
+    // Name what actually arrived: a bare "Unknown API endpoint" on the sign-in
+    // screen gave no hint whether the method, the path or a host rewrite
+    // (proxy prefix, trailing slash, platform rewrite) was at fault.
+    console.warn(`404 ${method} ${pathname} (url ${req.url})`);
+    return json(res, 404, { error: `Unknown API endpoint: ${method} ${pathname}` });
   } catch (e) {
     return json(res, 500, { error: e.message });
   }

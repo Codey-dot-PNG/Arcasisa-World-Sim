@@ -93,7 +93,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const pathname = decodeURIComponent(url.pathname);
 
-  if (pathname.startsWith('/api/')) {
+  if (pathname.startsWith('/api/') || pathname === '/api') {
     // in supabase mode each request loads fresh state and commits its writes
     if (store.MODE !== 'file') await store.begin();
     const handled = await api.handle(req, res, pathname, req.method);

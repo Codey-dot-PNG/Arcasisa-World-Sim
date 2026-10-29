@@ -41,7 +41,11 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `PATCH /api/company/:id/controls` | CEO/owner: `keepPct, govMix, govPriceMult, wage, govMixByItem` |
 | `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |
 | `PATCH /api/trade/controls` | President (controls `ent_gov`) or GM: `govBuy`, `exports`, `imports` |
-| `POST /api/protest/control` | active-protest toggles, side-gated by `cmdAccessOf`: `protestorsViolent`/`captureMode` need `att` (organizer's controller or GM), `govViolent` needs `def` (government/military operator or GM). Response includes the fresh protest doc; responds-sync so the flip lands instantly |
+| `POST /api/protest/control` | active-protest toggles, gated by `cmdAccessOf`: `protestorsViolent`/`captureMode` need `attLead` (the organizer's ownership chain), `govViolent` needs `force` (defender chain or the `authorize_force` ability). Response includes the fresh protest doc; responds-sync so the flip lands instantly |
+| `POST /api/protest/disband` | Phase 36 — the organizer's leadership (`attLead`) calls the protest off (no winner) |
+| `POST /api/protest/concede` | Phase 36 — the defender chain (`concede`) concedes: the protest ends with `winner:'att'` and the organizer's party gains `settings.war.protest.concedeSupport` in every province the movement touched |
+| `POST /api/protest/apply` | Phase 36 — petition the GM to start a protest: `{organizerId, name?, demands?, baseCities[≤3], crowds 1–3, perCity 500–5000}`. Caller must control the organizer (party/org/company/person); one pending application per organizer; refused while `settings.war.protest.applications === false` |
+| `POST /api/protest/applications/:id/withdraw` | the applicant's chain withdraws a pending petition |
 | `POST /api/election/campaign` | run a party campaign during the election season: `{partyId, campaignId}`. Anyone who controls the party (its leader chain) or the GM; spends the party treasury + campaign stock, adds support (and late votes once the count is live). Responds-sync |
 
 ## Market (Phase 4.4 / Workstream A)
@@ -84,13 +88,15 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `GET snapshots` · `POST rollback` `{turn}` | |
 | `GET export` · `POST import` | full world JSON archive |
 | `POST reset` | reseed |
-| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns) |
+| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns), `war.protest` (Phase 36 protest rules — opinion knobs, `applications` switch, new-protest defaults; merged & clamped) |
+| `POST users` · `PATCH users/:id` | Phase 36: an unknown `roleId`/`entityId` is a 400 (it used to be stored and silently fall back to Citizen); the editor's `'__null__'` persona means none |
 | `POST users` · `PATCH\|DELETE users/:id` | user CRUD; calls `sim.syncPresidency` |
 | `POST\|PATCH\|DELETE coll/:coll(/:id)` | generic CRUD for `entities, provinces, cities, properties, items, events, variables, roles, accounts, markers` — with cascade deletes, geometry-based province placement, deed/cert/texture sync hooks |
 | `POST war/start` · `POST war/control` · `POST war/end` · `POST war/tuning` · `GET war/scenarios` · `POST war/scenarios/custom` · `POST war/spawn` · `POST war/join` · `POST war/treaty` | war desk — see docs/WAR.md. Control/end/tuning/spawn accept `conflict: 'war'\|'protest'` (default `war`) |
 | `POST protest/start` | `{name?, organizerId, baseCities:[cityIds], policeCities:[cityIds], crowds?, perCity?}` — 409 while a protest is active |
 | `POST protest/tuning` | `{strikeFrac? 0–1, civFrac? 0–10, refugeeFrac? 0–0.5, refugeeEvery? 2–12, dmg? 0.1–10, bombDmg? 0.1–10, hp? 0.1–10}` — see docs/WAR.md "Protests & civil unrest" |
-| `POST protest/end` | ends the protest (GM); refugees settle, strikes clear next economy pass |
+| `POST protest/end` | ends the protest (GM); refugees settle, strikes clear next economy pass. 400 when no protest is active (no double end) |
+| `POST protest/applications/:id/approve` · `…/deny` | Phase 36 — rule on a player petition. Approve `{policeCities?, name?, crowds?, perCity?, note?}` starts the protest from it (police default to the capital; 409 while a protest is active); deny `{note?}` — the applicant sees the note |
 
 ## Permission filtering — `filterState(u)`
 
@@ -98,6 +104,13 @@ The single place the world is narrowed per operator. Key rules:
 - **Ownership chain** (`ownership.controlledSet`): own entity + everything reached via
   `ownerId`, `ceoId`, party `leaderId`, government `executives`, or >50 % shareholding
   (depth ≤ 6, cycle-safe). `'own'`-scoped accounts/inventories follow this chain.
+- **Roster grants (Phase 36)**: `myGrants` ships the caller's live grants on entities outside
+  their chain (`{entityId: {title, scopes, spendLimitPerTurn, accounts, properties, expiresAt}}`).
+  A `spend` grant opens the granted accounts (and their transactions), a `trade` grant the
+  entity's inventory, trade offers and contracts — the delegated slice only. Every trade route
+  (`/api/trade`, `/api/trades*`, `/api/trade/execute`, `/api/trade/contracts*`,
+  `/api/market/buy|sell|transfer`, tender bids) authorises via `canAct(…, 'trade')`, with
+  cash the entity pays counted against the grant's spend cap.
 - Accounts/transactions: `perms.accounts` all/own; txns filtered to visible accounts (last 400).
 - Inventories stripped unless `perms.inventories` allows; company `vars/shareholders` stripped
   without `companyFinancials` (unless it's your company).
@@ -110,8 +123,12 @@ The single place the world is narrowed per operator. Key rules:
 - `events`, full `roles`, `users` are GM-only. `history` without `statistics` is
   share-prices-only. `globalVars` without `statistics` → population + econConfidence only.
 - `db.war` **and** `db.protest` ship to every logged-in operator (both conflicts are
-  public spectacle), redacted like war docs (`command.notes` emptied; each doc carries
-  the caller's `cmdAccess {att, def}` — see docs/WAR.md "Command authority").
+  public spectacle) via `conflictView`, redacted like war docs for non-GMs
+  (`command.notes` emptied). Every doc — the GM's too — carries the caller's
+  `cmdAccess {att, attLead, def, defAll, force, air, concede}` (see docs/WAR.md
+  "Command authority").
+- `protestApplications`: the GM gets the whole queue; others only petitions filed for
+  organizers in their own chain.
 - `db.election` (live election doc, Phase 33) ships to every operator — the count is a
   public spectacle — but `election.forPlayers()` deletes `targets` (the unrevealed
   per-province ballot roll), `baseTargets`, `rng`, `deviationPct`, `supportToVotes`

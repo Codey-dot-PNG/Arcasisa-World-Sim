@@ -1559,15 +1559,17 @@ enforces the escalation ladder:
   never formally win — a concession is a GM end. Capture mode records cells
   but cannot end the protest.
 - Airstrikes are defender-only (same `dropBomb`/`/api/war/bomb` path as a
-  war — no violence requirement; a protest is a normal air target at any
-  stage).
+  war) and, since Phase 36, **grounded until force is authorized**:
+  `dropBomb` refuses a protest strike while `war.protest.govViolent` is
+  false (a peaceful sit-in used to be a legitimate air target).
 
 ### Lifecycle & commands
 
 - `POST /api/gm/protest/start { name?, organizerId, baseCities:[ids],
   policeCities:[ids], crowds?, perCity? }` — GM-only; 409 while a protest is
   active. Organizer can be a party, person, company, org or foreign power;
-  at least one base city is required.
+  at least one base city is required. Initial deployments and GM reinforcements
+  are limited to 300 live units per protest.
 - `POST /api/protest/control { conflict:'protest', protestorsViolent?,
   govViolent?, captureMode? }` — side-gated by `cmdAccess` (see below); each
   flip pushes a milestone event, logs to the timeline and (for the escalation
@@ -1579,20 +1581,74 @@ enforces the escalation ladder:
 - `POST /api/gm/protest/end` — GM abort; refugees still on the road settle,
   strike flags clear next economy pass.
 
-### Command authority
+### Command authority (reworked in Phase 36)
 
 `api.cmdAccessOf(db, war, u)` — the same per-conflict answer shipped to every
-client as `war.cmdAccess {att, def}`:
+client (the GM included) as `doc.cmdAccess`, for wars and protests alike:
 
-- `att` (crowds): GM, or any operator who **controls the organizer entity**
-  via the ownership chain — a party leader commands their party's crowds.
-- `def` (police): GM, controllers of the defender entity,
-  `government`-clearance operators, or anyone holding the `military` map
-  layer (the National Police file under the military staff — the police role
-  gained `'military'` in its mapLayers for this).
+| Field | Who | Gates |
+|---|---|---|
+| `att` | controllers of the attacker (a protest's organizer, a war's invader) or a `command_units` roster grantee on it | moving attacker units |
+| `attLead` | the attacker's **ownership chain** only | protest violence / capture toggles, calling the protest off |
+| `def` | controllers of the defender, a `command_units` grantee, or the role ability `command_police` (protest) / `command_military` (war) | moving defender units |
+| `defAll` | `def` minus grantees | a grantee's `unitFilter` is applied otherwise |
+| `force` | defender chain or `authorize_force` (protests only) | the `govViolent` toggle |
+| `air` | defender chain or `order_airstrikes` | `/api/war/bomb` |
+| `concede` | defender chain (protests only) | `/api/protest/concede` |
 
-Every `/api/war/command` and `/api/war/bomb` call is side-gated against this;
-violations 403 with `deny`.
+**Conflict-of-interest guard:** an operator with `att` gets no defender lever
+at all — the organizer of a protest can never command, authorize force
+against, or bomb their own crowds. Information clearances (`government`,
+the military map layer) no longer grant anything here: before Phase 36 every
+MP and judge could command the police and call airstrikes on a peaceful
+protest, while a Police role that had lost its military layer could command
+nothing. Abilities live on `role.perms.abilities` (docs/WORLD-DATA.md).
+
+Every `/api/war/command`, `/api/war/bomb` and `/api/protest/*` call is gated
+against this; violations 403 with `deny`. The War Room prints the caller's
+authority in one line (`War.authorityText`), and the map toolbar only offers
+the levers the caller holds.
+
+### Public opinion (Phase 36)
+
+`applyProtestPolitics` (server/war.js, authority-only, tick-accounted so a
+catch-up burst applies the right number of passes) runs every
+`settings.war.protest.politicsEvery` ticks. Each province's crowd presence
+(live protestor strength ÷ `refCrowd`, capped 1.5) moves opinion:
+
+- **peaceful, no force** — the organizer's party (the organizer itself if it
+  is a party, else the party it leads) gains `sympathyPerPass` permanent
+  `support`; province `approval` drops `pressurePerPass`;
+- **force against a peaceful crowd** (a crackdown) — sympathy ×2, approval
+  loss ×`crackdownMult`, plus a small happiness hit;
+- **violent crowds** — the party *loses* `backlashPerPass`; approval loss is
+  halved; happiness hit.
+
+Running totals sit on `war.stats.politics {support, approval, partyId,
+mood}` (the War Room's Public Opinion table); `summarizeProtestPolitics`
+writes one `politics` timeline entry whenever the protest ends, by any path.
+`war.stats.unrestCities` (cities with a live crowd within 150px) feeds the
+"Cities in unrest" counter.
+
+### Exits & petitions (Phase 36)
+
+- **Call off** — `POST /api/protest/disband` (`attLead`): `result.winner:
+  null`, reason "Called off by the organizers".
+- **Concede** — `POST /api/protest/concede` (`concede`): `winner:'att'`; the
+  organizer's party banks `concedeSupport` in every province the movement
+  touched (rally cities + wherever a crowd stands).
+- Both go through `war.concludeProtest`, which drafts its own wire piece and
+  calls `endWar(…, {quiet: true})`.
+- **Petitions** — players who control a party/org/company/their own person
+  file `POST /api/protest/apply`; the GM approves (choosing police cities)
+  or denies from the War Room's Protest Applications queue
+  (`/api/gm/protest/applications/:id/approve|deny`). `settings.war.protest.
+  applications: false` closes the channel. The GM's standing knobs live in
+  the War Room's Protest Rules panel (`PATCH /api/gm/settings {war:
+  {protest}}`).
+- Crowds march **on foot** (no fuel tank — they neither drink the organizer's
+  fuel nor get a motor-speed bonus) and only draw weapons from the
+  organizer's stockpile once violent (server/war.js resupplyUnits).
 
 ### Strike economics
 

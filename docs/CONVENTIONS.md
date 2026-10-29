@@ -75,8 +75,14 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
 
 ## Permission model
 
+- Role perms split into **clearance** (what a role may SEE: pages, statistics, map layers,
+  "government information") and **abilities** (what it may DO — `perms.abilities`, catalogue
+  `ABILITIES` in api.js, mirrored by `ROLE_ABILITIES` in gm.js). Never gate an action on a
+  clearance flag: until Phase 36 the government/military-layer flags let every MP and judge
+  command the police and bomb a peaceful protest.
 - Authorisation = role perms + the **ownership chain** (`ownership.controls`), never entity
-  identity alone. A CEO controls their company's subsidiaries, properties, accounts; the
+  identity alone. Delegated actions go through `ownership.canAct(db, me, entity, scope)`
+  (chain first, then roster grants) — use it, not `controls`, on any route a grant scope covers. A CEO controls their company's subsidiaries, properties, accounts; the
   President controls the government chain (which does NOT reach privately-owned companies —
   see the Satrom-casino regression note in api.js around line 353).
 - New state exposed to clients must be classified in `api.filterState` — public, statistics-

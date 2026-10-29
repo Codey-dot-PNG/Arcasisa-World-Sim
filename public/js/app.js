@@ -89,6 +89,8 @@ const App = {
 
     this.bindShell();
     this.bindDrawers();
+    let fitT = null;
+    window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(() => { if (W.me && S()) this.renderTabs(); }, 120); });
     try {
       await refreshState(true); // first paint must never be skipped by the v-unchanged fast path
       this.enter();
@@ -218,7 +220,9 @@ const App = {
   renderTabs() {
     const tabs = document.getElementById('tabs');
     clear(tabs);
+    this.closeTabMenu();
     const elc = S() && S().election;
+    const btns = [];
     for (const [id, label] of this.PAGES) {
       if (!can(id)) continue;
       let text = label;
@@ -230,8 +234,58 @@ const App = {
         const unread = this.unreadNews();
         if (unread > 0) text = label + ' (' + unread + ')';
       }
-      tabs.appendChild(el('button.tab', { class: W.view === id ? 'active' : '', onclick: () => this.go(id) }, text));
+      const b = el('button.tab', { class: W.view === id ? 'active' : '', onclick: () => this.go(id) }, text);
+      btns.push(b);
+      tabs.appendChild(b);
     }
+    this.fitTabs(tabs, btns);
+  },
+
+  // Tab overflow (Phase 36 UX): the strip scrolled sideways with its
+  // scrollbar hidden, so on an ordinary 1440px laptop every tab past
+  // "Economy" — News, War Room, GM Studio — was simply invisible. When the
+  // strip can't hold every tab beside the clock/music/user cluster it drops
+  // to its own full-width row (what phones already did); only if even that
+  // row overflows do the rightmost tabs fold into a "More ▾" menu. The
+  // active tab always stays on the strip. Re-fitted on every render and on
+  // resize (both layout probes run in one task, so nothing flickers).
+  fitTabs(tabs, btns) {
+    const bar = document.getElementById('topbar');
+    const overflowing = () => tabs.scrollWidth > tabs.clientWidth + 1;
+    if (bar) bar.classList.remove('tabs-row');
+    if (!tabs.clientWidth || !overflowing()) return;
+    if (bar) bar.classList.add('tabs-row');
+    if (!overflowing()) return;
+    const more = el('button.tab.tab-more', 'More ▾');
+    tabs.appendChild(more);
+    const hidden = [];
+    for (let i = btns.length - 1; i >= 0 && overflowing(); i--) {
+      if (btns[i].classList.contains('active')) continue;
+      hidden.unshift(btns[i]);
+      btns[i].remove();
+    }
+    if (!hidden.length) { more.remove(); return; }
+    // An unread badge ("News (3)") folded into the menu still shows on it.
+    if (hidden.some(b => /\(\d+\)/.test(b.textContent))) more.textContent = 'More • ▾';
+    more.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (document.getElementById('tab-menu')) { this.closeTabMenu(); return; }
+      const r = more.getBoundingClientRect();
+      const menu = el('div#tab-menu.tab-menu', hidden.map(b => {
+        b.classList.add('tab-menu-item');
+        b.addEventListener('click', () => this.closeTabMenu());
+        return b;
+      }));
+      menu.style.top = Math.round(r.bottom) + 'px';
+      menu.style.left = Math.round(Math.min(r.left, window.innerWidth - 200)) + 'px';
+      document.body.appendChild(menu);
+      setTimeout(() => document.addEventListener('click', this._tabMenuAway = () => this.closeTabMenu(), { once: true }), 0);
+    });
+  },
+  closeTabMenu() {
+    const m = document.getElementById('tab-menu');
+    if (m && m.parentNode) m.parentNode.removeChild(m);
+    if (this._tabMenuAway) { document.removeEventListener('click', this._tabMenuAway); this._tabMenuAway = null; }
   },
 
   renderTopbar() {

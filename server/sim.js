@@ -762,17 +762,33 @@ function applyStrikes(db) {
     return;
   }
   const R2 = STRIKE_RADIUS * STRIKE_RADIUS;
+  // Index the live crowds into radius-sized buckets so each property only
+  // checks units in its own and neighboring buckets, instead of scanning the
+  // full protest force for every productive site.
+  const bucketSize = STRIKE_RADIUS;
+  const crowdBuckets = new Map();
+  for (const u of protest.units || []) {
+    if (u.side !== 'att' || u.kind !== 'protestor' || !strikeAlive(u) || !Array.isArray(u.pos)) continue;
+    const bx = Math.floor(u.pos[0] / bucketSize), by = Math.floor(u.pos[1] / bucketSize);
+    const key = `${bx},${by}`;
+    if (!crowdBuckets.has(key)) crowdBuckets.set(key, []);
+    crowdBuckets.get(key).push(u);
+  }
   const struck = new Set(); // propertyIds still under a live strike this turn
   let firstStruck = null;
   for (const pr of db.properties) {
     if (!pr || !pr.pos || !pr.prodMode || !pr.ownerId) continue;
     const px = pr.pos[0], py = pr.pos[1];
+    const bx = Math.floor(px / bucketSize), by = Math.floor(py / bucketSize);
     let degree = 0;
-    for (const u of protest.units) {
-      if (u.side !== 'att' || u.kind !== 'protestor' || !strikeAlive(u)) continue;
-      const dx = u.pos[0] - px, dy = u.pos[1] - py;
-      if (dx * dx + dy * dy > R2) continue;
-      degree += Math.min(1, (u.strength || 0) / 5000);
+    for (let dxBucket = -1; dxBucket <= 1; dxBucket++) {
+      for (let dyBucket = -1; dyBucket <= 1; dyBucket++) {
+        const nearby = crowdBuckets.get(`${bx + dxBucket},${by + dyBucket}`) || [];
+        for (const u of nearby) {
+          const dx = u.pos[0] - px, dy = u.pos[1] - py;
+          if (dx * dx + dy * dy <= R2) degree += Math.min(1, (u.strength || 0) / 5000);
+        }
+      }
     }
     if (degree <= 0) continue;
     degree = Math.min(cap, degree);

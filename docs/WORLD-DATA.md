@@ -7,7 +7,7 @@ mode). `store.get()` returns it; everything mutates it in place.
 
 ```js
 {
-  schema: 4,               // migration gate — bump only in store.migrate()
+  schema: 16,              // migration gate — bump only in store.migrate()
   settings: { ... },       // world config (see below)
   globalVars: { ... },     // national numbers: gdp, population, treasury, moneySupply,
                            // avgHappiness, avgApproval, gdpGrowth, gdpScale, econConfidence,
@@ -27,6 +27,7 @@ mode). `store.get()` returns it; everything mutates it in place.
   election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
+  protestApplications: [ ... ], // Phase 36 — player petitions to start a protest (see below)
   history: [ ... ],        // per-turn time-series for charts (cap 1000)
   roles: [ ... ],          // permission templates
   users: [ ... ],          // operator accounts (salt + scrypt passHash)
@@ -205,8 +206,21 @@ Party Treasuries).
 
 Role: `{ id, name, perms: { pages: [...], inventories: 'all'|'own'|'none', accounts:
 'all'|'own'|'none', companyFinancials, government, statistics, mapLayers: ['political',
-'data', 'ownership', 'military'], manageNews, gm } }`. Ten seeded: gamemaster, citizen, mp,
-judge, executive, president, minister, journalist, police, military.
+'data', 'ownership', 'military'], manageNews, gm, abilities: [...] } }`. Ten seeded: gamemaster,
+citizen, mp, judge, executive, president, minister, journalist, police, military.
+
+**Abilities (Phase 36)** — actions, separate from the information clearances above:
+`command_police` (police in a protest), `authorize_force` (order force against a protest),
+`command_military` (the national defence in a war), `order_airstrikes`. Seeded once
+(`world._abilitiesSeeded`): president all four; minister police + force + military; police
+`command_police`; military `command_military` + `order_airstrikes`; custom roles with the
+military map layer get military + airstrikes; everyone else none. GM-editable in Roles &
+Operators.
+
+**Protest applications (Phase 36)** — `{ id, organizerId, name, demands, baseCities (≤3),
+crowds (1–3), perCity (500–5000), status: 'pending'|'approved'|'denied'|'withdrawn', filedBy,
+filedByEntityId, ts, turn, note?, decidedBy?, decidedAt? }`, capped at 60 (oldest decided
+dropped first).
 
 User: `{ id, username, displayName, salt, passHash (scrypt), roleId, entityId (their persona),
 newspaperId (journalists), lastReadNewsTs (news "News (n)" badge waterline, migrate-defaulted
@@ -233,5 +247,8 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
   (ARC Arms Works to Lachevan, derived from the capital's live position).
 - **Phase 33 (live elections, no schema bump):** `_partyStockSeeded` — default election
   settings + campaign catalogue, per-party Party Treasury accounts, grain/fuel war-chest.
+- **Phase 36 (permissions & protests, no schema bump):** `_abilitiesSeeded` (role
+  abilities), `protestApplications: []`, the `settings.war.protest` opinion/application
+  defaults, and a heal of users whose persona was stored as the literal `'__null__'`.
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino
   owner self-heal, certificate/deed reconciliation…). Follow the existing patterns when adding.

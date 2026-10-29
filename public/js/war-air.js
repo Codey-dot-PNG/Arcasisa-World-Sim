@@ -41,7 +41,7 @@
       const ca = this.access(war);
       const out = [];
       if (ca.air) out.push('def');
-      if (war.kind !== 'protest' && (ca.att || ca.attLead)) out.push('att');
+      if (war.kind === 'protest' ? ca.attLead : (ca.att || ca.attLead)) out.push('att');
       return out;
     },
     // the wing the dock shows: the GM's command side, else the one you fly
@@ -52,7 +52,7 @@
       return sides[0];
     },
     _airSideName(war, side) {
-      if (war.kind === 'protest') return side === 'def' ? 'Security forces' : 'Crowds';
+      if (war.kind === 'protest') return side === 'def' ? 'Security forces' : (entName((war.protest || {}).organizerId || war.attackerId) || 'The movement');
       return entName(side === 'att' ? war.attackerId : war.defenderId) || (side === 'att' ? 'Invader' : 'Defence');
     },
     _tickFrac(war) {
@@ -81,12 +81,15 @@
       const air = war.air;
       this._sqNodes = this._sqNodes || new Map();
       this._sqAnim = this._sqAnim || {};
-      if (!D.air._parts || !D.air._parts.bases.isConnected) {
+      // airfields sit UNDER the units (their own sublayer — a garrison
+      // standing on a runway must stay clickable); aircraft fly above
+      if (!D.air._parts || !D.air._parts.mis.isConnected) {
         clear(D.air);
-        D.air._parts = { bases: sv('g', { class: 'war-air-bases' }, D.air), mis: sv('g', { class: 'war-air-missions' }, D.air), sqs: sv('g', { class: 'war-air-sqs' }, D.air) };
+        D.air._parts = { mis: sv('g', { class: 'war-air-missions' }, D.air), sqs: sv('g', { class: 'war-air-sqs' }, D.air) };
         this._airDefs();
       }
       const P = D.air._parts;
+      P.bases = D.airfields;
       const seen = new Set();
       if (air && Array.isArray(air.squadrons)) {
         const side = this.commandableSide(war);
@@ -98,11 +101,18 @@
           if (sq.state === 'ready') ready[sq.baseId] = (ready[sq.baseId] || 0) + sq.planes;
           if (sq.state === 'rearm') rearm[sq.baseId] = (rearm[sq.baseId] || 0) + sq.planes;
         }
-        const bk = (air.bases || []).map(b => [b.id, b.pos.join(','), ready[b.id] || 0, rearm[b.id] || 0].join(':')).join('|');
-        if (P._bk !== bk) {
-          P._bk = bk;
+        // every airfield on the map: this conflict's bases in their side's
+        // colour, the rest (neutral nations', unused ones) drawn plain
+        const used = new Set((air.bases || []).map(b => b.propId).filter(Boolean));
+        const neutral = (S().properties || []).filter(p => p.pos && MAP_AIRFIELD_KINDS[p.kind] && !used.has(p.id))
+          .map(p => ({ id: 'nf_' + p.id, side: 'none', pos: p.pos, name: p.name, owner: p.ownerId }));
+        const fields = (air.bases || []).concat(neutral);
+        // (only on the War layer — elsewhere the base map draws airfields)
+        const bk = W.layer !== 'war' ? 'off' : fields.map(b => [b.id, b.pos.join(','), ready[b.id] || 0, rearm[b.id] || 0].join(':')).join('|');
+        if (P.bases._bk !== bk) {
+          P.bases._bk = bk;
           clear(P.bases);
-          for (const b of air.bases || []) {
+          for (const b of (bk === 'off' ? [] : fields)) {
             const g = this._scaledGroup(NS, P.bases, b.pos, 'war-airfield war-airfield-' + b.side);
             sv('path', { d: 'M-15,4 L11,-11 L15,-4 L-11,11 Z', class: 'war-airfield-strip' }, g);
             sv('path', { d: 'M-9,4.5 L-3,1 M1,-1.4 L7,-4.9', class: 'war-airfield-dash' }, g);
@@ -113,7 +123,8 @@
               sv('text', { x: 15, y: -14.4, class: 'war-airfield-count' }, g).textContent = txt;
             }
             sv('text', { y: 24, 'text-anchor': 'middle', class: 'war-airfield-name' }, g).textContent = b.name;
-            sv('title', {}, g).textContent = `${b.name} — ${this._airSideName(war, b.side)} airfield` + (n ? ` · ${n} plane${n === 1 ? '' : 's'} ready` : '') + (r ? ` · ${r} rearming` : '');
+            sv('title', {}, g).textContent = b.side === 'none' ? `${b.name} — airfield (${entName(b.owner) || 'unowned'}), not in this conflict`
+              : `${b.name} — ${this._airSideName(war, b.side)} airfield` + (n ? ` · ${n} plane${n === 1 ? '' : 's'} ready` : '') + (r ? ` · ${r} rearming` : '');
           }
         }
         // --- missions (own side; the GM sees both) + dogfight / flak FX
@@ -267,13 +278,13 @@
       const sqs = air.squadrons.filter(s => s.side === side && (s.planes > 0 || s.losses));
       const sig = [key, side, W.warAirDock, this._airSel, this._airPlan && (this._airPlan.sqId + this._airPlan.kind), !!(air.auto || {})[side],
         Math.round((air.fuel || {})[side] || 0), sqs.map(s => [s.id, s.planes, s.state, s.mission && s.mission.kind].join(':')).join('|'),
-        isGM() && this._gmSide, war.kind === 'protest' && !!(war.protest || {}).govViolent].join('#');
+        isGM() && this._gmSide, war.kind === 'protest' && [!!(war.protest || {}).govViolent, !!(war.protest || {}).protestorsViolent].join()].join('#');
       const old = document.getElementById('war-air-dock');
       if (!force && old && old.isConnected && this._airDockSig === sig) { this._patchAirDock(old, war); return; }
       this._airDockSig = sig;
       if (old) old.remove();
       const dock = el('div#war-air-dock.war-air-dock', { class: this._airPlan ? 'planning' : '' });
-      const grounded = war.kind === 'protest' && !(war.protest || {}).govViolent;
+      const grounded = war.kind === 'protest' && !(side === 'def' ? (war.protest || {}).govViolent : (war.protest || {}).protestorsViolent);
       const per = air.fuelPerPlane || 10;
       const fuel = (air.fuel || {})[side] || 0;
       // head: whose wing, (GM) switch, close
@@ -282,7 +293,7 @@
         el('span.air-title', '✈ Air wing'),
         sides.length > 1 ? el('div.seg', sides.slice().sort().reverse().map(s => el('button', {
           class: s === side ? 'active' : '', onclick: () => { this._gmSide = s; this._sel.clear(); this._airPlan = null; this._airPlanClear(); this.refreshLayer(true); this.renderAirDock(true); }
-        }, war.kind === 'protest' ? 'Police' : s === 'def' ? 'Defence' : 'Invader'))) : el('span.air-side', this._airSideName(war, side)),
+        }, war.kind === 'protest' ? (s === 'def' ? 'Police' : 'Movement') : s === 'def' ? 'Defence' : 'Invader'))) : el('span.air-side', this._airSideName(war, side)),
         el('button.air-close', { title: 'Close', onclick: () => { W.warAirDock = false; this._airPlan = null; this._airPlanClear(); this._removeAirDock(); this.renderToolbar(); } }, '×')));
       const sortieNeed = Math.max(...sqs.filter(s => s.planes > 0).map(s => s.planes), 0) * per;
       dock.appendChild(el('div.air-meta',
@@ -294,11 +305,13 @@
               try { await POST('/api/war/air/auto', { conflict: key, side, on: e.target.checked }); toast(e.target.checked ? 'The air staff takes over the wing.' : 'The wing flies on your orders.'); }
               catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; }
             } }), 'Auto')));
-      if (grounded) dock.appendChild(el('div.air-warn', 'Grounded — force has not been authorized against the protest.'));
+      if (grounded) dock.appendChild(el('div.air-warn', side === 'def' ? 'Grounded — force has not been authorized against the protest.' : 'Grounded — the movement is still peaceful. Its aircraft fly once the crowds turn violent.'));
       else if (fuel < per) dock.appendChild(el('div.air-warn', 'No refined fuel — the wing cannot take off. Buy or move Refined Fuel into your stockpile.'));
       if ((air.auto || {})[side]) dock.appendChild(el('div.air-note', 'The air staff is flying this wing. Orders you give still go out.'));
       const list = el('div.air-list');
-      if (!sqs.length) list.appendChild(el('div.air-empty', 'No aircraft. Military aircraft in this side\'s stockpiles form squadrons automatically.'));
+      if (!sqs.length) list.appendChild(el('div.air-empty', war.kind === 'protest' && side === 'att'
+        ? 'No aircraft. The movement flies the organizer\'s military aircraft from an airfield it owns or has seized.'
+        : 'No aircraft. Military aircraft in this side\'s stockpiles form squadrons at its airfields automatically.'));
       for (const sq of sqs) list.appendChild(this._airRow(war, key, sq, grounded, fuel, per));
       dock.appendChild(list);
       dock.appendChild(el('div.air-foot', `Tanks hold ${this.fmtDur(((sqs[0] || {}).endurance || 15) * this._tickSeconds(war))} of flight — the farther the target, the less time over it · ${this.fmtDur((eng().AIR_REARM_TICKS || 60) * this._tickSeconds(war))} to refuel and rearm after landing.`));
@@ -511,7 +524,7 @@
     airHudText(war) {
       if (!war.air) return null;
       const parts = [];
-      for (const side of (war.kind === 'protest' ? ['def'] : ['def', 'att'])) {
+      for (const side of ['def', 'att']) {
         const c = this.airCounts(war, side);
         if (!c.planes && !c.lost) continue;
         parts.push(`${this._airSideName(war, side)}: ${c.aloft} aloft · ${c.ready} ready` + (c.rearm ? ` · ${c.rearm} rearming` : '') + (c.lost ? ` · ${c.lost} lost` : ''));
@@ -522,7 +535,7 @@
       const air = war.air;
       if (!air || !(air.squadrons || []).length) return;
       inner.appendChild(Views.secLabel('Air war'));
-      const sides = war.kind === 'protest' ? ['def'] : ['def', 'att'];
+      const sides = ['def', 'att'];
       const can = new Set(war.active ? this.airSidesFor(war) : []);
       for (const side of sides) {
         const c = this.airCounts(war, side);

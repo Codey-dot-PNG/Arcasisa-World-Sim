@@ -61,7 +61,8 @@ const AIRSTRIKE_EGRESS_TICKS = 3;  // ticks after impact the plane is still visi
 // Total lifetime of the impact FX. Modelled frame-by-frame on neal.fun's
 // Asteroid Launcher impact (~2.9s at 24fps in the reference capture): bloom
 // wash 0-650ms, shockwave bubble 480-2750ms, ember lingering to the end.
-const EXPLOSION_LIFE_MS = 2900;
+const EXPLOSION_LIFE_MS = 5600;  // a blast's flash, fireball and lingering smoke
+const WAR_STICK_STAGGER_MS = 160; // a squadron's stick of bombs walks along its run
 
 // Feature: unit damage feedback — how long the hit-jitter/flash plays after a
 // live unit's strength is observed to drop between renderUnits passes.
@@ -69,6 +70,9 @@ const WAR_HIT_FX_MS = 450;
 // Matches the engine's rout threshold (war-engine.js: org < 25 → routed) —
 // used purely for the client's morale-bar/info-card color, not gameplay.
 const WAR_ROUT_ORG = 25;
+// The GM's speed slider stops (server/war.js clamps to [0.05, 8]).
+const WAR_SPEEDS = [0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
+function warSpeedLabel(v) { return String(Math.round((Number(v) || 1) * 100) / 100) + '×'; }
 const WAR_GROUND_MIN_MS = 1500; // see renderGround
 const MAX_PROTEST_UNITS_CLIENT = 300; // server/war.js MAX_PROTEST_UNITS
 // Protest unit glyphs (see War._symbol): a crowd pill holding three figures,
@@ -267,9 +271,20 @@ const War = {
   // The engine's db-shaped view over client state: the predicted war plus
   // the world data the tick pipeline reads (provinces for territory/geometry,
   // cities for the AI's garrison rule, settings.map for the transport graph).
-  _dbLike(war) {
+  // The db shell a predicted tick runs against. The OTHER live conflict's
+  // predicted doc rides along (db.protest for the war, db.otherWar for the
+  // protest) so cross-conflict fighting predicts like the server's — except
+  // during a rebase fast-forward (`solo`), which replays ticks whose effects
+  // on the other doc it already shows.
+  _dbLike(war, solo) {
     const s = S() || {};
-    return { war, provinces: s.provinces || [], cities: s.cities || [], settings: s.settings || {} };
+    const db = { war, provinces: s.provinces || [], cities: s.cities || [], settings: s.settings || {} };
+    if (!solo && war) {
+      const otherKey = this.docKeyOf(war) === 'protest' ? 'war' : 'protest';
+      const o = this._preds[otherKey] && this._preds[otherKey].war;
+      if (o && o.active && o !== war) { if (otherKey === 'protest') db.protest = o; else db.otherWar = o; }
+    }
+    return db;
   },
 
   // The war doc the MAP renders: predicted when available, else authoritative.
@@ -326,7 +341,7 @@ const War = {
     // knew that we didn't (other players' orders, bombs, AI replans).
     if (sameWar && war.active && !war.paused && prev.war.tick > (war.tick || 0)) {
       const ahead = Math.min(prev.war.tick - (war.tick || 0), 12); // cap the catch-up CPU; beyond it, accept the jump
-      const dbl = this._dbLike(war);
+      const dbl = this._dbLike(war, true);
       for (let i = 0; i < ahead && war.active && !war.paused; i++) WarEngine.warTick(dbl);
     }
     // Carry the local tick PHASE across rebases — resetting it to "now" on
@@ -421,7 +436,9 @@ const War = {
     }
     // 2. authoritative heartbeat, one tick interval apart (never below 1s —
     //    at 8× speed prediction carries the smoothness, not the network)
-    const interval = Math.max(1000, (docs[0].tickMs || 2000) / (docs[0].speed || 1));
+    // (capped at 4s: a slow conflict — 0.05× ticks every 40s — must still
+    // bring other players' orders and the server's results in promptly)
+    const interval = Math.min(4000, Math.max(1000, (docs[0].tickMs || 2000) / (docs[0].speed || 1)));
     const now = Date.now();
     if (now >= this._hbDue && !this._hbBusy) {
       this._hbDue = now + interval;
@@ -835,7 +852,9 @@ const War = {
     const docs = this.authDocs();
     const w = docs[0] || {};
     const interval = (w.tickMs || 2000) / (w.speed || 1);
-    return Math.min(2200, Math.max(250, interval));
+    // a full tick's glide, however long: at slow speeds units creep
+    // continuously instead of hopping and then standing still
+    return Math.min(60000, Math.max(250, interval));
   },
 
   /* ---------- shared animation loop ----------
@@ -994,7 +1013,7 @@ const War = {
     root.setAttribute('class', 'war-overlay-root');
     host.appendChild(root);
     this._O = { root, docs: {} };
-    for (const name of ['marks', 'orders', 'refugees', 'units', 'air', 'fx', 'measure']) {
+    for (const name of ['marks', 'airfields', 'orders', 'refugees', 'units', 'air', 'fx', 'measure']) {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', 'war-' + name);
       root.appendChild(g);
@@ -1087,7 +1106,7 @@ const War = {
         this.renderRefugees(map, null, NS, war, D.refugees);
         this.renderUnits(map, NS, war, D, key, seen);
         if (this.renderAir) this.renderAir(map, NS, war, D, key, seen);
-      } else if (this.renderAir) clear(D.air);
+      } else if (this.renderAir) { clear(D.air); clear(D.airfields); D.airfields._bk = null; }
       this._fx = D.fx;
       this._checkAirstrikeLandings(war);
       this.renderAirstrikePlanes(map, null, NS, war);
@@ -1119,7 +1138,7 @@ const War = {
   _hideDoc(key) {
     const B = this._L.docs[key], O = this._O && this._O.docs[key];
     if (B) { clear(B.ground); clear(B.halo); B._groundKey = null; B._haloKey = null; }
-    if (O) { clear(O.marks); O._marksKey = null; clear(O.orders); clear(O.refugees); clear(O.fx); if (O.air) clear(O.air); }
+    if (O) { clear(O.marks); O._marksKey = null; clear(O.orders); clear(O.refugees); clear(O.fx); if (O.air) clear(O.air); if (O.airfields) { clear(O.airfields); O.airfields._bk = null; } }
   },
   // one group per conflict doc inside each sublayer (z-order: every doc's
   // ground under every doc's units)
@@ -1128,7 +1147,7 @@ const War = {
     let B = this._L.docs[key];
     if (!B) { B = this._L.docs[key] = { halo: mkG(this._L.ground) }; B.ground = mkG(this._L.ground); }
     let O = this._O.docs[key];
-    if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'orders', 'refugees', 'units', 'air', 'fx']) O[name] = mkG(this._O[name]); }
+    if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'airfields', 'orders', 'refugees', 'units', 'air', 'fx']) O[name] = mkG(this._O[name]); }
     const D = Object.assign(O, { ground: B.ground });
     D._groundKey = B._groundKey;
     D._base = B;
@@ -1158,6 +1177,7 @@ const War = {
       pattern('war-hatch', '#9b2c22', '0.16', '0.30');
       pattern('war-hatch-def', '#24466e', '0.16', '0.30');
       pattern('war-hatch-protest', '#b0701c', '0.14', '0.30');
+      defs.appendChild(this._radialGrad(NS, 'war-scorch', [[0, '#1e150e', 0.5], [0.45, '#2e2216', 0.3], [0.8, '#3a2a1a', 0.1], [1, '#3a2a1a', 0]]));
       defs.appendChild(this._radialGrad(NS, 'war-unrest-glow', [[0, '#e3a03c', 0.42], [0.55, '#e3a03c', 0.2], [1, '#e3a03c', 0]]));
       defs.appendChild(this._radialGrad(NS, 'war-unrest-riot', [[0, '#d2502a', 0.45], [0.55, '#d2502a', 0.22], [1, '#d2502a', 0]]));
     }
@@ -1222,7 +1242,7 @@ const War = {
       D.ground.appendChild(n);
       return n;
     };
-    for (const c of (war.craters || [])) add('circle', { cx: c.pos[0], cy: c.pos[1], r: c.r || 95, class: 'war-crater' });
+    for (const c of (war.craters || [])) this._crater(NS, D.ground, c);
     const g = war.grid;
     if (!g || !g.cols || !g.rows) return;
     const protest = war.kind === 'protest';
@@ -1274,6 +1294,35 @@ const War = {
       n.setAttribute('class', 'war-unrest' + (war.protest && war.protest.protestorsViolent ? ' war-unrest-riot' : ''));
       B.halo.appendChild(n);
     }
+  },
+  // A crater: a scorch mark, a jagged bowl with a lighter rim and a scatter
+  // of ejecta — shaped deterministically from its position, sized by its
+  // blast, softening as it ages.
+  _crater(NS, parent, c) {
+    const r = c.r || 95;
+    let h = Math.round(c.pos[0] * 7.13 + c.pos[1] * 13.7) | 0;
+    const rnd = () => { h = (h * 1103515245 + 12345) | 0; return ((h >>> 8) & 0xffff) / 0xffff; };
+    const ageMin = c.t ? (Date.now() - c.t) / 60000 : 0;
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'war-crater');
+    g.setAttribute('transform', `translate(${c.pos[0].toFixed(1)},${c.pos[1].toFixed(1)}) rotate(${Math.round(rnd() * 360)})`);
+    g.style.opacity = String(Math.max(0.45, 1 - ageMin / 90).toFixed(2));
+    const el2 = (tag, attrs) => { const n = document.createElementNS(NS, tag); for (const a in attrs) n.setAttribute(a, attrs[a]); g.appendChild(n); return n; };
+    el2('ellipse', { rx: (r * 1.05).toFixed(1), ry: (r * (0.85 + rnd() * 0.2)).toFixed(1), fill: 'url(#war-scorch)', class: 'war-crater-scorch' });
+    const pts = [];
+    const n = 11;
+    for (let i = 0; i < n; i++) { const a = (i / n) * Math.PI * 2, rr = r * 0.3 * (0.78 + rnd() * 0.44); pts.push([Math.cos(a) * rr, Math.sin(a) * rr]); }
+    const poly = (k) => 'M' + pts.map(p => (p[0] * k).toFixed(1) + ' ' + (p[1] * k).toFixed(1)).join(' L') + ' Z';
+    el2('path', { d: poly(1.28), class: 'war-crater-rim', 'vector-effect': 'non-scaling-stroke' });
+    el2('path', { d: poly(1), class: 'war-crater-bowl' });
+    let ej = '';
+    for (let i = 0; i < 9; i++) {
+      const a = rnd() * Math.PI * 2, d = r * (0.48 + rnd() * 0.42), s = r * (0.025 + rnd() * 0.035);
+      const x = Math.cos(a) * d, y = Math.sin(a) * d;
+      ej += `M${(x - s).toFixed(1)} ${y.toFixed(1)} a${s.toFixed(1)},${s.toFixed(1)} 0 1 0 ${(2 * s).toFixed(1)},0 a${s.toFixed(1)},${s.toFixed(1)} 0 1 0 ${(-2 * s).toFixed(1)},0 `;
+    }
+    el2('path', { d: ej, class: 'war-crater-ejecta' });
+    parent.appendChild(g);
   },
   // 1 where `side` holds the ground, 0 where the other side does; everything
   // else (sea, neutral soil) takes its nearest belligerent cell's value.
@@ -1572,6 +1621,22 @@ const War = {
         else clashes.push({ pos: mid, n: 1, str: a.strength + d.strength });
       }
     }
+    // ...and fights across the two conflicts (war troops vs protest crowds or
+    // police — resolved by the engine's stepCrossCombat), drawn by the war doc
+    if (war.kind !== 'protest') {
+      const P = this._preds.protest && this._preds.protest.war;
+      if (P && P.active) {
+        for (const a of war.units) {
+          if (!live(a) || a.state !== 'fighting') continue;
+          for (const b of P.units) {
+            if (!live(b) || b.state !== 'fighting' || Math.hypot(a.pos[0] - b.pos[0], a.pos[1] - b.pos[1]) > 60) continue;
+            const mid = [(a.pos[0] + b.pos[0]) / 2, (a.pos[1] + b.pos[1]) / 2];
+            const near = clashes.find(c => Math.hypot(c.pos[0] - mid[0], c.pos[1] - mid[1]) < 90);
+            if (near) { near.n++; near.str += a.strength + b.strength; } else clashes.push({ pos: mid, n: 1, str: a.strength + b.strength, cross: true });
+          }
+        }
+      }
+    }
     // protests: a crowd face to face with a police line while neither side
     // may fight is a standoff — two opposed chevrons between them
     if (war.kind === 'protest' && protestPosture(war.protest) === 'peaceful') {
@@ -1610,7 +1675,7 @@ const War = {
       x.setAttribute('class', 'war-clash-x');
       g.appendChild(x);
       const t = document.createElementNS(NS, 'title');
-      t.textContent = `Engagement — ${c.n} unit pair${c.n === 1 ? '' : 's'} in contact`;
+      t.textContent = c.cross ? `Street fighting — the war's troops and the protest in contact (${c.n})` : `Engagement — ${c.n} unit pair${c.n === 1 ? '' : 's'} in contact`;
       g.appendChild(t);
     }
   },
@@ -2030,10 +2095,13 @@ const War = {
   // — idempotent across re-renders and rebases since it's keyed by strike id,
   // not by any per-frame state. The actual explosion is built by
   // renderExplosions below, keyed off this same map.
+  // Stamps are keyed per conflict doc ('war|<id>'): with a war and a protest
+  // both live, a shared key space let one doc's pass forget the other's.
   _checkAirstrikeLandings(war) {
+    const pre = this.docKeyOf(war) + '|';
     for (const s of (war.airstrikes || [])) {
-      if (s.done && !(s.id in this._strikeImpactAt)) {
-        this._strikeImpactAt[s.id] = Date.now();
+      if (s.done && !((pre + s.id) in this._strikeImpactAt)) {
+        this._strikeImpactAt[pre + s.id] = Date.now();
       }
     }
   },
@@ -2050,138 +2118,120 @@ const War = {
     }
     return grad;
   },
-  // Task 1: soft nuclear-flash impact FX, modelled directly on neal.fun's
-  // Asteroid Launcher (frame-by-frame from a 24fps reference capture):
-  //   · 0-650ms   a huge soft warm-white BLOOM (pure radial-gradient falloff,
-  //               no hard edges) washes over ~3× the blast radius, with a
-  //               flattened horizontal lens streak — the anamorphic-flare look;
-  //   · 250ms+    a bright CORE ball sits at ground zero and slowly shrinks
-  //               into a small warm ember that lingers to the very end;
-  //   · 480-2750ms a delicate soap-bubble SHOCKWAVE ring detaches and expands
-  //               slowly to ~2.6× the blast radius — a blurred wide band plus
-  //               a thinner bright rim, never a crisp stroke;
-  //   · no debris lines, no turbulence displacement — the reference reads as
-  //   pure light, and the soft gradients are also far cheaper to composite.
-  // Recreated each render (the whole war-layer is torn down every render,
-  // same reasoning as the hatch pattern / arrowhead defs) and then animated
-  // frame-to-frame by ensureLoop → _updateExplosion, keyed off
-  // _strikeImpactAt so it survives full-layer rebuilds without restarting.
+  // Impact FX — a conventional bomb, top-down, per blast (a squadron's stick
+  // detonates bomb by bomb along its run, WAR_STICK_STAGGER_MS apart):
+  //   · 0–140ms    a white-hot FLASH and a ground SHOCK RING racing out to
+  //                ~1.8× the blast radius;
+  //   · 0–700ms    SPARKS — burning debris thrown outward;
+  //   · 0–1300ms   the FIREBALL: three churning gradient blobs that swell,
+  //                then shrink and darken into the smoke;
+  //   · 250ms–end  the SMOKE plume: grey-brown puffs billowing up and
+  //                drifting downwind, lingering ~5s.
+  // No filters (a blur repaints expensively every frame) — gradients only.
+  // Recreated each paint and posed from the impact time (ensureLoop →
+  // _updateExplosion), so it survives layer rebuilds without restarting.
   renderExplosions(map, mk, NS, war) {
     const now = Date.now();
     const byId = {};
     for (const s of (war.airstrikes || [])) byId[s.id] = s;
     const bombR = (window.WarEngine && WarEngine.BOMB_RADIUS) || 95;
     let defs = null; // built lazily — only when at least one explosion is live this pass
-    for (const id in this._strikeImpactAt) {
+    const pre = this.docKeyOf(war) + '|';
+    for (const sid in this._strikeImpactAt) {
+      if (!sid.startsWith(pre)) continue; // the other conflict's blasts
+      const id = sid.slice(pre.length);
       const strike = byId[id];
       // Forget the impact stamp ONLY once the strike has left the war doc
-      // entirely (the engine prunes it AIRSTRIKE_PRUNE_TICKS after impact).
-      // The old code deleted it the moment the FX finished — but the strike
-      // was still in war.airstrikes with done:true, so _checkAirstrikeLandings
-      // immediately re-stamped it on the next render and the explosion
-      // REPLAYED every EXPLOSION_LIFE_MS until the prune finally caught up.
-      if (!strike) { delete this._strikeImpactAt[id]; delete this._explosionAnim[id]; continue; }
-      const t0 = this._strikeImpactAt[id];
+      // entirely (the engine prunes it AIRSTRIKE_PRUNE_TICKS after impact) —
+      // forgetting it when the FX ended let the still-done strike re-stamp
+      // and REPLAY the explosion until the prune caught up.
+      if (!strike) { delete this._strikeImpactAt[sid]; delete this._explosionAnim[sid]; continue; }
+      const delay = strike.squadronId ? (Number(String(id).split('-').pop()) || 0) * WAR_STICK_STAGGER_MS : 0;
+      const t0 = this._strikeImpactAt[sid] + delay;
       const age = now - t0;
-      if (age > EXPLOSION_LIFE_MS) { delete this._explosionAnim[id]; continue; } // FX over — keep the stamp (see above)
+      if (age > EXPLOSION_LIFE_MS) { delete this._explosionAnim[sid]; continue; } // FX over — keep the stamp (see above)
 
       if (!defs) {
         defs = document.createElementNS(NS, 'defs');
         (this._fx || map.warLayer).appendChild(defs);
-        // Shared by every simultaneous explosion — the reference effect has
-        // no per-strike variance (every neal.fun impact looks the same), so
-        // fixed ids are fine and per-strike turbulence seeds are gone.
-        defs.appendChild(this._radialGrad(NS, 'war-nuke-bloom', [
-          [0, '#ffffff', .95], [0.25, '#fff4dc', .8], [0.5, '#ffdfbc', .5], [0.75, '#ffc9a6', .22], [1, '#ffc9a6', 0]
-        ]));
-        defs.appendChild(this._radialGrad(NS, 'war-nuke-core', [
-          [0, '#ffffff', 1], [0.55, '#fff1cf', .95], [0.85, '#ffc38f', .5], [1, '#ffc38f', 0]
-        ]));
-        const soft = document.createElementNS(NS, 'filter');
-        soft.setAttribute('id', 'war-nuke-soft');
-        soft.setAttribute('x', '-50%'); soft.setAttribute('y', '-50%');
-        soft.setAttribute('width', '200%'); soft.setAttribute('height', '200%');
-        const blur = document.createElementNS(NS, 'feGaussianBlur');
-        blur.setAttribute('stdDeviation', '5');
-        soft.appendChild(blur);
-        defs.appendChild(soft);
+        defs.appendChild(this._radialGrad(NS, 'war-blast-glow', [[0, '#fff2c4', 0.9], [0.35, '#ffb347', 0.45], [1, '#ff7a1a', 0]]));
+        defs.appendChild(this._radialGrad(NS, 'war-blast-fire', [[0, '#fffbe6', 1], [0.25, '#ffd45c', 0.95], [0.55, '#ff7b1c', 0.85], [0.8, '#b8320f', 0.55], [1, '#5a1a08', 0]]));
+        defs.appendChild(this._radialGrad(NS, 'war-blast-smoke', [[0, '#3a332c', 0.85], [0.55, '#5b5248', 0.55], [1, '#6b6156', 0]]));
       }
-
+      const R = strike.radius || bombR;
+      // a deterministic little scatter per blast, so a stick never looks stamped
+      let h = 0;
+      for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) | 0;
+      const rnd = () => { h = (h * 1103515245 + 12345) | 0; return ((h >>> 8) & 0xffff) / 0xffff; };
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', 'war-explosion');
       g.setAttribute('transform', `translate(${strike.pos[0]},${strike.pos[1]})`);
-
-      // 1. horizontal lens streak (under the bloom, same gradient — a
-      //    radialGradient in objectBoundingBox units stretches to the
-      //    ellipse's own box, giving the flattened flare for free)
-      const streak = document.createElementNS(NS, 'ellipse');
-      streak.setAttribute('fill', 'url(#war-nuke-bloom)');
-      g.appendChild(streak);
-      // 2. the big soft bloom wash
-      const bloom = document.createElementNS(NS, 'circle');
-      bloom.setAttribute('fill', 'url(#war-nuke-bloom)');
-      g.appendChild(bloom);
-      // 3. shockwave bubble: a blurred wide band + a thinner bright rim
-      const ring = document.createElementNS(NS, 'circle');
-      ring.setAttribute('fill', 'none'); ring.setAttribute('stroke', '#ffffff');
-      ring.setAttribute('filter', 'url(#war-nuke-soft)');
-      g.appendChild(ring);
-      const rim = document.createElementNS(NS, 'circle');
-      rim.setAttribute('fill', 'none'); rim.setAttribute('stroke', '#ffffff');
-      g.appendChild(rim);
-      // 4. the core ball / lingering ember (on top of everything)
-      const core = document.createElementNS(NS, 'circle');
-      core.setAttribute('fill', 'url(#war-nuke-core)');
-      g.appendChild(core);
-
+      const mkc = (cls, fill) => { const c = document.createElementNS(NS, 'circle'); c.setAttribute('class', cls); if (fill) c.setAttribute('fill', fill); c.setAttribute('r', '0.01'); g.appendChild(c); return c; };
+      const smoke = [];
+      for (let i = 0; i < 5; i++) smoke.push({ n: mkc('war-blast-smoke', 'url(#war-blast-smoke)'), a: rnd() * Math.PI * 2, d: 0.15 + rnd() * 0.35, s: 0.75 + rnd() * 0.5, lag: rnd() * 400 });
+      const glow = mkc('war-blast-glow', 'url(#war-blast-glow)');
+      const fire = [];
+      for (let i = 0; i < 3; i++) fire.push({ n: mkc('war-blast-fire', 'url(#war-blast-fire)'), a: rnd() * Math.PI * 2, d: 0.12 + rnd() * 0.18, s: 0.7 + rnd() * 0.45 });
+      const ring = mkc('war-blast-ring');
+      const sparks = document.createElementNS(NS, 'path');
+      sparks.setAttribute('class', 'war-blast-sparks');
+      g.appendChild(sparks);
+      const sparkDirs = [];
+      for (let i = 0; i < 9; i++) sparkDirs.push({ a: (i / 9) * Math.PI * 2 + rnd() * 0.5, v: 0.8 + rnd() * 0.7 });
+      const flash = mkc('war-blast-flash');
       (this._fx || map.warLayer).appendChild(g);
-      // a squadron's stick of bombs: each blast its own (smaller) radius
-      const entry = { node: g, streak, bloom, ring, rim, core, t0, life: EXPLOSION_LIFE_MS, bombR: strike.radius || bombR };
-      this._explosionAnim[id] = entry;
+      const entry = { node: g, glow, fire, smoke, ring, sparks, sparkDirs, flash, t0, life: EXPLOSION_LIFE_MS, R, wind: [0.55, -0.85] };
+      this._explosionAnim[sid] = entry;
       this._updateExplosion(entry, age);
     }
   },
-  // Age-driven pose for one explosion — called once at creation (renderExplosions)
-  // and then every rAF frame (ensureLoop) so the FX keeps animating between
-  // the (throttled) war-layer rebuilds. All timings below are the reference
-  // capture's, scaled to EXPLOSION_LIFE_MS = 2900.
+  // Age-driven pose for one blast — at creation and then every rAF frame.
   _updateExplosion(e, age) {
-    const bombR = e.bombR;
-    const clamp01 = (v) => Math.max(0, Math.min(1, v));
-    const easeOut = (k) => 1 - Math.pow(1 - clamp01(k), 3);
-
-    // 1+2. bloom wash (and its lens streak): grows fast to ~3× blast radius
-    // with a slow residual creep, full brightness almost instantly, holds to
-    // ~650ms, then bleeds away by ~1600ms.
-    const bloomR = Math.max(0.01, bombR * 3.0 * (0.92 * easeOut(age / 450) + 0.08 * clamp01(age / e.life)));
-    const bloomOp = age < 650 ? clamp01(age / 120) : clamp01(1 - (age - 650) / 950);
-    e.bloom.setAttribute('r', String(bloomR));
-    e.bloom.style.opacity = String(bloomOp);
-    e.streak.setAttribute('rx', String(bloomR * 1.9));
-    e.streak.setAttribute('ry', String(Math.max(0.01, bloomR * 0.22)));
-    e.streak.style.opacity = String(bloomOp * 0.65);
-
-    // 3. shockwave bubble: detaches at ~480ms, expands slowly (ease-out) to
-    // ~2.6× blast radius by ~2750ms, softening and fading the whole way.
-    const rt = clamp01((age - 480) / (2750 - 480));
-    const rk = 1 - Math.pow(1 - rt, 2);
-    const ringR = Math.max(0.01, bombR * (0.55 + 2.05 * rk));
-    const ringW = Math.max(1, bombR * (0.30 - 0.20 * rk));
-    const ringOp = clamp01((age - 480) / 150) * (1 - rt) * 0.9;
-    e.ring.setAttribute('r', String(ringR));
-    e.ring.setAttribute('stroke-width', String(ringW));
-    e.ring.style.opacity = String(ringOp);
-    e.rim.setAttribute('r', String(ringR * 0.985));
-    e.rim.setAttribute('stroke-width', String(Math.max(0.5, ringW * 0.35)));
-    e.rim.style.opacity = String(Math.min(1, ringOp * 1.25));
-
-    // 4. core → ember: swells to ~0.55× blast radius by 250ms, then shrinks
-    // steadily into a small warm ember (~0.1×) that only fades out at the
-    // very end — the lingering glow at ground zero in the reference.
-    const coreR = Math.max(0.01, bombR * 0.55 * easeOut(age / 250) * (1 - 0.82 * clamp01((age - 250) / 2250)));
-    const coreOp = age < 1700 ? 1 : clamp01(1 - (age - 1700) / 1050);
-    e.core.setAttribute('r', String(coreR));
-    e.core.style.opacity = String(coreOp);
+    const R = e.R;
+    const c01 = (v) => Math.max(0, Math.min(1, v));
+    const easeOut = (k) => 1 - Math.pow(1 - c01(k), 3);
+    const set = (n, r, op, cx, cy) => {
+      n.setAttribute('r', Math.max(0.01, r).toFixed(1));
+      n.style.opacity = c01(op).toFixed(3);
+      if (cx !== undefined) { n.setAttribute('cx', cx.toFixed(1)); n.setAttribute('cy', cy.toFixed(1)); }
+    };
+    if (age < 0) { e.node.style.opacity = '0'; return; } // a stick bomb still falling
+    e.node.style.opacity = '1';
+    // flash + glow
+    set(e.flash, R * 0.4 * easeOut(age / 60), 1 - age / 140);
+    set(e.glow, R * (0.6 + 1.1 * easeOut(age / 350)), age < 180 ? 1 : 1 - (age - 180) / 520);
+    // ground shock ring: fast, thin, gone in under half a second
+    const rk = c01(age / 450);
+    set(e.ring, R * (0.3 + 1.5 * easeOut(rk)), (1 - rk) * 0.85);
+    e.ring.setAttribute('stroke-width', (R * 0.07 * (1 - rk) + 0.6).toFixed(2));
+    // fireball: swell, churn, shrink into the smoke
+    const fk = c01(age / 1300);
+    for (const f of e.fire) {
+      const grow = easeOut(age / 280), shrink = 1 - 0.75 * c01((age - 350) / 950);
+      const drift = R * f.d * (0.4 + 0.6 * fk);
+      set(f.n, R * 0.62 * f.s * grow * shrink, 1 - Math.pow(fk, 1.6), Math.cos(f.a + fk * 0.8) * drift, Math.sin(f.a + fk * 0.8) * drift);
+    }
+    // sparks: burning debris flung outward
+    const sk = c01(age / 700);
+    if (sk < 1) {
+      let d = '';
+      for (const sp of e.sparkDirs) {
+        const r1 = R * (0.25 + 1.1 * sp.v * easeOut(sk)), r0 = r1 - R * 0.22 * (1 - sk);
+        d += `M${(Math.cos(sp.a) * r0).toFixed(1)} ${(Math.sin(sp.a) * r0).toFixed(1)} L${(Math.cos(sp.a) * r1).toFixed(1)} ${(Math.sin(sp.a) * r1).toFixed(1)} `;
+      }
+      e.sparks.setAttribute('d', d);
+      e.sparks.style.opacity = (1 - sk).toFixed(3);
+    } else if (e.sparks.getAttribute('d')) e.sparks.setAttribute('d', '');
+    // smoke: billows up from the fireball and drifts downwind, lingering
+    for (const sm of e.smoke) {
+      const a = age - 250 - sm.lag;
+      if (a <= 0) { set(sm.n, 0.01, 0); continue; }
+      const k = c01(a / (e.life - 250 - sm.lag));
+      const rr = R * (0.3 + 0.75 * sm.s * easeOut(k * 1.6));
+      const op = (a < 500 ? a / 500 : 1) * (1 - Math.pow(k, 1.4)) * 0.8;
+      const dx = Math.cos(sm.a) * R * sm.d + e.wind[0] * R * 0.9 * k, dy = Math.sin(sm.a) * R * sm.d + e.wind[1] * R * 0.9 * k;
+      set(sm.n, rr, op, dx, dy);
+    }
   },
 
   /* ═══════════ WAR MAP CONTROLS ═══════════
@@ -2413,7 +2463,7 @@ const War = {
       fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar,
       this.airHudText ? this.airHudText(war) : ''].join('|');
     const old = document.getElementById('war-hud');
-    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : protest ? ((war.protest || {}).protestorsViolent ? 'VIOLENT' : 'PEACEFUL') : war.totalWar ? 'TOTAL WAR' : 'LIVE') + ' · T' + war.tick + (war.speed > 1 ? ' · ' + war.speed + '×' : '');
+    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : protest ? ((war.protest || {}).protestorsViolent ? 'VIOLENT' : 'PEACEFUL') : war.totalWar ? 'TOTAL WAR' : 'LIVE') + ' · T' + war.tick + (war.speed !== 1 ? ' · ' + warSpeedLabel(war.speed) : '');
     if (old && old.isConnected && this._hudSig === sig) {
       const stEl = old.querySelector('.war-hud-status');
       if (stEl && stEl.textContent !== statusText()) stEl.textContent = statusText();
@@ -2489,7 +2539,7 @@ const War = {
       Math.round(sm.support * 10), Math.round(sm.approval * 10), sm.strikes.length, Math.round(sm.maxCut * 100), sm.unrest.join(),
       fmtCompact(st.civilianDeaths || 0), fmtCompact(st.refugees || 0), fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), (war.result || {}).winner].join('|');
     const old = document.getElementById('war-hud');
-    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : P.status) + ' · T' + war.tick + (war.speed > 1 ? ' · ' + war.speed + '×' : '');
+    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : P.status) + ' · T' + war.tick + (war.speed !== 1 ? ' · ' + warSpeedLabel(war.speed) : '');
     if (old && old.isConnected && this._hudSig === sig) {
       const stEl = old.querySelector('.war-hud-status');
       if (stEl && stEl.textContent !== statusText()) stEl.textContent = statusText();
@@ -3236,6 +3286,24 @@ const War = {
     inner.appendChild(box);
   },
 
+  // The conflict clock as a slider (log-spaced stops 0.05×–8×): the label
+  // follows the thumb, the POST goes on release.
+  _speedSlider(war, key) {
+    const cur = Number(war.speed) || 1;
+    let idx = 0;
+    WAR_SPEEDS.forEach((v, i) => { if (Math.abs(Math.log(v / cur)) < Math.abs(Math.log(WAR_SPEEDS[idx] / cur))) idx = i; });
+    const tickMs = war.tickMs || 2000;
+    const per = (v) => { const ms = Math.max(200, tickMs / v); return ms >= 1000 ? Math.round(ms / 100) / 10 + 's' : ms + 'ms'; };
+    const label = el('span.war-speed-label', warSpeedLabel(cur), el('span.war-speed-per', ` · a tick every ${per(cur)}`));
+    const input = el('input.war-speed-range', { type: 'range', min: 0, max: WAR_SPEEDS.length - 1, step: 1, value: idx, title: 'Conflict speed',
+      oninput: (e) => { const v = WAR_SPEEDS[+e.target.value]; label.firstChild.textContent = warSpeedLabel(v); label.lastChild.textContent = ` · a tick every ${per(v)}`; },
+      onchange: async (e) => {
+        const v = WAR_SPEEDS[+e.target.value];
+        try { await POST('/api/gm/war/control', { speed: v, conflict: key }); toast(`Speed ${warSpeedLabel(v)} — a tick every ${per(v)}.`); }
+        catch (err) { toast(err.message, true); }
+      } });
+    return el('label.war-speed', el('span.mono-label', 'Speed'), input, label);
+  },
   renderControls(inner, war, key) {
     const protest = war.kind === 'protest';
     const row = el('div.btn-row.war-gm-row');
@@ -3244,10 +3312,7 @@ const War = {
       row.appendChild(el('button.solid-btn.btn-xs', {
         onclick: async () => { try { await POST('/api/gm/war/control', { paused: !war.paused, conflict: key }); } catch (e) { toast(e.message, true); } }
       }, war.paused ? '▶ Resume' : '⏸ Pause'));
-      row.appendChild(el('div.seg', { title: 'Simulation speed' }, [1, 2, 4, 8].map(sp => el('button', {
-        class: war.speed === sp ? 'active' : '',
-        onclick: async () => { try { await POST('/api/gm/war/control', { speed: sp, conflict: key }); } catch (e) { toast(e.message, true); } }
-      }, sp + '×'))));
+      row.appendChild(this._speedSlider(war, key));
       row.appendChild(el('button.danger-btn.btn-xs', {
         onclick: () => confirmModal(protest ? 'END PROTEST' : 'END WAR', protest ? 'End the protest now? The crowds stand down and production resumes.' : 'End the war now? The result stays on record for review.', async () => {
           await POST(protest ? '/api/gm/protest/end' : '/api/gm/war/end', { conflict: key });

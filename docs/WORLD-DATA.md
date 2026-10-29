@@ -261,7 +261,11 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
   defaults, and a heal of users whose persona was stored as the literal `'__null__'`.
 - **War map & air force (no schema bump):** `settings.map.kmPerPx` (2.17, only when
   missing). Optional GM knobs `settings.war.air = { squadronSize, fuelPerPlane }`
-  (defaults 4 / 10). A conflict doc's `war.air` (squadrons mirrored from the aircraft
+  (defaults 4 / 10) and `settings.war.defaultSpeed` (0.05). `_airbasesSeeded` — one
+  `airbase` property per foreign nation with map territory (`prop_airbase_<countryId>`,
+  type military, owned by the nation, inland on the side facing the capital, no
+  province); deeds issue in the same pass. Airfields — kinds `airport`, `airbase`,
+  `military_base` — are ordinary properties and where every air force flies from. A conflict doc's `war.air` (squadrons mirrored from the aircraft
   stock, bases, fuel) is built by `server/war.js` `syncAirWings` on the next tick of any
   war or protest — no migration needed (docs/WAR.md "The air force").
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino

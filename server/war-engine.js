@@ -1246,6 +1246,7 @@
         }
         if (stepChase(db, war, u)) continue;
         if (!u.dest) continue;
+        if (u.xHold >= war.tick - 1) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
         const spd = u.speed || DEF_MOVE_SPEED;
@@ -1284,6 +1285,7 @@
       }
       if (stepChase(db, war, u)) continue;
       if (u.dest) {
+        if (u.xHold >= war.tick - 1) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
         stepAlongPath(war, u, u.speed);
@@ -1518,6 +1520,20 @@
         if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
         if (u.strength <= 0) killUnit(war, u);
       }
+      // ...and the other conflict's units under the same bomb
+      const O = otherDoc(db, war);
+      if (O) {
+        O.stats = O.stats || { attLosses: 0, defLosses: 0 };
+        for (const u of O.units) {
+          if (!isLive(u)) continue;
+          const d = dist(u.pos, strike.pos);
+          if (d > R) continue;
+          const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d, R) * bombDmgMod * mul;
+          u.strength = Math.max(0, round1(u.strength - dmg));
+          O.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] = (O.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] || 0) + dmg;
+          if (u.strength <= 0) killUnit(O, u);
+        }
+      }
       pruneCorpses(war);
       // Refugee columns caught in the blast die by the same falloff curve —
       // count-scaled rather than strength-scaled (they have no armour, no
@@ -1556,6 +1572,80 @@
     // the client keeps its plane/FX animation going for a few seconds past
     // impact (see public/js/war.js), well inside this window.
     war.airstrikes = war.airstrikes.filter(s => !s.done || (war.tick - s.strikeTick) < AIRSTRIKE_PRUNE_TICKS);
+  }
+
+  // ---------- war ↔ protest: one battlefield, two conflict docs ----------
+  // A war and a protest run as separate docs, but their units share the map.
+  // The OTHER live doc reaches a tick through db.otherWar (the protest's
+  // projection — server/war.js conflictDoc) or db.protest (the war's own db).
+  // Each war side is either the protest's GOVERNMENT camp (its principal or
+  // allies include the protest's defender) or the other camp:
+  //   · peaceful crowds are attacked only by the government camp, and only
+  //     once force is authorized; violent crowds are combatants for BOTH
+  //     camps — and fight back;
+  //   · the protest's police are the government's men: at war with the other
+  //     camp, friendly to their own.
+  // Ground combat and dogfights across the docs resolve ONCE, in the war's
+  // tick (so nothing double-counts); each doc's bombs hit the other's units;
+  // patrols in either doc chase hostile aircraft from both.
+  function otherDoc(db, war) {
+    const o = db.otherWar || (db.protest && db.protest !== war ? db.protest : null);
+    return o && o !== war && o.active ? o : null;
+  }
+  function govSideOf(W, P) {
+    const gid = P.defenderId, al = W.allies || {};
+    if (W.defenderId === gid || (al.def || []).indexOf(gid) >= 0) return 'def';
+    if (W.attackerId === gid || (al.att || []).indexOf(gid) >= 0) return 'att';
+    return null;
+  }
+  // may war unit u fire on protest unit p, and p on u?
+  function crossFire(W, P, u, p) {
+    const gov = govSideOf(W, P), pp = P.protest || {}, violent = !!pp.protestorsViolent;
+    if (p.side === 'att') return { uFires: u.side === gov ? (violent || !!pp.govViolent) : violent, pFires: violent };
+    const hostile = u.side !== gov;
+    return { uFires: hostile, pFires: hostile };
+  }
+  // are two squadrons in different docs enemies? (a crowd's aircraft only
+  // ever fly while the crowds are violent — hostile to both camps)
+  function crossHostileSq(docA, a, docB, b) {
+    const W = docA.kind === 'protest' ? docB : docA, P = docA.kind === 'protest' ? docA : docB;
+    const ws = docA === W ? a : b, ps = docA === W ? b : a;
+    if (ps.side === 'att') return true;
+    return ws.side !== govSideOf(W, P);
+  }
+  function stepCrossCombat(db, war, ctx, rng) {
+    if (war.kind === 'protest') return;
+    const P = otherDoc(db, war);
+    if (!P || P.kind !== 'protest' || P.paused) return;
+    const dmgW = (war.mods && war.mods.dmg) || 1, dmgP = (P.mods && P.mods.dmg) || 1;
+    const pu = P.units.filter(isLive);
+    if (!pu.length) return;
+    P.stats = P.stats || { attLosses: 0, defLosses: 0 };
+    for (const u of war.units) {
+      if (!isLive(u) || u.state === 'embarked' || u.state === 'transport' || NAVAL_KINDS[u.kind]) continue;
+      for (const p of pu) {
+        if (!isLive(p) || !isLive(u)) continue;
+        if (Math.abs(u.pos[0] - p.pos[0]) > COMBAT_RANGE || Math.abs(u.pos[1] - p.pos[1]) > COMBAT_RANGE || dist(u.pos, p.pos) > COMBAT_RANGE) continue;
+        const f = crossFire(war, P, u, p);
+        if (!f.uFires && !f.pFires) continue;
+        const toP = f.uFires ? K_COMBAT * u.strength * (0.7 + 0.6 * rng()) * (u.atk || 1) * dmgW : 0;
+        const toU = f.pFires ? K_COMBAT * p.strength * (0.7 + 0.6 * rng()) * (p.atk || 1) * dmgP : 0;
+        p.strength = Math.max(0, round1(p.strength - toP));
+        u.strength = Math.max(0, round1(u.strength - toU));
+        war.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] += toU;
+        P.stats[p.side === 'att' ? 'attLosses' : 'defLosses'] = (P.stats[p.side === 'att' ? 'attLosses' : 'defLosses'] || 0) + toP;
+        // both stand and fight while the contact lasts (stepMovement reads xHold)
+        u.xHold = war.tick; p.xHold = P.tick;
+        if (u.state !== 'routed') u.state = 'fighting';
+        if (p.state !== 'routed') p.state = 'fighting';
+        if (toU > 0) u.org = clamp((u.org || 0) - ORG_DRAIN * 0.7, 0, 100);
+        if (toP > 0) p.org = clamp((p.org || 0) - ORG_DRAIN, 0, 100);
+        if (p.org < ROUT_ORG && p.state !== 'routed') { p.state = 'routed'; pushEvent(P, 'battle', p.pos.slice(), `${p.name} breaks and scatters before ${u.name}.`); }
+        if (u.org < ROUT_ORG && u.state !== 'routed' && !u.garrison) { u.state = 'routed'; pushEvent(war, 'battle', u.pos.slice(), `${u.name} breaks under the crowds.`); }
+        if (p.strength <= 0) { killUnit(P, p); pushEvent(P, 'battle', p.pos.slice(), `${p.name} is wiped out by ${u.name}.`); }
+        if (u.strength <= 0) { killUnit(war, u); pushEvent(war, 'battle', u.pos.slice(), `${u.name} is overwhelmed by ${p.name}.`); }
+      }
+    }
   }
 
   // ---------- air force: squadrons on patrol and strike sorties ----------
@@ -1633,8 +1723,11 @@
     if (!air || !Array.isArray(air.squadrons) || !air.squadrons.length) return;
     air.fuel = air.fuel || { att: 0, def: 0 };
     const perPlane = air.fuelPerPlane > 0 ? air.fuelPerPlane : 10;
-    // a protest's air wing stays grounded until force is authorized
-    const grounded = (sq) => war.kind === 'protest' && sq.side === 'def' && !(war.protest && war.protest.govViolent);
+    // a protest's air wings stay grounded until their side escalates: the
+    // police's until force is authorized, the crowds' until they turn violent
+    const grounded = (sq) => war.kind === 'protest' && !(war.protest && (sq.side === 'def' ? war.protest.govViolent : war.protest.protestorsViolent));
+    const O = otherDoc(db, war);
+    const oSqs = (O && O.air && Array.isArray(O.air.squadrons)) ? O.air.squadrons : [];
     const sqs = air.squadrons;
     // 1. orders: launches, retasking, recalls; rearmed squadrons come ready
     for (const sq of sqs) {
@@ -1649,7 +1742,7 @@
         if (o.kind === 'recall') {
           if (airborne(sq) && sq.state !== 'return') { sq.state = 'return'; sq.mission = null; }
         } else if (grounded(sq)) {
-          pushEvent(war, 'air', home.slice(), `${sq.name} is grounded — force has not been authorized.`);
+          pushEvent(war, 'air', home.slice(), sq.side === 'def' ? `${sq.name} is grounded — force has not been authorized.` : `${sq.name} is grounded — the movement is still peaceful.`);
         } else if (airborne(sq)) {
           sq.mission = { kind: o.kind, target: o.target.slice(), radius: o.radius || AIR_PATROL_R };
           sq.state = 'out';
@@ -1680,6 +1773,11 @@
       const base = airBaseOf(war, sq);
       const home = base ? base.pos : sq.prevPos;
       sq.fuel = (sq.fuel || 0) - 1;
+      if (!base && sq.fuel <= 0) { // its airfield fell while it was aloft: nowhere to land
+        const n = airLosePlanes(war, ctx, sq, sq.planes);
+        pushEvent(war, 'air', sq.pos.slice(), `${sq.name} has no airfield left to land on — ${n} aircraft lost.`);
+        continue;
+      }
       if (sq.state !== 'return' && sq.fuel <= airHomeTicks(sq, home) + 1) {
         if (sq.mission && sq.mission.kind === 'patrol' && sq.state === 'station') pushEvent(war, 'air', sq.pos.slice(), `${sq.name} is low on fuel and leaves its patrol.`);
         sq.state = 'return'; sq.mission = null; sq.engaging = null;
@@ -1700,12 +1798,13 @@
         const m = sq.mission;
         // defend the patrol area: chase the nearest enemy squadron inside it
         let threat = null, td = Infinity;
-        for (const e of sqs) {
-          if (e.side === sq.side || e.planes <= 0 || !airborne(e)) continue;
-          if (dist(e.pos, m.target) > m.radius * 1.15) continue;
+        const consider = (e, hostile) => {
+          if (!hostile || e.planes <= 0 || !airborne(e) || dist(e.pos, m.target) > m.radius * 1.15) return;
           const d = dist(e.pos, sq.pos);
           if (d < td) { td = d; threat = e; }
-        }
+        };
+        for (const e of sqs) consider(e, e.side !== sq.side);
+        for (const e of oSqs) consider(e, crossHostileSq(war, sq, O, e));
         sq.engaging = threat ? threat.id : null;
         if (threat) airStep(sq, threat.pos);
         else {
@@ -1748,6 +1847,31 @@
           if (lostB) parts.push(`${b.name} loses ${lostB}`);
           if (lostA) parts.push(`${a.name} loses ${lostA}`);
           pushEvent(war, 'air', mid, `Dogfight over ${airPlaceName(db, mid)}: ${parts.join(', ')}.`);
+        }
+      }
+    }
+    // 3b. ...and with the other conflict's hostile aircraft (resolved in the
+    //     war's tick only, so a pair never fights twice)
+    if (war.kind !== 'protest' && O) {
+      for (const a of sqs) {
+        if (a.planes <= 0 || !airborne(a)) continue;
+        for (const b of oSqs) {
+          if (b.planes <= 0 || !airborne(b) || a.planes <= 0) continue;
+          if (dist(a.pos, b.pos) > AIR_COMBAT_R || !crossHostileSq(war, a, O, b)) continue;
+          const pA = AIR_KILL_P * role(a) * (a.q || 1) / (b.q || 1);
+          const pB = AIR_KILL_P * role(b) * (b.q || 1) / (a.q || 1);
+          let downB = 0, downA = 0;
+          for (let k = 0; k < a.planes; k++) if (rng() < pA) downB++;
+          for (let k = 0; k < b.planes; k++) if (rng() < pB) downA++;
+          a.dogfightTick = war.tick; b.dogfightTick = O.tick;
+          O.air.lost = O.air.lost || { att: 0, def: 0 };
+          const lostB = airLosePlanes(O, ctx, b, downB), lostA = airLosePlanes(war, ctx, a, downA);
+          a.kills = (a.kills || 0) + lostB; b.kills = (b.kills || 0) + lostA;
+          if (lostA || lostB) {
+            const mid = [round1((a.pos[0] + b.pos[0]) / 2), round1((a.pos[1] + b.pos[1]) / 2)];
+            const text = `Dogfight over ${airPlaceName(db, mid)}: ` + [lostB ? `${b.name} loses ${lostB}` : '', lostA ? `${a.name} loses ${lostA}` : ''].filter(Boolean).join(', ') + '.';
+            pushEvent(war, 'air', mid, text); pushEvent(O, 'air', mid, text);
+          }
         }
       }
     }
@@ -2281,6 +2405,7 @@
     stepMovement(db, war, ctx, rng);
     stepTransportState(war);
     stepCombat(db, war, ctx, rng);
+    stepCrossCombat(db, war, ctx, rng);
     stepAir(db, war, ctx, rng);
     stepAirstrikes(db, war, ctx);
     stepRefugees(war);
@@ -2327,7 +2452,7 @@
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
     BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS, WARSHIP_RANGE, WARSHIP_TRANSPORT_BONUS, NAVAL_KINDS,
     AIR_REARM_TICKS, AIR_COMBAT_R, AIR_AA_R, AIR_PATROL_R, AIR_BOMB_RADIUS, AIR_MIN_STATION,
-    airborne, airRange, airBaseOf, airHomeTicks,
+    airborne, airRange, airBaseOf, airHomeTicks, otherDoc, govSideOf, crossFire,
     REFUGEE_MAX, REFUGEE_FADE_TICKS, REFUGEE_SPEED,
     AI_INTERVAL, TOTAL_VICTORY_PCT,
     // helpers

@@ -1132,7 +1132,8 @@ async function handle(req, res, pathname, method) {
     // The air force (squadrons — docs/WAR.md "Air force"). A side's air arm
     // answers to whoever may fly it: the defence's to `cmdAccess.air`, an
     // invader's to its commanders (never a protest's crowds).
-    const canFly = (doc, ca, side) => side === 'def' ? !!ca.air : (doc.kind !== 'protest' && !!(ca.att || ca.attLead));
+    // (a protest's crowds fly the organizer's aircraft — its leadership's call)
+    const canFly = (doc, ca, side) => side === 'def' ? !!ca.air : (doc.kind === 'protest' ? !!ca.attLead : !!(ca.att || ca.attLead));
     if (pathname === '/api/war/air' && method === 'POST') {
       const b = await readBody(req);
       const key = b.conflict === 'protest' ? 'protest' : 'war';
@@ -2607,8 +2608,8 @@ async function handle(req, res, pathname, method) {
         if (b.paused !== undefined) doc.paused = !!b.paused;
         if (b.speed !== undefined) {
           const speed = Number(b.speed);
-          if (![1, 2, 4, 8].includes(speed)) return bad('Speed must be one of 1, 2, 4, 8.');
-          doc.speed = speed;
+          if (!Number.isFinite(speed) || speed <= 0) return bad('Speed must be a positive multiplier.');
+          doc.speed = war.clampSpeed(speed);
         }
         store.log('gm', 'Conflict control updated', `paused=${doc.paused} speed=${doc.speed}×`, actor, []);
         store.save(); broadcast('sync');

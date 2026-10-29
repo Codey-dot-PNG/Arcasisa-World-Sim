@@ -92,6 +92,7 @@
       const wrap = document.getElementById('map-wrap');
       if (!wrap) return;
       if (!document.getElementById('war-paper')) wrap.appendChild(el('div#war-paper'));
+      if (!document.getElementById('war-lamp')) wrap.appendChild(el('div#war-lamp'));
       let frame = document.getElementById('war-frame');
       if (!frame) {
         frame = el('div#war-frame');
@@ -106,7 +107,7 @@
       this.onViewChange();
     },
     _unmountFrame() {
-      for (const id of ['war-paper', 'war-frame', 'war-rose', 'war-scalebar']) { const n = document.getElementById(id); if (n) n.remove(); }
+      for (const id of ['war-paper', 'war-lamp', 'war-frame', 'war-rose', 'war-scalebar']) { const n = document.getElementById(id); if (n) n.remove(); }
       this._frameKey = null;
       const svg = GameMap && GameMap.svg;
       if (svg) svg.classList.remove('war-grid-fine');

@@ -452,6 +452,13 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .prop-marker:hover{stroke:var(--accent); stroke-width:5; stroke-opacity:1;}
 .prop-marker.selected{stroke:var(--accent); stroke-width:6.4; stroke-opacity:1;}
 .prop-glyph{font-family:var(--font-mono); font-weight:700; fill:var(--paper); pointer-events:none;}
+.map-airfield{cursor:pointer;}
+.map-airfield-strip{stroke:var(--ink); stroke-width:2.4; stroke-linejoin:round; fill-opacity:.9;}
+.map-airfield-dash{fill:none; stroke:var(--paper); stroke-width:2.2;}
+.map-airfield:hover .map-airfield-strip, .map-airfield.selected .map-airfield-strip{stroke:var(--accent); stroke-width:4;}
+.map-airfield-label{display:none; font-family:var(--font-mono); font-size:19px; letter-spacing:.08em; fill:var(--ink); paint-order:stroke; stroke:rgba(238,230,210,.7); stroke-width:5px;}
+.map-airfields.named .map-airfield-label{display:block;}
+#map-svg.war-mode .map-airfields{display:none;}
 
 /* ═══ War layer (public/js/war.js) — a staff situation map ═══
    A parchment veil mutes the base map; the overlay is drawn in ink: a heavy
@@ -469,7 +476,10 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .war-front-base{stroke:#8c1f15; stroke-width:2.8;}
 .war-front-teeth{stroke:#8c1f15; stroke-width:8; stroke-dasharray:1.5 7; stroke-linecap:butt;}
 .war-front-protest{stroke:#9a5a12;}
-.war-crater{fill:#1a1410; opacity:.28; pointer-events:none; stroke:#0c0906; stroke-width:1; stroke-dasharray:6 4;}
+.war-crater{pointer-events:none;}
+.war-crater-bowl{fill:#241a12; fill-opacity:.62;}
+.war-crater-rim{fill:#6b5a40; fill-opacity:.35; stroke:#a08c66; stroke-opacity:.55; stroke-width:.8px;}
+.war-crater-ejecta{fill:#3b2a20; fill-opacity:.45;}
 /* objectives & fallen cities */
 .war-obj{pointer-events:auto; cursor:help;}
 .war-obj-ring{fill:#f4ecdc; fill-opacity:.9; stroke:#8c1f15; stroke-width:2.4;}
@@ -684,6 +694,10 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 .war-orbat-att td:first-child{border-left:3px solid #b0251a;}
 .war-orbat-def td:first-child{border-left:3px solid #24466e;}
 .war-gm-row{align-items:center; gap:6px; padding:6px 8px; border:1px dashed var(--rule-strong); margin:4px 0 10px;}
+.war-speed{display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 4px;}
+.war-speed-range{width:150px; accent-color:var(--accent);}
+.war-speed-label{font-family:var(--font-mono); font-size:11px; font-weight:700; letter-spacing:.04em; min-width:44px;}
+.war-speed-per{font-weight:400; color:var(--ink-faint); font-size:10px;}
 /* protests: posture colours (peaceful olive, riot red, crackdown navy, clashes deep red) */
 .war-hud-status.posture-peaceful, .war-report-status.posture-peaceful{color:#55691f;}
 .war-hud-status.posture-riot, .war-report-status.posture-riot{color:#b0251a;}
@@ -809,10 +823,10 @@ body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-clashes
   #map-wrap:has(#war-frame) .war-hud{left:24px; top:66px;}
 }
 /* the GM bar overlays the map's foot: the sheet ends above it */
-body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper{bottom:66px;}
+body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper, body:has(.gm-bar:not(.hidden)) #war-lamp{bottom:66px;}
 body:has(.gm-bar:not(.hidden)) #war-scalebar{bottom:92px;}
 @media (max-width:900px){
-  body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper{bottom:106px;}
+  body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper, body:has(.gm-bar:not(.hidden)) #war-lamp{bottom:106px;}
   body:has(.gm-bar:not(.hidden)) #war-scalebar{bottom:132px;}
 }
 @media (max-width:640px){
@@ -845,12 +859,104 @@ body:has(.gm-bar:not(.hidden)) #war-scalebar{bottom:92px;}
 .war-route-box{fill:#fbf7ee; fill-opacity:.95; stroke:#c47f12; stroke-width:.9;}
 .war-route-text{font-family:var(--font-mono); font-size:10px; font-weight:700; fill:#5a3a10;}
 
+/* ═══ The war map at night — dark moods (and the lamp) ═══
+   In the dark/red moods the sheet becomes the war table after hours: dark
+   ink frame and margins, light-ink grid and labels, brighter route and front
+   colours, and a warm desk lamp (#war-lamp) pooling light over the map that
+   the floating panels catch. The same lamp switches on at in-game night in
+   the light moods (it rides --dn-night, written by GameMap.setDayNight). */
+#map-wrap{--wm-lamp:calc(var(--dn-night) * .85);}
+body:is([data-mood="dark"],[data-mood="red"]) #map-wrap{--wm-lamp:1;}
+#war-lamp{
+  position:absolute; inset:0; z-index:2; pointer-events:none; opacity:var(--wm-lamp); mix-blend-mode:soft-light; transform:translateZ(0);
+  background:
+    radial-gradient(55% 50% at 47% 40%, rgba(255,214,150,.85) 0%, rgba(255,184,96,.35) 45%, rgba(255,184,96,0) 72%),
+    radial-gradient(140% 120% at 47% 40%, rgba(0,0,0,0) 48%, rgba(0,0,0,.6) 100%);
+}
+body:is([data-mood="dark"],[data-mood="red"]){
+  --wm-ink:#e6d9bb; --wm-sheet:#18120d; --wm-card:#1c1510; --wm-text:#ece0c6; --wm-halo:#120d08;
+  --wm-att:#e5785f; --wm-def:#93b4e2; --wm-front:#dc5a42;
+}
+body[data-mood="red"]{--wm-sheet:#211010; --wm-card:#261312; --wm-halo:#140808;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-veil-rect{fill:#0d0906; fill-opacity:.34;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-grid-major{stroke:var(--wm-ink); stroke-opacity:.15;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-grid-minor{stroke:var(--wm-ink); stroke-opacity:.07;}
+body:is([data-mood="dark"],[data-mood="red"]) #war-paper{opacity:.5;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-frame-margin{fill:var(--wm-sheet);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-frame-outer, .war-frame-inner, .war-frame-ticks){stroke:var(--wm-ink); stroke-opacity:.75;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-frame-ref{fill:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) .rose-ring{fill:rgba(20,15,10,.8); stroke:var(--wm-ink);}
+body:is([data-mood="dark"],[data-mood="red"]) .rose-light{fill:var(--wm-text); stroke:var(--wm-ink);}
+body:is([data-mood="dark"],[data-mood="red"]) .rose-dark{fill:#4d3f2e; stroke:var(--wm-ink);}
+body:is([data-mood="dark"],[data-mood="red"]) .rose-n{fill:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) #war-scalebar{background:rgba(22,16,11,.92); border-color:var(--wm-ink);}
+body:is([data-mood="dark"],[data-mood="red"]) .sb-dark{fill:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) .sb-light{fill:#2a2018;}
+body:is([data-mood="dark"],[data-mood="red"]) .sb-box{stroke:var(--wm-ink);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.sb-num, .sb-unit){fill:var(--wm-text);}
+/* ink on the map: fronts, routes, trails, objectives */
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-front-base, .war-front-teeth){stroke:var(--wm-front);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-front-protest{stroke:#e0a458;}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-move-def, .war-trail-def, .war-strike-run-def){stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-move-att, .war-trail-att, .war-strike-run-att){stroke:var(--wm-att);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-head-def{fill:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-head-att{fill:var(--wm-att);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-move-case{stroke:var(--wm-halo); stroke-opacity:.55;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-obj-ring{fill:var(--wm-card); stroke:var(--wm-front);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-obj-cross{stroke:var(--wm-front);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-obj-num{fill:#f3a08b;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-obj-tag{fill:#f3a08b; stroke:var(--wm-halo);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-fallen-pole{stroke:var(--wm-ink);}
+/* labels: light text on a dark halo */
+body:is([data-mood="dark"],[data-mood="red"]) :is(.wu-label, .war-airfield-name, .war-refugee-count, .war-strike-pct, .war-air-range-tag text){fill:var(--wm-text); stroke:var(--wm-halo);}
+body:is([data-mood="dark"],[data-mood="red"]) .wu-ech{fill:var(--wm-text); paint-order:stroke; stroke:var(--wm-halo); stroke-width:2.4px;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-cap-tag text{stroke:var(--wm-halo);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-cap-tag-def text{fill:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-cap-tag-att text{fill:var(--wm-att);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-cap-def{fill:var(--wm-def); stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-cap-att{fill:var(--wm-att); stroke:var(--wm-att);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-reticle-def circle, .war-reticle-def path){stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-reticle-att circle, .war-reticle-att path){stroke:var(--wm-att);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-sq-def .war-jet{fill:#6f95c8;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-sq-att .war-jet{fill:#d2553e;}
+/* cards on the map: lamp-lit index cards */
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-measure-box, .war-route-box, .war-sq-label-bg, .war-airfield-badge, .war-standoff-bg){fill:var(--wm-card); stroke:#e0a458;}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-measure-text, .war-sq-label-text, .war-airfield-count){fill:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-measure-text.faint{fill:#a49778;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-measure-text.bad{fill:#ff8a6a;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-route-text{fill:#f0c98a;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-ruler-case{stroke:var(--wm-halo);}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-ruler-line, .war-ruler-ticks){stroke:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-range-ring{fill:rgba(147,180,226,.07); stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-range-radius{stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-refugee-box{fill:#2a2420; stroke:#a49778;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-refugee-figs{fill:var(--wm-text); stroke:var(--wm-text);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-post-box{fill:#18222f; stroke:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-post-text{fill:var(--wm-def);}
+body:is([data-mood="dark"],[data-mood="red"]) .war-crater-rim{stroke:#c8b088;}
+/* the panels catch the lamp; status lamps glow */
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-hud, .war-toolbar, .war-unit-card, .war-air-dock){
+  border-color:rgba(224,164,88,.32);
+  background-image:radial-gradient(130% 80% at 50% -12%, rgba(255,196,120,.13), rgba(255,196,120,0) 62%);
+  box-shadow:0 0 0 1px rgba(255,196,120,.08), 0 12px 32px rgba(0,0,0,.55), 0 0 30px rgba(255,170,80,.08);
+}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.war-hud-status, .war-report-status, .air-state){text-shadow:0 0 6px currentColor; box-shadow:0 0 10px -2px currentColor, inset 0 0 6px -3px currentColor;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-hud-status.posture-peaceful{color:#a8bd6a;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-hud-status.posture-crackdown{color:#8fb0e0;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-hud-status.live{color:#ff7a5c;}
+body:is([data-mood="dark"],[data-mood="red"]) .air-state[data-state="ready"]{color:#a8bd6a;}
+body:is([data-mood="dark"],[data-mood="red"]) :is(.air-state[data-state="out"], .air-state[data-state="station"], .air-state[data-state="return"]){color:#93b4e2;}
+body:is([data-mood="dark"],[data-mood="red"]) .air-state[data-state="rearm"]{color:#e0a458;}
+body:is([data-mood="dark"],[data-mood="red"]) .war-balance-def{background:#4f78ad;}
+
 /* ═══ The air force (public/js/war-air.js) ═══ */
 .war-air-bases, .war-air-sqs, .war-air-missions{pointer-events:none;}
 .war-airfield{pointer-events:auto; cursor:help;}
 .war-airfield-strip{fill:#6b6250; stroke:#2a2018; stroke-width:.8; stroke-linejoin:round;}
 .war-airfield-def .war-airfield-strip{fill:#3d5878;}
 .war-airfield-att .war-airfield-strip{fill:#7a3a30;}
+.war-airfield-none{opacity:.6;}
+.war-airfield-none .war-airfield-strip{fill:#8a8270;}
 .war-airfield-dash{fill:none; stroke:#f4ecdc; stroke-width:1.4;}
 .war-airfield-badge{fill:#fbf7ee; stroke:#2a2018; stroke-width:.7;}
 .war-airfield-count{font-family:var(--font-mono); font-size:8.5px; font-weight:700; fill:#2a2018;}
@@ -946,6 +1052,9 @@ body:has(.gm-bar:not(.hidden)) .war-air-dock{bottom:92px;}
 .war-plane{pointer-events:none;}
 .war-plane-body{fill:#2f3d52; stroke:var(--paper); stroke-width:0.8;}
 .war-explosion{pointer-events:none;}
+.war-blast-flash{fill:#fffdf2;}
+.war-blast-ring{fill:none; stroke:#fff1cf;}
+.war-blast-sparks{fill:none; stroke:#ffcf6a; stroke-width:1.6px; stroke-linecap:round; vector-effect:non-scaling-stroke;}
 
 /* Isometric property buildings — small extruded blocks shown once the map is
    zoomed in close enough (see GameMap.isoBuilding / updateMarkerScale in

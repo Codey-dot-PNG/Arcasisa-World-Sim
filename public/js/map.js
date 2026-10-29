@@ -807,7 +807,8 @@ const GameMap = {
         g.appendChild(poly([[mastX - 1.4, mastY - 33], [mastX + 1.4, mastY - 33], [mastX + 15, mastY - 27], [mastX + 13, mastY - 25]], 'iso-crane'));
         break;
       }
-      case 'airport': {
+      case 'airport':
+      case 'airbase': {
         // runway strip hint, low and flat, behind the terminal block
         g.appendChild(poly([[-17, 15], [17, 15], [11, 21], [-11, 21]], 'iso-runway'));
         g.appendChild(box(-6, 8, 14, 8, 11, roofTint));
@@ -1086,6 +1087,43 @@ const GameMap = {
       this.markerLayer.appendChild(g);
     }
 
+    // airfields — airports, air bases and military bases are where every air
+    // force flies from, so they stay on the map at every zoom (runway in the
+    // owner's colour, the name once zoomed in) instead of appearing only
+    // when a war starts. On the War layer the war overlay draws them itself.
+    this.airfieldLayer = document.createElementNS(NS, 'g');
+    this.airfieldLayer.setAttribute('class', 'map-airfields');
+    this.world.appendChild(this.airfieldLayer);
+    for (const pr of S().properties) {
+      if (!pr.pos || !MAP_AIRFIELD_KINDS[pr.kind]) continue;
+      const owner = S().entities.find(e => e.id === pr.ownerId);
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('class', 'map-airfield' + (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id ? ' selected' : ''));
+      g.setAttribute('data-x', pr.pos[0]); g.setAttribute('data-y', pr.pos[1]);
+      const strip = document.createElementNS(NS, 'path');
+      strip.setAttribute('d', 'M-24,7 L17,-17 L24,-7 L-17,17 Z');
+      strip.setAttribute('class', 'map-airfield-strip');
+      strip.style.fill = (owner && owner.color) || '#6b6250';
+      g.appendChild(strip);
+      const dash = document.createElementNS(NS, 'path');
+      dash.setAttribute('d', 'M-14,6.5 L-6,2 M0,-1.5 L8,-6');
+      dash.setAttribute('class', 'map-airfield-dash');
+      g.appendChild(dash);
+      const lbl = document.createElementNS(NS, 'text');
+      lbl.setAttribute('class', 'map-airfield-label');
+      lbl.setAttribute('x', 30); lbl.setAttribute('y', 8);
+      lbl.textContent = '✈ ' + pr.name;
+      g.appendChild(lbl);
+      title(g, `${pr.name} — airfield` + (owner ? ` · ${owner.name}` : ''));
+      g.addEventListener('pointerup', (e) => {
+        if (W.layer === 'war') return;
+        if (this.dragMoved() || W.placing || this.editing()) return;
+        e.stopPropagation();
+        select('property', pr.id, { noPan: true });
+      });
+      this.airfieldLayer.appendChild(g);
+    }
+
     // cities
     this.cityLayer = document.createElementNS(NS, 'g');
     this.world.appendChild(this.cityLayer);
@@ -1275,6 +1313,13 @@ const GameMap = {
         if (iso) iso.classList.toggle('iso-hidden', !useIso);
         if (rect) rect.style.opacity = useIso ? '0' : '1';
         if (glyph) glyph.style.display = (!useIso && shown) ? '' : 'none';
+      }
+    }
+    if (this.airfieldLayer) {
+      this.airfieldLayer.classList.toggle('named', k >= 1.6);
+      for (const g of this.airfieldLayer.children) {
+        const x = g.getAttribute('data-x'), y = g.getAttribute('data-y');
+        g.setAttribute('transform', `translate(${x},${y}) scale(${1 / Math.max(1, k * 0.72)})`);
       }
     }
     if (this.cityLayer) {

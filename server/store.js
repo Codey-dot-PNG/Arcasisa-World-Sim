@@ -420,6 +420,48 @@ function migrate(world) {
   // mirror the X100 leveraged book into its certificate items (Phase 34)
   try { if (require('./market').syncAllX100Certificates(world)) changed = true; }
   catch (e) { /* market module optional during early boot */ }
+  // Air bases are ordinary properties (kind 'airbase' — owned, deeded,
+  // tradeable, capturable). Seed one per foreign nation with territory on the
+  // map, owned by that nation, inland inside its own borders on the side
+  // facing the Republic's capital — where its air force flies from in a war
+  // (server/war.js airBasesFor). One-shot (_airbasesSeeded); the GM edits,
+  // sells or adds more like any property.
+  if (!world._airbasesSeeded && world.settings && world.settings.map && Array.isArray(world.properties) && Array.isArray(world.entities)) {
+    try {
+      const E = require('./war-engine');
+      const cap = (world.cities || []).find(c => c.isCapital && Array.isArray(c.pos)) || (world.cities || []).find(c => Array.isArray(c.pos));
+      for (const c of (world.settings.map.countries || [])) {
+        const ent = world.entities.find(e => e.id === c.entityId);
+        if (!ent || !c.shape || !cap || world.properties.some(p => p.kind === 'airbase' && p.ownerId === ent.id)) continue;
+        const poly = E.parseShape(c.shape);
+        const flat = [].concat(...poly);
+        if (!flat.length) continue;
+        const xs = flat.map(p => p[0]), ys = flat.map(p => p[1]);
+        const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+        const inside = (pt) => E.pointInPolygon(pt, poly);
+        const inland = (pt) => { for (let a = 0; a < 8; a++) { const r = 60, q = [pt[0] + Math.cos(a * Math.PI / 4) * r, pt[1] + Math.sin(a * Math.PI / 4) * r]; if (!inside(q)) return false; } return true; };
+        let best = null, bd = Infinity, any = null, ad = Infinity;
+        for (let x = x0 + 16; x <= x1; x += 32) {
+          for (let y = y0 + 16; y <= y1; y += 32) {
+            const pt = [x, y], d = Math.hypot(x - cap.pos[0], y - cap.pos[1]);
+            if (d >= bd || !inside(pt)) continue;
+            if (d < ad) { ad = d; any = pt; }
+            if (inland(pt)) { bd = d; best = pt; }
+          }
+        }
+        const at = best || any;
+        if (!at) continue;
+        world.properties.push({
+          id: 'prop_airbase_' + c.id, name: `${ent.name} Air Base`, type: 'military', kind: 'airbase', provinceId: null,
+          pos: [Math.round(at[0]), Math.round(at[1])], ownerId: ent.id, value: 30000000, employees: 1200, income: 0, expenses: 0,
+          description: `${ent.name}'s forward air base — runways, hangars and fuel depots on the side facing the Republic.`,
+          inventory: [], vars: {}
+        });
+      }
+      world._airbasesSeeded = true;
+      changed = true;
+    } catch (e) { /* engine geometry optional during early boot */ }
+  }
   // issue/reconcile property deed items against property.ownerId
   try { if (require('./deeds').syncAllDeeds(world)) changed = true; }
   catch (e) { /* deeds module optional during early boot */ }

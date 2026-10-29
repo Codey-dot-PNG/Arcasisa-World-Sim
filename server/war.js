@@ -84,6 +84,16 @@ const PROTEST_DEFAULTS = {
   applications: true       // players may petition the GM to start a protest
 };
 const MAX_PROTEST_UNITS = 300;
+// The conflict clock: a speed multiplier on tickMs (2000ms at 1×). New wars
+// and protests start at settings.war.defaultSpeed — 0.05× by default, a tick
+// every 40s, so a conflict unfolds over real hours like the rest of the
+// world; the GM's slider moves it anywhere in [SPEED_MIN, SPEED_MAX].
+const SPEED_MIN = 0.05, SPEED_MAX = 8;
+function clampSpeed(v) { return Math.round(engine.clamp(Number(v) || 1, SPEED_MIN, SPEED_MAX) * 100) / 100; }
+function defaultSpeed(db) {
+  const v = Number((((db.settings || {}).war || {}).defaultSpeed));
+  return Number.isFinite(v) && v > 0 ? clampSpeed(v) : 0.05;
+}
 function protestCfg(db) {
   return Object.assign({}, PROTEST_DEFAULTS, (((db.settings || {}).war || {}).protest) || {});
 }
@@ -94,7 +104,8 @@ function conflictDoc(db, key) {
   if (key !== 'protest') return db;
   return {
     war: db.protest, provinces: db.provinces, cities: db.cities,
-    settings: db.settings, entities: db.entities, terrain: db.terrain
+    settings: db.settings, entities: db.entities, terrain: db.terrain,
+    otherWar: db.war // the war shares the battlefield (engine otherDoc)
   };
 }
 
@@ -1334,7 +1345,7 @@ function startWar(db, scenario) {
     : (landingObj ? landingObj.pos.slice() : null);
 
   db.war = {
-    active: true, paused: false, speed: 1,
+    active: true, paused: false, speed: defaultSpeed(db),
     tickMs: 2000, _lastTick: Date.now(),
     tick: 0, startedAt: new Date().toISOString(),
     // Minted ONCE here, then immutable: every tick's combat rolls and sweep
@@ -1963,7 +1974,7 @@ function startProtest(db, opts, actor) {
   }
   const attTotal = units.filter(u => u.side === 'att').reduce((s, u) => s + u.strength, 0);
   db.protest = {
-    active: true, paused: false, speed: 1,
+    active: true, paused: false, speed: defaultSpeed(db),
     tickMs: cfg.tickMs, _lastTick: Date.now(),
     tick: 0, startedAt: new Date().toISOString(),
     kind: 'protest', name,
@@ -2269,34 +2280,30 @@ function fuelStock(db, war, entityId) {
   for (const pool of nationPools(db, war, entityId)) for (const row of pool) if (row && ids.has(row.itemId)) n += Math.max(0, Number(row.qty) || 0);
   return round1(n);
 }
-const AIRFIELD_KINDS = { airport: 0, military_base: 1 };
+// Airfields are ordinary properties: airports, air bases (foreign nations
+// each own one — store.migrate seeds them) and military bases. A side flies
+// from the airfields its nation OWNS — buy, sell or capture one and the air
+// war moves with it. A protest's crowds also fly from any airfield standing
+// in a district they have seized.
+const AIRFIELD_KINDS = { airport: 0, airbase: 0, military_base: 1 };
 function airBasesFor(db, war, side) {
   const nid = side === 'att' ? war.attackerId : war.defenderId;
+  const g = war.grid || {};
+  const seized = (pos) => {
+    if (war.kind !== 'protest' || side !== 'att' || !g.cell) return false;
+    const c = (war.cells || {})[engine.cellKey(Math.floor(pos[0] / g.cell), Math.floor(pos[1] / g.cell))];
+    return !!(c && c.o === 'att');
+  };
   const out = [];
   for (const p of db.properties || []) {
-    if (!Array.isArray(p.pos) || p.ownerId !== nid || !(p.kind in AIRFIELD_KINDS)) continue;
+    if (!Array.isArray(p.pos) || !(p.kind in AIRFIELD_KINDS)) continue;
+    if (p.ownerId !== nid && !seized(p.pos)) continue;
     out.push({ id: 'ab_' + p.id, side, pos: p.pos.slice(), name: p.name, propId: p.id, kind: p.kind });
   }
   out.sort((a, b) => (AIRFIELD_KINDS[a.kind] - AIRFIELD_KINDS[b.kind]) || (a.id < b.id ? -1 : 1));
-  if (side === 'att' && war.kind !== 'protest') {
-    // the invader's own soil nearest the defender's capital
-    const g = war.grid || {};
-    const cap = (db.cities || []).find(c => c.isCapital && c.pos) || (db.cities || []).find(c => c.pos);
-    if (cap && g.enemyCells) {
-      let best = null, bd = Infinity;
-      for (const k in g.enemyCells) {
-        const i = k.indexOf(',');
-        const pt = [(+k.slice(0, i) + 0.5) * g.cell, (+k.slice(i + 1) + 0.5) * g.cell];
-        const d = dist(pt, cap.pos);
-        if (d < bd) { bd = d; best = pt; }
-      }
-      const ent = (db.entities || []).find(e => e.id === nid);
-      if (best) out.push({ id: 'ab_home_' + nid, side, pos: [Math.round(best[0]), Math.round(best[1])], name: (ent ? ent.name : 'Home') + ' air base', kind: 'homeland' });
-    }
-  }
-  if (!out.length) {
-    // no airfield at all: the defence flies from its capital, an invader from
-    // its fleet's staging waters
+  // no airfield at all: the defence flies from a capital airstrip, an
+  // invader from its fleet (protest crowds need a real airfield)
+  if (!out.length && !(war.kind === 'protest' && side === 'att')) {
     const cap = (db.cities || []).find(c => c.isCapital && c.pos) || (db.cities || []).find(c => c.pos);
     const anchor = side === 'def' ? (cap && cap.pos) : (war.supplyAnchor || (war.units.find(u => u.side === 'att') || {}).pos);
     if (anchor) out.push({ id: 'ab_fallback_' + side, side, pos: [Math.round(anchor[0]), Math.round(anchor[1])], name: side === 'def' && cap ? cap.name + ' airstrip' : 'Carrier group', kind: 'fallback' });
@@ -2360,7 +2367,13 @@ function syncAirWings(db, war) {
   air.reserve = air.reserve || { att: 0, def: 0 };
   air.seq = air.seq || { att: 0, def: 0 };
   air.fuelPerPlane = Math.max(0, Number(cfg.fuelPerPlane) || 0) || 10;
-  const sides = protest ? ['def'] : ['att', 'def'];
+  // A protest's police fly the government's planes only when no war is
+  // using them (both docs would otherwise mirror the same stockpile — the
+  // war's squadrons strike protest targets instead); its crowds fly whatever
+  // aircraft the organizer holds, from airfields they hold.
+  const govBusy = protest && db.war && db.war.active && db.war !== war && db.war.defenderId === war.defenderId;
+  const sides = protest ? (govBusy ? ['att'] : ['att', 'def']) : ['att', 'def'];
+  air.squadrons = air.squadrons.filter(sq => sides.includes(sq.side) || engine.airborne(sq));
   air.bases = [].concat(...sides.map(side => airBasesFor(db, war, side)));
   for (const side of sides) {
     const nid = side === 'att' ? war.attackerId : war.defenderId;
@@ -2435,6 +2448,9 @@ function orderSquadron(db, key, sqId, order, actor) {
   if (kind !== 'patrol' && kind !== 'strike') return { ok: false, error: 'Unknown mission.' };
   if (war.kind === 'protest' && sq.side === 'def' && !(war.protest && war.protest.govViolent)) {
     return { ok: false, error: 'Force has not been authorized against the protest — the air wing stays grounded.' };
+  }
+  if (war.kind === 'protest' && sq.side === 'att' && !(war.protest && war.protest.protestorsViolent)) {
+    return { ok: false, error: 'The movement is peaceful — its aircraft stay grounded until the crowds turn violent.' };
   }
   const t = order.target;
   if (!Array.isArray(t) || t.length !== 2 || !t.every(Number.isFinite)) return { ok: false, error: 'Invalid target.' };
@@ -2625,4 +2641,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

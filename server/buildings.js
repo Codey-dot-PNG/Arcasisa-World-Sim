@@ -22,6 +22,7 @@ const TEXTURES = {
   fort: ['military-fort.png'],
   port: ['ports.png'],
   airport: ['airport.png'],
+  airbase: ['airport.png'],
   prison: ['prison.png', 'prison-2.png']
 };
 

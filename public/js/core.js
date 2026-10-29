@@ -260,7 +260,9 @@ function tradeTariffRateClient(side, holder, partnerId, itemId) {
 }
 
 const TYPE_LABEL = { person: 'Person', company: 'Company', party: 'Political Party', government: 'Government', foreign: 'Foreign Power', org: 'Organisation' };
-const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', fort: 'T', port: 'P', airport: 'V', university: 'U', infrastructure: 'I', prison: 'J' };
+// property kinds that serve as airfields (server/war.js AIRFIELD_KINDS)
+const MAP_AIRFIELD_KINDS = { airport: true, airbase: true, military_base: true };
+const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M', farm: 'A', government: 'G', military_base: 'X', fort: 'T', port: 'P', airport: 'V', airbase: 'W', university: 'U', infrastructure: 'I', prison: 'J' };
 // Assignable SVG map icons (Phase 1.5). Filenames (no extension) under
 // public/assets/icons/. Properties and event markers may carry an `icon`
 // naming one of these; the map renders /assets/icons/<icon>.svg in place of the

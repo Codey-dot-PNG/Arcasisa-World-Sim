@@ -1300,12 +1300,17 @@ already running when this shipped gets its scenario wing on its first tick.
 Flight characteristics come from the model's weapon stats (`airModelStats`):
 `speed = 160 + 80 × speed` px/tick, `endurance = 12 + 5 × range` ticks of
 fuel, `q = 0.7 + hp + 0.4 × speed` (dogfight quality) — the SF-50E flies
-226 px/tick for 15 ticks (30s at 1×). **Bases** (`airBasesFor`): every
-`airport` / `military_base` property a side owns (airports first) — capture
-an airfield and it becomes the enemy's forward base — plus, for an invader,
-an airfield on its own soil nearest the defender's capital; with none at
-all, the defence flies from a capital airstrip and an invader from its
-fleet. A squadron whose base is lost relocates to the nearest one left.
+226 px/tick for 15 ticks (30s at 1×). **Bases** (`airBasesFor`) are
+ordinary PROPERTIES — every `airport`, `airbase` or `military_base` a side's
+nation owns (airports and air bases first): buy, sell or capture one
+(occupation transfers ownership) and the air war moves with it. Each foreign
+nation owns an `airbase` property on its own soil (seeded by `store.migrate`,
+see docs/WORLD-DATA.md), so an invader flies from home without any
+war-only map points; a protest's crowds ALSO fly from any airfield standing
+in a district they have seized. With no airfield at all the defence flies
+from a capital airstrip and an invader from its fleet (crowds can't fly). A
+squadron whose base is lost relocates to the nearest one left; one aloft when
+its last airfield falls is lost when its fuel runs out.
 `air.fuel[side]` is refreshed each tick to the side's refined-fuel stock
 (`meta.weapon.kind:'fuel'` items in its `nationPools`) plus its reserve.
 
@@ -1343,9 +1348,16 @@ tick pipeline after combat and before `stepAirstrikes`):**
 A downed plane leaves the real inventory through `ctx.onAircraftLost`
 (`airPlanesLost` — virtual planes just vanish), logged to the timeline.
 
-**Protests.** A protest's air wing is the security forces' alone and stays
-grounded until force is authorized (`orderSquadron` refuses, `stepAir`
-turns airborne police squadrons home if force is withdrawn). No air AI.
+**Protests.** A protest has two air wings, each grounded until its side
+escalates (`orderSquadron` refuses; `stepAir` turns airborne squadrons home
+if the escalation is withdrawn): the POLICE wing (the government's aircraft)
+until force is authorized, the MOVEMENT's wing (the organizer's aircraft,
+flying from an airfield the organizer owns or the crowds have seized) until
+the crowds turn violent — flown by the organizer's leadership (`attLead`).
+While a war is running with the same government, the police wing stays
+empty: the government's planes are the war's squadrons (one stockpile is
+never mirrored into both docs), and they strike protest targets from there.
+No air AI in protests.
 
 **The air staff AI (`war-ai.js` `airPass`, every `AIR_AI_INTERVAL` = 3
 ticks, for each side whose `air.auto[side]` is on — an NPC invader by
@@ -1365,6 +1377,28 @@ defence's to `cmdAccess.air`, an invader's to its commanders (`att` /
 `attLead`), the GM to both. `POST /api/war/bomb { pos }` remains for old
 clients: it sends the nearest ready defence squadron in range on a strike.
 GM tuning: `settings.war.air = { squadronSize, fuelPerPlane }`.
+
+### War ↔ protest — one battlefield
+
+A war and a protest are separate docs, but their units share the map and
+fight across them (engine `stepCrossCombat`, `crossFire`, `govSideOf`). Each
+war side is either the protest's GOVERNMENT camp (its principal or allies
+include the protest's defender) or the other camp:
+- peaceful crowds are attacked only by the government camp, and only once
+  force is authorized (they don't fight back); violent crowds are combatants
+  for BOTH camps and fight back;
+- the protest's police are the government's men: at war with the other camp,
+  friendly to their own.
+Units in such a fight hold their ground (`xHold`) and trade damage like any
+engagement; losses land in each doc's own stats; crowds broken by troops
+scatter. Each doc's bombs hit the other doc's units too; patrols chase
+hostile aircraft from either doc; cross-doc dogfights resolve with the same
+odds. Everything cross-doc resolves ONCE, in the war's tick — the war reaches
+the protest as `db.protest`, the protest's tick reaches the war as
+`db.otherWar` (server `conflictDoc`; client `_dbLike`, which leaves the other
+doc out of a rebase fast-forward so replayed ticks don't apply twice). The map
+draws "street fighting" clash markers where the two conflicts' units are in
+contact.
 
 ### Client — squadrons, the air wing dock and the mission planner
 
@@ -1407,8 +1441,20 @@ the engine decides everything.
   War Room "Air war" section (per side: aircraft, sorties, shot down, lost,
   fuel, Auto) with a squadron table fold, legend rows, help modal rows.
 
-The explosion FX themselves are unchanged (neal.fun-style bloom, core,
-shockwave — `renderExplosions`), sized per strike radius.
+**Impact FX** (`renderExplosions`/`_updateExplosion`, `EXPLOSION_LIFE_MS`
+5.6s, sized per strike radius) — a conventional bomb seen from above: a
+white-hot flash and a ground shock ring (≤450ms), burning sparks flung out
+(≤700ms), a fireball of three churning gradient blobs swelling then
+darkening into smoke (≤1.3s), and a grey-brown smoke plume billowing and
+drifting downwind for the rest. A squadron's stick detonates bomb by bomb
+along its run (`WAR_STICK_STAGGER_MS` = 160). Gradients only — no per-frame
+blur filters. Impact stamps are keyed per conflict doc (`'war|<id>'`) — a
+shared key space let the protest's render pass forget the war's blasts (and
+vice versa) whenever both were live, so explosions never showed.
+**Craters** (`_crater`, base map ground): a scorch ellipse (`#war-scorch`
+gradient), a jagged bowl with a lighter rim and a scatter of ejecta, shaped
+deterministically from the position, sized by the blast (`crater.r`),
+softening over ~90 minutes.
 
 ## Client-side prediction (Phase 18) — why the war feels realtime now
 
@@ -1757,7 +1803,12 @@ only the levers you hold, phone-sized targets):
   active; 400 for an unknown scenario id or a scenario referencing missing
   entities.
 - `POST /api/gm/war/control { paused?, speed?, conflict? }` — GM-only;
-  `speed` must be one of 1/2/4/8. `conflict` picks which doc (default `war`).
+  `speed` is any multiplier, clamped to [0.05, 8] (`clampSpeed`). New wars and
+  protests start at `settings.war.defaultSpeed` (default **0.05×** — a tick every
+  40s, so a conflict unfolds over real hours). The War Room's GM row sets it with a
+  slider (log-spaced stops, a "tick every Ns" readout). At slow speeds units glide
+  across the whole tick (`_tweenMs` up to 60s) and the client still polls the
+  heartbeat at least every 4s. `conflict` picks which doc (default `war`).
 - `POST /api/gm/war/end { conflict? }` — GM-only abort. `endWar` sets
   `active:false` and (if the war hadn't already produced a result) a
   `result` with `winner: null` — **the war document is kept, not deleted**,
@@ -1939,6 +1990,19 @@ km at that scale; times are real seconds at the conflict's current speed.
   the remaining route's length and arrival time (`routeEta`), one per
   destination.
 
+**Dark moods & the lamp.** In the dark/red moods the sheet becomes the war
+table at night: dark ink frame and margins, light-ink grid, labels on dark
+halos, brighter route/front colours (`--wm-*` tokens), lamp-lit cards, and a
+warm desk lamp (`#war-lamp`, soft-light) pooling light over the map that the
+floating panels catch, with glowing status lamps. In the light moods the same
+lamp comes on at in-game night (`--wm-lamp` rides `--dn-night`).
+
+**Airfields** draw in their own overlay sublayer (`airfields`) UNDER the
+units — a garrison standing on a runway stays clickable — with this
+conflict's bases in their side's colour (ready ✈ / rearming ⟳ counts) and
+every other airfield plain; elsewhere the base map draws them (see
+docs/FRONTEND.md).
+
 **Per-paint layers.** `_paint` clears each doc's OWN `orders`/`refugees`/
 `fx` groups before redrawing them. (It used to clear the shared sublayers,
 which detached the per-doc groups after the first paint — routes, clash
@@ -1973,8 +2037,8 @@ move/attack, right-drag route, Ctrl-drag line-up, Shift-drag box select, Esc cle
 
 A situation report per conflict: status chip, tick/elapsed/speed and **Open the battle map
 →**; the operator's authority line; a balance-of-forces bar; a stat strip (losses per side,
-civilian dead, refugees, cities fallen/in unrest); the GM row (Pause, speed 1×/2×/4×/8×
-segmented, End) with tuning / spawn / intervention / treaty folds; objectives as a checklist
+civilian dead, refugees, cities fallen/in unrest); the GM row (Pause, a speed
+slider 0.05×–8×, End) with tuning / spawn / intervention / treaty folds; objectives as a checklist
 (the next one tagged, ◎ jumps the battle map there); province control bars; the five latest
 notable reports (captures/landings ahead of rout chatter, ◎ to locate) with the full log
 folded; **Order of battle** (every unit: side, type + echelon, strength %, morale, state,

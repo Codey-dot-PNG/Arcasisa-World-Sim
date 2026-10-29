@@ -335,7 +335,7 @@ async function api(method, path, body, opts) {
     // the whole app). War orders do neither: the war heartbeat +
     // client prediction own that path, and the old per-order full refetch
     // was pure overhead on top of them.
-    const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$)/;
+    const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$|me\/office$)/;
     if (data && data.sync) applySync(data.sync);
     else if (!SYNC_SKIP.test(path)) scheduleRefresh(true);
   }
@@ -344,6 +344,7 @@ async function api(method, path, body, opts) {
 const GET = (p) => api('GET', p);
 const POST = (p, b, opts) => api('POST', p, b || {}, opts);
 const PATCH = (p, b, opts) => api('PATCH', p, b || {}, opts);
+const PUT = (p, b, opts) => api('PUT', p, b || {}, opts);
 const DEL = (p, opts) => api('DELETE', p, undefined, opts);
 
 /* ---------- live stream + refresh ---------- */

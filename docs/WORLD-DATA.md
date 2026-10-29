@@ -211,7 +211,9 @@ citizen, mp, judge, executive, president, minister, journalist, police, military
 
 **Abilities (Phase 36)** — actions, separate from the information clearances above:
 `command_police` (police in a protest), `authorize_force` (order force against a protest),
-`command_military` (the national defence in a war), `order_airstrikes`. Seeded once
+`command_military` (the national defence in a war), `order_airstrikes`, and
+`distribute_food` (release food from the national stockpile — President, Cabinet and GM by
+default; added to existing worlds by the `world._abilitiesFood` flag). Seeded once
 (`world._abilitiesSeeded`): president all four; minister police + force + military; police
 `command_police`; military `command_military` + `order_airstrikes`; custom roles with the
 military map layer get military + airstrikes; everyone else none. GM-editable in Roles &
@@ -223,6 +225,7 @@ filedByEntityId, ts, turn, note?, decidedBy?, decidedAt? }`, capped at 60 (oldes
 dropped first).
 
 User: `{ id, username, displayName, salt, passHash (scrypt), roleId, entityId (their persona),
+office ({widgets, updatedAt} — the Office tab layout, Phase 36),
 newspaperId (journalists), lastReadNewsTs (news "News (n)" badge waterline, migrate-defaulted
 to 0), created, lastLogin }`. Seeded users all use passphrase `arcasia`:
 gm, president (Miron Valen), journalist (Jana Halden), executive (Kira Moss), citizen

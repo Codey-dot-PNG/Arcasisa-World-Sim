@@ -57,7 +57,7 @@ function restoreScroll(saved) {
 
 const App = {
   PAGES: [
-    ['map', 'World Map'], ['parliament', 'Parliament'], ['companies', 'Companies'],
+    ['map', 'World Map'], ['parliament', 'Parliament'], ['office', 'Office'], ['companies', 'Companies'],
     ['economy', 'Economy'], ['population', 'Population'], ['news', 'News'],
     ['entertainment', 'Entertainment'], ['war', 'War Room'], ['timeline', 'Timeline'], ['gm', 'GM Studio']
   ],

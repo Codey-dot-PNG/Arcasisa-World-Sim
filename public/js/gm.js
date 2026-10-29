@@ -7,7 +7,8 @@ const ROLE_ABILITIES = [
   ['command_police', 'Command the police (protests)'],
   ['authorize_force', 'Authorize force against protestors'],
   ['command_military', 'Command the national defence (wars)'],
-  ['order_airstrikes', 'Order airstrikes']
+  ['order_airstrikes', 'Order airstrikes'],
+  ['distribute_food', 'Release food from the national stockpile']
 ];
 
 // Phase 13 — quick-start templates so a GM can stand up a producing property or
@@ -2671,7 +2672,7 @@ const GM = {
     // (keys mirror server/api.js ABILITIES). Ownership still counts on its
     // own: whoever controls the government commands its forces regardless,
     // and a protest's organizer can never command the side policing it.
-    main.appendChild(Views.secLabel('Abilities — conflict command'));
+    main.appendChild(Views.secLabel('Abilities — what this role may do'));
     const abGrid = el('div.perm-grid');
     d.perms.abilities = Array.isArray(d.perms.abilities) ? d.perms.abilities : [];
     for (const [aid, alabel] of ROLE_ABILITIES) {

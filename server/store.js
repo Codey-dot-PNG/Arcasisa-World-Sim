@@ -475,12 +475,13 @@ function migrate(world) {
   // also filters timeline data itself in api.js filterState.)
   // Conversely, every role gets the full set of INFO tabs — all dossiers are
   // public knowledge; only the data inside them is clearance-filtered.
-  const STD_PAGES = ['map', 'parliament', 'companies', 'economy', 'population', 'news', 'entertainment', 'war'];
+  const STD_PAGES = ['map', 'parliament', 'office', 'companies', 'economy', 'population', 'news', 'entertainment', 'war'];
   for (const r of (world.roles || [])) {
     if (!r.perms || !Array.isArray(r.perms.pages)) continue;
     if (r.perms.gm) { // GM keeps everything; just make sure it has entertainment/war
       if (!r.perms.pages.includes('entertainment')) { r.perms.pages.push('entertainment'); changed = true; }
       if (!r.perms.pages.includes('war')) { r.perms.pages.push('war'); changed = true; }
+      if (!r.perms.pages.includes('office')) { r.perms.pages.push('office'); changed = true; } // Phase 36 Office tab
       continue;
     }
     if (r.perms.pages.includes('timeline')) {
@@ -520,6 +521,18 @@ function migrate(world) {
       changed = true;
     }
     world._abilitiesSeeded = true; changed = true;
+  }
+  // Phase 36 — the food programme becomes an ability too (distribute_food):
+  // the President and the Cabinet run it by default. Separate flag so worlds
+  // already past _abilitiesSeeded pick it up; additive, never removes.
+  if (!world._abilitiesFood) {
+    for (const r of (world.roles || [])) {
+      if (!r.perms || !Array.isArray(r.perms.abilities)) continue;
+      if ((r.id === 'president' || r.id === 'minister' || r.perms.gm) && !r.perms.abilities.includes('distribute_food')) {
+        r.perms.abilities.push('distribute_food'); changed = true;
+      }
+    }
+    world._abilitiesFood = true; changed = true;
   }
   // The operator editor's "— none —" persona option used to be stored
   // verbatim as the entity id '__null__'. Heal it to a real null.

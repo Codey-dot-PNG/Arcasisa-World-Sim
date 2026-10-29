@@ -40,7 +40,7 @@ setInterval(() => broadcast('ping', { t: Date.now() }), 25000).unref();
 // heartbeat channel (docs/WAR.md) — attaching a full state payload to each
 // would undo the payload diet; auth precedes a full page boot;
 // stream/config/cron are not world mutations at all.
-const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$)/;
+const SYNC_SKIP = /^\/api\/(auth\/|war\/|gm\/war\/|stream$|config$|cron$|news\/read$|me\/office$)/;
 
 // Response-sync (Phase 21): every successful world-mutating response carries
 // the freshly-mutated, permission-filtered world, so the client applies its
@@ -202,6 +202,7 @@ function userPayload(u) {
     id: u.user.id, username: u.user.username, displayName: u.user.displayName,
     entityId: u.user.entityId, roleId: u.user.roleId, newspaperId: u.user.newspaperId || null,
     lastReadNewsTs: u.user.lastReadNewsTs || 0,
+    office: u.user.office || null,
     role: { id: u.role.id, name: u.role.name, perms: u.role.perms }
   };
 }
@@ -267,7 +268,8 @@ const ABILITIES = {
   command_police: 'Command the police in a protest',
   authorize_force: 'Authorize force against protestors',
   command_military: 'Command the national defence in a war',
-  order_airstrikes: 'Order airstrikes'
+  order_airstrikes: 'Order airstrikes',
+  distribute_food: 'Release food from the national stockpile'
 };
 function hasAbility(u, key) {
   const p = (u && u.role && u.role.perms) || {};
@@ -412,7 +414,12 @@ function filterState(u) {
   const transactions = (p.accounts === 'all' ? db.transactions
     : db.transactions.filter(t => (t.from && visAcct.has(t.from)) || (t.to && visAcct.has(t.to)))).slice(-400);
 
-  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId)) || grantHas(ownerId, 'trade');
+  // distribute_food (Phase 36): the food programme's operators must see the
+  // national stockpile they release from.
+  const govId = (db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government') || {}).id;
+  const foodOps = hasAbility(u, 'distribute_food');
+  const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId)) || grantHas(ownerId, 'trade') ||
+    (foodOps && ownerId === govId);
   const military = (p.mapLayers || []).includes('military');
 
   const entities = db.entities.map(e => {
@@ -635,6 +642,13 @@ async function ledgerPage(u, query) {
   return { transactions, hasMore: all.length > limit, nextBefore: all.length > limit && transactions.length ? transactions[transactions.length - 1].ts : null };
 }
 
+// Office widget catalogue (Phase 36) — the client's Office.TYPES mirrors these
+// keys (public/js/office.js); unknown types are dropped on save.
+const OFFICE_TYPES = ['accounts', 'portfolio', 'quotes', 'inventory', 'news', 'trades', 'polling',
+  'parliament', 'food', 'conflict', 'notes', 'clock', 'province', 'dossier', 'ledger'];
+const OFFICE_STYLES = ['ledger', 'card', 'dark', 'telegram', 'accent'];
+const OFFICE_MAX_WIDGETS = 24;
+
 // ---------- request handling ----------------------------------------------
 // Hosting rewrites (vercel.json sends /api/:path* to /api/index) can hand
 // the process the REWRITTEN url instead of the one the browser asked for —
@@ -766,6 +780,34 @@ async function handle(req, res, pathname, method) {
       u.user.salt = salt; u.user.passHash = hash;
       store.save();
       return json(res, 200, { ok: true });
+    }
+    // Phase 36 — the Office tab: each operator's own widget layout. Personal
+    // UI state (no audit entry, no broadcast — nobody else renders it), but
+    // kept on the user record so it follows the operator across devices.
+    // Validated hard: a fixed widget-type whitelist, bounded counts/sizes.
+    if (pathname === '/api/me/office' && method === 'PUT') {
+      const b = await readBody(req, 64e3);
+      const raw = Array.isArray(b && b.widgets) ? b.widgets : null;
+      if (!raw) return bad('A widget list is required.');
+      if (raw.length > OFFICE_MAX_WIDGETS) return bad(`An office holds at most ${OFFICE_MAX_WIDGETS} widgets.`);
+      const widgets = [];
+      for (const w of raw) {
+        if (!w || !OFFICE_TYPES.includes(w.type)) continue;
+        let opts = (w.opts && typeof w.opts === 'object' && !Array.isArray(w.opts)) ? w.opts : {};
+        if (JSON.stringify(opts).length > 3000) opts = {};
+        widgets.push({
+          id: String(w.id || store.uid('ow')).replace(/[^\w-]/g, '').slice(0, 32) || store.uid('ow'),
+          type: w.type,
+          w: Math.max(1, Math.min(4, Math.round(Number(w.w) || 1))),
+          h: ['s', 'm', 'l'].includes(w.h) ? w.h : 'm',
+          style: OFFICE_STYLES.includes(w.style) ? w.style : 'ledger',
+          title: String(w.title || '').slice(0, 40),
+          opts
+        });
+      }
+      u.user.office = { widgets, updatedAt: Date.now() };
+      store.save();
+      return json(res, 200, { office: u.user.office });
     }
     if (pathname === '/api/state' && method === 'GET') {
       // Serverless-friendly TURN advance: with no resident process the
@@ -1939,7 +1981,10 @@ async function handle(req, res, pathname, method) {
     // provinces equally. Body: { itemId, qty, provinceIds? }.
     if (pathname === '/api/food/release' && method === 'POST') {
       const gm = u.role.perms.gm;
-      if (!gm && !ownership.controls(u.user.entityId, 'ent_gov')) return deny('Only the government may release food.');
+      // The head of government (chain) or a role cleared to run the food
+      // programme (distribute_food — the cabinet by default). Ministers used
+      // to be refused outright: only whoever controls ent_gov passed.
+      if (!gm && !ownership.controls(u.user.entityId, 'ent_gov') && !hasAbility(u, 'distribute_food')) return deny('Only the government may release food.');
       const b = await readBody(req);
       try {
         const hh = require('./households');

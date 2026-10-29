@@ -277,19 +277,27 @@ function releaseFood(db, itemId, qty, provinceIds, actor) {
     : db.provinces.filter(p => (p.vars.population || 0) > 0);
   if (!provs.length) throw new Error('No valid target provinces.');
 
-  // Distribute evenly across targets
-  const perProv = round2(requested / provs.length);
+  // Split by population (the UI always promised "by population", but the
+  // release was an even split — a small province got as much grain as the
+  // capital). Falls back to even shares when no target has a headcount.
+  // The last target takes the rounding remainder so exactly `requested`
+  // units leave the stockpile.
+  const popTot = provs.reduce((t, p) => t + Math.max(0, Number(p.vars.population) || 0), 0);
   const delivered = {};
-  for (const p of provs) {
-    p.vars.foodStock = round2((p.vars.foodStock || 0) + perProv * weight);
-    delivered[p.id] = perProv;
-  }
+  let left = requested;
+  provs.forEach((p, i) => {
+    const share = i === provs.length - 1 ? left
+      : round2(requested * (popTot > 0 ? Math.max(0, Number(p.vars.population) || 0) / popTot : 1 / provs.length));
+    left = round2(left - share);
+    p.vars.foodStock = round2((p.vars.foodStock || 0) + share * weight);
+    delivered[p.id] = share;
+  });
 
   // Debit the national stockpile
   row.qty = round2(row.qty - requested);
   if (row.qty <= 0) gov.inventory = gov.inventory.filter(r => r !== row);
 
-  const totalDelivered = round2(perProv * provs.length);
+  const totalDelivered = requested;
   store.log('simulation', 'Food released to provinces',
     fmtNum(totalDelivered) + ' × ' + item.name + ' → ' + provs.map(p => p.name).join(', '),
     actor || 'ENGINE', ['ent_gov']);

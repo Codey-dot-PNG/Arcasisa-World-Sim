@@ -47,6 +47,15 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
   `S().myGrants`; the transfer/trade/contract pickers, inventory, trade view and the company/
   property desks use them, and delegated accounts are labelled "(delegated)" and kept out of
   "Your Money".
+- **The Office** (`office.js`, tab after Parliament): a per-operator desk of widgets
+  (`Office.TYPES` — accounts, portfolio, market watch, stock room, headlines, trade inbox,
+  polling, chamber, food distribution, situation room, notepad, desk clock, province watch,
+  pinned file, ledger). Pointer-event drag (mouse and touch) reorders cards by rectangle
+  hit-testing; ⚙ settings (title, style, widget options), ◐ cycles window style
+  (`ledger|card|dark|telegram|accent`), ⇔/↕ size. Layout is kept in `Office._local` and
+  saved debounced to `PUT /api/me/office`; `Views.render` skips rebuilding the Office while a
+  drag or a focused widget input is live (`Office.busy`). Widgets only render filtered state
+  and call existing routes — they add no authority.
 - **Ledger views (compact UI pass)**: the Exchange is a quote board (`viewExchange` — one
   row per company with a static `Views.miniSpark` trend; clicking a row sets `W.exchOpen`
   and opens a drawer with the two live charts, the ×100 lane and the controller's capital

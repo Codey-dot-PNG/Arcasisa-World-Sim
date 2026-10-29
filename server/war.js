@@ -70,6 +70,7 @@ const PROTEST_DEFAULTS = {
   refugeeRiotFrac: 0.04,   // fraction of a province's population fleeing per riot wave
   refugeeRiotEvery: 4,     // riot refugee wave cadence (ticks)
   dmg: 1,                  // default violence multiplier (GM-adjustable)
+  policeMult: 3,           // police dispersal power against crowds (batons, gas, riot lines) — engine stepCombat
   hp: 1,
   // Phase 36 — public opinion (applyProtestPolitics). Every politicsEvery
   // ticks each province's crowd presence (live protestor strength ÷
@@ -1995,7 +1996,8 @@ function startProtest(db, opts, actor) {
         strikeFrac: cfg.strikeFrac,
         civFrac: cfg.civPerRiotFrac,
         refugeeFrac: cfg.refugeeRiotFrac,
-        refugeeEvery: cfg.refugeeRiotEvery
+        refugeeEvery: cfg.refugeeRiotEvery,
+        policeMult: cfg.policeMult
       },
       strikeCityNames: baseIds.map(id => cityOf(id).name),
       // Phase 36 — what the movement wants (shown in the War Room and the
@@ -2071,6 +2073,10 @@ function setProtestTuning(db, patch, actor) {
   if (patch.refugeeFrac !== undefined && Number.isFinite(Number(patch.refugeeFrac))) {
     p.tuning.refugeeFrac = engine.clamp(Number(patch.refugeeFrac), 0, 0.5);
     changes.push(`refugeeFrac=${p.tuning.refugeeFrac}`);
+  }
+  if (patch.policeMult !== undefined && Number.isFinite(Number(patch.policeMult))) {
+    p.tuning.policeMult = engine.clamp(Number(patch.policeMult), 0.1, 10);
+    changes.push(`policeMult=${p.tuning.policeMult}×`);
   }
   if (patch.refugeeEvery !== undefined && Number.isFinite(Number(patch.refugeeEvery))) {
     p.tuning.refugeeEvery = Math.round(engine.clamp(Number(patch.refugeeEvery), 2, 12));

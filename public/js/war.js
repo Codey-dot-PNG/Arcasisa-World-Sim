@@ -3524,7 +3524,7 @@ const War = {
       const tun = (war.protest || {}).tuning || {};
       d = this._protestTuneDraft = {
         id: pid,
-        t: Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4 }, tun),
+        t: Object.assign({ strikeFrac: 0.5, civFrac: 0.6, refugeeFrac: 0.04, refugeeEvery: 4, policeMult: 3 }, tun),
         mods: Object.assign({ dmg: 1, hp: 1 }, war.mods || {}),
         // strikeFrac shown on a 0–100 scale in the number box; converted back to a fraction on post.
         pct: { strikeFrac: Math.round((tun.strikeFrac !== undefined ? tun.strikeFrac : 0.5) * 100) }
@@ -3550,6 +3550,7 @@ const War = {
       }));
     box.appendChild(sl('Violence damage ×', d.mods, 'dmg', 0.1, 5, 0.1, '×', (v) => debounced('dmg', v)));
     box.appendChild(sl('Unit HP ×', d.mods, 'hp', 0.1, 5, 0.1, '×', (v) => debounced('hp', v)));
+    box.appendChild(sl('Police dispersal power ×', d.t, 'policeMult', 0.1, 10, 0.1, '×', (v) => debounced('policeMult', v)));
     box.appendChild(sl('Aircraft bombing damage ×', d.mods, 'bombDmg', 0.1, 5, 0.1, '×', (v) => debounced('bombDmg', v)));
     box.appendChild(sl('Strike output drop (0–100%)', d.pct, 'strikeFrac', 0, 100, 1, '%', (v) => debounced('strikeFrac', v / 100)));
     box.appendChild(sl('Civilian deaths per fight tick (×)', d.t, 'civFrac', 0, 10, 0.1, '×', (v) => debounced('civFrac', v)));

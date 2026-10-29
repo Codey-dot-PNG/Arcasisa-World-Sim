@@ -1608,6 +1608,15 @@ police city.
 
 ### Violence & territory gates (engine)
 
+**Police vs crowds.** The security forces disperse crowds far beyond what
+their headcount alone would do: their damage to crowds is multiplied by
+`war.protest.tuning.policeMult` (default 3, `PROTEST_DEFAULTS.policeMult`,
+GM slider "Police dispersal power"). A crowd under a crackdown loses morale
+even though it never fights back, so force against a peaceful crowd breaks
+and scatters it; and any unit that took fire this tick doesn't supply-heal it
+back (`engagedUntil`) — without that, a peaceful crowd (never flagged
+'fighting') out-healed every baton charge.
+
 `canFight` (shared `war-engine.js`, byte-identical on server and client)
 enforces the escalation ladder:
 

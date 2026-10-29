@@ -1423,11 +1423,22 @@
       // (hp); better small arms also slow morale drain (a unit that can
       // shoot back holds longer).
       const dmgToDef = aFights ? K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp') : 0;
-      const dmgToAtt = dFights ? K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp') : 0;
+      // In a protest the security forces DISPERSE crowds — batons, gas, riot
+      // lines — far beyond what their headcount alone would do to a mass of
+      // people (war.protest.tuning.policeMult, default ×3).
+      const protest = war.kind === 'protest';
+      const policeMult = protest ? (Number(((war.protest || {}).tuning || {}).policeMult) || 3) : 1;
+      const dmgToAtt = dFights ? K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * policeMult * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp') : 0;
       d.strength = Math.max(0, round1(d.strength - dmgToDef));
       a.strength = Math.max(0, round1(a.strength - dmgToAtt));
       war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
+      // a unit taking fire doesn't heal it straight back this tick (a crowd
+      // that isn't fighting back is never flagged 'fighting')
+      if (dmgToAtt > 0) a.engagedUntil = Math.max(a.engagedUntil || -1, war.tick);
+      if (dmgToDef > 0) d.engagedUntil = Math.max(d.engagedUntil || -1, war.tick);
       if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
+      // ...and a crowd under a crackdown breaks even though it never fights back
+      else if (protest && dmgToAtt > 0) a.org = clamp(a.org - ORG_DRAIN, 0, 100);
       if (dFights) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a

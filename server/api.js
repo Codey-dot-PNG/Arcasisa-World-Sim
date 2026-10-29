@@ -799,7 +799,9 @@ async function handle(req, res, pathname, method) {
           id: String(w.id || store.uid('ow')).replace(/[^\w-]/g, '').slice(0, 32) || store.uid('ow'),
           type: w.type,
           w: Math.max(1, Math.min(4, Math.round(Number(w.w) || 1))),
-          h: ['s', 'm', 'l'].includes(w.h) ? w.h : 'm',
+          // Height: a legacy preset ('s'|'m'|'l') or a dragged pixel height.
+          h: ['s', 'm', 'l'].includes(w.h) ? w.h
+            : (w.h !== null && w.h !== '' && Number.isFinite(Number(w.h)) ? Math.max(80, Math.min(1100, Math.round(Number(w.h)))) : 'm'),
           style: OFFICE_STYLES.includes(w.style) ? w.style : 'ledger',
           title: String(w.title || '').slice(0, 40),
           opts

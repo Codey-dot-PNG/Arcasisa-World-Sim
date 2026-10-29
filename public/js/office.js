@@ -290,7 +290,7 @@ const Office = {
     const locked = (() => { try { return localStorage.getItem('arcasia-office-locked') === '1'; } catch (e) { return false; } })();
     inner.appendChild(el('div.doc-title', 'Your Office'));
     inner.appendChild(el('div.doc-sub', locked ? 'Layout locked — unlock to rearrange'
-      : 'Drag ⠿ to rearrange · ⚙ settings · ◐ window style · ⇔ ↕ size'));
+      : 'Drag a title bar to move a window · drag its corner ◢ to resize · ⚙ settings · ◐ style'));
     inner.appendChild(el('div.btn-row.office-bar',
       el('button.solid-btn', { onclick: () => this.catalogue() }, '+ Add widget'),
       el('button.dash-btn', { onclick: () => { try { localStorage.setItem('arcasia-office-locked', locked ? '0' : '1'); } catch (e) { } this.rerender(); } }, locked ? '🔓 Unlock layout' : '🔒 Lock layout'),
@@ -307,12 +307,15 @@ const Office = {
 
   card(w, locked) {
     const T = this.TYPES[w.type];
-    const card = el('div.ow', { class: `ow-w${w.w} ow-h-${w.h} ow-style-${w.style}`, 'data-ow': w.id });
+    const pxH = typeof w.h === 'number';
+    const card = el('div.ow', { class: `ow-w${w.w} ${pxH ? 'ow-h-px' : 'ow-h-' + w.h} ow-style-${w.style}`, 'data-ow': w.id });
     const head = el('div.ow-head');
     if (!locked) {
-      const handle = el('span.ow-handle', { title: 'Drag to move' }, '⠿');
-      handle.addEventListener('pointerdown', (e) => this.dragStart(e, card));
-      head.appendChild(handle);
+      // the whole title bar is the drag handle (buttons excepted)
+      head.classList.add('ow-draggable');
+      head.title = 'Drag to move';
+      head.addEventListener('pointerdown', (e) => { if (!e.target.closest('button')) this.dragStart(e, card); });
+      head.appendChild(el('span.ow-handle', '⠿'));
     }
     head.appendChild(el('span.ow-title', (T.icon ? T.icon + ' ' : '') + (w.title || T.label)));
     if (!locked) {
@@ -323,15 +326,22 @@ const Office = {
           const i = OFFICE_STYLES.findIndex(s => s[0] === w.style);
           w.style = OFFICE_STYLES[(i + 1) % OFFICE_STYLES.length][0];
         })),
-        btn('⇔', 'Width', () => this.update(() => { w.w = w.w >= 4 ? 1 : w.w + 1; })),
-        btn('↕', 'Height', () => this.update(() => { w.h = w.h === 's' ? 'm' : w.h === 'm' ? 'l' : 's'; })),
         btn('✕', 'Remove', () => this.update(list => { list.splice(list.indexOf(w), 1); }))));
     }
     card.appendChild(head);
     if (!locked && this._settingsOpen[w.id]) card.appendChild(this.settings(w));
     const body = el('div.ow-body');
+    if (pxH) body.style.height = w.h + 'px';
     try { T.render(body, w); } catch (e) { body.appendChild(el('div.ow-empty', 'This widget could not draw: ' + e.message)); }
     card.appendChild(body);
+    if (!locked) {
+      // drag-to-scale: width snaps to grid columns, height is free;
+      // double-click returns the window to its natural size
+      const grip = el('span.ow-resize', { title: 'Drag to resize · double-click to reset' });
+      grip.addEventListener('pointerdown', (e) => this.resizeStart(e, card, w));
+      grip.addEventListener('dblclick', () => this.update(() => { w.h = this.TYPES[w.type].size[1]; }));
+      card.appendChild(grip);
+    }
     return card;
   },
 
@@ -383,48 +393,167 @@ const Office = {
   },
 
   // ---- drag & drop (pointer events: mouse, pen and touch alike) ----
-  // The card itself moves through the DOM as the pointer crosses other
-  // cards; on release the new DOM order becomes the saved order.
+  // The card lifts out of the grid and follows the pointer (position:fixed,
+  // translated per frame); a dashed placeholder holds its slot, and the
+  // other cards glide out of the way (FLIP: measure, move, animate the
+  // difference). Release settles the card into the placeholder. A 5px
+  // threshold keeps a plain click on the title bar a click.
+  _flip(grid, mutate) {
+    const kids = [...grid.children];
+    const before = new Map(kids.map(k => [k, k.getBoundingClientRect()]));
+    mutate();
+    for (const k of kids) {
+      const a = before.get(k), b = k.getBoundingClientRect();
+      const dx = a.left - b.left, dy = a.top - b.top;
+      if (!dx && !dy) continue;
+      k.style.transition = 'none';
+      k.style.transform = `translate(${dx}px, ${dy}px)`;
+      k.getBoundingClientRect(); // commit the inverted position before animating
+      k.style.transition = 'transform 180ms cubic-bezier(.2,.7,.3,1)';
+      k.style.transform = '';
+    }
+  },
   dragStart(e, card) {
     if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault();
     const grid = card.parentNode;
-    this._drag = { card, pointerId: e.pointerId };
-    card.classList.add('dragging');
-    // Hit-test by rectangle (not elementFromPoint: hiding the dragged card
-    // from hit-testing also dropped its pointer capture and stalled the
-    // drag). Document-level listeners so a release anywhere ends it.
-    const move = (ev) => {
-      if (ev.pointerId !== this._drag.pointerId) return;
-      for (const target of grid.querySelectorAll('.ow')) {
-        if (target === card) continue;
-        const r = target.getBoundingClientRect();
-        if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) continue;
-        const after = ev.clientY > r.top + r.height / 2;
-        if (after ? target.nextSibling !== card : target.previousSibling !== card) grid.insertBefore(card, after ? target.nextSibling : target);
-        break;
+    const st = this._drag = { card, grid, pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, started: false, ph: null, raf: 0, lastX: e.clientX, lastY: e.clientY };
+    const begin = () => {
+      st.started = true;
+      const r = card.getBoundingClientRect();
+      st.rect = r;
+      st.ph = el('div.ow-placeholder', { class: [...card.classList].filter(c => /^ow-w\d$/.test(c)).join(' ') });
+      st.ph.style.height = r.height + 'px';
+      grid.insertBefore(st.ph, card);
+      grid.parentNode.appendChild(card); // out of the grid, still inside the view's styles
+      Object.assign(card.style, { position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 200, margin: 0, pointerEvents: 'none' });
+      card.classList.add('ow-floating');
+      document.body.classList.add('ow-dragging-cursor');
+    };
+    const place = () => {
+      st.raf = 0;
+      card.style.transform = `translate(${st.lastX - st.x0}px, ${st.lastY - st.y0}px) rotate(.6deg) scale(1.02)`;
+      // Hit-test on layout boxes (offsetLeft/Top ignore the FLIP transforms
+      // of cards still gliding), and treat "over the placeholder" as settled
+      // so cards of different widths can't bounce the slot back and forth.
+      const gr = grid.getBoundingClientRect();
+      const x = st.lastX - gr.left, y = st.lastY - gr.top;
+      const hit = (k) => x >= k.offsetLeft && x <= k.offsetLeft + k.offsetWidth && y >= k.offsetTop && y <= k.offsetTop + k.offsetHeight;
+      if (!hit(st.ph)) {
+        const kids = [...grid.querySelectorAll('.ow')];
+        const over = kids.find(hit);
+        if (over) {
+          const after = x > over.offsetLeft + over.offsetWidth / 2;
+          const ref = after ? over.nextSibling : over;
+          if (ref !== st.ph && (after ? over.nextSibling : over.previousSibling) !== st.ph) {
+            this._flip(grid, () => grid.insertBefore(st.ph, ref));
+          }
+        } else if (kids.length && y > Math.max(...kids.map(k => k.offsetTop + k.offsetHeight)) && grid.lastChild !== st.ph) {
+          this._flip(grid, () => grid.appendChild(st.ph)); // below everything: drop at the end
+        }
       }
-      // keep the page scrolling while dragging near the edges
+      // keep the page scrolling while the pointer rests near its edges
       const dv = grid.closest('.doc-view');
       if (dv) {
         const r = dv.getBoundingClientRect();
-        if (ev.clientY < r.top + 40) dv.scrollTop -= 12; else if (ev.clientY > r.bottom - 40) dv.scrollTop += 12;
+        const dy = st.lastY < r.top + 60 ? -12 : st.lastY > r.bottom - 60 ? 12 : 0;
+        if (dy) { dv.scrollTop += dy; st.raf = requestAnimationFrame(place); }
       }
     };
+    const move = (ev) => {
+      if (ev.pointerId !== st.pointerId) return;
+      st.lastX = ev.clientX; st.lastY = ev.clientY;
+      if (!st.started) {
+        if (Math.hypot(ev.clientX - st.x0, ev.clientY - st.y0) < 5) return;
+        begin();
+      }
+      if (!st.raf) st.raf = requestAnimationFrame(place);
+    };
     const up = (ev) => {
-      if (ev.pointerId !== this._drag.pointerId) return;
+      if (ev.pointerId !== st.pointerId) return;
       document.removeEventListener('pointermove', move);
       document.removeEventListener('pointerup', up);
       document.removeEventListener('pointercancel', up);
-      card.classList.remove('dragging');
+      if (st.raf) cancelAnimationFrame(st.raf);
+      if (!st.started) { this._drag = null; return; }
+      // glide into the placeholder, then drop it in for real
+      const gr = grid.getBoundingClientRect();
+      const target = { left: gr.left + st.ph.offsetLeft, top: gr.top + st.ph.offsetTop };
+      card.style.transition = 'transform 160ms ease-out';
+      card.style.transform = `translate(${target.left - st.rect.left}px, ${target.top - st.rect.top}px)`;
+      setTimeout(() => {
+        grid.insertBefore(card, st.ph);
+        st.ph.remove();
+        card.removeAttribute('style');
+        card.classList.remove('ow-floating');
+        document.body.classList.remove('ow-dragging-cursor');
+        this._drag = null;
+        const order = [...grid.querySelectorAll('.ow')].map(n => n.getAttribute('data-ow'));
+        const byId = Object.fromEntries(this._local.map(w => [w.id, w]));
+        const next = order.map(id => byId[id]).filter(Boolean);
+        if (next.length === this._local.length && next.some((w, i) => w !== this._local[i])) {
+          this._local = next;
+          this.save();
+        }
+        this.rerender();
+      }, 170);
+    };
+    document.addEventListener('pointermove', move);
+    document.addEventListener('pointerup', up);
+    document.addEventListener('pointercancel', up);
+  },
+
+  // ---- drag-to-scale ----
+  // Width snaps to whole grid columns as you drag (live), height follows the
+  // pointer freely (80–1100px). On a 2-column screen a "full" span keeps the
+  // widget wide on desktop too; phones only resize height.
+  resizeStart(e, card, w) {
+    if (e.button !== undefined && e.button !== 0) return;
+    e.preventDefault(); e.stopPropagation();
+    const grid = card.parentNode;
+    const gs = getComputedStyle(grid);
+    const cols = gs.gridTemplateColumns.split(' ').filter(Boolean).length || 1;
+    const gap = parseFloat(gs.columnGap) || 14;
+    const colW = (grid.getBoundingClientRect().width - gap * (cols - 1)) / cols;
+    const body = card.querySelector('.ow-body');
+    const r = card.getBoundingClientRect();
+    const st = this._drag = { resize: true, pointerId: e.pointerId, x0: e.clientX, y0: e.clientY,
+      w0: r.width, h0: body.getBoundingClientRect().height, span: Math.max(1, Math.round((r.width + gap) / (colW + gap))), h: null, raf: 0 };
+    card.classList.add('ow-resizing');
+    document.body.classList.add('ow-resize-cursor');
+    const badge = el('span.ow-size-badge');
+    card.appendChild(badge);
+    let lastX = e.clientX, lastY = e.clientY;
+    const apply = () => {
+      st.raf = 0;
+      const span = Math.max(1, Math.min(cols, Math.round((st.w0 + lastX - st.x0 + gap) / (colW + gap))));
+      const h = Math.max(80, Math.min(1100, Math.round(st.h0 + lastY - st.y0)));
+      if (cols > 1 && span !== st.span) this._flip(grid, () => { card.style.gridColumn = 'span ' + span; });
+      st.span = span; st.h = h;
+      body.style.height = h + 'px'; body.style.maxHeight = 'none';
+      badge.textContent = (cols > 1 ? span + ' col' + (span > 1 ? 's' : '') + ' · ' : '') + h + 'px';
+    };
+    const move = (ev) => {
+      if (ev.pointerId !== st.pointerId) return;
+      lastX = ev.clientX; lastY = ev.clientY;
+      if (!st.raf) st.raf = requestAnimationFrame(apply);
+    };
+    const up = (ev) => {
+      if (ev.pointerId !== st.pointerId) return;
+      document.removeEventListener('pointermove', move);
+      document.removeEventListener('pointerup', up);
+      document.removeEventListener('pointercancel', up);
+      if (st.raf) { cancelAnimationFrame(st.raf); apply(); }
+      document.body.classList.remove('ow-resize-cursor');
+      card.classList.remove('ow-resizing');
+      badge.remove();
       this._drag = null;
-      const order = [...grid.querySelectorAll('.ow')].map(n => n.getAttribute('data-ow'));
-      const byId = Object.fromEntries(this._local.map(w => [w.id, w]));
-      const next = order.map(id => byId[id]).filter(Boolean);
-      if (next.length === this._local.length && next.some((w, i) => w !== this._local[i])) {
-        this._local = next;
-        this.save();
-      }
+      // a plain click leaves the DOM alone so a double-click can still reset
+      if (st.h === null) return;
+      if (cols === 4) w.w = st.span;
+      else if (cols === 2) w.w = st.span === 2 ? Math.max(2, w.w) : 1;
+      w.h = st.h;
+      this.save();
       this.rerender();
     };
     document.addEventListener('pointermove', move);

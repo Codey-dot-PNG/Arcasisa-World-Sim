@@ -50,9 +50,16 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 - **The Office** (`office.js`, tab after Parliament): a per-operator desk of widgets
   (`Office.TYPES` — accounts, portfolio, market watch, stock room, headlines, trade inbox,
   polling, chamber, food distribution, situation room, notepad, desk clock, province watch,
-  pinned file, ledger). Pointer-event drag (mouse and touch) reorders cards by rectangle
-  hit-testing; ⚙ settings (title, style, widget options), ◐ cycles window style
-  (`ledger|card|dark|telegram|accent`), ⇔/↕ size. Layout is kept in `Office._local` and
+  pinned file, ledger). Pointer-event drag (mouse and touch) from the whole title bar: past a
+  5px threshold the card lifts out of the grid (`position:fixed`, translated per rAF), a
+  dashed `.ow-placeholder` holds its slot, and the other cards glide aside via FLIP
+  (`Office._flip`). Hit-testing uses `offsetLeft/Top` (layout boxes, immune to in-flight FLIP
+  transforms) and "pointer over the placeholder" is a no-op, which stops mixed-width cards
+  oscillating. The ◢ corner grip (`resizeStart`) scales the window: width snaps live to grid
+  columns, height is free (80–1100px, stored as a number in `w.h`; legacy `s|m|l` presets
+  still render); double-click the grip resets to the type's natural size. ⚙ settings (title,
+  style, widget options), ◐ cycles window style (`ledger|card|dark|telegram|accent`). Layout
+  is kept in `Office._local` and
   saved debounced to `PUT /api/me/office`; `Views.render` skips rebuilding the Office while a
   drag or a focused widget input is live (`Office.busy`). Widgets only render filtered state
   and call existing routes — they add no authority.

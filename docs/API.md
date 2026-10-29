@@ -20,7 +20,7 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `POST /api/auth/logout` | |
 | `POST /api/auth/register` | if `settings.registration.open`; creates person entity + account + stipend |
 | `GET /api/me` · `PATCH /api/me/password` | |
-| `PUT /api/me/office` | Phase 36 — save the caller's Office layout `{widgets:[{id,type,w 1–4,h s|m|l,style,title,opts}]}` (≤24 widgets, type/style whitelists `OFFICE_TYPES`/`OFFICE_STYLES`, opts ≤3KB). Stored on `user.office`, returned in the user payload; no log/broadcast (in SYNC_SKIP) |
+| `PUT /api/me/office` | Phase 36 — save the caller's Office layout `{widgets:[{id,type,w 1–4,h s|m|l or px 80–1100,style,title,opts}]}` (≤24 widgets, type/style whitelists `OFFICE_TYPES`/`OFFICE_STYLES`, opts ≤3KB). Stored on `user.office`, returned in the user payload; no log/broadcast (in SYNC_SKIP) |
 | `GET /api/state` | `{user, state: filterState(u), v, polling}`. Also rides `market.maybeDayTick` (serverless day market). `?ifv=<v>`: when the version still matches (and this request didn't mutate), returns tiny `{v, unchanged: true, user}` instead of the full body |
 | `GET /api/stream` | SSE (file mode only; cloud uses Supabase Realtime) |
 | `GET /api/polling` | public party-support percentages, national + per province (legacy — new clients read the copy bundled into `/api/state` and sync payloads) |

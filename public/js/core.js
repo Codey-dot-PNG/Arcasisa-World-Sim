@@ -663,9 +663,13 @@ function select(kind, id, opts) {
 }
 
 /* ---------- explorer ---------- */
-function expSection(key, label, rows) {
+// Phase 36 UX: long sections (properties, items, people…) start folded so
+// the sidebar reads as an index rather than a 250-row scroll; a search opens
+// every matching section, and a section the operator toggled stays as set.
+const EXP_FOLD_OVER = 12;
+function expSection(key, label, rows, searching) {
   if (!rows.length) return null;
-  const open = W.expOpen[key] !== false;
+  const open = searching || (W.expOpen[key] !== undefined ? W.expOpen[key] : rows.length <= EXP_FOLD_OVER);
   return el('div.exp-section',
     el('div.exp-section-head', { onclick: () => { W.expOpen[key] = !open; renderExplorer(); } },
       el('span', (open ? '▾ ' : '▸ ') + label), el('span.exp-count', String(rows.length))),
@@ -698,16 +702,17 @@ function renderExplorer() {
   const items = S().items.filter(i => match(i.name));
 
   const sections = [
-    expSection('prov', 'Provinces', provs.map(p => expItem('province', p.id, p.name, fmtCompact(p.vars.population), p.color))),
-    expSection('city', 'Cities', cities.map(c => expItem('city', c.id, c.name, c.isCapital ? '★ capital' : '', 'var(--ink-faint)'))),
-    expSection('co', 'Companies', companies.map(e => expItem('entity', e.id, e.name, e.industry, e.color, e.logo))),
-    expSection('party', 'Political Parties', parties.map(e => expItem('entity', e.id, e.name, (e.mpCount || 0) + ' MPs', e.color, e.logo))),
-    expSection('gov', 'Government', gov.map(e => expItem('entity', e.id, e.name, '', e.color))),
-    expSection('ppl', 'People', people.map(e => expItem('entity', e.id, e.name, e.title, e.color))),
-    expSection('for', 'Foreign Powers', foreign.map(e => expItem('entity', e.id, e.name, e.stance, e.color, e.logo))),
-    expSection('prop', 'Properties', props.map(p => expItem('property', p.id, p.name, entName(p.ownerId), (entById(p.ownerId) || {}).color))),
-    expSection('item', 'Items & Markets', items.map(i => expItem('item', i.id, i.name, fmtMoney(i.marketValue), 'var(--paper-line)')))
+    expSection('prov', 'Provinces', provs.map(p => expItem('province', p.id, p.name, fmtCompact(p.vars.population), p.color)), !!q),
+    expSection('city', 'Cities', cities.map(c => expItem('city', c.id, c.name, c.isCapital ? '★ capital' : '', 'var(--ink-faint)')), !!q),
+    expSection('co', 'Companies', companies.map(e => expItem('entity', e.id, e.name, e.industry, e.color, e.logo)), !!q),
+    expSection('party', 'Political Parties', parties.map(e => expItem('entity', e.id, e.name, (e.mpCount || 0) + ' MPs', e.color, e.logo)), !!q),
+    expSection('gov', 'Government', gov.map(e => expItem('entity', e.id, e.name, '', e.color)), !!q),
+    expSection('ppl', 'People', people.map(e => expItem('entity', e.id, e.name, e.title, e.color)), !!q),
+    expSection('for', 'Foreign Powers', foreign.map(e => expItem('entity', e.id, e.name, e.stance, e.color, e.logo)), !!q),
+    expSection('prop', 'Properties', props.map(p => expItem('property', p.id, p.name, entName(p.ownerId), (entById(p.ownerId) || {}).color)), !!q),
+    expSection('item', 'Items & Markets', items.map(i => expItem('item', i.id, i.name, fmtMoney(i.marketValue), 'var(--paper-line)')), !!q)
   ];
+
   sections.forEach(s => s && body.appendChild(s));
   if (!body.children.length) body.appendChild(el('div', { style: 'padding:20px 16px; color:var(--ink-faint); font-family:var(--font-mono); font-size:10px; letter-spacing:.1em;' }, 'NOTHING IN THE FILES.'));
 }

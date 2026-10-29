@@ -251,7 +251,7 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 /* Phase 36 — when the tabs can't share the bar they take their own row,
    and any still left over fold into "More ▾" (App.fitTabs) */
 #topbar.tabs-row{height:auto; min-height:46px; flex-wrap:wrap; row-gap:0;}
-#topbar.tabs-row > *:not(#tabs){min-height:44px;}
+@media (min-width:641px){ #topbar.tabs-row > *:not(#tabs){min-height:44px;} }
 #topbar.tabs-row #tabs{order:5; flex-basis:100%; margin-left:0; border-top:1px solid var(--rule);}
 #topbar.tabs-row .tab{padding:10px 11px 9px;}
 #topbar.tabs-row .topbar-spacer{flex:1 1 auto;}
@@ -1463,4 +1463,68 @@ body:has(.gm-bar:not(.hidden)) #toast-root{bottom:76px;}
 .slider-input.mix::-moz-range-thumb{
   width:8px; height:18px; border-radius:0;
   background:var(--ink); border:1px solid var(--paper);
+}
+
+/* ═══ Phase 36 UX — compact ledger views ═══ */
+/* Exchange quote board (views.js viewExchange) */
+table.data.quote-board td, table.data.party-ledger td{vertical-align:middle;}
+.qb-co{display:flex; align-items:center; gap:8px; white-space:nowrap;}
+.qb-sub{display:block; font-family:var(--font-mono); font-size:9px; letter-spacing:.06em; color:var(--ink-faint); text-transform:uppercase;}
+.qb-caret{color:var(--ink-faint); font-size:10px; margin-left:2px;}
+.stk-logo.stk-logo-sm{width:24px; height:24px; font-size:12px; margin:0;}
+.qb-actions{display:flex; gap:4px; justify-content:flex-end;}
+.btn-xs{padding:4px 9px !important; font-size:9.5px !important; letter-spacing:.08em;}
+tr.qb-drawer-row td{background:var(--hover-wash); padding:10px 12px 14px;}
+tr.qb-drawer-row:hover td{background:var(--hover-wash);}
+.mini-spark{display:block; vertical-align:middle;}
+/* collapsible ledger section (<details class="ledger-fold">) */
+details.ledger-fold{margin:0;}
+details.ledger-fold[open]{margin-bottom:10px;}
+details.ledger-fold > summary{cursor:pointer; list-style:none; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-soft); padding:7px 0; border-bottom:1px dotted var(--rule);}
+details.ledger-fold > summary::-webkit-details-marker{display:none;}
+details.ledger-fold > summary::before{content:'▸ '; color:var(--ink-faint);}
+details.ledger-fold[open] > summary::before{content:'▾ ';}
+@media (max-width:640px){
+  .col-opt{display:none;}
+  .qb-sub{display:none;}
+}
+.chart-row{display:flex; flex-wrap:wrap; gap:14px; align-items:flex-start;}
+.chart-row > *{flex:0 1 auto; max-width:100%;}
+.chart-row svg{max-width:100%; height:auto;}
+/* Phase 36 UX — phones: the theme swatches fold behind one ◐ button so the
+   control cluster stays on a single line above the tab row */
+#theme-btn{display:none;}
+@media (max-width:640px){
+  #theme-btn{display:inline-flex;}
+  #palette{display:none;}
+  #palette.open{display:flex; position:absolute; top:100%; right:6px; z-index:70; gap:10px; padding:10px 12px;
+    background:var(--paper); border:1px solid var(--rule-strong); box-shadow:0 10px 24px rgba(0,0,0,.18);}
+  #palette.open .swatch{width:22px; height:22px;}
+  #topbar{position:relative;}
+}
+/* phones: page-level sub-tab rows (Economy, News, Timeline…) scroll as one
+   line instead of wrapping into two or three rows of chips */
+@media (max-width:640px){
+  .doc-inner > .chip-row{flex-wrap:nowrap; overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; padding-bottom:2px;}
+  .doc-inner > .chip-row::-webkit-scrollbar{display:none;}
+  .doc-inner > .chip-row > *{flex:0 0 auto;}
+}
+@media (max-width:640px){
+  /* ledger tables already drop their optional columns — keep them full width */
+  table.data.quote-board, table.data.party-ledger{display:table;}
+  .stk-logo.stk-logo-sm{width:20px; height:20px;}
+  /* one-line control cluster: the world clock and music padding give way */
+  #clock-world{display:none;}
+  .music-widget{padding:1px 3px;}
+  .music-widget .icon-btn{min-width:26px; min-height:26px; padding:2px 4px;}
+}
+.qb-status{display:flex; flex-wrap:wrap; gap:6px 18px; font-family:var(--font-mono); font-size:10.5px; letter-spacing:.04em; color:var(--ink-faint); margin:2px 0 10px;}
+.qb-status b{font-weight:700;}
+.qb-drawer a{color:var(--accent); text-decoration:none; border-bottom:1px dotted var(--accent);}
+/* phones: stat strips become a tight 3-up ledger grid instead of tall cards */
+@media (max-width:640px){
+  .stat-strip{grid-template-columns:repeat(3, minmax(0,1fr)); gap:0; border:1px solid var(--rule);}
+  .stat-cell{border:none; border-right:1px dotted var(--rule); border-bottom:1px dotted var(--rule); padding:7px 8px;}
+  .stat-cell .v{font-size:16px; margin-top:2px; overflow-wrap:anywhere;}
+  .stat-cell .k{font-size:7.5px; letter-spacing:.1em;}
 }

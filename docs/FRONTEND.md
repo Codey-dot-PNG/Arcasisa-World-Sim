@@ -47,6 +47,21 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
   `S().myGrants`; the transfer/trade/contract pickers, inventory, trade view and the company/
   property desks use them, and delegated accounts are labelled "(delegated)" and kept out of
   "Your Money".
+- **Ledger views (compact UI pass)**: the Exchange is a quote board (`viewExchange` — one
+  row per company with a static `Views.miniSpark` trend; clicking a row sets `W.exchOpen`
+  and opens a drawer with the two live charts, the ×100 lane and the controller's capital
+  tools). Parliament is one party ledger (seats, polling, last vote) with the election record
+  folded. Reference tables (all accounts, market values — deeds/certificates hidden unless
+  asked — inventory holders, ended conflicts, GM war tools, the petition form) use
+  `Views.ledgerFold(key, label, build, defaultOpen)`: a `<details>` whose body is built only
+  when open and whose state persists in `W[key]` across re-renders. Columns marked `.col-opt`
+  drop on phones. Players without statistics clearance get a public census table on the
+  Population tab.
+- **Phones**: one-line control cluster (theme swatches fold behind `#theme-btn`, world
+  clock hidden), page sub-tab rows (`.doc-inner > .chip-row`) scroll as one line, stat strips
+  become a 3-up grid, and the map key starts folded (`W.legendHidden`). The explorer folds
+  sections longer than `EXP_FOLD_OVER` (12) unless searching. The GM's top-bar Advance button
+  is hidden — the GM command bar carries Advance.
 - **Roles editor** (`gm.js tabRoles`): "Abilities — conflict command" checkboxes
   (`ROLE_ABILITIES`, keys mirror api.js `ABILITIES`).
 

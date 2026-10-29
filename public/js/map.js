@@ -1308,6 +1308,9 @@ const GameMap = {
     const lg = document.getElementById('map-legend');
     if (!lg) return;
     clear(lg);
+    // Phase 36 UX: on phones the key covered ~40% of the map — start it
+    // folded there (the "Show Key" chip brings it back for the session).
+    if (W.legendHidden === undefined) W.legendHidden = window.innerWidth <= 640;
     if (W.legendHidden) {
       lg.classList.add('collapsed');
       lg.appendChild(el('button.chip', { onclick: () => { W.legendHidden = false; this.renderLegend(); } }, '☰ Show Key'));

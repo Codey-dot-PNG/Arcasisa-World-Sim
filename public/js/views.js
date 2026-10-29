@@ -1131,94 +1131,75 @@ const Views = {
     const gov = parties.filter(p => p.inGovernment).map(p => p.name).join(', ') || '—';
     inner.appendChild(el('div.doc-title', 'Parliament of the Republic'));
     inner.appendChild(el('div.doc-sub', totalSeats + ' seats · unicameral · ' + fmtDate(S().settings.time.date)));
+    // Phase 36 UX — one party ledger instead of the same seat counts four
+    // times over (stat card, colour bar, party list, seats pie) plus a
+    // separate election table and polling bars.
+    const govSeats = parties.filter(p => p.inGovernment).reduce((t, p) => t + (p.mpCount || 0), 0);
+    const majority = Math.floor(totalSeats / 2) + 1;
     inner.appendChild(this.statStrip([
-      ['Seats', fmtNum(totalSeats)],
-      ['Government', gov],
-      ['Last Election', lastElec ? fmtDate(lastElec.simDate) : '—', lastElec ? 'turnout ' + lastElec.turnout + '%' : ''],
-      ['Opposition Seats', fmtNum(parties.filter(p => !p.inGovernment).reduce((s, p) => s + (p.mpCount || 0), 0))]
+      ['Government', gov, fmtNum(govSeats) + ' seats'],
+      ['Majority', fmtNum(majority), govSeats >= majority ? 'government holds it' : 'government short by ' + (majority - govSeats)],
+      ['Opposition', fmtNum(parties.filter(p => !p.inGovernment).reduce((t, p) => t + (p.mpCount || 0), 0)), 'seats'],
+      ['Last Election', lastElec ? fmtDate(lastElec.simDate) : '—', lastElec ? 'turnout ' + lastElec.turnout + '%' : '']
     ]));
 
-    const partyBar = el('div', { style: 'display:flex; height:42px; margin-top:16px; border:1px solid var(--rule-strong); overflow:hidden;' });
-    for (const p of [...parties].sort((a, b) => (b.mpCount || 0) - (a.mpCount || 0))) {
-      const seats = p.mpCount || 0;
-      if (!seats) continue;
-      partyBar.appendChild(el('div', { title: `${p.name}: ${seats} seats`, style: `flex:${seats}; min-width:24px; background:${p.color || 'var(--ink-faint)'}; color:#fff; display:flex; align-items:center; justify-content:center; font-family:var(--font-mono); font-size:11px; border-right:1px solid rgba(255,255,255,.35); cursor:pointer;`, onclick: () => select('entity', p.id) }, `${p.abbrev || p.name} · ${seats}`));
-    }
-    inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin:5px 0 0;' }, 'SEAT DISPLAY · LEFT TO RIGHT BY PARTY SIZE'));
-    inner.appendChild(partyBar);
-
-    const stage = el('div.stage', { style: 'margin-top:16px; text-align:center;' });
+    const stage = el('div.stage.hemicycle', { style: 'margin-top:12px; text-align:center;' });
     stage.appendChild(this.seatArc(parties, totalSeats));
     inner.appendChild(stage);
 
+    const seeStats = perms().statistics || isGM();
+    const poll = (W.polling && W.polling.national) || {};
+    const lastBy = {};
+    for (const r of ((lastElec && lastElec.national) || [])) lastBy[r.partyId] = r;
     inner.appendChild(this.secLabel('Parties'));
-    const list = el('div');
-    for (const p of [...parties].sort((a, b) => (b.mpCount || 0) - (a.mpCount || 0))) {
-      list.appendChild(el('div.party-row', { onclick: () => select('entity', p.id) },
-        p.logo ? el('img', { src: p.logo, alt: '' }) : el('span.exp-dot', { style: 'background:' + p.color }),
-        el('div',
-          el('div.pr-name', p.name),
-          el('div.pr-meta', `${p.leaderId ? entName(p.leaderId) + ' · ' : ''}${this.ideologyLabel(p.ideology)}${p.inGovernment ? ' · IN GOVERNMENT' : ''}`)),
-        el('div.pr-seats', String(p.mpCount || 0))));
-    }
-    inner.appendChild(list);
+    inner.appendChild(el('table.data.party-ledger',
+      el('thead', el('tr',
+        el('th', 'Party'), el('th.col-opt', 'Leader'), el('th.col-opt', 'Position'),
+        el('th.num', 'Seats'),
+        seeStats ? el('th.num', 'Polling') : null,
+        lastElec ? el('th.num.col-opt', 'Last vote') : null)),
+      el('tbody', [...parties].sort((a, b) => (b.mpCount || 0) - (a.mpCount || 0)).map(p => el('tr.row-link', { onclick: () => select('entity', p.id) },
+        el('td', el('div.qb-co',
+          p.logo ? el('img.stk-logo.stk-logo-sm', { src: p.logo, alt: '' }) : el('span.exp-dot', { style: 'background:' + p.color }),
+          el('span', el('b', p.abbrev || p.name), el('span.qb-sub', (p.abbrev ? p.name : '') + (p.inGovernment ? (p.abbrev ? ' · ' : '') + 'in government' : ''))))),
+        el('td.col-opt', p.leaderId ? entName(p.leaderId) : '—'),
+        el('td.col-opt', { style: 'font-size:12px; color:var(--ink-soft);' }, this.ideologyLabel(p.ideology)),
+        el('td.num', el('b', String(p.mpCount || 0))),
+        seeStats ? el('td.num', poll[p.id] !== undefined ? fmtNum(poll[p.id], 1) + '%' : '—') : null,
+        lastElec ? el('td.num.col-opt', lastBy[p.id] ? lastBy[p.id].pct + '% · ' + lastBy[p.id].seats : '—') : null)))));
 
-    if (isGM()) {
-      inner.appendChild(el('div.btn-row',
-        el('button.solid-btn', {
-          onclick: () => confirmModal('DISSOLUTION', 'Dissolve Parliament and hold a general election? Results are computed from the simulated population.', async () => {
-            await POST('/api/gm/election');
-            toast('The Republic has voted.');
-          }, 'Call Election')
-        }, '⚑ Call General Election')));
-    }
-
-    if (perms().statistics || isGM()) {
-      inner.appendChild(this.secLabel('Current Polling (national)'));
-      const pollBox = el('div.stage', { style: 'margin-top:4px;' });
-      inner.appendChild(pollBox);
-      try {
-        const poll = await GET('/api/polling');
-        for (const p of [...parties].sort((a, b) => (poll.national[b.id] || 0) - (poll.national[a.id] || 0))) {
-          pollBox.appendChild(this.barRow(p.name, poll.national[p.id] || 0, p.color));
-        }
-      } catch (e) { pollBox.appendChild(el('div', { style: 'color:var(--ink-faint)' }, 'Polling unavailable: ' + e.message)); }
-
+    if (seeStats) {
       /* Phase 7.3 — polling-over-time, one series per party, drawn only from
          the weekly rows that carry a polling snapshot (r.polling). */
       const hist = Views.histAll();
-      if (hist && hist.length) {
-        const pollRows = hist.filter(r => r.polling);
-        if (pollRows.length >= 2) {
-          inner.appendChild(this.secLabel('Polling Over Time'));
-          inner.appendChild(Charts.chartLine(parties.map(p => ({
-            name: p.abbrev || p.name, color: p.color,
-            points: pollRows.map(r => ({ x: r.turn, y: r.polling[p.id] }))
-          })), { title: 'NATIONAL POLLING', yFormat: v => v + '%', percent: true }));
-        }
+      const pollRows = (hist || []).filter(r => r.polling);
+      if (pollRows.length >= 2) {
+        inner.appendChild(this.secLabel('Polling Over Time'));
+        inner.appendChild(Charts.chartLine(parties.map(p => ({
+          name: p.abbrev || p.name, color: p.color,
+          points: pollRows.map(r => ({ x: r.turn, y: r.polling[p.id] }))
+        })), { title: 'NATIONAL POLLING', yFormat: v => v + '%', percent: true }));
       }
     }
 
     if (lastElec) {
-      inner.appendChild(this.secLabel('Election Record — ' + (lastElec.name || fmtDate(lastElec.simDate))));
-      const tbl = el('table.data',
+      inner.appendChild(this.ledgerFold('elecOpen', 'Election Record — ' + (lastElec.name || fmtDate(lastElec.simDate)), () => el('table.data',
         el('thead', el('tr', el('th', 'Party'), el('th.num', 'Votes'), el('th.num', 'Share'), el('th.num', 'Seats'))),
         el('tbody', (lastElec.national || []).map(r => el('tr',
           el('td', entName(r.partyId)),
           el('td.num', fmtNum(r.votes)),
           el('td.num', r.pct + '%'),
-          el('td.num', String(r.seats))))));
-      inner.appendChild(tbl);
+          el('td.num', String(r.seats))))))));
+    }
 
-      /* Phase 7.3 — election results: seats held by party, as a pie. */
-      inner.appendChild(Charts.chartPie((lastElec.national || []).map(r => {
-        const party = parties.find(p => p.id === r.partyId);
-        return {
-          label: party ? (party.abbrev || party.name) : entName(r.partyId),
-          value: r.seats, color: party ? party.color : undefined,
-          onClick: party ? () => select('entity', party.id) : undefined
-        };
-      }), { title: 'Seats by Party', width: 380, height: 190, valueFormat: v => v + ' seats' }));
+    if (isGM()) {
+      inner.appendChild(el('div.btn-row', { style: 'margin-top:12px;' },
+        el('button.dash-btn', {
+          onclick: () => confirmModal('DISSOLUTION', 'Hold an INSTANT general election? Results are computed from the simulated population immediately — for a campaign season and live count use GM Studio → Election.', async () => {
+            await POST('/api/gm/election');
+            toast('The Republic has voted.');
+          }, 'Call Election')
+        }, '⚑ Instant General Election')));
     }
   },
 
@@ -3226,16 +3207,20 @@ const Views = {
       ['Holders', fmtNum(holders.length + sites.length)],
       ['Combined market value', fmtMoney(grand)]
     ]));
-
+    // Phase 36 UX: ONE send button (it was repeated under every holder,
+    // all opening the same modal) and each holder folds — your own stock
+    // starts open, as does everything when there are only a few holders.
+    inner.appendChild(el('div.btn-row', { style: 'margin:4px 0 6px;' },
+      el('button.solid-btn', { onclick: () => this.tradeModal() }, '▣ Send Items')));
+    const few = holders.length + sites.length <= 3;
     for (const e of holders) {
-      inner.appendChild(this.secLabel(e.name + ' — ' + fmtMoney(rowsValue(e.inventory)),
-        el('button.outline-btn', { style: 'margin-left:8px;', onclick: () => this.tradeModal() }, '▣ Send Items')));
-      inner.appendChild(this.inventoryTable(e.inventory, e.id));
+      inner.appendChild(this.ledgerFold('invOpen_' + e.id, `${e.name} — ${(e.inventory || []).length} lines · ${fmtMoney(rowsValue(e.inventory))}`,
+        () => this.inventoryTable(e.inventory, e.id), few || e.id === W.me.entityId));
     }
     for (const pr of sites) {
-      inner.appendChild(this.secLabel(pr.name + ' (site) — ' + fmtMoney(rowsValue(pr.inventory)),
-        el('button.outline-btn', { style: 'margin-left:8px;', onclick: () => select('property', pr.id) }, 'Open site file')));
-      inner.appendChild(this.inventoryTable(pr.inventory, pr.ownerId));
+      inner.appendChild(this.ledgerFold('invOpen_' + pr.id, `${pr.name} (site) — ${fmtMoney(rowsValue(pr.inventory))}`,
+        () => el('div', el('div.btn-row', { style: 'margin:4px 0;' }, el('button.outline-btn', { onclick: () => select('property', pr.id) }, 'Open site file')),
+          this.inventoryTable(pr.inventory, pr.ownerId)), few));
     }
   },
 
@@ -3250,8 +3235,7 @@ const Views = {
     if (g.totalEmployment !== undefined) cells.push(['Total Employment', fmtNum(g.totalEmployment)]);
     if (g.povertyRateNational !== undefined) cells.push(['Poverty Rate', Math.round(g.povertyRateNational * 100) / 100 + '%']);
     if (g.giniNational !== undefined) cells.push(['National Gini', (Math.round(g.giniNational * 100) / 100) + '']);
-    cells.push(['Visible Accounts', fmtNum(S().accounts.length)]);
-    inner.appendChild(this.statStrip(cells));
+    if (cells.length) inner.appendChild(this.statStrip(cells));
 
     const mineSet = ownershipSetClient();
     const myAccts = (S().accounts || []).filter(a => canSpendFromClient(a, mineSet) && (isGM() ? mineSet.has(a.ownerId) : true));
@@ -3290,33 +3274,27 @@ const Views = {
        perms.statistics — only share prices survive for the Exchange tab). */
     const hist = Views.histAll();
     if (hist && hist.length && hist.some(h => h.gdp !== undefined || h.moneySupply !== undefined)) {
+      // Phase 36 UX: the three national series side by side (they used to
+      // be three full-width charts, each under its own heading).
       const xLabels = hist.map(h => 'T' + h.turn);
-      inner.appendChild(this.secLabel('National GDP Over Time'));
-      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.gdp || 0) })), {
-        title: 'GDP (' + CUR() + 'M)', xLabels, yFormat: (v) => fmtCompact(v)
+      inner.appendChild(this.secLabel('National Accounts Over Time'));
+      const row = el('div.chart-row');
+      row.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.gdp || 0) })), {
+        width: 340, height: 150, title: 'GDP (' + CUR() + 'M)', xLabels, yFormat: (v) => fmtCompact(v)
       }));
-      inner.appendChild(this.secLabel('Money Supply Over Time'));
-      inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.moneySupply || 0) })), {
-        title: 'Money Supply (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
+      row.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.moneySupply || 0) })), {
+        width: 340, height: 150, title: 'Money Supply (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
       }));
       if (hist.some(h => h.treasury !== undefined)) {
-        inner.appendChild(this.secLabel('Federal Treasury Over Time'));
-        inner.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.treasury || 0) })), {
-          title: 'Federal Treasury (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
+        row.appendChild(Charts.chartLine(hist.map(h => ({ x: h.turn, y: (h.treasury || 0) })), {
+          width: 340, height: 150, title: 'Federal Treasury (' + CUR() + ')', xLabels, yFormat: (v) => fmtCompact(v)
         }));
       }
+      inner.appendChild(row);
     }
 
     // your accounts = the whole ownership chain: own entity plus any company
     // you own or run as CEO, and their subsidiaries
-    if (perms().accounts === 'all' || isGM()) {
-      inner.appendChild(this.secLabel('All Accounts'));
-      inner.appendChild(el('table.data',
-        el('thead', el('tr', el('th', 'Holder'), el('th', 'Account'), el('th.num', 'Balance'))),
-        el('tbody', [...S().accounts].sort((a, b) => b.balance - a.balance).slice(0, 40).map(a => el('tr.row-link', { onclick: () => select('entity', a.ownerId) },
-          el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance)))))));
-    }
-
     inner.appendChild(this.secLabel('Ledger — All Transactions'));
     const allTxns = this.ledgerRows();
     const page = this._ledgerPage || 0;
@@ -3339,11 +3317,56 @@ const Views = {
         this._ledgerLoading ? 'Loading older transactions…' : 'Next ledger page')));
     }
 
-    inner.appendChild(this.secLabel('Market Values'));
-    inner.appendChild(el('table.data',
-      el('thead', el('tr', el('th', 'Item'), el('th', 'Category'), el('th.num', 'Market Value'), el('th', 'Tradable'))),
-      el('tbody', S().items.map(it => el('tr.row-link', { onclick: () => select('item', it.id) },
-        el('td', it.name), el('td', it.category), el('td.num', fmtMoney(effPrice(it))), el('td', it.tradable ? 'yes' : 'no'))))));
+    // Reference tables fold away (Phase 36 UX): the richest-accounts list and
+    // the full price list (~150 rows, mostly deeds) used to sit open under
+    // every Overview visit. Deeds/certificates are hidden from the price
+    // list unless asked for — they're priced on the Exchange / their file.
+    if (perms().accounts === 'all' || isGM()) {
+      const accts = [...S().accounts].sort((a, b) => b.balance - a.balance).slice(0, 40);
+      inner.appendChild(this.ledgerFold('acctsOpen', `All Accounts — top ${accts.length} by balance`, () => el('table.data',
+        el('thead', el('tr', el('th', 'Holder'), el('th', 'Account'), el('th.num', 'Balance'))),
+        el('tbody', accts.map(a => el('tr.row-link', { onclick: () => select('entity', a.ownerId) },
+          el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance))))))));
+    }
+    const isRecord = (it) => it.meta && (it.meta.companyId || it.meta.propertyId);
+    inner.appendChild(this.ledgerFold('pricesOpen', `Market Values — ${S().items.filter(i => !isRecord(i)).length} goods`, () => {
+      const f = W.priceFilter = W.priceFilter || { q: '', records: false };
+      const wrap = el('div');
+      const tbody = el('tbody');
+      const fill = () => {
+        clear(tbody);
+        const q = f.q.trim().toLowerCase();
+        for (const it of S().items) {
+          if (!f.records && isRecord(it)) continue;
+          if (q && !(it.name + ' ' + (it.category || '')).toLowerCase().includes(q)) continue;
+          tbody.appendChild(el('tr.row-link', { onclick: () => select('item', it.id) },
+            el('td', it.name), el('td', it.category), el('td.num', fmtMoney(effPrice(it))), el('td', it.tradable ? 'yes' : 'no')));
+        }
+      };
+      wrap.appendChild(el('div.btn-row', { style: 'margin:6px 0;' },
+        el('input.text-input', { type: 'search', placeholder: 'Filter items or categories…', value: f.q, style: 'max-width:260px;',
+          oninput: (e) => { f.q = e.target.value; fill(); } }),
+        el('label', { style: 'display:flex; gap:6px; align-items:center; font-size:12px; cursor:pointer;' },
+          el('input', { type: 'checkbox', checked: f.records ? 'checked' : undefined, onchange: (e) => { f.records = e.target.checked; fill(); } }),
+          'Show deeds & share certificates')));
+      wrap.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Item'), el('th', 'Category'), el('th.num', 'Market Value'), el('th', 'Tradable'))), tbody));
+      fill();
+      return wrap;
+    }));
+  },
+
+  // A <details> fold for reference tables, remembering open/closed per
+  // session across re-renders (W[key]); the body is built only when open.
+  ledgerFold(key, label, build, defaultOpen) {
+    if (W[key] === undefined && defaultOpen) W[key] = true;
+    const d = el('details.ledger-fold', { open: W[key] ? 'open' : undefined }, el('summary', label));
+    if (W[key]) d.appendChild(build());
+    d.addEventListener('toggle', () => {
+      W[key] = d.open;
+      if (d.open && d.children.length === 1) d.appendChild(build());
+    });
+    return d;
   },
 
   /* ---- Exchange (Phase 4.4) ---- */
@@ -3425,7 +3448,8 @@ const Views = {
     // only tells the player WHEN the next tick lands, ticked locally off
     // dayTick.lastAt/intervalMs (see server/api.js's filterState) rather
     // than waiting for a refetch to notice time passed.
-    inner.appendChild(el('div#day-tick-countdown', { style: 'font-family:var(--font-mono); font-size:10.5px; color:var(--ink-faint); margin:-4px 0 12px;' }, this.dayTickCountdownText()));
+    const statusLine = el('div.qb-status');
+    inner.appendChild(statusLine);
     if (!companies.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:20px 0;' }, 'No listed companies on file.'));
       return;
@@ -3436,16 +3460,25 @@ const Views = {
     if (econC !== undefined) {
       const tone = econC >= 60 ? 'var(--good)' : econC <= 40 ? 'var(--accent)' : 'var(--ink-soft)';
       const mood = econC >= 70 ? 'buoyant' : econC >= 55 ? 'steady' : econC >= 45 ? 'cautious' : econC >= 30 ? 'anxious' : 'panicked';
-      inner.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px; margin:6px 0 12px; font-family:var(--font-mono); font-size:11px;' },
-        el('span', { style: 'color:var(--ink-faint);' }, 'ECONOMIC CONFIDENCE'),
-        el('span', { style: 'font-weight:700; color:' + tone }, fmtNum(econC, 0) + '% · ' + mood),
-        el('span', { style: 'color:var(--ink-faint);' }, '— consumer speculation drives revenue and public mood')));
+      statusLine.appendChild(el('span', { title: 'Consumer speculation drives revenue and public mood' },
+        'CONFIDENCE ', el('b', { style: 'color:' + tone }, fmtNum(econC, 0) + '% · ' + mood)));
     }
+    // one status line: confidence + the day-tick countdown (was 2–3 lines)
+    statusLine.appendChild(el('span#day-tick-countdown', this.dayTickCountdownText()));
     const hist = Views.histAll();
     const controlsCompany = (c) => isGM() || (W.me.entityId && (c.ownerId === W.me.entityId || c.ceoId === W.me.entityId || ownership_controlsClient(W.me.entityId, c.id)));
 
+    // Phase 36 UX — a quote board instead of eight two-chart cards (~4000px
+    // of page for eight companies). One ledger row per company; clicking a
+    // row opens its drawer (both charts, ×100 position, the controller's
+    // capital tools). Optional columns drop on phones (.col-opt).
+    const tbl = el('table.data.quote-board',
+      el('thead', el('tr',
+        el('th', 'Company'), el('th.num', 'Day'), el('th.num', 'Chg'), el('th.num.col-opt', 'Wk'),
+        el('th.num.col-opt', 'Value'), el('th.num.col-opt', 'Float'), el('th.num.col-opt', 'Conf'),
+        el('th.col-opt', 'Trend'), el('th.num.col-opt', 'Your holding'), el('th', ''))));
+    const body = el('tbody');
     for (const c of companies) {
-      const row = el('div.trade-row');
       const priceHist = hist.filter(h => h.shares && h.shares[c.id] !== undefined).map(h => ({ x: h.turn, y: h.shares[c.id] }));
       // day/week change from recorded history, else '—'
       const chg = (n) => {
@@ -3455,12 +3488,9 @@ const Views = {
         const pct = (now - then) / then * 100;
         return (pct >= 0 ? '+' : '') + fmtNum(pct, 1) + '%';
       };
-      const myHold = (() => {
-        const sh = (c.shareholders || []).find(x => x.entityId === W.me.entityId);
-        return sh ? sh.shares : 0;
-      })();
+      const reg = (c.shareholders || []).find(x => x.entityId === W.me.entityId);
+      const myHold = reg ? reg.shares : 0;
       const myEntry = market_holdEntryOfClient(c, W.me.entityId);
-
       // percent change vs the previous recorded price
       const pct = (() => {
         if (priceHist.length < 2) return null;
@@ -3471,75 +3501,90 @@ const Views = {
       const pctEl = pct === null
         ? el('span.stk-chg.stk-flat', '—')
         : pct > 0
-          ? el('span.stk-chg.stk-up', '▲ +' + fmtNum(pct, 1) + '%')
+          ? el('span.stk-chg.stk-up', '▲ ' + fmtNum(pct, 1) + '%')
           : pct < 0
-            ? el('span.stk-chg.stk-down', '▼ −' + fmtNum(Math.abs(pct), 1) + '%')
-            : el('span.stk-chg.stk-flat', '· 0.0%');
-
-      const openFile = () => select('entity', c.id);
+            ? el('span.stk-chg.stk-down', '▼ ' + fmtNum(Math.abs(pct), 1) + '%')
+            : el('span.stk-chg.stk-flat', '0.0%');
+      const isOpen = W.exchOpen === c.id;
+      const toggle = () => { W.exchOpen = isOpen ? null : c.id; App.renderView(); };
       const logoEl = c.logo
-        ? el('img.stk-logo', { src: c.logo, alt: c.name, title: 'Open company file', onclick: openFile })
-        : el('div.stk-logo.stk-logo-mono', { style: `background:${c.color || 'var(--accent)'};`, title: 'Open company file', onclick: openFile }, (c.name || '?').charAt(0).toUpperCase());
-
-      const head = el('div', { style: 'display:flex; justify-content:space-between; align-items:flex-start; gap:16px;' },
-        el('div', { style: 'display:flex; align-items:flex-start; gap:12px;' },
-          logoEl,
-          el('div',
-            el('div.tr-parties', { style: 'cursor:pointer;', title: 'Open company file', onclick: openFile }, c.name + ' — ' + (c.abbrev || c.industry || '')),
-            el('div.tr-meta', 'DAY ', this.livePriceEl(c), ` · VALUE ${CUR()}${fmtNum(c.sharePrice)} · WK ${chg(7)} · FLOAT ${c.publicFloat || 0}% · CONF ${c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'}`,
-              (Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c)) > 0
-                ? el('span', { style: 'color:var(--accent);' }, ` · ${fmtNum(Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c)))} ON SHELF`) : null),
-              ' ', pctEl))),
-        el('div', { style: 'text-align:right;' },
-          el('div', { style: 'font-family:var(--font-mono); font-size:11px;', title: myHold > 0 ? 'vs entry ' + CUR() + fmtNum(myEntry || 0) : '' },
-            'Your holding: ' + fmtNum(myHold) + ' shares',
-            myHold > 0 ? el('span', {},
-              ' · ', el('span', { 'data-hold-value': c.id }, CUR() + fmtNum(myHold * this.livePrice(c))),
-              ' · ', el('span', { 'data-hold-gain': c.id, style: 'color:var(--ink-faint);' }, myEntry ? this.holdGainText(myHold, myEntry, this.livePrice(c)) : '—')) : null),
-          (() => {
-            const pos = market_x100EntryOfClient(c, W.me.entityId);
-            if (!pos) return null;
-            const val = market_x100ValueClient(pos, this.livePrice(c));
-            return el('div', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent);' }, 'Your ×100: ' + fmtNum(pos.qty) + ' shares · ',
-              el('span', { 'data-x100-value': c.id }, CUR() + fmtNum(val)),
-              el('span', { style: 'color:var(--ink-faint);' }, ' (entry ' + CUR() + fmtNum(pos.entry) + ')'));
-          })()));
-      row.appendChild(head);
-
+        ? el('img.stk-logo.stk-logo-sm', { src: c.logo, alt: '' })
+        : el('div.stk-logo.stk-logo-sm.stk-logo-mono', { style: `background:${c.color || 'var(--accent)'};` }, (c.name || '?').charAt(0).toUpperCase());
+      const onShelf = Math.min((c.vars && c.vars.primaryPool) || 0, market_treasuryPoolClient(c));
+      const stop = (fn) => (e) => { e.stopPropagation(); fn(); };
+      const x100Pos = market_x100EntryOfClient(c, W.me.entityId);
+      body.appendChild(el('tr.row-link', { class: isOpen ? 'active' : '', onclick: toggle, title: 'Show charts & details' },
+        el('td', el('div.qb-co', logoEl, el('span', el('b', c.abbrev || c.name), el('span.qb-sub', c.industry || '')), el('span.qb-caret', isOpen ? '▾' : '▸'))),
+        el('td.num', this.livePriceEl(c)),
+        el('td.num', pctEl),
+        el('td.num.col-opt', chg(7)),
+        el('td.num.col-opt', CUR() + fmtNum(c.sharePrice)),
+        el('td.num.col-opt', (c.publicFloat || 0) + '%' + (onShelf > 0 ? ' · ' + fmtCompact(onShelf) + ' new' : '')),
+        el('td.num.col-opt', c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'),
+        el('td.col-opt', this.miniSpark((c.dayHistory || []).concat([this.livePrice(c)]))),
+        el('td.num.col-opt', myHold > 0
+          ? el('span', { title: 'vs entry ' + CUR() + fmtNum(myEntry || 0) }, fmtNum(myHold) + ' · ',
+              el('span', { 'data-hold-value': c.id }, CUR() + fmtNum(myHold * this.livePrice(c))), ' ',
+              el('span', { 'data-hold-gain': c.id, style: 'color:var(--ink-faint);' }, myEntry ? this.holdGainText(myHold, myEntry, this.livePrice(c)) : '—'))
+          : el('span', { style: 'color:var(--ink-faint);' }, x100Pos ? '×100 only' : '—')),
+        el('td', el('div.qb-actions',
+          el('button.solid-btn.btn-xs', { onclick: stop(() => this.marketBuyModal(c)) }, 'Buy'),
+          el('button.dash-btn.btn-xs', { onclick: stop(() => this.marketSellModal(c)) }, 'Sell')))));
+      if (!isOpen) continue;
+      // ---- drawer ----
+      const drawer = el('div.qb-drawer');
+      drawer.appendChild(el('div.tr-meta',
+        el('a', { href: '#', onclick: (e) => { e.preventDefault(); select('entity', c.id); } }, 'Open the ' + c.name + ' file →'),
+        ` · value ${CUR()}${fmtNum(c.sharePrice)} · week ${chg(7)} · float ${c.publicFloat || 0}% · confidence ${c.confidence !== undefined ? fmtNum(c.confidence, 0) + '%' : '—'}`,
+        onShelf > 0 ? el('span', { style: 'color:var(--accent);' }, ` · ${fmtNum(onShelf)} new shares on the shelf`) : null,
+        market_treasuryPoolClient(c) <= 0 ? el('span', { style: 'color:var(--accent);' }, ' · public float fully subscribed — buying may be rejected') : null));
+      drawer.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:11px; margin-top:4px;' },
+        'Your holding: ' + fmtNum(myHold) + ' shares' + (myHold > 0 ? ' · ' + CUR() + fmtNum(myHold * this.livePrice(c)) + (myEntry ? ' · ' + this.holdGainText(myHold, myEntry, this.livePrice(c)) + ' vs entry' : '') : '')));
+      if (x100Pos) {
+        drawer.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--accent); margin-top:4px;' }, 'Your ×100: ' + fmtNum(x100Pos.qty) + ' shares · ',
+          el('span', { 'data-x100-value': c.id }, CUR() + fmtNum(market_x100ValueClient(x100Pos, this.livePrice(c)))),
+          el('span', { style: 'color:var(--ink-faint);' }, ' (entry ' + CUR() + fmtNum(x100Pos.entry) + ')')));
+      }
       const cols = el('div', { style: 'display:flex; gap:18px; align-items:flex-start; margin-top:8px; flex-wrap:wrap;' });
-      // Left: turn-based Company Value (fundamentals). Right: live Day Market.
+      // Left: turn-based Company Value (fundamentals). Right: live Day Market
+      // (data-day-chart marks the cell for startPriceTicker's 900ms redraw).
       const valWrap = el('div.sparkline-cell');
       valWrap.appendChild(Charts.chartLine(priceHist.length ? priceHist : [], { width: 300, height: 110, title: 'COMPANY VALUE / TURN', yFormat: v => CUR() + fmtNum(v) }));
       cols.appendChild(valWrap);
-      // data-day-chart marks this cell for startPriceTicker's 900ms refresh
-      // (same interval that already updates the live price label) — it
-      // rebuilds the chart with a fresh trailing LIVE point each tick (see
-      // dayChartNode) so the sparkline visibly wanders between real
-      // dayHistory commits instead of sitting frozen until the next refetch.
       const dayWrap = el('div.sparkline-cell', { 'data-day-chart': c.id });
       dayWrap.appendChild(this.dayChartNode(c));
       cols.appendChild(dayWrap);
-
-      const btns = el('div.btn-row', { style: 'flex-direction:column; align-items:flex-start; gap:8px;' });
-      const floatExhausted = market_treasuryPoolClient(c) <= 0;
-      btns.appendChild(el('div.btn-row',
-        el('button.solid-btn', { onclick: () => this.marketBuyModal(c) }, 'Buy'),
-        el('button.dash-btn', { onclick: () => this.marketSellModal(c) }, 'Sell')
-      ));
-      if (floatExhausted) btns.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint);' }, 'Public float fully subscribed — buying may be rejected.'));
+      drawer.appendChild(cols);
       if (controlsCompany(c)) {
-        btns.appendChild(el('div.btn-row',
+        drawer.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
           el('button.outline-btn', { onclick: () => this.marketOfferModal(c) }, '⊕ Raise Capital'),
           el('button.outline-btn', { onclick: () => this.marketIssueModal(c) }, '⊕ Bonus Issue'),
           el('button.outline-btn', { onclick: () => this.marketBuybackModal(c) }, '⊖ Buy Back')));
       }
-      cols.appendChild(btns);
-      row.appendChild(cols);
-      inner.appendChild(row);
+      body.appendChild(el('tr.qb-drawer-row', el('td', { colspan: '10' }, drawer)));
     }
+    tbl.appendChild(body);
+    inner.appendChild(tbl);
     this.startPriceTicker();
   },
 
+  // Tiny static trend line for ledger rows (the full live charts live in
+  // the Exchange drawer). values: plain numbers, oldest first.
+  miniSpark(values, w, h) {
+    w = w || 96; h = h || 22;
+    const NS = 'http://www.w3.org/2000/svg';
+    const svg = document.createElementNS(NS, 'svg');
+    svg.setAttribute('width', w); svg.setAttribute('height', h); svg.setAttribute('class', 'mini-spark');
+    const vals = (values || []).filter(v => Number.isFinite(Number(v))).slice(-40).map(Number);
+    if (vals.length < 2) return svg;
+    const lo = Math.min(...vals), hi = Math.max(...vals), span = hi - lo || 1;
+    const pts = vals.map((v, i) => `${(i / (vals.length - 1) * (w - 2) + 1).toFixed(1)},${(h - 2 - (v - lo) / span * (h - 4)).toFixed(1)}`).join(' ');
+    const pl = document.createElementNS(NS, 'polyline');
+    pl.setAttribute('points', pts); pl.setAttribute('fill', 'none');
+    pl.setAttribute('stroke', vals[vals.length - 1] >= vals[0] ? 'var(--good)' : 'var(--accent)'); pl.setAttribute('stroke-width', '1.4');
+    svg.appendChild(pl);
+    return svg;
+  },
   // Live DAY-MARKET price element + ticker. The label renders the shared
   // deterministic path (PricePath) around the committed dayPrice at Date.now(),
   // and a low-frequency interval refreshes every such label in place — so the
@@ -3584,10 +3629,10 @@ const Views = {
   // market.maybeDayTick, this just narrates the wait).
   dayTickCountdownText() {
     const dt = S().dayTick;
-    if (!dt || !dt.lastAt) return 'Day Market prices wiggle continuously between server ticks.';
+    if (!dt || !dt.lastAt) return 'Day prices move live';
     const next = dt.lastAt + (dt.intervalMs || 5000);
     const remaining = Math.max(0, Math.round((next - Date.now()) / 1000));
-    return `Prices wiggle continuously; next Day Market tick in ~${remaining}s.`;
+    return `Day prices live · next tick ~${remaining}s`;
   },
   startPriceTicker() {
     if (this._priceTicker) return;
@@ -4203,7 +4248,17 @@ const Views = {
     const g = S().globalVars || {};
     inner.appendChild(el('div.doc-sub', fmtNum(g.population) + ' citizens across ' + S().provinces.length + ' provinces'));
     if (!perms().statistics && !isGM()) {
-      inner.appendChild(el('div.stage', el('div', { style: 'font-family:var(--font-mono); font-size:11px; letter-spacing:.1em;' }, 'DEMOGRAPHIC RECORDS REQUIRE STATISTICS CLEARANCE.')));
+      // Phase 36 UX: headcounts are public (filterState ships every
+      // province's population) — show the census table instead of a bare
+      // clearance wall; only the demographic detail stays restricted.
+      const total = S().provinces.reduce((t, p) => t + ((p.vars && p.vars.population) || 0), 0) || 1;
+      inner.appendChild(this.secLabel('Census by Province'));
+      inner.appendChild(el('table.data',
+        el('thead', el('tr', el('th', 'Province'), el('th', 'Capital'), el('th.num', 'Population'), el('th.num', 'Share'))),
+        el('tbody', [...S().provinces].sort((a, b) => ((b.vars || {}).population || 0) - ((a.vars || {}).population || 0)).map(p => el('tr.row-link', { onclick: () => select('province', p.id) },
+          el('td', p.name), el('td', ((cityById(p.capital) || {}).name) || '—'),
+          el('td.num', fmtNum((p.vars || {}).population || 0)), el('td.num', fmtNum(((p.vars || {}).population || 0) / total * 100, 1) + '%'))))));
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:8px;' }, 'Demographic detail — happiness, income, employment and voting groups — requires statistics clearance.'));
       return;
     }
     inner.appendChild(this.statStrip([

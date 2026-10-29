@@ -89,6 +89,12 @@ const App = {
 
     this.bindShell();
     this.bindDrawers();
+    // phones: ◐ opens the folded theme picker; any outside tap closes it
+    const themeBtn = document.getElementById('theme-btn'), palette = document.getElementById('palette');
+    if (themeBtn && palette) {
+      themeBtn.addEventListener('click', (e) => { e.stopPropagation(); palette.classList.toggle('open'); });
+      document.addEventListener('click', (e) => { if (!palette.contains(e.target)) palette.classList.remove('open'); });
+    }
     let fitT = null;
     window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(() => { if (W.me && S()) this.renderTabs(); }, 120); });
     try {
@@ -295,7 +301,10 @@ const App = {
     document.getElementById('clock-date').textContent = fmtDate(t.date);
     this.renderWorldClock();
     document.getElementById('clock-auto').classList.toggle('hidden', !(t.auto && t.auto.enabled));
-    document.getElementById('advance-btn').classList.toggle('hidden', !isGM());
+    // Phase 36 UX: the GM command bar (gmbar.js) — always on screen for the
+    // GM — already carries Advance +1/+7/+30; the top-bar copy only cost
+    // room in the crowded control cluster.
+    document.getElementById('advance-btn').classList.toggle('hidden', !isGM() || typeof GMBar !== 'undefined');
     document.getElementById('user-name').textContent = W.me.displayName;
     document.getElementById('user-role').textContent = W.me.role.name;
     if (!worldClockTimer) worldClockTimer = setInterval(() => this.renderWorldClock(), 1000);

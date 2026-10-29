@@ -2017,6 +2017,19 @@ const War = {
   // Phase 31: the War Room covers BOTH conflict docs — the invasion war and
   // any protest — each with its own status strip, controls and front-line
   // report, stacked in one panel.
+  // A collapsible GM tool section (Views.ledgerFold); the tool's own section
+  // heading is dropped since the fold's summary already names it. Open/closed
+  // is remembered per session, so a re-render never snaps a tool shut.
+  _fold(inner, key, label, render) {
+    inner.appendChild(Views.ledgerFold(key, label, () => {
+      const box = el('div');
+      render(box);
+      const first = box.firstChild;
+      if (first && first.classList && first.classList.contains('section-label')) box.removeChild(first);
+      return box;
+    }));
+  },
+
   renderPanel(inner) {
     inner.appendChild(el('div.doc-title', 'War Room'));
     const docs = this.authDocs();
@@ -2025,8 +2038,8 @@ const War = {
       if (isGM()) {
         this.renderApplicationQueue(inner);
         this.renderStartForm(inner);
-        this.renderProtestStartForm(inner);
-        this.renderProtestRules(inner);
+        this._fold(inner, 'wrProtestStart', 'Start a Protest', (b) => this.renderProtestStartForm(b));
+        this._fold(inner, 'wrProtestRules', 'Protest Rules', (b) => this.renderProtestRules(b));
       } else this.renderProtestApplications(inner);
       return;
     }
@@ -2035,14 +2048,24 @@ const War = {
     // A viewer parked on this panel (map not mounted) still drives the
     // heartbeat, keeping the authoritative docs ticking and the counters live.
     if (docs.some(d => d.active) && window.WarEngine) this._ensureRealtime();
-    for (const auth of docs) this.renderDocPanel(inner, auth, this.docKeyOf(auth));
+    // Phase 36 UX: a conflict that has ENDED folds into one line (its full
+    // after-action report is still a click away) so live business and the
+    // start forms aren't pushed below a screen of zeros.
+    for (const auth of docs) {
+      const key = this.docKeyOf(auth);
+      if (auth.active) { this.renderDocPanel(inner, auth, key); continue; }
+      const what = auth.kind === 'protest' ? 'Protest' : 'War';
+      const why = (auth.result && auth.result.reason) || 'ended';
+      inner.appendChild(Views.ledgerFold('wrEnded_' + key + '_' + (auth.startedAt || ''), `Last ${what.toLowerCase()} — ${auth.name} · ${why}`,
+        () => { const box = el('div'); this.renderDocPanel(box, auth, key); return box; }));
+    }
     // Both conflicts run simultaneously — the GM can start the OTHER kind
     // even while one is live (a protest mid-invasion, or a war mid-strike).
     if (isGM()) {
       this.renderApplicationQueue(inner);
       if (!S().war || !S().war.active) this.renderStartForm(inner);
-      if (!S().protest || !S().protest.active) this.renderProtestStartForm(inner);
-      this.renderProtestRules(inner);
+      if (!S().protest || !S().protest.active) this._fold(inner, 'wrProtestStart', 'Start a Protest', (b) => this.renderProtestStartForm(b));
+      this._fold(inner, 'wrProtestRules', 'Protest Rules', (b) => this.renderProtestRules(b));
     } else this.renderProtestApplications(inner);
   },
 
@@ -2126,9 +2149,14 @@ const War = {
       // "peaceful crowds / strikes 50%" forever.
       if (war.active) {
         const chips = el('div.btn-row');
-        chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
-        chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
-        chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
+        // posture chips only for viewers without the toggles — the toggle
+        // buttons above already show the same state to whoever holds them
+        const ca = this.access(war);
+        if (!ca.attLead && !ca.force) {
+          chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
+          chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
+          chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
+        }
         const t = p.tuning || {};
         if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
         inner.appendChild(chips);
@@ -2222,7 +2250,7 @@ const War = {
         catch (e) { toast(e.message, true); }
       }
     }, '⚔ Start War')));
-    this.renderCustomScenarioForm(inner);
+    this._fold(inner, 'wrCustomScenario', 'Custom Scenario Creator', (b) => this.renderCustomScenarioForm(b));
   },
 
   _customDraft: { name: 'Custom War', attackerId: '', defenderId: 'ent_gov', infantry: 3, armored: 1, marine: 0, boat: 0, warship: 0 },
@@ -2425,14 +2453,17 @@ const War = {
     }
     inner.appendChild(row);
     if (!war.result) {
-      if (protest) this.renderProtestTuning(inner, war, key);
-      else this.renderTuning(inner, war);
-      this.renderSpawner(inner, war, key);
-      if (!protest) this.renderIntervention(inner, war);
+      // Phase 36 UX: GM tools fold away so the live status stays on top
+      // (the panel used to be a ~3000px scroll of open forms).
+      this._fold(inner, protest ? 'wrProtestTune' : 'wrWarTune', protest ? 'Protest Tuning' : 'Global Tuning',
+        (b) => protest ? this.renderProtestTuning(b, war, key) : this.renderTuning(b, war));
+      this._fold(inner, 'wrSpawn_' + key, 'Spawn Units', (b) => this.renderSpawner(b, war, key));
+      if (!protest) this._fold(inner, 'wrJoin', 'Foreign Intervention', (b) => this.renderIntervention(b, war));
     }
     if (!protest) {
-      this.renderTreaty(inner, war);
-      if (war.result) this.renderStartForm(inner);
+      this._fold(inner, 'wrTreaty', 'Peace Treaty', (b) => this.renderTreaty(b, war));
+      // (the scenario picker is NOT repeated here — renderPanel already
+      // shows it whenever no war is live; an ended war used to show it twice)
     }
   },
 
@@ -2573,6 +2604,13 @@ const War = {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'The Gamemaster is not accepting protest applications right now.'));
       return;
     }
+    // The petition form folds away (open by default only while the streets
+    // are quiet) — it used to sit fully open under a live protest.
+    const live = !!(s.protest && s.protest.active);
+    inner.appendChild(Views.ledgerFold('wrPetition', 'File a petition', () => { const box = el('div'); this._petitionForm(box, orgs); return box; }, !live));
+  },
+  _petitionForm(inner, orgs) {
+    const s = S();
     const d = this._appDraft = this._appDraft || { organizerId: orgs[0].id, name: '', demands: '', baseCities: [], crowds: 2, perCity: 2000 };
     if (!orgs.some(o => o.id === d.organizerId)) d.organizerId = orgs[0].id;
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:4px;' },

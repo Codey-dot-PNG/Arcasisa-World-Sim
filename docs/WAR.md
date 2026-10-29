@@ -1567,7 +1567,8 @@ enforces the escalation ladder:
 - `POST /api/gm/protest/start { name?, organizerId, baseCities:[ids],
   policeCities:[ids], crowds?, perCity? }` — GM-only; 409 while a protest is
   active. Organizer can be a party, person, company, org or foreign power;
-  at least one base city is required.
+  at least one base city is required. Initial deployments and GM reinforcements
+  are limited to 300 live units per protest.
 - `POST /api/protest/control { conflict:'protest', protestorsViolent?,
   govViolent?, captureMode? }` — side-gated by `cmdAccess` (see below); each
   flip pushes a milestone event, logs to the timeline and (for the escalation

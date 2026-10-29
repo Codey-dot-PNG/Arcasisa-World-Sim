@@ -72,6 +72,7 @@ const PROTEST_DEFAULTS = {
   dmg: 1,                  // default violence multiplier (GM-adjustable)
   hp: 1
 };
+const MAX_PROTEST_UNITS = 300;
 function protestCfg(db) {
   return Object.assign({}, PROTEST_DEFAULTS, (((db.settings || {}).war || {}).protest) || {});
 }
@@ -1340,11 +1341,13 @@ function endWar(db, actor, reason, key) {
     }
     war.refugees = [];
   }
-  // Task 2: occupied properties stay with their occupier permanently — this
-  // does NOT touch property.ownerId, only clears the stash so a FUTURE war
-  // re-stashes fresh original owners instead of reaching back through this one.
-  for (const prop of (db.properties || [])) {
-    if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+  // Occupation ownership bookkeeping belongs only to the invasion war. A
+  // protest can end while that war is still active; clearing its stash here
+  // would prevent the active war from restoring property on recapture.
+  if (war.kind !== 'protest') {
+    for (const prop of (db.properties || [])) {
+      if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
+    }
   }
   demobilizeUnits(db, war, actor);
   store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
@@ -1387,6 +1390,9 @@ function spawnUnits(db, opts, actor, key) {
     return { ok: false, error: 'Invalid spawn position.' };
   }
   const count = engine.clamp(Math.round(Number(opts.count) || 1), SPAWN_MIN_COUNT, SPAWN_MAX_COUNT);
+  if (war.kind === 'protest' && war.units.filter(isLive).length + count > MAX_PROTEST_UNITS) {
+    return { ok: false, error: `A protest is limited to ${MAX_PROTEST_UNITS} live units. Disperse units before spawning more.` };
+  }
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
   const kind = (typeof opts.kind === 'string' && opts.kind.trim()) || 'infantry';
   const def = unitDefaults[kind] || { strength: 2000, speed: 4, atk: 1 };
@@ -1647,16 +1653,20 @@ function startProtest(db, opts, actor) {
   const defender = db.entities.find(e => e.id === opts.defenderId) || db.entities.find(e => e.type === 'government');
   if (!defender) throw new Error('Unknown defender entity.');
   const cityOf = (id) => db.cities.find(c => c.id === id);
-  const baseIds = Array.isArray(opts.baseCities) ? opts.baseCities.filter(id => !!cityOf(id)) : [];
-  const policeIds = (Array.isArray(opts.policeCities) ? opts.policeCities.filter(id => !!cityOf(id)) : []).filter(id => !baseIds.includes(id));
+  const baseIds = Array.isArray(opts.baseCities) ? [...new Set(opts.baseCities.filter(id => !!cityOf(id)))] : [];
+  const policeIds = (Array.isArray(opts.policeCities) ? [...new Set(opts.policeCities.filter(id => !!cityOf(id)))] : []).filter(id => !baseIds.includes(id));
   if (!baseIds.length) throw new Error('At least one base city is required.');
+  const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
+  const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
+  const deploymentSize = baseIds.length * crowdCount + policeIds.length * 2;
+  if (deploymentSize > MAX_PROTEST_UNITS) {
+    throw new Error(`Protest deployment is ${deploymentSize} units; the limit is ${MAX_PROTEST_UNITS}. Reduce the cities or crowds per city.`);
+  }
   const cfg = protestCfg(db);
   const grid = buildGrid(db);
   engine.ensureNavalGrid(db);
   const wf = { grid }; // grid facade for clampToWorld
   const cityPt = (c) => engine.clampToWorld(wf, [c.pos[0] + rand(-30, 30), c.pos[1] + rand(-30, 30)]);
-  const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
-  const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
   const units = [];
   let n = 0;
   for (const cid of baseIds) {

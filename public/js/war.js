@@ -26,11 +26,11 @@
        prediction error — the server always wins.
 
    Rendering reads the predicted war; the War Room panel and command
-   authority checks keep reading the authoritative S().war. Positions are
-   additionally tweened (~900ms ease) between renders, exactly as before; a
-   persistent requestAnimationFrame loop keyed by unit id survives GameMap's
-   from-scratch DOM rebuilds because the interpolation state (_anim) lives
-   in this module, not in the DOM. */
+   authority checks keep reading the authoritative S().war. The map layer is
+   RETAINED: front line and occupied ground live in #map-svg and are rebuilt
+   only when the captured cells change; units, orders and FX live in the
+   overlay svg (GameMap.overSvg) as keyed nodes patched in place, tweened by
+   one rAF loop that writes only what changed — see docs/WAR.md "Client". */
 
 const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '⚒', police: '⛨' };
 // Transport ships & Boats feature: a land unit whose state reads 'transport'
@@ -96,6 +96,11 @@ const War = {
   _bombArmed: false,
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
   _inspect: null,    // Feature: unit info card — enemy unit id under inspection (own-side uses _sel instead)
+  // Tap orders: a left-click/tap on ground moves the selection and a tap on
+  // an enemy attacks it — on by default on touch screens (no right button),
+  // a toolbar toggle everywhere.
+  _tapOrders: (typeof matchMedia === 'function') && matchMedia('(pointer: coarse)').matches,
+  _unitNodes: new Map(), // keyed unit nodes of the retained war layer (see renderUnits)
 
   // ---- GM unit spawner (Feature: mid-war reinforcements) ----
   _spawnArmed: false,        // "arm placement" mode: next war-layer left-click places the spawn
@@ -418,29 +423,6 @@ const War = {
     this._hbBusy = false;
   },
 
-  // Rebuild ONLY the war layer group from the predicted war — never the whole
-  // map SVG. A full GameMap.render() per predicted tick (the original design)
-  // tore down and rebuilt every province/property/label up to 4× a second at
-  // 8× speed; that DOM churn WAS the lag. Throttled so a heartbeat rebase and
-  // a predicted tick landing together don't rebuild twice back-to-back.
-  refreshLayer(force) {
-    const now = performance.now();
-    if (!force && now - this._lastDraw < 150) return;
-    // NB: GameMap is a top-level `const` in map.js — a script-scope global
-    // that is NOT a window property, so it must be referenced bare (a
-    // `window.GameMap` guard is always undefined and silently no-ops).
-    const map = typeof GameMap !== 'undefined' ? GameMap : null;
-    // Only redraw when the map is actually on screen (prediction and the
-    // heartbeat are themselves gated on _watchingWar, but a straggler call
-    // — an in-flight heartbeat resolving after a view switch — still lands
-    // here with nothing to draw).
-    if (!(map && map.svg && map.svg.isConnected && map.world && map.world.isConnected && map.mk)) return;
-    if (window.MapEdit && MapEdit.dragging) return; // same guard as GameMap.render
-    this._lastDraw = now;
-    if (map.warLayer && map.warLayer.parentNode) map.warLayer.parentNode.removeChild(map.warLayer);
-    this.renderMapLayer(map, map.mk, 'http://www.w3.org/2000/svg');
-  },
-
   // The War Room panel (view 'war') reads the authoritative doc that the
   // heartbeat just swapped in — re-render it occasionally so tick/casualty
   // counters stay live now that war ticks no longer broadcast a full sync.
@@ -579,7 +561,7 @@ const War = {
           if (u.pos[0] >= x0 && u.pos[0] <= x1 && u.pos[1] >= y0 && u.pos[1] <= y1) this._sel.add(u.id);
         }
       }
-      if (map.render) map.render();
+      this.refreshLayer(true);
     } else if (this._input.mode === 'formation') {
       if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
       if (!tiny && this._sel.size) this._issueFormation(start, world);
@@ -609,11 +591,17 @@ const War = {
   // dossier select() handlers stand down on the war layer): clear selection.
   onMapClick(e) {
     if (e.button !== 0) return;
+    // Tap orders (the touch-friendly scheme — no right button on a phone):
+    // with units selected, a tap on open ground is a move order.
+    if (this._tapOrders && this._sel.size && this.commandable()) {
+      this._issueMove(GameMap.clientToWorld(e.clientX, e.clientY));
+      return;
+    }
     let changed = false;
     if (this._sel.size) { this._sel.clear(); changed = true; }
     if (this._inspect) { this._inspect = null; changed = true; } // Feature: unit info card — ground click clears inspection too
     if (this._inspectRef) { this._inspectRef = null; changed = true; } // refugee columns clear the same way
-    if (changed && GameMap.render) GameMap.render();
+    if (changed) this.refreshLayer(true);
   },
 
   // Left-click a commandable soldier: replace the selection; shift+click
@@ -623,7 +611,8 @@ const War = {
     if (e.shiftKey) { if (!this._sel.delete(unitId)) this._sel.add(unitId); }
     else { this._sel.clear(); this._sel.add(unitId); }
     this._inspectRef = null; // picking a unit supersedes a refugee inspection
-    if (GameMap.render) GameMap.render();
+    this._inspect = null;
+    this.refreshLayer(true);
   },
 
   // Esc clears selection + disarms the bomb while on the war layer. Bound
@@ -635,7 +624,7 @@ const War = {
       if (e.key !== 'Escape' || W.layer !== 'war') return;
       const had = this._sel.size || this._bombArmed || this._spawnArmed || this._inspect || this._inspectRef;
       this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null; this._inspect = null; this._inspectRef = null;
-      if (had) { if (GameMap.render) GameMap.render(); this.renderToolbar(); }
+      if (had) this.refreshLayer(true);
     });
   },
 
@@ -837,36 +826,77 @@ const War = {
   },
 
   /* ---------- shared animation loop ----------
-     One rAF loop, started lazily, that both tweens unit positions (~900ms
-     ease between server syncs) and counter-scales markers with the current
-     map zoom, and fades battle-flash rings. Runs continuously while there is
-     anything to animate; stops itself once both registries are empty so an
-     ended/never-started war costs nothing. */
+     One rAF loop that tweens unit/refugee positions, keeps the screen-size
+     symbols counter-scaled to the zoom, and drives the airstrike plane and
+     impact FX. It only WRITES to the DOM when something actually changed —
+     a unit that has finished its leg is skipped until the next leg or a zoom
+     change (an idle battlefield used to rewrite every transform 60×/s, which
+     made the browser repaint the whole map SVG continuously). */
   ensureLoop() {
     if (this._raf) return;
     const step = (now) => {
       let any = false;
+      const k = GameMap.view ? GameMap.view.k : 1;
+      const scale = warMarkerScale(k);
+      const zoomChanged = scale !== this._loopScale;
+      this._loopScale = scale;
+      // name labels and other zoom-only detail switch on as you zoom in
+      const layer = this._O && this._O.root;
+      if (layer && layer.isConnected) {
+        any = true;
+        const zoomed = k >= 2.4;
+        if (zoomed !== this._zoomed || zoomChanged) { this._zoomed = zoomed; layer.classList.toggle('war-zoomed', zoomed); }
+        if (zoomChanged) {
+          for (const n of layer.querySelectorAll('.war-scaled')) {
+            n.setAttribute('transform', `translate(${n.getAttribute('data-x')},${n.getAttribute('data-y')}) scale(${scale})`);
+          }
+        }
+      }
       for (const id in this._anim) {
         const e = this._anim[id];
         if (!e.node || !e.node.isConnected) { delete this._anim[id]; continue; }
         any = true;
         // LINEAR interpolation, deliberately not eased: legs chain tick to
         // tick, and an ease curve restarting on every leg made units
-        // accelerate/decelerate 1-4× a second — visible stutter. Constant
-        // velocity across chained legs reads as continuous marching.
-        const k = Math.min(1, (now - e.t0) / (e.dur || 900));
-        e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
+        // accelerate/decelerate 1-4× a second — visible stutter.
+        const t = Math.min(1, (now - e.t0) / (e.dur || 900));
+        if (e.settled && !zoomChanged) continue;
+        e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * t, e.from[1] + (e.to[1] - e.from[1]) * t];
+        e.settled = t >= 1;
         const ar = this._arrowAnim[id];
         if (ar) {
           if (!ar.node.isConnected) delete this._arrowAnim[id];
-          else ar.node.setAttribute('points', e.curPos[0] + ',' + e.curPos[1] + (ar.tail ? ' ' + ar.tail : ''));
+          else ar.node.setAttribute('d', 'M' + e.curPos[0].toFixed(1) + ' ' + e.curPos[1].toFixed(1) + (ar.tail ? ' ' + ar.tail : ''));
         }
-        // Fixed-world-size above WAR_FIXED_MODE_K, constant-screen-size below
-        // — computed every frame from the live zoom so the mode switches
-        // during a wheel-zoom without waiting for a re-render. HP bar,
-        // selection ring and fight ring all inherit this group transform.
-        const scale = warMarkerScale(GameMap.view ? GameMap.view.k : 1);
-        e.node.setAttribute('transform', `translate(${e.curPos[0]},${e.curPos[1]}) scale(${scale})`);
+        e.node.setAttribute('transform', `translate(${e.curPos[0].toFixed(1)},${e.curPos[1].toFixed(1)}) scale(${scale})`);
+      }
+      // Refugee columns — same tween plus a fade driven by the predicted
+      // tick clock (smooth between war-layer refreshes).
+      for (const id in this._refAnim) {
+        const e = this._refAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._refAnim[id]; continue; }
+        any = true;
+        const t = Math.min(1, (now - e.t0) / (e.dur || 900));
+        e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * t, e.from[1] + (e.to[1] - e.from[1]) * t];
+        e.node.setAttribute('transform', `translate(${e.curPos[0].toFixed(1)},${e.curPos[1].toFixed(1)}) scale(${scale})`);
+        e.node.style.opacity = String(this._refOpacity(e.war, e.r));
+      }
+      // Airstrike planes — a pure function of the predicted tick clock.
+      for (const id in this._airstrikeAnim) {
+        const e = this._airstrikeAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._airstrikeAnim[id]; continue; }
+        any = true;
+        this._updatePlanePose(e);
+      }
+      // Impact FX — keyed off Date.now() (the _strikeImpactAt epoch), NOT the
+      // rAF timestamp (performance.now()-based — a different clock epoch).
+      for (const id in this._explosionAnim) {
+        const e = this._explosionAnim[id];
+        if (!e.node || !e.node.isConnected) { delete this._explosionAnim[id]; continue; }
+        any = true;
+        const age = Date.now() - e.t0;
+        if (age > e.life) { delete this._explosionAnim[id]; continue; }
+        this._updateExplosion(e, age);
       }
       for (const id in this._flashAnim) {
         const f = this._flashAnim[id];
@@ -876,52 +906,31 @@ const War = {
         if (age > f.life) { delete this._flashAnim[id]; continue; }
         f.node.style.opacity = String(1 - age / f.life);
       }
-      // Refugee columns — same linear tween as units, plus a per-frame fade
-      // opacity (fade-in after spawn, fade-out after arrival/annihilation)
-      // computed from the predicted tick clock, so the fades run smoothly
-      // between the ~per-tick war-layer rebuilds.
-      for (const id in this._refAnim) {
-        const e = this._refAnim[id];
-        if (!e.node || !e.node.isConnected) { delete this._refAnim[id]; continue; }
-        any = true;
-        const k = Math.min(1, (now - e.t0) / (e.dur || 900));
-        e.curPos = [e.from[0] + (e.to[0] - e.from[0]) * k, e.from[1] + (e.to[1] - e.from[1]) * k];
-        const scale = warMarkerScale(GameMap.view ? GameMap.view.k : 1);
-        e.node.setAttribute('transform', `translate(${e.curPos[0]},${e.curPos[1]}) scale(${scale})`);
-        e.node.style.opacity = String(this._refOpacity(e.war, e.r));
-      }
-      // Airstrike planes — position is a pure function of predicted tick, so
-      // every frame just recomputes it from the entry's captured timing/strike
-      // rather than interpolating toward a stored target.
-      for (const id in this._airstrikeAnim) {
-        const e = this._airstrikeAnim[id];
-        if (!e.node || !e.node.isConnected) { delete this._airstrikeAnim[id]; continue; }
-        any = true;
-        this._updatePlanePose(e);
-      }
-      // Impact explosion FX (fireball/shockwave/debris) — same recreate-
-      // each-render + rAF-driven animation as the battle-flash rings above,
-      // but keyed off Date.now() (matching _strikeImpactAt's epoch), NOT the
-      // rAF timestamp `now` (which is performance.now()-based — a different
-      // clock epoch entirely; mixing the two would make age wildly wrong).
-      for (const id in this._explosionAnim) {
-        const e = this._explosionAnim[id];
-        if (!e.node || !e.node.isConnected) { delete this._explosionAnim[id]; continue; }
-        any = true;
-        const age = Date.now() - e.t0;
-        if (age > e.life) { delete this._explosionAnim[id]; continue; }
-        this._updateExplosion(e, age);
-      }
       this._raf = any ? requestAnimationFrame(step) : null;
     };
     this._raf = requestAnimationFrame(step);
   },
 
-  /* ═══════════ MAP LAYER ═══════════ */
-  // Phase 31: a protest is a SECOND conflict doc, so the layer renders both
-  // the invasion war and the protest (crowds/police, territory fractures,
-  // craters, planes) — each from its OWN predicted doc at full cadence, the
-  // two stacked in the same map.warLayer group.
+  /* ═══════════ MAP LAYER (retained mode) ═══════════
+     The war layer is a set of PERSISTENT sublayers, updated in place:
+
+       war-veil      a parchment wash over the base map (War layer only), so
+                     the situation overlay reads like a staff map
+       war-ground    occupied ground, the front line, craters — rebuilt only
+                     when the captured-cell set changes (fingerprinted)
+       war-marks     objectives and captured-city flags — rebuilt when their
+                     status changes
+       war-orders    movement/attack arrows, warship fire, clash markers —
+                     cheap, rebuilt per refresh
+       war-refugees  refugee columns
+       war-units     one KEYED node per unit, created once and patched in
+                     place (attributes are only written when they change)
+       war-fx        planes, impact explosions, event flashes
+
+     GameMap.render() (a full map rebuild) calls renderMapLayer, which builds
+     the sublayers afresh; every predicted tick / heartbeat goes through
+     refreshLayer → _paint, which patches them. Both conflict docs (war and
+     protest) draw into per-doc groups inside each sublayer. */
   renderMapLayer(map, mk, NS) {
     const docs = this.authDocs();
     if (!docs.length) {
@@ -929,42 +938,132 @@ const War = {
       this._airstrikeAnim = {}; this._explosionAnim = {}; this._strikeImpactAt = {};
       this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {};
-      this._removeToolbar(); this._removeUnitCard(); this._inspect = null;
+      this._removeToolbar(); this._removeUnitCard(); this._removeHud(); this._inspect = null;
+      if (this._O) { this._O.root.remove(); this._O = null; this._unitNodes = new Map(); }
       this._stopRealtime(); this._preds = {}; return;
     }
     if (window.WarEngine) this._ensureRealtime();
-    map.warLayer = document.createElementNS(NS, 'g');
-    map.warLayer.setAttribute('class', 'war-layer');
-    map.world.appendChild(map.warLayer);
-    // The defs (patterns/markers/clipPaths) are id-referenced by url(#…);
-    // both docs draw the SAME named defs with identical content, so they
-    // resolve to whichever was created first — visually indistinguishable.
-    for (const auth of docs) {
-      // Render the PREDICTED doc (rebased-on-authority + locally ticked), so
-      // the front line the player sees is always at full cadence. Falls back
-      // to the raw authoritative doc if the engine script failed to load.
-      const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
-      this.renderCraters(map, mk, NS, war);
-      this.renderTerritory(map, mk, NS, war);
-      // Once a conflict concludes the soldiers leave the field — draw the
-      // move/attack arrows and unit markers only while it's still active. The
-      // craters and captured territory above remain so the final front can be
-      // reviewed.
-      if (war.active) {
-        this.renderMoveArrows(map, mk, NS, war);
-        this.renderAttackArrows(map, mk, NS, war);
-        this.renderWarshipFire(map, mk, NS, war);
-        this.renderRefugees(map, mk, NS, war); // under the unit markers — a column never occludes a formation
-        this.renderUnits(map, mk, NS, war);
-      }
-      this._checkAirstrikeLandings(war);
-      this.renderAirstrikePlanes(map, mk, NS, war);
-      this.renderExplosions(map, mk, NS, war);
-      this.renderFlashes(map, mk, NS, war);
+    NS = NS || 'http://www.w3.org/2000/svg';
+    // base part, inside #map-svg (rebuilt with every full map render): the
+    // veil and the ground — they change rarely, and live under the map's
+    // cities/labels in the same paint
+    const layer = document.createElementNS(NS, 'g');
+    layer.setAttribute('class', 'war-layer');
+    map.world.appendChild(layer);
+    map.warLayer = layer;
+    this._L = { root: layer, docs: {} };
+    for (const name of ['veil', 'ground']) {
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('class', 'war-' + name);
+      layer.appendChild(g);
+      this._L[name] = g;
     }
-    // All conflicts concluded: drop any lingering per-unit animation/selection
-    // state so a re-render doesn't tween ghosts of the departed units. (Only
-    // when NONE are active — the registries are shared across docs.)
+    this._defs(NS, layer, 'patterns');
+    this._overlay(map, NS);
+    this._paint(map, NS);
+  },
+  // The moving parts live in GameMap's overlay svg (#war-overlay) and
+  // PERSIST across full map renders — units keep their nodes and glide on.
+  _overlay(map, NS) {
+    const host = map.overWorld || map.world; // (no overlay svg → old single-svg behaviour)
+    if (this._O && this._O.root.parentNode === host) return this._O;
+    if (this._O) this._O.root.remove();
+    this._unitNodes = new Map();
+    for (const k in this._L.docs) delete this._L.docs[k];
+    const root = document.createElementNS(NS, 'g');
+    root.setAttribute('class', 'war-overlay-root');
+    host.appendChild(root);
+    this._O = { root, docs: {} };
+    for (const name of ['marks', 'orders', 'refugees', 'units', 'fx']) {
+      const g = document.createElementNS(NS, 'g');
+      g.setAttribute('class', 'war-' + name);
+      root.appendChild(g);
+      this._O[name] = g;
+    }
+    this._defs(NS, root, 'markers');
+    this._bindUnitEvents(this._O.units);
+    if (map.overSvg && this._overSvgBound !== map.overSvg) { this._overSvgBound = map.overSvg; this._forwardToMap(map); }
+    this._zoomed = null; this._loopScale = null; // force the loop to restyle the new nodes
+    return this._O;
+  },
+  // Events that land on the overlay's interactive marks (enemy units,
+  // objectives, refugees…) but mean "the map" — a pan starting over an
+  // enemy, a right-click order, the wheel, a double-click zoom — are
+  // re-dispatched to the map svg so its own handlers run as before. Own
+  // units consume their left press (select) and are not forwarded.
+  _forwardToMap(map) {
+    const svg = map.overSvg;
+    const fwd = (ctor) => (e) => {
+      if (e._warFwd) return;
+      if (e.type === 'pointerdown' && e.button === 0) {
+        const n = e.target.closest && e.target.closest('[data-wu]');
+        const rec = n && this._unitNodes.get(n.getAttribute('data-wu'));
+        if (rec && rec.own && !this._bombArmed && !this._spawnArmed) return;
+      }
+      const ev = new ctor(e.type, e);
+      ev._warFwd = true;
+      map.svg.dispatchEvent(ev);
+      if (e.type === 'wheel' || e.type === 'contextmenu') e.preventDefault();
+    };
+    svg.addEventListener('pointerdown', fwd(PointerEvent));
+    svg.addEventListener('pointermove', fwd(PointerEvent));
+    svg.addEventListener('wheel', fwd(WheelEvent), { passive: false });
+    svg.addEventListener('dblclick', fwd(MouseEvent));
+    svg.addEventListener('contextmenu', fwd(MouseEvent));
+  },
+
+  // Patch the existing layer in place; rebuild it only if the map SVG was
+  // replaced underneath us (a full GameMap.render since the last paint).
+  refreshLayer(force) {
+    const now = performance.now();
+    if (!force && now - this._lastDraw < 150) return;
+    // NB: GameMap is a top-level `const` in map.js — a script-scope global
+    // that is NOT a window property, so it must be referenced bare.
+    const map = typeof GameMap !== 'undefined' ? GameMap : null;
+    if (!(map && map.svg && map.svg.isConnected && map.world && map.world.isConnected && map.mk)) return;
+    if (window.MapEdit && MapEdit.dragging) return; // same guard as GameMap.render
+    this._lastDraw = now;
+    if (this._L && this._L.root.isConnected && this._L.root.parentNode === map.world && this._O && this._O.root.isConnected) this._paint(map, 'http://www.w3.org/2000/svg');
+    else this.renderMapLayer(map, map.mk, 'http://www.w3.org/2000/svg');
+  },
+
+  _paint(map, NS) {
+    const docs = this.authDocs();
+    if (!docs.length) { this.renderMapLayer(map, map.mk, NS); return; }
+    const onWar = W.layer === 'war';
+    // the parchment veil mutes the base map so the overlay reads at a glance
+    if (onWar && !this._L.veil.firstChild) {
+      const r = document.createElementNS(NS, 'rect');
+      r.setAttribute('x', -8000); r.setAttribute('y', -8000); r.setAttribute('width', 3840 + 16000); r.setAttribute('height', 2160 + 16000);
+      r.setAttribute('class', 'war-veil-rect');
+      this._L.veil.appendChild(r);
+    } else if (!onWar && this._L.veil.firstChild) clear(this._L.veil);
+    clear(this._O.orders); clear(this._O.refugees); clear(this._O.fx);
+    const seen = new Set();
+    for (const auth of docs) {
+      const key = this.docKeyOf(auth);
+      // Render the PREDICTED doc (rebased-on-authority + locally ticked), so
+      // the front line the player sees is always at full cadence.
+      const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
+      const D = this._docLayers(NS, key, war);
+      this.renderGround(map, NS, war, D, key);
+      this.renderMarks(map, NS, war, D);
+      // Once a conflict concludes the soldiers leave the field — arrows and
+      // markers only while it's active; ground and marks stay for review.
+      if (war.active) {
+        this.renderOrders(map, NS, war, D);
+        this.renderRefugees(map, null, NS, war, D.refugees);
+        this.renderUnits(map, NS, war, D, key, seen);
+      }
+      this._fx = D.fx;
+      this._checkAirstrikeLandings(war);
+      this.renderAirstrikePlanes(map, null, NS, war);
+      this.renderExplosions(map, null, NS, war);
+      this.renderFlashes(map, null, NS, war);
+      this._fx = null;
+    }
+    // drop keyed nodes of units no longer in any doc
+    for (const [k, n] of this._unitNodes) if (!seen.has(k)) { n.g.remove(); this._unitNodes.delete(k); delete this._anim[k]; }
     if (!docs.some(d => d.active)) {
       this._anim = {}; this._flashAnim = {}; this._arrowAnim = {};
       this._refAnim = {}; this._inspectRef = null;
@@ -972,218 +1071,385 @@ const War = {
     }
     this.ensureLoop();
     this.bindKeys();
-    if (W.layer === 'war') { this.renderToolbar(); this.renderUnitCard(); }
-    else { this._removeToolbar(); this._removeUnitCard(); }
+    if (onWar) { this.renderToolbar(); this.renderUnitCard(); this.renderHud(); }
+    else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); }
   },
 
-  // Dark scorch circles from recent bomb drops — drawn UNDER units/territory
-  // so a crater reads as ground damage, not a marker. war.craters is capped
-  // at 40 server-side so this stays cheap.
-  renderCraters(map, mk, NS, war) {
-    for (const c of (war.craters || [])) {
-      const circ = document.createElementNS(NS, 'circle');
-      circ.setAttribute('cx', c.pos[0]); circ.setAttribute('cy', c.pos[1]); circ.setAttribute('r', 95);
-      circ.setAttribute('class', 'war-crater');
-      map.warLayer.appendChild(circ);
-    }
+  // one group per conflict doc inside each sublayer (z-order: every doc's
+  // ground under every doc's units)
+  _docLayers(NS, key, war) {
+    const mkG = (parent) => { const g = document.createElementNS(NS, 'g'); g.setAttribute('data-doc', key); parent.appendChild(g); return g; };
+    let B = this._L.docs[key];
+    if (!B) B = this._L.docs[key] = { ground: mkG(this._L.ground) };
+    let O = this._O.docs[key];
+    if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'orders', 'refugees', 'units', 'fx']) O[name] = mkG(this._O[name]); }
+    const D = Object.assign(O, { ground: B.ground });
+    D._groundKey = B._groundKey;
+    D._base = B;
+    const cls = 'war-doc-' + (war.kind === 'protest' ? 'protest' : 'war');
+    for (const name of ['ground', 'marks', 'orders', 'units']) if (D[name].getAttribute('class') !== cls) D[name].setAttribute('class', cls);
+    return D;
   },
 
-  // Fracture overlay: captured cells grouped by province, drawn as a union of
-  // 48px cell rects clipped to that province's real outline — the jagged
-  // "territory eaten away" look, never spilling past the coastline.
-  renderTerritory(map, mk, NS, war) {
-    // The whole SVG is rebuilt from scratch every render (see GameMap.render),
-    // so the hatch <pattern> def has to be recreated each time too — cheap,
-    // and simpler than trying to persist defs across a full DOM teardown.
+  // Shared <defs>: hatch patterns, arrowheads. Built once per layer.
+  _defs(NS, layer, which) {
     const defs = document.createElementNS(NS, 'defs');
-    map.warLayer.appendChild(defs);
-    const pat = document.createElementNS(NS, 'pattern');
-    pat.setAttribute('id', 'war-hatch');
-    pat.setAttribute('width', '10'); pat.setAttribute('height', '10');
-    pat.setAttribute('patternUnits', 'userSpaceOnUse');
-    pat.setAttribute('patternTransform', 'rotate(45)');
-    const bg = document.createElementNS(NS, 'rect');
-    bg.setAttribute('width', '10'); bg.setAttribute('height', '10'); bg.setAttribute('fill', '#8a3030'); bg.setAttribute('fill-opacity', '0.32');
-    const stripe = document.createElementNS(NS, 'rect');
-    stripe.setAttribute('width', '4'); stripe.setAttribute('height', '10'); stripe.setAttribute('fill', '#8a3030'); stripe.setAttribute('fill-opacity', '0.55');
-    pat.appendChild(bg); pat.appendChild(stripe);
-    defs.appendChild(pat);
-
-    // Defender counter-occupation of attacker homeland (Phase 22) — a second
-    // hatch in the defence's blue, drawn unclipped (country polygons aren't
-    // per-province clip targets; the cells themselves are already rasterised
-    // to the homeland, so a plain cell fill reads fine at map scale).
-    const defPat = pat.cloneNode(true);
-    defPat.setAttribute('id', 'war-hatch-def');
-    for (const r of defPat.childNodes) r.setAttribute('fill', '#2f4a6e');
-    defs.appendChild(defPat);
-    let defD = '';
-    const csDef = (war.grid && war.grid.cell) || 48;
-    for (const key in (war.cells || {})) {
-      const c = war.cells[key];
-      if (c.o !== 'def') continue;
-      const parts = key.split(',');
-      defD += `M${Number(parts[0]) * csDef},${Number(parts[1]) * csDef} h${csDef} v${csDef} h${-csDef} z `;
+    const pattern = (id, color, op1, op2) => {
+      const pat = document.createElementNS(NS, 'pattern');
+      pat.setAttribute('id', id);
+      pat.setAttribute('width', '11'); pat.setAttribute('height', '11');
+      pat.setAttribute('patternUnits', 'userSpaceOnUse');
+      pat.setAttribute('patternTransform', 'rotate(45)');
+      const bg = document.createElementNS(NS, 'rect');
+      bg.setAttribute('width', '11'); bg.setAttribute('height', '11'); bg.setAttribute('fill', color); bg.setAttribute('fill-opacity', op1);
+      const stripe = document.createElementNS(NS, 'rect');
+      stripe.setAttribute('width', '2'); stripe.setAttribute('height', '11'); stripe.setAttribute('fill', color); stripe.setAttribute('fill-opacity', op2);
+      pat.appendChild(bg); pat.appendChild(stripe);
+      defs.appendChild(pat);
+    };
+    if (which !== 'markers') {
+      pattern('war-hatch', '#9b2c22', '0.16', '0.30');
+      pattern('war-hatch-def', '#24466e', '0.16', '0.30');
+      pattern('war-hatch-protest', '#b0701c', '0.14', '0.30');
     }
-    if (defD) mk('path', { d: defD, fill: 'url(#war-hatch-def)', class: 'war-territory' }, map.warLayer);
-
-    const byProv = {};
-    for (const key in (war.cells || {})) {
-      const c = war.cells[key];
-      if (c.o !== 'att' || !c.pid) continue;
-      (byProv[c.pid] = byProv[c.pid] || []).push(key);
-    }
-    const cs = (war.grid && war.grid.cell) || 48;
-    for (const pid in byProv) {
-      const prov = provById(pid);
-      if (!prov) continue;
-      let d = '';
-      for (const key of byProv[pid]) {
-        const parts = key.split(',');
-        const x = Number(parts[0]) * cs, y = Number(parts[1]) * cs;
-        d += `M${x},${y} h${cs} v${cs} h${-cs} z `;
-      }
-      const clipId = 'warclip-' + pid;
-      const cp = document.createElementNS(NS, 'clipPath');
-      cp.setAttribute('id', clipId);
-      const shapeNode = document.createElementNS(NS, prov.shape ? 'path' : 'polygon');
-      if (prov.shape) shapeNode.setAttribute('d', prov.shape);
-      else if (prov.path) shapeNode.setAttribute('points', prov.path.map(p => p.join(',')).join(' '));
-      shapeNode.setAttribute('fill-rule', 'evenodd');
-      cp.appendChild(shapeNode);
-      defs.appendChild(cp);
-      mk('path', { d, 'clip-path': `url(#${clipId})`, fill: 'url(#war-hatch)', class: 'war-territory' }, map.warLayer);
-    }
-  },
-
-  // Movement arrows: a dashed polyline from each COMMANDABLE-SIDE live unit
-  // with a dest, along its remaining transport-graph waypoints (u.path from
-  // u.pathIdx on — straight to dest when there's no route), ending in an
-  // arrowhead at the destination. Enemy movement intent is deliberately NOT
-  // drawn — fog of war on where the other side is headed. Static per render
-  // (the tweened marker chases the arrow's tail slightly — acceptable).
-  renderMoveArrows(map, mk, NS, war) {
-    const side = this.commandableSide(war);
-    // Arrowhead <marker> defs — recreated per render, same reasoning as the
-    // territory hatch <pattern> (the whole SVG is torn down every render).
-    const defs = document.createElementNS(NS, 'defs');
-    map.warLayer.appendChild(defs);
-    for (const [id, cls] of [['war-arrowhead', 'war-move-arrowhead'], ['war-arrowhead-sel', 'war-move-arrowhead-sel']]) {
+    const head = (id, cls) => {
       const m = document.createElementNS(NS, 'marker');
       m.setAttribute('id', id);
       m.setAttribute('viewBox', '0 0 10 10');
-      m.setAttribute('refX', '8'); m.setAttribute('refY', '5');
-      m.setAttribute('markerWidth', '5'); m.setAttribute('markerHeight', '5');
+      m.setAttribute('refX', '7'); m.setAttribute('refY', '5');
+      m.setAttribute('markerWidth', '4'); m.setAttribute('markerHeight', '4');
       m.setAttribute('orient', 'auto-start-reverse');
       const tip = document.createElementNS(NS, 'path');
       tip.setAttribute('d', 'M0,0 L10,5 L0,10 z');
       tip.setAttribute('class', cls);
       m.appendChild(tip);
       defs.appendChild(m);
+    };
+    if (which !== 'patterns') {
+      head('war-head-att', 'war-head war-head-att');
+      head('war-head-def', 'war-head war-head-def');
+      head('war-head-sel', 'war-head war-head-sel');
+      head('war-head-strike', 'war-head war-head-strike');
     }
-    this._arrowAnim = {}; // rebuilt per layer render; the rAF loop keeps each tail pinned to its tweened marker
-    for (const u of war.units) {
-      if (u.side !== side || u.dead || u.state === 'dead' || !(u.strength > 0) || !u.dest) continue;
-      const anim = this._anim[u.id];
-      const from = anim && anim.curPos ? anim.curPos : u.pos;
-      const pts = [from];
-      if (Array.isArray(u.path) && u.path.length) {
-        for (let i = (u.pathIdx || 0); i < u.path.length; i++) pts.push(u.path[i]);
+    layer.insertBefore(defs, layer.firstChild);
+  },
+
+  /* ---------- ground: occupied territory + the front line ----------
+     Every land cell of the war grid gets an owner: captured cells from
+     war.cells, the attacker's homeland (grid.enemyCells) for the attacker,
+     the Republic's provinces for the defender; sea and neutral cells take
+     their nearest belligerent's value (multi-source BFS), so the 50% line
+     only ever runs BETWEEN the two sides. Marching squares + Chaikin
+     smoothing turn that into smooth loops: the attacker's loops fill the
+     occupied provinces (clipped to them), and the same loops — clipped to
+     belligerent land — are stroked as the front line. */
+  _groundKey(war) {
+    let h = 0;
+    for (const k in (war.cells || {})) {
+      const c = war.cells[k];
+      for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) | 0;
+      h = (h * 7 + (c.o === 'att' ? 1 : 2)) | 0;
+    }
+    return [war.startedAt, Object.keys(war.cells || {}).length, h, (war.craters || []).length, (S().provinces || []).length, W.layer === 'war'].join(':');
+  },
+  renderGround(map, NS, war, D, key) {
+    const gk = this._groundKey(war);
+    if (D._base._groundKey === gk) return;
+    D._base._groundKey = gk;
+    clear(D.ground);
+    const add = (tag, attrs) => {
+      const n = document.createElementNS(NS, tag);
+      for (const a in attrs) if (attrs[a] !== undefined && attrs[a] !== null) n.setAttribute(a, attrs[a]);
+      D.ground.appendChild(n);
+      return n;
+    };
+    for (const c of (war.craters || [])) add('circle', { cx: c.pos[0], cy: c.pos[1], r: 95, class: 'war-crater' });
+    const g = war.grid;
+    if (!g || !g.cols || !g.rows) return;
+    const protest = war.kind === 'protest';
+    const field = this._controlField(war, 'att');
+    if (!field) return;
+    const attD = this._loopsToPath(this._contours(field, g.cols, g.rows), g.cell);
+    // clip targets: the Republic's provinces, and the belligerents' homelands
+    const provShapes = (S().provinces || []).map(p => p.shape || (p.path ? 'M' + p.path.map(q => q.join(' ')).join(' L') + ' Z' : '')).filter(Boolean);
+    const enemyIds = new Set(Object.values(g.enemyCells || {}));
+    const countries = ((S().settings || {}).map || {}).countries || [];
+    const enemyShapes = countries.filter(c => enemyIds.has(c.id) && c.shape).map(c => c.shape);
+    const defs = add('defs', {});
+    const clip = (id, shapes) => {
+      const cp = document.createElementNS(NS, 'clipPath');
+      cp.setAttribute('id', id);
+      for (const s of shapes) { const p = document.createElementNS(NS, 'path'); p.setAttribute('d', s); p.setAttribute('fill-rule', 'evenodd'); cp.appendChild(p); }
+      defs.appendChild(cp);
+      return `url(#${id})`;
+    };
+    const clipProv = clip('war-clip-prov-' + key, provShapes);
+    const clipAll = clip('war-clip-bel-' + key, provShapes.concat(enemyShapes));
+    if (attD) add('path', { d: attD, 'fill-rule': 'evenodd', 'clip-path': clipProv, fill: protest ? 'url(#war-hatch-protest)' : 'url(#war-hatch)', class: 'war-occupied' });
+    // the defence's counter-occupation of enemy homeland
+    if (!protest && enemyShapes.length && Object.values(war.cells || {}).some(c => c.o === 'def')) {
+      const defField = this._controlField(war, 'def');
+      const defD = defField && this._loopsToPath(this._contours(defField, g.cols, g.rows), g.cell);
+      if (defD) add('path', { d: defD, 'fill-rule': 'evenodd', 'clip-path': clip('war-clip-enemy-' + key, enemyShapes), fill: 'url(#war-hatch-def)', class: 'war-occupied' });
+    }
+    // the front line: a heavy line with "teeth" (short bars) along it
+    if (attD) {
+      add('path', { d: attD, 'clip-path': clipAll, class: 'war-front war-front-base' + (protest ? ' war-front-protest' : ''), 'vector-effect': 'non-scaling-stroke' });
+      add('path', { d: attD, 'clip-path': clipAll, class: 'war-front war-front-teeth' + (protest ? ' war-front-protest' : ''), 'vector-effect': 'non-scaling-stroke' });
+    }
+  },
+  // 1 where `side` holds the ground, 0 where the other side does; everything
+  // else (sea, neutral soil) takes its nearest belligerent cell's value.
+  _controlField(war, side) {
+    const g = war.grid;
+    const W_ = g.cols, H_ = g.rows, N = W_ * H_;
+    const f = new Float32Array(N).fill(-1);
+    const idx = (cx, cy) => (cx >= 0 && cy >= 0 && cx < W_ && cy < H_) ? cy * W_ + cx : -1;
+    const set = (key, v) => { const p = key.indexOf(','); const i = idx(+key.slice(0, p), +key.slice(p + 1)); if (i >= 0) f[i] = v; };
+    const att = side === 'att' ? 1 : 0, def = 1 - att;
+    for (const pid in (g.provinceCells || {})) for (const c of g.provinceCells[pid]) { const i = idx(c[0], c[1]); if (i >= 0) f[i] = def; }
+    for (const k in (g.enemyCells || {})) set(k, att);
+    let any = false;
+    for (const k in (war.cells || {})) {
+      const o = war.cells[k].o;
+      if (o === 'att' || o === 'def') { set(k, o === side ? 1 : 0); if (o === side) any = true; }
+    }
+    // for 'att' the homeland alone already draws the border front; for the
+    // defence's counter-occupation we need at least one captured cell
+    if (!any && side === 'def') return null;
+    if (side === 'att' && !any && !Object.keys(g.enemyCells || {}).length) return null;
+    // multi-source BFS: unknown cells copy the nearest known value
+    const q = new Int32Array(N); let qh = 0, qt = 0;
+    for (let i = 0; i < N; i++) if (f[i] >= 0) q[qt++] = i;
+    while (qh < qt) {
+      const i = q[qh++], x = i % W_, y = (i / W_) | 0, v = f[i];
+      if (x > 0 && f[i - 1] < 0) { f[i - 1] = v; q[qt++] = i - 1; }
+      if (x < W_ - 1 && f[i + 1] < 0) { f[i + 1] = v; q[qt++] = i + 1; }
+      if (y > 0 && f[i - W_] < 0) { f[i - W_] = v; q[qt++] = i - W_; }
+      if (y < H_ - 1 && f[i + W_] < 0) { f[i + W_] = v; q[qt++] = i + W_; }
+    }
+    for (let i = 0; i < N; i++) if (f[i] < 0) f[i] = 0;
+    return f;
+  },
+  // Marching squares at 0.5 over a W×H cell field (cell-centre lattice,
+  // padded with 0 so every loop closes) → loops in cell units.
+  _contours(f, W_, H_) {
+    const val = (x, y) => (x < 0 || y < 0 || x >= W_ || y >= H_) ? 0 : f[y * W_ + x];
+    const PW = W_ + 2; // padded lattice: vertex (x,y) for x∈[-1,W_]
+    const eid = (x, y, vert) => (((y + 1) * PW + (x + 1)) * 2) + (vert ? 1 : 0);
+    const pts = new Map();
+    const ptOf = (id) => {
+      if (pts.has(id)) return pts.get(id);
+      const base = id >> 1, x = (base % PW) - 1, y = ((base / PW) | 0) - 1;
+      const a = val(x, y), b = (id & 1) ? val(x, y + 1) : val(x + 1, y);
+      const t = Math.max(0, Math.min(1, (0.5 - a) / ((b - a) || 1e-9)));
+      const p = (id & 1) ? [x + 0.5, y + t + 0.5] : [x + t + 0.5, y + 0.5];
+      pts.set(id, p);
+      return p;
+    };
+    const segA = [], segB = [];
+    const seg = (a, b) => { segA.push(a); segB.push(b); };
+    for (let y = -1; y < H_; y++) {
+      for (let x = -1; x < W_; x++) {
+        const tl = val(x, y), tr = val(x + 1, y), br = val(x + 1, y + 1), bl = val(x, y + 1);
+        const code = (tl > 0.5 ? 1 : 0) | (tr > 0.5 ? 2 : 0) | (br > 0.5 ? 4 : 0) | (bl > 0.5 ? 8 : 0);
+        if (code === 0 || code === 15) continue;
+        const top = eid(x, y, false), left = eid(x, y, true), right = eid(x + 1, y, true), bottom = eid(x, y + 1, false);
+        switch (code) {
+          case 1: case 14: seg(left, top); break;
+          case 2: case 13: seg(top, right); break;
+          case 3: case 12: seg(left, right); break;
+          case 4: case 11: seg(right, bottom); break;
+          case 6: case 9: seg(top, bottom); break;
+          case 7: case 8: seg(left, bottom); break;
+          case 5: seg(left, top); seg(right, bottom); break;
+          case 10: seg(top, right); seg(bottom, left); break;
+        }
       }
-      pts.push(u.dest);
-      const sel = this._sel.has(u.id);
-      const line = document.createElementNS(NS, 'polyline');
-      line.setAttribute('points', pts.map(p => p[0] + ',' + p[1]).join(' '));
-      line.setAttribute('class', sel ? 'war-move-arrow-sel' : 'war-move-arrow');
-      line.setAttribute('marker-end', `url(#${sel ? 'war-arrowhead-sel' : 'war-arrowhead'})`);
-      map.warLayer.appendChild(line);
-      this._arrowAnim[u.id] = { node: line, tail: pts.slice(1).map(p => p[0] + ',' + p[1]).join(' ') };
+    }
+    const adj = new Map();
+    const link = (e, s) => { const l = adj.get(e); if (l) l.push(s); else adj.set(e, [s]); };
+    for (let s = 0; s < segA.length; s++) { link(segA[s], s); link(segB[s], s); }
+    const used = new Uint8Array(segA.length);
+    const loops = [];
+    for (let s0 = 0; s0 < segA.length; s0++) {
+      if (used[s0]) continue;
+      used[s0] = 1;
+      const start = segA[s0];
+      const loop = [ptOf(start)];
+      let cur = s0, e = segB[s0];
+      for (let guard = 0; guard < 100000 && e !== start; guard++) {
+        loop.push(ptOf(e));
+        const l = adj.get(e) || [];
+        const nx = l[0] === cur ? l[1] : l[0];
+        if (nx === undefined || used[nx]) break;
+        used[nx] = 1;
+        e = segA[nx] === e ? segB[nx] : segA[nx];
+        cur = nx;
+      }
+      if (loop.length >= 3) loops.push(loop);
+    }
+    return loops;
+  },
+  // Chaikin-smoothed closed loops → SVG path in world units
+  _loopsToPath(loops, cell) {
+    let d = '';
+    for (let loop of loops) {
+      for (let it = 0; it < 3; it++) {
+        const out = [];
+        for (let i = 0; i < loop.length; i++) {
+          const a = loop[i], b = loop[(i + 1) % loop.length];
+          out.push([a[0] * 0.75 + b[0] * 0.25, a[1] * 0.75 + b[1] * 0.25], [a[0] * 0.25 + b[0] * 0.75, a[1] * 0.25 + b[1] * 0.75]);
+        }
+        loop = out;
+      }
+      d += 'M' + loop.map(p => (p[0] * cell).toFixed(1) + ' ' + (p[1] * cell).toFixed(1)).join(' L') + ' Z ';
+    }
+    return d;
+  },
+
+  /* ---------- marks: objectives and fallen cities ---------- */
+  _scaledGroup(NS, parent, pos, cls) {
+    const g = document.createElementNS(NS, 'g');
+    g.setAttribute('class', 'war-scaled ' + cls);
+    g.setAttribute('data-x', pos[0]); g.setAttribute('data-y', pos[1]);
+    g.setAttribute('transform', `translate(${pos[0]},${pos[1]}) scale(${warMarkerScale(GameMap.view ? GameMap.view.k : 1)})`);
+    parent.appendChild(g);
+    return g;
+  },
+  renderMarks(map, NS, war, D) {
+    const objs = (war.objectives || []).filter(o => o.pos);
+    const held = (war.stats && (war.stats.citiesHeld || war.stats.unrestCities)) || [];
+    const mk = [war.startedAt, objs.map(o => o.id + o.status).join(','), held.join(',')].join('|');
+    if (D._marksKey === mk) return;
+    D._marksKey = mk;
+    clear(D.marks);
+    const add = (parent, tag, attrs, text) => {
+      const n = document.createElementNS(NS, tag);
+      for (const a in attrs) n.setAttribute(a, attrs[a]);
+      if (text !== undefined) n.textContent = text;
+      parent.appendChild(n);
+      return n;
+    };
+    // fallen cities: a small flag in the occupier's colour
+    for (const cid of held) {
+      const c = cityById(cid);
+      if (!c || !c.pos) continue;
+      const g = this._scaledGroup(NS, D.marks, c.pos, 'war-fallen');
+      add(g, 'path', { d: 'M-1,-2 V-24', class: 'war-fallen-pole' });
+      add(g, 'path', { d: 'M-1,-24 h13 l-3,4.5 l3,4.5 h-13 z', class: 'war-fallen-flag' });
+      add(g, 'title', {}, (c.name || cid) + (war.kind === 'protest' ? ' — in unrest' : ' — held by the invader'));
+    }
+    // objectives: a numbered target; the next one pending is emphasised
+    const pending = objs.filter(o => o.status !== 'done').sort((a, b) => a.priority - b.priority);
+    const next = pending[0];
+    const seenPos = new Set();
+    for (const o of [...objs].sort((a, b) => a.priority - b.priority)) {
+      const pk = Math.round(o.pos[0]) + ',' + Math.round(o.pos[1]);
+      if (seenPos.has(pk) && o !== next) continue; // landing + seize on one city: one marker
+      seenPos.add(pk);
+      const done = o.status === 'done';
+      const g = this._scaledGroup(NS, D.marks, o.pos, 'war-obj' + (done ? ' war-obj-done' : '') + (o === next ? ' war-obj-next' : ''));
+      add(g, 'circle', { r: 15, class: 'war-obj-ring' });
+      add(g, 'path', { d: 'M-21,0 h9 M12,0 h9 M0,-21 v9 M0,12 v9', class: 'war-obj-cross' });
+      add(g, 'text', { y: 4, 'text-anchor': 'middle', class: 'war-obj-num' }, done ? '✓' : String(o.priority));
+      if (o === next) add(g, 'text', { y: -25, 'text-anchor': 'middle', class: 'war-obj-tag' }, 'NEXT OBJECTIVE');
+      add(g, 'title', {}, `Objective ${o.priority}: ${this.objLabel(o)} — ${this.objTarget(o)} · ${done ? 'achieved' : 'pending'}`);
     }
   },
 
-  // Task 5 (Explicit attack command): a red dashed arrow from every LIVE unit
-  // chasing a target (u.attackId set, either by a player order or the AI/
-  // engine) to that target's current position — distinct from the amber move
-  // arrows above, drawn for BOTH sides (fog-of-war on intent only applies to
-  // plain movement; an ongoing attack is already visible via combat itself).
-  // `attackId` is absent until the engine agent's applyOrders wires it up —
-  // this loop is then simply a no-op, same "additive/absent-safe" contract as
-  // every other new war field.
-  renderAttackArrows(map, mk, NS, war) {
-    const defs = document.createElementNS(NS, 'defs');
-    map.warLayer.appendChild(defs);
-    const m = document.createElementNS(NS, 'marker');
-    m.setAttribute('id', 'war-attackhead');
-    m.setAttribute('viewBox', '0 0 10 10');
-    m.setAttribute('refX', '8'); m.setAttribute('refY', '5');
-    m.setAttribute('markerWidth', '5'); m.setAttribute('markerHeight', '5');
-    m.setAttribute('orient', 'auto-start-reverse');
-    const tip = document.createElementNS(NS, 'path');
-    tip.setAttribute('d', 'M0,0 L10,5 L0,10 z');
-    tip.setAttribute('class', 'war-attack-arrowhead');
-    m.appendChild(tip);
-    defs.appendChild(m);
-
+  /* ---------- orders: arrows, warship fire, clash markers ----------
+     Own-side movement arrows only (fog of war on enemy intent); attack
+     arrows for both sides (an attack is visible through the fighting
+     itself). Clash markers sit between engaged enemies, one per cluster —
+     they replace the old per-unit pulsing rings, which animated (and
+     repainted the map) forever. */
+  renderOrders(map, NS, war, D) {
+    const side = this.commandableSide(war);
+    const live = (u) => u && !u.dead && u.state !== 'dead' && u.strength > 0;
+    const posOf = (u) => { const a = this._anim[this._ukey(war, u)]; return a && a.curPos ? a.curPos : u.pos; };
+    const add = (tag, attrs) => {
+      const n = document.createElementNS(NS, tag);
+      for (const a in attrs) if (attrs[a] !== undefined) n.setAttribute(a, attrs[a]);
+      D.orders.appendChild(n);
+      return n;
+    };
+    this._arrowAnim = this._arrowAnim || {};
     for (const u of war.units) {
-      if (u.dead || u.state === 'dead' || !(u.strength > 0) || !u.attackId) continue;
-      const target = war.units.find(t => t.id === u.attackId);
-      if (!target || target.dead || target.state === 'dead' || !(target.strength > 0)) continue;
-      const anim = this._anim[u.id];
-      const from = anim && anim.curPos ? anim.curPos : u.pos;
-      const tAnim = this._anim[target.id];
-      const to = tAnim && tAnim.curPos ? tAnim.curPos : target.pos;
-      const line = document.createElementNS(NS, 'line');
-      line.setAttribute('x1', from[0]); line.setAttribute('y1', from[1]);
-      line.setAttribute('x2', to[0]); line.setAttribute('y2', to[1]);
-      line.setAttribute('class', 'war-attack-arrow');
-      line.setAttribute('marker-end', 'url(#war-attackhead)');
-      map.warLayer.appendChild(line);
+      if (u.side !== side || !live(u) || !u.dest || u.attackId) continue;
+      const key = this._ukey(war, u);
+      const pts = [];
+      if (Array.isArray(u.path) && u.path.length) for (let i = (u.pathIdx || 0); i < u.path.length; i++) pts.push(u.path[i]);
+      pts.push(u.dest);
+      const from = posOf(u);
+      const tail = pts.map(p => 'L' + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
+      const sel = this._sel.has(u.id);
+      const node = add('path', {
+        d: 'M' + from[0].toFixed(1) + ' ' + from[1].toFixed(1) + ' ' + tail,
+        class: 'war-move ' + (sel ? 'war-move-sel' : 'war-move-' + u.side),
+        'marker-end': `url(#war-head-${sel ? 'sel' : u.side})`, 'vector-effect': 'non-scaling-stroke'
+      });
+      this._arrowAnim[key] = { node, tail };
     }
-  },
-
-  // Warships feature (cosmetic only — the server/engine already resolved the
-  // ranged pass; this just draws a subtle line/flash toward whatever a live
-  // warship in 'fighting' state would be engaging, derived fresh from state
-  // exactly like the client re-derives everything else). Since the engine
-  // doesn't persist "who a warship is currently shooting" on the unit, this
-  // re-runs the SAME nearest-live-enemy-in-range search stepWarshipFire uses,
-  // purely for the line's endpoint — no gameplay effect either way.
-  renderWarshipFire(map, mk, NS, war) {
+    for (const u of war.units) {
+      if (!live(u) || !u.attackId) continue;
+      const t = war.units.find(x => x.id === u.attackId);
+      if (!live(t)) continue;
+      const a = posOf(u), b = posOf(t);
+      add('path', { d: `M${a[0].toFixed(1)} ${a[1].toFixed(1)} L${b[0].toFixed(1)} ${b[1].toFixed(1)}`, class: 'war-strike-arrow war-strike-' + u.side, 'marker-end': 'url(#war-head-strike)', 'vector-effect': 'non-scaling-stroke' });
+    }
+    // warships firing at range (cosmetic — the engine resolved the shot)
     const range = (window.WarEngine && WarEngine.WARSHIP_RANGE) || 180;
     for (const w of war.units) {
-      if (w.kind !== 'warship' || w.dead || w.state !== 'fighting' || !(w.strength > 0)) continue;
-      let nearest = null, nd = Infinity;
+      if (w.kind !== 'warship' || w.state !== 'fighting' || !live(w)) continue;
+      let best = null, bd = Infinity;
       for (const e of war.units) {
-        if (e.side === w.side || e.dead || e.state === 'dead' || !(e.strength > 0) || e.state === 'embarked') continue;
-        const dx = e.pos[0] - w.pos[0], dy = e.pos[1] - w.pos[1];
-        const d = Math.hypot(dx, dy);
-        if (d < nd) { nd = d; nearest = e; }
+        if (e.side === w.side || !live(e) || e.state === 'embarked') continue;
+        const d = Math.hypot(e.pos[0] - w.pos[0], e.pos[1] - w.pos[1]);
+        if (d < bd) { bd = d; best = e; }
       }
-      if (!nearest || nd > range) continue;
-      const anim = this._anim[w.id];
-      const from = anim && anim.curPos ? anim.curPos : w.pos;
-      const tAnim = this._anim[nearest.id];
-      const to = tAnim && tAnim.curPos ? tAnim.curPos : nearest.pos;
-      const line = document.createElementNS(NS, 'line');
-      line.setAttribute('x1', from[0]); line.setAttribute('y1', from[1]);
-      line.setAttribute('x2', to[0]); line.setAttribute('y2', to[1]);
-      line.setAttribute('class', 'war-warship-fire');
-      map.warLayer.appendChild(line);
+      if (!best || bd > range) continue;
+      const a = posOf(w), b = posOf(best);
+      add('path', { d: `M${a[0].toFixed(1)} ${a[1].toFixed(1)} L${b[0].toFixed(1)} ${b[1].toFixed(1)}`, class: 'war-shellfire', 'vector-effect': 'non-scaling-stroke' });
+    }
+    // clash markers: engaged enemy pairs, clustered
+    const clashes = [];
+    const atts = war.units.filter(u => live(u) && u.side === 'att');
+    const defs = war.units.filter(u => live(u) && u.side === 'def');
+    for (const a of atts) {
+      for (const d of defs) {
+        if (a.state !== 'fighting' && d.state !== 'fighting') continue;
+        const dist = Math.hypot(a.pos[0] - d.pos[0], a.pos[1] - d.pos[1]);
+        if (dist > 75) continue;
+        const mid = [(a.pos[0] + d.pos[0]) / 2, (a.pos[1] + d.pos[1]) / 2];
+        const near = clashes.find(c => Math.hypot(c.pos[0] - mid[0], c.pos[1] - mid[1]) < 90);
+        if (near) { near.n++; near.str += a.strength + d.strength; }
+        else clashes.push({ pos: mid, n: 1, str: a.strength + d.strength });
+      }
+    }
+    for (const c of clashes) {
+      const g = this._scaledGroup(NS, D.orders, c.pos, 'war-clash');
+      const big = c.n > 2 || c.str > 12000;
+      const s = big ? 1.25 : 1;
+      const star = document.createElementNS(NS, 'path');
+      const pts = [];
+      for (let i = 0; i < 16; i++) { const r = (i % 2 ? 7 : 14) * s, ang = i * Math.PI / 8; pts.push((Math.cos(ang) * r).toFixed(1) + ' ' + (Math.sin(ang) * r).toFixed(1)); }
+      star.setAttribute('d', 'M' + pts.join(' L') + ' Z');
+      star.setAttribute('class', 'war-clash-burst');
+      g.appendChild(star);
+      const x = document.createElementNS(NS, 'path');
+      x.setAttribute('d', `M${-6 * s},${-6 * s} L${6 * s},${6 * s} M${6 * s},${-6 * s} L${-6 * s},${6 * s}`);
+      x.setAttribute('class', 'war-clash-x');
+      g.appendChild(x);
+      const t = document.createElementNS(NS, 'title');
+      t.textContent = `Engagement — ${c.n} unit pair${c.n === 1 ? '' : 's'} in contact`;
+      g.appendChild(t);
     }
   },
 
-  // NATO-ish rectangle markers, one per live unit. Position is animated by
-  // the shared rAF loop (ensureLoop) — here we only decide the tween's `from`
-  // (the last known interpolated position, so a mid-tween re-render never
-  // snaps backward) and `to` (this sync's authoritative server position).
-  // Commandable-side live markers are also the CLICK TARGETS for select /
-  // shift-toggle (the group is the hitbox, so in fixed-world mode the hitbox
-  // equals the visual symbol exactly); enemy and dead units get no handlers.
   // Refugee-column fade: opacity as a pure function of the predicted tick
   // clock (fade in over ~1.5 ticks after spawn; fade out over the engine's
-  // REFUGEE_FADE_TICKS window after arrival or annihilation) — recomputed
-  // per frame in ensureLoop, so it's smooth regardless of render cadence and
-  // survives the war layer's per-render DOM rebuild without extra state.
+  // REFUGEE_FADE_TICKS window after arrival or annihilation).
   _refOpacity(war, r) {
     const interval = Math.max(200, (war.tickMs || 2000) / (war.speed || 1));
     const frac = Math.max(0, Math.min(1, (Date.now() - (war._lastTick || Date.now())) / interval));
@@ -1194,16 +1460,10 @@ const War = {
     if (endTick != null) o = Math.min(o, Math.max(0, 1 - (tickF - endTick) / Math.max(1, fadeTicks - 1)));
     return Math.max(0, Math.min(0.92, o));
   },
-  // Refugee columns (Phase 28) — civilian flight made visible: one small
-  // neutral marker per war.refugees entry, walking from its emptying province
-  // toward shelter (the engine's stepRefugees moves them; the authority layer
-  // settles their population on arrival). Clickable — the unit info card
-  // shows the head count and route — but never selectable or commandable,
-  // and there is deliberately NO player order that targets them: they die
-  // only to the engine's airstrike falloff and crossfire. Perf: a capped
-  // array (REFUGEE_MAX, 24) drawn as one <g> each, tweened via the existing
-  // rAF loop — no combat rosters, no O(n²) passes.
-  renderRefugees(map, mk, NS, war) {
+  // Refugee columns (Phase 28) — civilian flight made visible: a small
+  // neutral marker per war.refugees entry walking toward shelter. Clickable
+  // for the info card, never commandable. A capped array (REFUGEE_MAX).
+  renderRefugees(map, mk, NS, war, parent) {
     const list = war.refugees;
     const liveIds = new Set();
     if (Array.isArray(list) && list.length) {
@@ -1219,36 +1479,32 @@ const War = {
         g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
         g.style.opacity = String(this._refOpacity(war, r));
         const box = document.createElementNS(NS, 'rect');
-        box.setAttribute('x', -16); box.setAttribute('y', -10); box.setAttribute('width', 32); box.setAttribute('height', 20);
-        box.setAttribute('rx', 9);
+        box.setAttribute('x', -15); box.setAttribute('y', -8); box.setAttribute('width', 30); box.setAttribute('height', 16);
+        box.setAttribute('rx', 8);
         box.setAttribute('class', 'war-refugee-box');
         g.appendChild(box);
-        const glyph = document.createElementNS(NS, 'text');
-        glyph.setAttribute('class', 'war-refugee-glyph');
-        glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 4);
-        glyph.textContent = '☷';
-        g.appendChild(glyph);
+        // three walking figures (dots) — no emoji, cheap to paint
+        const figs = document.createElementNS(NS, 'path');
+        figs.setAttribute('d', 'M-7,-1 a2,2 0 1 0 0.01,0 M0,-1 a2,2 0 1 0 0.01,0 M7,-1 a2,2 0 1 0 0.01,0 M-9,4 h4 M-2,4 h4 M5,4 h4');
+        figs.setAttribute('class', 'war-refugee-figs');
+        g.appendChild(figs);
         const label = document.createElementNS(NS, 'text');
         label.setAttribute('class', 'war-refugee-count');
-        label.setAttribute('text-anchor', 'middle'); label.setAttribute('y', 20);
+        label.setAttribute('text-anchor', 'middle'); label.setAttribute('y', 18);
         const n = Math.max(0, Math.round(r.count || 0));
         label.textContent = '≈' + (n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n));
         g.appendChild(label);
         const title = document.createElementNS(NS, 'title');
         title.textContent = `Refugee column — ≈${n.toLocaleString('en-US')} civilians fleeing ${r.fromName || r.from} for ${r.toName || r.to}`;
         g.appendChild(title);
-        // Left-click inspects — pointerup only (same rationale as enemy-unit
-        // inspection: a left-drag starting over the marker still pans), and
-        // it falls through while a bomb/spawn placement is armed so the armed
-        // click lands on the map point underneath.
         g.addEventListener('pointerup', (e) => {
-          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+          if (e.button !== 0 || this._bombArmed || this._spawnArmed || GameMap.lastDragMoved) return;
           e.stopPropagation();
           this._inspectRef = r.id;
           this._inspect = null;
-          if (GameMap.render) GameMap.render();
+          this.refreshLayer(true);
         });
-        map.warLayer.appendChild(g);
+        parent.appendChild(g);
         if (sameLeg) { prevAnim.node = g; prevAnim.r = r; prevAnim.war = war; }
         else this._refAnim[r.id] = { from: from.slice(), to: r.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g, r, war };
       }
@@ -1257,11 +1513,17 @@ const War = {
     if (this._inspectRef && !liveIds.has(this._inspectRef)) this._inspectRef = null;
   },
 
+  /* ---------- units (keyed, patched in place) ----------
+     NATO-style symbols: a light-filled frame in the side's colour (land
+     units a rectangle, naval units a rounded hull frame), the branch symbol
+     drawn in ink inside it (infantry ✕, armour track, marines ✕ + waves,
+     garrison ✕ + bastion, police shield, crowd flag…), the size marker above
+     (I/II/III/X/XX from the unit's establishment strength), and a strength
+     bar + thin morale bar below. Name labels appear once you zoom in. */
+  _ukey(war, u) { return this.docKeyOf(war) + ':' + u.id; },
   // Protestors march under the organizing entity's own flag: whenever the
-  // organizer ships a logo (party/company/nation), crowd markers and unit
-  // cards show that emblem instead of the generic protest glyph — falling
-  // back to '⚒' for persons/orgs without one. Dead protestors keep the
-  // emblem too; the corpse styling's grayscale filter takes the colour out.
+  // organizer ships a logo (party/company/nation), crowd markers show that
+  // emblem instead of the generic crowd symbol.
   _protestorFlag(war, u) {
     if (!u || u.kind !== 'protestor' || u.state === 'transport') return null;
     const orgId = war && war.protest && war.protest.organizerId;
@@ -1269,251 +1531,189 @@ const War = {
     const ent = S() && S().entities && S().entities.find(e => e.id === orgId);
     return (ent && ent.logo) || null;
   },
-  _appendUnitEmblem(NS, g, war, u, glyphText) {
-    const flag = this._protestorFlag(war, u);
-    if (flag) {
-      const img = document.createElementNS(NS, 'image');
-      img.setAttribute('class', 'war-unit-flag');
-      img.setAttribute('href', flag);
-      img.setAttribute('x', -10); img.setAttribute('y', -10);
-      img.setAttribute('width', 20); img.setAttribute('height', 20);
-      g.appendChild(img);
-    } else {
-      const glyph = document.createElementNS(NS, 'text');
-      glyph.setAttribute('class', 'war-unit-glyph');
-      glyph.setAttribute('text-anchor', 'middle'); glyph.setAttribute('y', 5);
-      glyph.textContent = glyphText;
-      g.appendChild(glyph);
-    }
+  _echelon(u) {
+    const s = u.maxStrength || u.strength || 0;
+    return s >= 8000 ? 'XX' : s >= 3000 ? 'X' : s >= 1200 ? 'III' : s >= 400 ? 'II' : 'I';
   },
-  renderUnits(map, mk, NS, war) {
-    const liveIds = new Set();
-    const seenIds = new Set(); // every unit id this pass, dead or alive — drives _lastStrength/_hitAt pruning
+  _symbol(u) {
+    const naval = u.kind === 'boat' || u.kind === 'warship';
+    const afloat = u.state === 'transport';
+    const frame = (naval || afloat)
+      ? 'M-16,-6 Q-16,-11 -11,-11 H11 Q16,-11 16,-6 V3 Q16,11 0,11 Q-16,11 -16,3 Z'
+      : 'M-17,-11 H17 V11 H-17 Z';
+    const X = 'M-17,-11 L17,11 M17,-11 L-17,11';
+    const sym = {
+      infantry: X,
+      armored: 'M-9,-5 H9 A5,5 0 0 1 9,5 H-9 A5,5 0 0 1 -9,-5 Z',
+      marine: X + ' M-12,7 q3,-3 6,0 t6,0 t6,0 t6,0',
+      garrison: X + ' M-6,-6 H6 V6 H-6 Z',
+      reserve: X + ' M0,-11 V11',
+      boat: 'M-9,1 H9 L5,6 H-5 Z M0,1 V-7 L5,-2',
+      warship: 'M-11,1 H11 L7,6 H-7 Z M-4,1 V-4 H4 V1 M4,-2 H10',
+      protestor: 'M-6,7 V-8 L7,-4 L-6,0 M-11,7 H11',
+      police: 'M0,-8 L7,-5 V0 Q7,6 0,9 Q-7,6 -7,0 V-5 Z'
+    }[u.kind] || X;
+    return { frame, sym: afloat ? 'M-9,1 H9 L5,6 H-5 Z M0,1 V-7 L5,-2' : sym, naval: naval || afloat };
+  },
+  _bindUnitEvents(layer) {
+    const hit = (e) => {
+      const n = e.target.closest && e.target.closest('[data-wu]');
+      if (!n) return null;
+      const rec = this._unitNodes.get(n.getAttribute('data-wu'));
+      return rec ? rec : null;
+    };
+    layer.addEventListener('pointerdown', (e) => {
+      const rec = hit(e);
+      if (!rec || e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+      if (rec.own) e.stopPropagation(); // never start a pan under a click on your own unit
+    });
+    layer.addEventListener('pointerup', (e) => {
+      const rec = hit(e);
+      if (!rec || e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+      if (!rec.own && GameMap.lastDragMoved) return; // the press over an enemy became a pan
+      e.stopPropagation();
+      if (rec.own) { this.onUnitClick(rec.unitId, e); return; }
+      if (rec.enemy) {
+        // tap-orders: with a selection, a tap on an enemy is an attack order
+        if (this._tapOrders && this._sel.size && this.commandable()) { this._issueAttack(rec.unitId); return; }
+        this._inspect = rec.unitId; this._inspectRef = null;
+        this.refreshLayer(true);
+      }
+    });
+  },
+  renderUnits(map, NS, war, D, key, seen) {
+    this._unitNodes = this._unitNodes || new Map();
     const cmdSide = this.commandableSide(war);
     const canCommand = this.commandable(war);
+    const isActiveDoc = this.activeAuth() && this.docKeyOf(this.activeAuth()) === key;
     const scaleNow = warMarkerScale(map.view ? map.view.k : 1);
-    // Task 5: units currently being chased (attackId points at them) get a
-    // pulsing red ring, regardless of which side is doing the chasing.
-    const attackTargets = new Set();
-    for (const a of war.units) {
-      if (a.attackId && !(a.dead || a.state === 'dead') && a.strength > 0) attackTargets.add(a.attackId);
-    }
+    const now = Date.now();
+    const flagOf = (u) => this._protestorFlag(war, u);
     for (const u of war.units) {
-      seenIds.add(u.id);
       const isDead = u.dead || u.state === 'dead';
-      const clickable = canCommand && !isDead && u.side === cmdSide;
-      // Task 4: enemy LIVE markers become inspectable (own-side units already
-      // select via `clickable` above) — crosshair cursor doubles as the
-      // attack-targeting affordance once a friendly selection exists.
-      const inspectable = !isDead && u.side !== cmdSide;
-      const g = document.createElementNS(NS, 'g');
-      g.setAttribute('class', `war-unit war-side-${u.side} war-state-${u.state}` +
-        (isDead ? ' war-unit-dead' : '') + (this._sel.has(u.id) ? ' war-unit-sel' : '') +
-        (clickable ? ' war-unit-cmd' : '') + (u.nationId ? ' war-unit-ally' : '') +
-        (inspectable ? ' war-unit-inspect' + (this._sel.size > 0 ? ' war-attackable' : '') : '') +
-        (!isDead && u.supplied === false ? ' war-unit-cutoff' : ''));
-      g.setAttribute('data-warunit', u.id);
-      if (clickable) {
-        // Left-click selects / shift-toggles. Propagation is stopped on BOTH
-        // pointerdown (so the map never starts pan bookkeeping under the
-        // click) and pointerup (so the svg-level empty-ground deselect never
-        // fires); the actual selection happens on pointerup, after which the
-        // re-render can safely tear the node down. Right-clicks fall through
-        // to the svg (a move order may target a friendly's position), and an
-        // ARMED BOMB or ARMED SPAWN click also falls through so it lands on
-        // the map point rather than selecting the unit underneath it.
-        g.addEventListener('pointerdown', (e) => {
-          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
-          e.stopPropagation();
-        });
-        g.addEventListener('pointerup', (e) => {
-          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
-          e.stopPropagation();
-          this.onUnitClick(u.id, e);
-        });
-      } else if (inspectable) {
-        // Task 4: enemy inspection — mirrors the own-unit listener pattern,
-        // but LEFT-BUTTON ONLY and deliberately no pointerdown handler at all
-        // (unlike the own-unit case above) so a plain left-drag starting over
-        // an enemy marker still pans the map normally; only pointerup (a
-        // motionless click) is intercepted, and only enough to stop it
-        // reaching the svg-level empty-ground deselect.
-        g.addEventListener('pointerup', (e) => {
-          if (e.button !== 0 || this._bombArmed || this._spawnArmed) return;
-          e.stopPropagation();
-          this._inspect = u.id;
-          if (GameMap.render) GameMap.render();
-        });
-      }
-
-      if (isDead) {
-        // Corpses don't tween and aren't kept in the anim registry — they
-        // just sit where they fell, at reduced opacity, no HP bar, no ring.
-        // They still take the current marker scale so they don't vanish at
-        // low zoom (static — corpses don't need per-frame rescaling).
-        g.setAttribute('transform', `translate(${u.pos[0]},${u.pos[1]}) scale(${scaleNow})`);
-        const box = document.createElementNS(NS, 'rect');
-        box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
-        box.setAttribute('class', 'war-unit-box');
-        g.appendChild(box);
-        this._appendUnitEmblem(NS, g, war, u, WAR_KIND_GLYPH[u.kind] || '?');
+      // corpses fade from the map after a while (the record keeps them)
+      if (isDead && (war.tick - (u.deadAt || war.tick)) > 60) continue;
+      const k = this._ukey(war, u);
+      seen.add(k);
+      let rec = this._unitNodes.get(k);
+      if (!rec) {
+        const g = document.createElementNS(NS, 'g');
+        g.setAttribute('data-wu', k);
+        const inner = document.createElementNS(NS, 'g');
+        inner.setAttribute('class', 'wu-inner');
+        const ring = document.createElementNS(NS, 'circle'); ring.setAttribute('r', 25); ring.setAttribute('class', 'wu-ring');
+        const frame = document.createElementNS(NS, 'path'); frame.setAttribute('class', 'wu-frame');
+        const sym = document.createElementNS(NS, 'path'); sym.setAttribute('class', 'wu-sym');
+        const ech = document.createElementNS(NS, 'text'); ech.setAttribute('class', 'wu-ech'); ech.setAttribute('y', -14); ech.setAttribute('text-anchor', 'middle');
+        const cut = document.createElementNS(NS, 'path'); cut.setAttribute('class', 'wu-cut'); cut.setAttribute('d', 'M17,-17 l6,10 h-12 z');
+        const hpBg = document.createElementNS(NS, 'rect'); hpBg.setAttribute('class', 'wu-bar-bg'); hpBg.setAttribute('x', -17); hpBg.setAttribute('y', 13); hpBg.setAttribute('width', 34); hpBg.setAttribute('height', 6);
+        const hp = document.createElementNS(NS, 'rect'); hp.setAttribute('class', 'wu-hp'); hp.setAttribute('x', -17); hp.setAttribute('y', 13); hp.setAttribute('height', 3.5);
+        const org = document.createElementNS(NS, 'rect'); org.setAttribute('class', 'wu-org'); org.setAttribute('x', -17); org.setAttribute('y', 17); org.setAttribute('height', 2);
+        const label = document.createElementNS(NS, 'text'); label.setAttribute('class', 'wu-label'); label.setAttribute('y', 30); label.setAttribute('text-anchor', 'middle');
         const title = document.createElementNS(NS, 'title');
-        title.textContent = `${u.name} — destroyed`;
-        g.appendChild(title);
-        map.warLayer.appendChild(g);
-        delete this._anim[u.id];
+        inner.appendChild(frame); inner.appendChild(sym); inner.appendChild(ech);
+        g.appendChild(ring); g.appendChild(inner); g.appendChild(cut); g.appendChild(hpBg); g.appendChild(hp); g.appendChild(org); g.appendChild(label); g.appendChild(title);
+        rec = { g, inner, frame, sym, ech, hp, org, label, title, img: null, v: {} };
+        this._unitNodes.set(k, rec);
+      }
+      if (rec.g.parentNode !== D.units) D.units.appendChild(rec.g);
+      const v = rec.v;
+      rec.unitId = u.id;
+      rec.own = isActiveDoc && canCommand && !isDead && u.side === cmdSide;
+      rec.enemy = isActiveDoc && !isDead && u.side !== cmdSide;
+      // shape: kind/state-dependent frame + symbol (or the organiser's flag)
+      const flag = !isDead && flagOf(u);
+      const shapeSig = u.kind + '|' + (u.state === 'transport') + '|' + (flag || '') + '|' + this._echelon(u) + '|' + isDead;
+      if (v.shape !== shapeSig) {
+        v.shape = shapeSig;
+        const s = this._symbol(u);
+        rec.frame.setAttribute('d', s.frame);
+        rec.sym.setAttribute('d', isDead ? 'M-11,-7 L11,7 M11,-7 L-11,7' : s.sym);
+        rec.ech.textContent = isDead ? '' : this._echelon(u);
+        if (rec.img) { rec.img.remove(); rec.img = null; }
+        if (flag) {
+          rec.img = document.createElementNS(NS, 'image');
+          rec.img.setAttribute('class', 'wu-flag');
+          rec.img.setAttribute('href', flag);
+          rec.img.setAttribute('x', -9); rec.img.setAttribute('y', -9); rec.img.setAttribute('width', 18); rec.img.setAttribute('height', 18);
+          rec.inner.appendChild(rec.img);
+          rec.sym.setAttribute('d', '');
+        }
+      }
+      // state classes
+      const fighting = u.state === 'fighting';
+      const cls = 'wu wu-' + u.side +
+        (isDead ? ' wu-dead' : '') + (this._sel.has(u.id) && isActiveDoc ? ' wu-sel' : '') +
+        (rec.own ? ' wu-cmd' : '') + (rec.enemy ? ' wu-inspect' + (this._sel.size ? ' wu-attackable' : '') : '') +
+        (u.nationId ? ' wu-ally' : '') + (fighting ? ' wu-fight' : '') + (u.state === 'routed' ? ' wu-routed' : '') +
+        (!isDead && u.supplied === false ? ' wu-cutoff' : '') + (this._inspect === u.id && isActiveDoc ? ' wu-inspected' : '');
+      if (v.cls !== cls) { v.cls = cls; rec.g.setAttribute('class', cls); }
+      // bars
+      const pct = isDead ? 0 : Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
+      const hpW = Math.round(pct * 34 * 2) / 2;
+      if (v.hpW !== hpW) { v.hpW = hpW; rec.hp.setAttribute('width', hpW); }
+      const hpCls = 'wu-hp ' + (pct > 0.6 ? 'wu-hp-ok' : pct > 0.3 ? 'wu-hp-mid' : 'wu-hp-low');
+      if (v.hpCls !== hpCls) { v.hpCls = hpCls; rec.hp.setAttribute('class', hpCls); }
+      const orgPct = Math.max(0, Math.min(100, typeof u.org === 'number' ? u.org : 100));
+      const orgW = isDead ? 0 : Math.round(orgPct * 0.34 * 2) / 2;
+      if (v.orgW !== orgW) { v.orgW = orgW; rec.org.setAttribute('width', orgW); rec.org.setAttribute('class', 'wu-org' + (orgPct < WAR_ROUT_ORG ? ' wu-org-low' : '')); }
+      if (v.name !== u.name) { v.name = u.name; rec.label.textContent = u.name.length > 26 ? u.name.slice(0, 25) + '…' : u.name; }
+      const tip = isDead ? `${u.name} — destroyed`
+        : `${u.name} — ${Math.round(u.strength).toLocaleString('en-US')}/${(u.maxStrength || 0).toLocaleString('en-US')} · ${u.state} · morale ${Math.round(orgPct)}%` +
+          (u.nationId ? ` · ${entName(u.nationId)} contingent` : '') + (u.supplied === false ? ' · CUT OFF' : '');
+      if (v.tip !== tip) { v.tip = tip; rec.title.textContent = tip; }
+      // damage feedback: a drop in strength plays a one-shot jolt
+      const prevStrength = this._lastStrength[k];
+      if (!isDead && prevStrength !== undefined && u.strength < prevStrength - 0.001) {
+        this._hitAt[k] = now;
+        // alternate between two identical animations so a fresh hit restarts
+        // the jolt without forcing a synchronous layout of the whole map
+        rec.hitAlt = !rec.hitAlt;
+        rec.inner.classList.remove('wu-hit', 'wu-hit2');
+        rec.inner.classList.add(rec.hitAlt ? 'wu-hit2' : 'wu-hit');
+        clearTimeout(rec.hitTimer);
+        rec.hitTimer = setTimeout(() => rec.inner.classList.remove('wu-hit', 'wu-hit2'), WAR_HIT_FX_MS);
+      }
+      this._lastStrength[k] = u.strength;
+      // position: corpses stay put; the living glide (tweened by the loop)
+      if (isDead) {
+        delete this._anim[k];
+        const tf = `translate(${u.pos[0].toFixed(1)},${u.pos[1].toFixed(1)}) scale(${scaleNow})`;
+        if (v.tf !== tf) { v.tf = tf; rec.g.setAttribute('transform', tf); }
         continue;
       }
-
-      // Feature: unit damage feedback — compare this pass's strength against
-      // the last one seen for this unit; a drop (from combat OR an airstrike)
-      // stamps _hitAt, which drives the war-unit-hit jitter/flash below for
-      // ~WAR_HIT_FX_MS. Read over the PREDICTED war, same as everything else
-      // this method reads, so the flash fires the instant a local tick
-      // predicts the hit, not only after the next server snapshot.
-      const prevStrength = this._lastStrength[u.id];
-      if (prevStrength !== undefined && u.strength < prevStrength - 0.001) this._hitAt[u.id] = Date.now();
-      this._lastStrength[u.id] = u.strength;
-      const hitAge = Date.now() - (this._hitAt[u.id] || -1e9);
-      const isHit = hitAge < WAR_HIT_FX_MS;
-
-      liveIds.add(u.id);
-      const prevAnim = this._anim[u.id];
-      // If the unit's target hasn't changed since the last render (a war-layer
-      // refresh mid-leg — heartbeat rebase, selection change, toolbar render),
-      // KEEP the in-flight leg and just rebind the fresh node: recreating the
-      // leg from curPos restarted the motion clock and made units crawl-and-
-      // freeze instead of gliding. A new target starts a new linear leg.
-      const sameLeg = prevAnim && prevAnim.to &&
-        Math.abs(prevAnim.to[0] - u.pos[0]) < 0.5 && Math.abs(prevAnim.to[1] - u.pos[1]) < 0.5;
-      const from = prevAnim ? (prevAnim.curPos || prevAnim.to) : u.pos;
-      // NB: this outer <g>'s transform is rewritten every rAF frame by
-      // ensureLoop — the hit jitter/flash below deliberately lives on an
-      // INNER <g> instead (see war-unit-inner), never here.
-      g.setAttribute('transform', `translate(${from[0]},${from[1]}) scale(${scaleNow})`);
-
-      if (u.state === 'fighting') {
-        const ring = document.createElementNS(NS, 'circle');
-        ring.setAttribute('r', 30); ring.setAttribute('class', 'war-fight-ring');
-        g.appendChild(ring);
-        // Optional tasteful flourish: a couple of small blinking muzzle ticks
-        // while actively engaged, beyond the existing pulsing fight ring.
-        const muzzle = document.createElementNS(NS, 'g');
-        muzzle.setAttribute('class', 'war-muzzle');
-        muzzle.setAttribute('transform', 'translate(15,-6)');
-        const tick1 = document.createElementNS(NS, 'line');
-        tick1.setAttribute('x1', 0); tick1.setAttribute('y1', 0); tick1.setAttribute('x2', 7); tick1.setAttribute('y2', -3);
-        tick1.setAttribute('class', 'war-muzzle-tick');
-        muzzle.appendChild(tick1);
-        const tick2 = document.createElementNS(NS, 'line');
-        tick2.setAttribute('x1', 0); tick2.setAttribute('y1', 0); tick2.setAttribute('x2', 6); tick2.setAttribute('y2', 4);
-        tick2.setAttribute('class', 'war-muzzle-tick');
-        muzzle.appendChild(tick2);
-        g.appendChild(muzzle);
-      }
-      if (attackTargets.has(u.id)) {
-        const aRing = document.createElementNS(NS, 'circle');
-        aRing.setAttribute('r', 34); aRing.setAttribute('class', 'war-attack-ring');
-        g.appendChild(aRing);
-      }
-      if (this._sel.has(u.id)) {
-        const selRing = document.createElementNS(NS, 'circle');
-        selRing.setAttribute('r', 30); selRing.setAttribute('class', 'war-sel-ring');
-        g.appendChild(selRing);
-      }
-
-      // Feature: unit damage feedback — box+glyph live inside an inner <g> so
-      // the war-unit-hit jitter (a CSS transform animation) never fights the
-      // outer group's JS-driven translate/scale attribute (rewritten by
-      // ensureLoop every frame).
-      const inner = document.createElementNS(NS, 'g');
-      inner.setAttribute('class', 'war-unit-inner' + (isHit ? ' war-unit-hit' : ''));
-      g.appendChild(inner);
-      const box = document.createElementNS(NS, 'rect');
-      box.setAttribute('x', -20); box.setAttribute('y', -14); box.setAttribute('width', 40); box.setAttribute('height', 28);
-      box.setAttribute('class', 'war-unit-box');
-      inner.appendChild(box);
-      if (isHit) {
-        const flash = document.createElementNS(NS, 'rect');
-        flash.setAttribute('x', -20); flash.setAttribute('y', -14); flash.setAttribute('width', 40); flash.setAttribute('height', 28);
-        flash.setAttribute('class', 'war-hit-flash');
-        inner.appendChild(flash);
-      }
-      // Transport ships & Boats feature: a land unit currently in 'transport'
-      // state (drifting/stranded over water — see war-engine.js's
-      // stepTransportState) draws the small transport-ship glyph instead of
-      // its normal kind glyph, regardless of kind — it's the SAME unit, just
-      // temporarily afloat.
-      this._appendUnitEmblem(NS, inner, war, u, u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?'));
-
-      // Task 6: supply cut-off glyph, top-right corner of the symbol.
-      if (u.supplied === false) {
-        const warn = document.createElementNS(NS, 'text');
-        warn.setAttribute('x', 15); warn.setAttribute('y', -11);
-        warn.setAttribute('class', 'war-unit-cutoff-glyph');
-        warn.textContent = '⚠';
-        g.appendChild(warn);
-      }
-
-      // Task 3: morale bar, above the HP bar (HP sits at y=-22 h4).
-      const org = typeof u.org === 'number' ? u.org : 100;
-      const orgPct = Math.max(0, Math.min(100, org));
-      const routed = u.state === 'routed';
-      const moraleBg = document.createElementNS(NS, 'rect');
-      moraleBg.setAttribute('x', -20); moraleBg.setAttribute('y', -28); moraleBg.setAttribute('width', 40); moraleBg.setAttribute('height', 3);
-      moraleBg.setAttribute('class', 'war-morale-bg');
-      g.appendChild(moraleBg);
-      const moraleFill = document.createElementNS(NS, 'rect');
-      moraleFill.setAttribute('x', -20); moraleFill.setAttribute('y', -28); moraleFill.setAttribute('width', 40 * orgPct / 100); moraleFill.setAttribute('height', 3);
-      moraleFill.setAttribute('class', 'war-morale-fill' + (orgPct < WAR_ROUT_ORG ? ' war-morale-danger' : '') + (routed ? ' war-morale-pulse' : ''));
-      g.appendChild(moraleFill);
-
-      const pct = Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
-      const hpBg = document.createElementNS(NS, 'rect');
-      hpBg.setAttribute('x', -20); hpBg.setAttribute('y', -22); hpBg.setAttribute('width', 40); hpBg.setAttribute('height', 4);
-      hpBg.setAttribute('class', 'war-hp-bg');
-      g.appendChild(hpBg);
-      const hpFill = document.createElementNS(NS, 'rect');
-      hpFill.setAttribute('x', -20); hpFill.setAttribute('y', -22); hpFill.setAttribute('width', 40 * pct); hpFill.setAttribute('height', 4);
-      hpFill.setAttribute('class', 'war-hp-fill');
-      g.appendChild(hpFill);
-      const title = document.createElementNS(NS, 'title');
-      title.textContent = `${u.name} — ${Math.round(u.strength)}/${u.maxStrength} · ${u.state} · Morale ${Math.round(orgPct)}%` +
-        (u.nationId ? ` · ${entName(u.nationId)} contingent` : '') +
-        (u.supplied === false ? ' · CUT OFF' : '');
-      g.appendChild(title);
-      map.warLayer.appendChild(g);
-
-      if (sameLeg) { prevAnim.node = g; }
-      else this._anim[u.id] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: this._tweenMs(), curPos: from.slice(), node: g };
+      const prev = this._anim[k];
+      const sameLeg = prev && prev.to && Math.abs(prev.to[0] - u.pos[0]) < 0.5 && Math.abs(prev.to[1] - u.pos[1]) < 0.5;
+      if (sameLeg) { prev.node = rec.g; continue; }
+      const from = prev ? (prev.curPos || prev.to) : u.pos;
+      if (!prev) rec.g.setAttribute('transform', `translate(${from[0].toFixed(1)},${from[1].toFixed(1)}) scale(${scaleNow})`);
+      this._anim[k] = { from: from.slice(), to: u.pos.slice(), t0: performance.now(), dur: prev ? this._tweenMs() : 1, curPos: from.slice(), node: rec.g, settled: false };
     }
-    for (const id in this._anim) if (!liveIds.has(id)) delete this._anim[id];
-    for (const id in this._lastStrength) if (!seenIds.has(id)) { delete this._lastStrength[id]; delete this._hitAt[id]; }
+    for (const id in this._lastStrength) if (id.startsWith(key + ':') && !seen.has(id)) { delete this._lastStrength[id]; delete this._hitAt[id]; }
   },
 
   renderFlashes(map, mk, NS, war) {
     const now = Date.now();
     let i = 0;
+    const parent = this._fx || map.warLayer;
     for (const ev of (war.events || [])) {
       i++;
       if (!ev.pos) continue;
-      // 'battle' events (unit destroyed, routs, strike impacts) fire far too
-      // often mid-war for a ring each — units already show fight rings,
-      // muzzle ticks and hit feedback, so the red flash circles were pure
-      // noise and are dropped. Rarer kinds (capture/landing/milestone) keep
-      // their flash.
+      // 'battle' events fire constantly mid-war — the clash markers carry
+      // them; only rarer kinds (capture/landing/milestone) flash.
       if (ev.kind === 'battle') continue;
       const age = now - ev.t;
       if (age > 4000) continue;
       const c = document.createElementNS(NS, 'circle');
-      c.setAttribute('cx', ev.pos[0]); c.setAttribute('cy', ev.pos[1]); c.setAttribute('r', 30);
+      c.setAttribute('cx', ev.pos[0]); c.setAttribute('cy', ev.pos[1]); c.setAttribute('r', 34);
       c.setAttribute('class', 'war-flash war-flash-' + ev.kind);
+      c.setAttribute('vector-effect', 'non-scaling-stroke');
       c.style.opacity = String(1 - age / 4000);
       const title = document.createElementNS(NS, 'title'); title.textContent = ev.text;
       c.appendChild(title);
-      map.warLayer.appendChild(c);
+      parent.appendChild(c);
       const fid = ev.t + '_' + i;
-      this._flashAnim[fid] = { node: c, t0: now - age, life: 4000 };
+      this._flashAnim[fid] = { node: c, t0: performance.now() - age, life: 4000 };
     }
   },
 
@@ -1587,7 +1787,7 @@ const War = {
     body.setAttribute('d', 'M12,0 L-7,-7 L-2,0 L-7,7 Z');
     body.setAttribute('class', 'war-plane-body');
     g.appendChild(body);
-    map.warLayer.appendChild(g);
+    (this._fx || map.warLayer).appendChild(g);
     return g;
   },
   // One node per in-flight strike, recreated each render pass (the whole
@@ -1674,7 +1874,7 @@ const War = {
 
       if (!defs) {
         defs = document.createElementNS(NS, 'defs');
-        map.warLayer.appendChild(defs);
+        (this._fx || map.warLayer).appendChild(defs);
         // Shared by every simultaneous explosion — the reference effect has
         // no per-strike variance (every neal.fun impact looks the same), so
         // fixed ids are fine and per-strike turbulence seeds are gone.
@@ -1721,7 +1921,7 @@ const War = {
       core.setAttribute('fill', 'url(#war-nuke-core)');
       g.appendChild(core);
 
-      map.warLayer.appendChild(g);
+      (this._fx || map.warLayer).appendChild(g);
       const entry = { node: g, streak, bloom, ring, rim, core, t0, life: EXPLOSION_LIFE_MS, bombR };
       this._explosionAnim[id] = entry;
       this._updateExplosion(entry, age);
@@ -1770,247 +1970,328 @@ const War = {
     e.core.style.opacity = String(coreOp);
   },
 
-  /* ═══════════ WAR MAP TOOLBAR ═══════════
-     Small floating control surface, only present while W.layer === 'war'.
-     Rebuilt on every render (cheap — a handful of buttons); removed the
-     instant the layer changes so it never lingers over another layer. */
+  /* ═══════════ WAR MAP CONTROLS ═══════════
+     Three small floating surfaces, present only while W.layer === 'war':
+       · the toolbar (bottom) — one contextual hint line + the commands this
+         operator actually holds;
+       · the situation HUD (top-left) — what is happening, at a glance;
+       · the unit card (top-right) — the selected / inspected unit or group.
+     Each is rebuilt on the 1s UI timer ONLY when its content signature
+     changes (rebuilding every second used to swallow taps mid-press). */
+  _uiTimer() {
+    if (this._toolbarTimer) return;
+    this._toolbarTimer = setInterval(() => {
+      if (W.layer === 'war' && this.active() && document.getElementById('map-wrap')) { this.renderToolbar(); this.renderUnitCard(); this.renderHud(); }
+      else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); }
+    }, 1000);
+  },
   renderToolbar() {
-    const bar0 = document.getElementById('war-toolbar');
-    if (bar0 && bar0.parentNode) bar0.parentNode.removeChild(bar0);
+    const wrap = document.getElementById('map-wrap');
     const war = this.activeAuth();
-    if (!war) return;
+    if (!wrap || !war) { this._removeToolbar(); return; }
+    this._uiTimer();
     const key = this.docKeyOf(war);
-    const live = this.commandable(war); // false once the conflict has concluded
+    const live = this.commandable(war);
     const side = this.commandableSide(war);
-    // The air arm is the defence's alone, so its cooldown/stock always read
-    // from bombs.def — an airstrike-cleared operator need not command the
-    // defending ground units (a Military role over a protest, say).
-    const bomb = (war.bombs || {}).def || { cooldownUntil: 0 };
-    const now = Date.now();
-    const onCooldown = now < bomb.cooldownUntil;
-    const aircraftKnown = Number.isFinite(Number(bomb.aircraftRemaining));
-    const aircraftRemaining = aircraftKnown ? Math.max(0, Number(bomb.aircraftRemaining)) : null;
-    const noAircraft = aircraftKnown && aircraftRemaining <= 0;
-    // The predicted war (when available) gives a smoother countdown than the
-    // authoritative doc — same reasoning as every other tick-driven readout.
-    const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
     const protest = war.kind === 'protest';
     const ca = this.access(war);
-    const bar = el('div#war-toolbar.war-toolbar');
-    bar.appendChild(el('div.war-toolbar-hint', !live
-      ? 'This conflict has concluded — units can be reviewed but no longer commanded.'
-      : side
-        ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
-        : this.authorityText(war) + ' Click a unit to inspect it.'));
-    const row = el('div.btn-row');
-    // Both conflicts present → a switch, so commands/selection target the
-    // other one without leaving the map layer.
-    const other = this.authDocs().find(d => d !== war);
-    if (other) {
-      row.appendChild(el('div.chip' + (key === 'war' ? '.active' : ''), { onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚔ War'));
-      row.appendChild(el('div.chip' + (key === 'protest' ? '.active' : ''), { onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚒ Protest'));
-    }
-    // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
-    // /api/war/bomb route) and need the order_airstrikes clearance (Phase
-    // 36); in a protest the air wing stays grounded until force has been
-    // authorized. Only operators who could actually call one see the button.
+    // The air arm is the defence's alone (bombs.def), whoever orders it.
+    const bomb = (war.bombs || {}).def || { cooldownUntil: 0 };
+    const now = Date.now();
+    const cooldownS = Math.max(0, Math.ceil((bomb.cooldownUntil - now) / 1000));
+    const aircraftKnown = Number.isFinite(Number(bomb.aircraftRemaining));
+    const aircraft = aircraftKnown ? Math.max(0, Number(bomb.aircraftRemaining)) : null;
+    const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
     const grounded = protest && !(war.protest && war.protest.govViolent);
-    if (ca.air && side !== 'att') {
-      const bombBtn = el('button.dash-btn', {
-        class: (this._bombArmed ? 'active' : ''), disabled: (onCooldown || noAircraft || !live || grounded) ? 'disabled' : undefined,
-        title: grounded ? 'Force has not been authorized against the protest.' : undefined,
-        onclick: () => { if (!live || grounded) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-      }, (!live ? '✈ Call Airstrike' : grounded ? '✈ Grounded — force not authorized' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
-      row.appendChild(bombBtn);
-      if (aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' aircraft available'));
-    } else if (isGM() && side === 'att') {
-      row.appendChild(el('button.dash-btn', { disabled: 'disabled', title: 'The attacking side has no air arm.' }, '✈ No air arm'));
-    }
-    if (side === 'att' || !ca.air || grounded) this._bombArmed = false; // never leave an airstrike armed that the server would refuse
-    // Countdown chip for a pending (not-yet-landed) strike this side ordered —
-    // visible even after clicking away from the arming flow, since the plane
-    // is airborne for several seconds.
-    const pendingStrike = ca.air ? (predWar.airstrikes || []).find(s => !s.done && s.side === 'def') : null;
-    if (pendingStrike) {
-      const remainingTicks = Math.max(0, pendingStrike.strikeTick - this._continuousTick(predWar));
+    const canAir = ca.air && side !== 'att';
+    if (!canAir || grounded) this._bombArmed = false; // never leave an airstrike armed that the server would refuse
+    const pending = ca.air ? (predWar.airstrikes || []).find(s => !s.done && s.side === 'def') : null;
+    let inboundS = 0;
+    if (pending) {
       const interval = Math.max(200, (predWar.tickMs || 2000) / (predWar.speed || 1));
-      const remainingS = Math.ceil((remainingTicks * interval) / 1000);
-      row.appendChild(el('div.chip.active', `✈ Strike inbound — ${remainingS}s`));
+      inboundS = Math.ceil((Math.max(0, pending.strikeTick - this._continuousTick(predWar)) * interval) / 1000);
     }
-    row.appendChild(el('button.dash-btn', {
-      onclick: () => { this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; if (GameMap.render) GameMap.render(); }
-    }, 'Clear selection'));
-    // Protest toggles on the map command bar — the same side-gated controls
-    // as the War Room's Protest Control panel (server-enforced via
-    // cmdAccessOf on /api/protest/control), so operators never have to leave
-    // the battlefield to authorize force or seize districts. Only offered
-    // while the protest is live and the caller holds that side's access.
-    // Optimistic paint (same as the panel toggles): the flip lands in W.state
-    // the moment the click lands, so the toolbar's own 1s re-render loop can
-    // never show a stale state while the POST round-trips.
+    const other = this.authDocs().find(d => d !== war && d.active);
+    const p = war.protest || {};
+    const sig = [key, live, side, this._sel.size, this._bombArmed, this._spawnArmed, this._tapOrders, cooldownS, aircraft, inboundS, grounded,
+      !!other, isGM() && this._gmSide, p.protestorsViolent, p.captureMode, p.govViolent, JSON.stringify(ca)].join('|');
+    const old = document.getElementById('war-toolbar');
+    if (old && old.isConnected && this._toolbarSig === sig) return;
+    this._toolbarSig = sig;
+    if (old) old.remove();
+
+    const n = this._sel.size;
+    const hint = !live ? 'This conflict has concluded — the field can be reviewed but no longer commanded.'
+      : this._bombArmed ? '✈ Airstrike armed — click the target. Esc cancels.'
+        : this._spawnArmed ? '➕ Reinforcements armed — click where they should appear. Esc cancels.'
+          : !side ? this.authorityText(war) + ' Click a unit for details.'
+            : n ? `${n} unit${n === 1 ? '' : 's'} selected — ` + (this._tapOrders
+              ? 'tap ground to move · tap an enemy to attack · right-drag draws a route'
+              : 'right-click to move · right-click an enemy to attack · right-drag draws a route · Ctrl-drag a line')
+              : (this._tapOrders ? 'Tap your units to select them, or Select all.' : 'Click your units to select (Shift adds) · Shift-drag to box-select · or Select all.');
+    const bar = el('div#war-toolbar.war-toolbar');
+    bar.appendChild(el('div.war-toolbar-hint', hint));
+    const row = el('div.war-toolbar-row');
+    if (other) {
+      row.appendChild(el('div.seg',
+        el('button', { class: key === 'war' ? 'active' : '', onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.refreshLayer(true); } }, '⚔ War'),
+        el('button', { class: key === 'protest' ? 'active' : '', onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.refreshLayer(true); } }, '⚒ Protest')));
+    }
+    if (live && side) {
+      row.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._selectAll() }, 'Select all'));
+      if (n) row.appendChild(el('button.dash-btn.btn-xs', { onclick: () => { this._sel.clear(); this._inspect = null; this.refreshLayer(true); } }, `Clear (${n})`));
+      row.appendChild(el('button.dash-btn.btn-xs', {
+        class: this._tapOrders ? 'active' : '', title: 'Left-click / tap gives orders: ground = move, enemy = attack',
+        onclick: () => { this._tapOrders = !this._tapOrders; this.renderToolbar(); }
+      }, (this._tapOrders ? '✓ ' : '') + 'Tap orders'));
+    }
+    if (canAir) {
+      row.appendChild(el('button.btn-xs', {
+        class: (this._bombArmed ? 'solid-btn active' : 'dash-btn') + ' war-air-btn',
+        disabled: (cooldownS > 0 || (aircraftKnown && aircraft <= 0) || !live || grounded) ? 'disabled' : undefined,
+        title: grounded ? 'Force has not been authorized against the protest.' : 'Defence air wing',
+        onclick: () => { if (!live || grounded) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
+      }, grounded ? '✈ Grounded' : cooldownS > 0 ? `✈ Rearming ${cooldownS}s` : this._bombArmed ? '✈ Pick target…' : '✈ Airstrike' + (aircraftKnown ? ` · ${aircraft}` : '')));
+    }
+    if (pending) row.appendChild(el('span.chip.active', `✈ Inbound ${inboundS}s`));
     if (protest && live) {
-      const p = war.protest || {};
-      const flip = (prop) => (s) => {
-        const d = s && s[key]; // 'war'|'protest' — authoritative doc for the active conflict
-        if (d && d.protest) d.protest[prop] = !d.protest[prop];
-      };
+      const flip = (prop) => (s) => { const d = s && s[key]; if (d && d.protest) d.protest[prop] = !d.protest[prop]; };
+      const toggle = (prop, on, off, cls) => el('button.btn-xs', {
+        class: (p[prop] ? 'solid-btn active' : (cls || 'dash-btn')),
+        onclick: async () => {
+          try { await POST('/api/protest/control', { [prop]: !p[prop], conflict: key }, { optimistic: flip(prop) }); this.renderToolbar(); }
+          catch (e) { toast(e.message, true); }
+        }
+      }, p[prop] ? on : off);
       if (ca.attLead) {
-        row.appendChild(el('button.solid-btn', {
-          class: p.protestorsViolent ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); this.renderToolbar(); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Allow fighting'));
-        row.appendChild(el('button.dash-btn', {
-          class: p.captureMode ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); this.renderToolbar(); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.captureMode ? '⚑ Seizing territory' : '⚑ Seize territory'));
+        row.appendChild(toggle('protestorsViolent', '⚒ Crowds violent', '⚒ Allow fighting'));
+        row.appendChild(toggle('captureMode', '⚑ Seizing ground', '⚑ Seize ground'));
       }
-      if (ca.force) {
-        row.appendChild(el('button.danger-btn', {
-          class: p.govViolent ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); this.renderToolbar(); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
-      }
+      if (ca.force) row.appendChild(toggle('govViolent', '⛨ Force engaged', '⛨ Use force', 'danger-btn'));
     }
-    // GM unit spawner (Feature: mid-war reinforcements) — the "Arm placement"
-    // button lives in the War Room GM panel (renderSpawner), but the armed
-    // state and its cancel action surface here too since arming happens on
-    // one view and the placement click happens on the map layer.
-    if (isGM() && this._spawnArmed) {
-      row.appendChild(el('button.dash-btn.active', {
-        onclick: () => { this._spawnArmed = false; this.renderToolbar(); }
-      }, `🪖 Spawn armed (${this._spawnDraft.side === 'att' ? 'Att' : 'Def'}) — click target`));
-    }
+    if (isGM() && this._spawnArmed) row.appendChild(el('button.dash-btn.btn-xs.active', { onclick: () => { this._spawnArmed = false; this.renderToolbar(); } }, '➕ Placing — cancel'));
     if (isGM()) {
-      row.appendChild(el('button.dash-btn', {
-        class: this._gmSide === 'def' ? 'active' : '',
-        onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.renderToolbar(); }
-      }, protest ? 'Command: Government' : 'Command: Defender'));
-      row.appendChild(el('button.dash-btn', {
-        class: this._gmSide === 'att' ? 'active' : '',
-        onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.renderToolbar(); }
-      }, protest ? 'Command: Protestors' : 'Command: Attacker'));
+      row.appendChild(el('div.seg', { title: 'Which side your orders command' },
+        el('button', { class: this._gmSide === 'def' ? 'active' : '', onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Police' : 'Defence'),
+        el('button', { class: this._gmSide === 'att' ? 'active' : '', onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Crowds' : 'Invader')));
     }
+    row.appendChild(el('button.dash-btn.btn-xs', { title: 'How to command', onclick: () => this._helpModal() }, '?'));
     bar.appendChild(row);
-    const wrap = document.getElementById('map-wrap');
-    if (wrap) wrap.appendChild(bar);
-    // Re-render the toolbar (+ the unit info card, same lifecycle) periodically
-    // so the bomb cooldown / HP / morale / supply readouts stay live without
-    // waiting for the next server sync.
-    if (!this._toolbarTimer) {
-      this._toolbarTimer = setInterval(() => {
-        if (W.layer === 'war' && this.active()) { this.renderToolbar(); this.renderUnitCard(); }
-        else { this._removeToolbar(); this._removeUnitCard(); }
-      }, 1000);
-    }
+    wrap.appendChild(bar);
   },
   _removeToolbar() {
     const bar = document.getElementById('war-toolbar');
-    if (bar && bar.parentNode) bar.parentNode.removeChild(bar);
-    if (this._toolbarTimer) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
+    if (bar) bar.remove();
+    this._toolbarSig = null;
+    if (this._toolbarTimer && !(W.layer === 'war' && this.active())) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
+  },
+  _selectAll() {
+    const war = (window.WarEngine && this.activePred()) || this.activeAuth();
+    const side = this.commandableSide(war);
+    this._sel.clear();
+    for (const u of (war ? war.units : [])) if (u.side === side && !u.dead && u.state !== 'dead' && u.strength > 0) this._sel.add(u.id);
+    this._inspect = null; this._inspectRef = null;
+    this.refreshLayer(true);
+  },
+  _helpModal() {
+    const rows = [
+      ['Select', 'Click a unit (Shift adds) · Shift-drag a box · Select all'],
+      ['Move', 'Right-click the ground — or with Tap orders on, just click / tap it'],
+      ['Attack', 'Right-click (or tap) an enemy unit — your selection chases it'],
+      ['Route', 'Right-drag to draw the exact road your units should take'],
+      ['Line up', 'Ctrl-drag a line — the selection spreads out along it'],
+      ['Hold', 'Hold position on the unit card stops a unit where it stands'],
+      ['Airstrike', 'Defence only: ✈ Airstrike, then click the target'],
+      ['Cancel', 'Esc, or click open ground']
+    ];
+    openModal('COMMANDING YOUR FORCES', el('div',
+      el('table.data', el('tbody', rows.map(r => el('tr', el('td', el('b', r[0])), el('td', r[1]))))),
+      el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-top:10px;' }, 'Fights happen on contact: units that touch an enemy stop and fight until one side breaks. Units outside their supply corridor (⚠) slowly lose strength and morale.')),
+      [{ label: 'Close', cls: 'dash-btn', onClick: () => { } }]);
   },
 
-  // Task 4: floating unit info card — shown while exactly one unit is
-  // selected (own side) OR an enemy unit is under _inspect (no single
-  // selection active). Re-read the unit fresh from the predicted war each
-  // call so it reflects the latest HP/morale/supply, and so a unit that died
-  // since the card was opened degrades gracefully instead of showing stale
-  // stats. Same lifecycle as the toolbar: rebuilt on every war-layer render
-  // and on the toolbar's 1s timer, removed the instant the layer changes.
+  // ---- the situation HUD ----
+  _legendRows() {
+    const sw = (inner) => el('span.war-legend-sw', { html: `<svg viewBox="-20 -14 40 28" width="30" height="21">${inner}</svg>` });
+    return [
+      [sw('<path d="M-18,4 Q-6,-8 4,0 T18,-4" fill="none" stroke="#8c1f15" stroke-width="3"/><path d="M-18,4 Q-6,-8 4,0 T18,-4" fill="none" stroke="#8c1f15" stroke-width="8" stroke-dasharray="1.5 6"/>'), 'Front line'],
+      [sw('<rect x="-18" y="-11" width="36" height="22" fill="#9b2c22" fill-opacity=".3"/><path d="M-18,6 L-6,-11 M-10,11 L6,-11 M-2,11 L14,-11 M6,11 L18,-6" stroke="#9b2c22" stroke-opacity=".6" stroke-width="2.5"/>'), 'Occupied ground'],
+      [sw('<rect x="-15" y="-9" width="30" height="18" fill="#b8cee4" stroke="#1f3a5c" stroke-width="1.5"/><path d="M-15,-9 L15,9 M15,-9 L-15,9" stroke="#173050" stroke-width="1.3"/>'), 'Defence unit'],
+      [sw('<rect x="-15" y="-9" width="30" height="18" fill="#ebb5ac" stroke="#7a2418" stroke-width="1.5"/><path d="M-15,-9 L15,9 M15,-9 L-15,9" stroke="#5a1a10" stroke-width="1.3"/>'), 'Invading unit'],
+      [sw('<path d="M14,0 L7,3 L10,10 L3,6 L0,14 L-3,6 L-10,10 L-7,3 L-14,0 L-7,-3 L-10,-10 L-3,-6 L0,-14 L3,-6 L10,-10 L7,-3 Z" fill="#f6d27a" stroke="#8c1f15" stroke-width="1.2"/>'), 'Fighting'],
+      [sw('<circle r="9" fill="#f4ecdc" stroke="#8c1f15" stroke-width="2"/><text y="4" text-anchor="middle" font-size="11" font-weight="700" fill="#8c1f15">1</text>'), 'Objective'],
+      [sw('<path d="M-2,10 V-12" stroke="#3b2a20" stroke-width="2"/><path d="M-2,-12 h13 l-3,4.5 l3,4.5 h-13 z" fill="#9b2c22"/>'), 'Fallen city'],
+      [sw('<path d="M-3,-10 l9,16 h-18 z" fill="#e0a458" stroke="#7a5418"/>'), 'Cut off from supply']
+    ];
+  },
+  renderHud() {
+    const wrap = document.getElementById('map-wrap');
+    const auth = this.activeAuth() || this.authDocs()[0];
+    if (!wrap || !auth) { this._removeHud(); return; }
+    const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
+    const protest = war.kind === 'protest';
+    const st = war.stats || {};
+    const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
+    let attStr = 0, defStr = 0, attN = 0, defN = 0;
+    for (const u of war.units || []) if (live(u)) { if (u.side === 'att') { attStr += u.strength; attN++; } else { defStr += u.strength; defN++; } }
+    const control = Object.entries(st.provinceControl || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
+    const next = [...(war.objectives || [])].filter(o => o.status !== 'done').sort((a, b) => a.priority - b.priority)[0];
+    const evs = war.events || [];
+    const lastEv = [...evs].reverse().find(e => e.kind !== 'battle') || evs[evs.length - 1];
+    const open = W.warHudOpen !== undefined ? W.warHudOpen : window.innerWidth > 640;
+    const sig = [war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, fmtCompact(attStr), fmtCompact(defStr), attN, defN, control.join(), next && next.id, lastEv && lastEv.t,
+      fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar].join('|');
+    const old = document.getElementById('war-hud');
+    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : protest ? ((war.protest || {}).protestorsViolent ? 'VIOLENT' : 'PEACEFUL') : war.totalWar ? 'TOTAL WAR' : 'LIVE') + ' · T' + war.tick + (war.speed > 1 ? ' · ' + war.speed + '×' : '');
+    if (old && old.isConnected && this._hudSig === sig) {
+      const stEl = old.querySelector('.war-hud-status');
+      if (stEl && stEl.textContent !== statusText()) stEl.textContent = statusText();
+      return;
+    }
+    this._hudSig = sig;
+    if (old) old.remove();
+    const names = protest ? ['Crowds', 'Police'] : [entName(war.attackerId) || 'Invader', entName(war.defenderId) || 'Defence'];
+    const hud = el('div#war-hud.war-hud', { class: open ? '' : 'collapsed' });
+    hud.appendChild(el('div.war-hud-head', { onclick: () => { W.warHudOpen = !open; this.renderHud(); } },
+      el('span.war-hud-title', (protest ? '⚒ ' : '⚔ ') + war.name),
+      el('span.war-hud-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live' }, statusText()),
+      el('span.war-hud-caret', open ? '▾' : '▸')));
+    if (!open) { wrap.appendChild(hud); return; }
+    const row = (label, ...v) => el('div.war-hud-row', el('span.war-hud-k', label), el('span.war-hud-v', ...v));
+    // balance of forces: one bar, the two sides' live strength
+    const tot = attStr + defStr || 1;
+    hud.appendChild(row('Forces', el('div.war-balance',
+      el('div.war-balance-att', { style: `width:${(attStr / tot * 100).toFixed(1)}%` }),
+      el('div.war-balance-def', { style: `width:${(defStr / tot * 100).toFixed(1)}%` }))));
+    hud.appendChild(el('div.war-hud-sub', `${names[0]} ${fmtCompact(attStr)} (${attN}) · ${names[1]} ${fmtCompact(defStr)} (${defN})`));
+    hud.appendChild(row(protest ? 'Seized' : 'Occupied', control.length
+      ? control.slice(0, 3).map(([pid, v]) => `${(provById(pid) || {}).name || pid} ${v}%`).join(' · ')
+      : el('span', { style: 'color:var(--ink-faint)' }, protest ? 'no district seized' : 'no ground lost yet')));
+    hud.appendChild(row('Losses', `${names[0]} ${fmtCompact(st.attLosses || 0)} · ${names[1]} ${fmtCompact(st.defLosses || 0)}` + (st.civilianDeaths ? ` · civilians ${fmtCompact(st.civilianDeaths)}` : '')));
+    if (!protest) hud.appendChild(row('Next', next ? `${next.priority}. ${this.objLabel(next)} — ${this.objTarget(next)}` : (war.result ? '—' : 'all objectives achieved')));
+    if (war.result) hud.appendChild(row('Result', (war.result.reason || 'ended')));
+    if (lastEv) {
+      const ago = Math.max(0, Math.round((Date.now() - lastEv.t) / 1000));
+      hud.appendChild(row('Latest', el('span', lastEv.text, el('span.war-hud-ago', ago < 90 ? ` ${ago}s ago` : ` ${Math.round(ago / 60)}m ago`))));
+    }
+    hud.appendChild(el('div.war-hud-foot',
+      el('button.dash-btn.btn-xs', { onclick: () => { W.warLegend = !W.warLegend; this.renderHud(); } }, W.warLegend ? 'Hide legend' : 'Legend'),
+      el('button.dash-btn.btn-xs', { onclick: () => App.go('war') }, 'War Room →')));
+    if (W.warLegend) hud.appendChild(el('div.war-legend', this._legendRows().map(([sw, label]) => el('div.war-legend-row', sw, el('span', label)))));
+    wrap.appendChild(hud);
+  },
+  _removeHud() {
+    const h = document.getElementById('war-hud');
+    if (h) h.remove();
+    this._hudSig = null;
+  },
+
+  // ---- the unit card (selection / inspection) ----
   renderUnitCard() {
-    const old = document.getElementById('war-unit-card');
-    if (old && old.parentNode) old.parentNode.removeChild(old);
+    const wrap = document.getElementById('map-wrap');
     const war = (window.WarEngine && this.activePred()) || this.activeAuth();
-    if (!war) return;
-    // Refugee column under inspection — its own compact card (checked first:
-    // it's the most recent click; selecting a unit clears it again).
+    if (!wrap || !war) { this._removeUnitCard(); return; }
+    const old = document.getElementById('war-unit-card');
+    const shown = (id) => { const u = war.units.find(x => x.id === id); return u ? [Math.round(u.strength), Math.round(u.org || 0), u.state, u.supplied, u.dead, JSON.stringify(u.kit || ''), (u.inv || []).map(r => Math.round(r.qty)).join()].join(',') : 'gone'; };
+    const ids = this._sel.size ? [...this._sel] : [this._inspect];
+    const sigBase = [this._sel.size, ids.join(), this._inspect, this._inspectRef, this.commandable(), ids.map(shown).join(';'),
+      this._inspectRef ? JSON.stringify((war.refugees || []).find(x => x.id === this._inspectRef) || null) : ''].join('|');
+    if (old && old.isConnected && this._cardSig === sigBase) return;
+    this._cardSig = sigBase;
+    if (old) old.remove();
+    const card = el('div#war-unit-card.war-unit-card');
+    const bar = (label, pct, cls, text) => el('div.war-card-stat',
+      el('div.war-card-stat-head', el('span', label), el('span', text)),
+      el('div.war-card-bar', el('div.war-card-bar-fill', { class: cls || '', style: `width:${Math.round(Math.max(0, Math.min(1, pct)) * 100)}%` })));
+    // a refugee column under inspection
     if (this._inspectRef) {
       const r = (war.refugees || []).find(x => x.id === this._inspectRef);
-      const wrap0 = document.getElementById('map-wrap');
-      if (!wrap0) return;
-      const card0 = el('div#war-unit-card.war-unit-card');
-      if (!r) {
-        this._inspectRef = null;
-      } else {
+      if (!r) { this._inspectRef = null; }
+      else {
         const n = Math.max(0, Math.round(r.count || 0));
         const lost = Math.max(0, Math.round((r.startCount || n) - n));
-        card0.appendChild(el('div.war-card-title', `☷ Refugee Column`));
-        card0.appendChild(el('div.war-card-sub', `Civilians fleeing ${r.fromName || r.from}`));
-        card0.appendChild(el('div.war-card-row', `≈${n.toLocaleString('en-US')} people on the road`));
-        if (lost > 0) card0.appendChild(el('div.war-card-row', el('span.war-card-cutoff', `${lost.toLocaleString('en-US')} lost on the way`)));
-        card0.appendChild(el('div.war-card-row', `Heading for ${r.toName || r.to}`));
-        card0.appendChild(el('div.war-card-row',
-          r.count <= 0 ? 'Status: the column was destroyed' :
-          r.arrived != null ? 'Status: dispersing into shelter' : 'Status: on the road'));
-        wrap0.appendChild(card0);
+        card.appendChild(el('div.war-card-title', 'Refugee column'));
+        card.appendChild(el('div.war-card-sub', `Civilians fleeing ${r.fromName || r.from} for ${r.toName || r.to}`));
+        card.appendChild(el('div.war-card-row', `≈${n.toLocaleString('en-US')} people on the road` + (lost ? ` · ${lost.toLocaleString('en-US')} lost` : '')));
+        card.appendChild(el('div.war-card-row', r.count <= 0 ? 'The column was destroyed.' : r.arrived != null ? 'Dispersing into shelter.' : 'On the road.'));
+        wrap.appendChild(card);
+        this._dockCard(card, wrap);
         return;
       }
     }
-    let unitId = null;
-    if (this._sel.size === 1) unitId = [...this._sel][0];
-    else if (this._inspect) unitId = this._inspect;
+    const live = (u) => u && !u.dead && u.state !== 'dead' && u.strength > 0;
+    // a group: totals and group commands
+    if (this._sel.size > 1) {
+      const us = [...this._sel].map(id => war.units.find(u => u.id === id)).filter(live);
+      if (!us.length) { this._sel.clear(); return; }
+      const str = us.reduce((s, u) => s + u.strength, 0), max = us.reduce((s, u) => s + (u.maxStrength || u.strength), 0);
+      const org = us.reduce((s, u) => s + (typeof u.org === 'number' ? u.org : 100), 0) / us.length;
+      const fighting = us.filter(u => u.state === 'fighting').length, cut = us.filter(u => u.supplied === false).length;
+      card.appendChild(el('div.war-card-title', `${us.length} units selected`));
+      card.appendChild(el('div.war-card-sub', [fighting ? `${fighting} in contact` : 'none in contact', cut ? `${cut} cut off` : null].filter(Boolean).join(' · ')));
+      card.appendChild(bar('Strength', str / (max || 1), str / (max || 1) < 0.3 ? 'low' : '', `${fmtCompact(str)} / ${fmtCompact(max)}`));
+      card.appendChild(bar('Morale', org / 100, org < WAR_ROUT_ORG ? 'low morale' : 'morale', Math.round(org) + '%'));
+      card.appendChild(el('div.btn-row.war-card-actions', el('button.dash-btn.btn-xs', { onclick: () => this._holdSelection() }, '■ Hold position')));
+      wrap.appendChild(card);
+      this._dockCard(card, wrap);
+      return;
+    }
+    const unitId = this._sel.size === 1 ? [...this._sel][0] : this._inspect;
     if (!unitId) return;
     const u = war.units.find(x => x.id === unitId);
-    const wrap = document.getElementById('map-wrap');
-    if (!wrap) return;
-    const card = el('div#war-unit-card.war-unit-card');
     if (!u) {
-      card.appendChild(el('div.war-card-title', 'Unit unavailable'));
+      card.appendChild(el('div.war-card-title', 'Unit lost'));
       card.appendChild(el('div.war-card-row', 'This unit has been destroyed or is no longer tracked.'));
       wrap.appendChild(card);
       return;
     }
-    const isDead = u.dead || u.state === 'dead';
-    const glyph = u.state === 'transport' ? WAR_TRANSPORT_GLYPH : (WAR_KIND_GLYPH[u.kind] || '?');
-    const kindLabel = (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
-    const flag = this._protestorFlag(war, u);
-    card.appendChild(el('div.war-card-title',
-      flag ? el('img', { src: flag, alt: '', style: 'width:18px;height:18px;vertical-align:-4px;margin-right:6px;' }) : glyph,
-      u.name));
-    card.appendChild(el('div.war-card-sub',
-      `${kindLabel} · ${u.side === 'att' ? 'Attacker' : 'Defender'}` +
-      (u.nationId ? ` · ${entName(u.nationId)} contingent` : '')));
+    const isDead = !live(u);
+    const kindLabel = (u.state === 'transport' ? 'At sea — ' : '') + (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
+    const sideName = war.kind === 'protest' ? (u.side === 'att' ? 'Crowd' : 'Police') : (u.side === 'att' ? 'Invader' : 'Defence');
+    const own = this._sel.has(u.id);
+    card.classList.add(u.side === 'att' ? 'war-card-att' : 'war-card-def');
+    card.appendChild(el('div.war-card-title', u.name));
+    card.appendChild(el('div.war-card-sub', `${kindLabel} · ${this._echelon(u)} · ${sideName}` + (u.nationId ? ` · ${entName(u.nationId)}` : '') + (own ? '' : ' · enemy')));
     if (isDead) {
-      card.appendChild(el('div.war-card-row', 'Status: destroyed'));
+      card.appendChild(el('div.war-card-row', 'Destroyed in action.'));
     } else {
-      const pct = Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
-      card.appendChild(el('div.war-card-row', `HP: ${Math.round(u.strength)}/${u.maxStrength}`));
-      card.appendChild(el('div.war-card-bar', el('div.war-card-bar-fill', { style: `width:${Math.round(pct * 100)}%;` })));
-      const org = typeof u.org === 'number' ? u.org : 100;
-      const orgPct = Math.max(0, Math.min(100, org));
-      card.appendChild(el('div.war-card-row', `Morale: ${Math.round(orgPct)}%`));
-      card.appendChild(el('div.war-card-bar', el('div.war-card-bar-fill.war-card-bar-morale',
-        { class: orgPct < WAR_ROUT_ORG ? 'danger' : '', style: `width:${orgPct}%;` })));
-      card.appendChild(el('div.war-card-row', `State: ${u.state}${u.garrison ? ' · garrison' : ''}`));
-      card.appendChild(el('div.war-card-row', `Speed: ${u.speed} · Atk: ${u.atk}`));
-      // Per-unit kit (Phase 26): what THIS unit carries and what it's worth
-      // in the field — u.inv/u.kit are written by the server's resupply pass.
-      if (u.kit) {
-        card.appendChild(el('div.war-card-row',
-          `Kit: dmg ${u.kit.dmg}× · armour ${u.kit.hp}× · morale ${u.kit.morale}× · speed ${u.kit.speed}×`));
-        const rows = (u.inv || []).filter(r => r.qty >= 0.5).map(r => {
-          const it = itemById(r.itemId);
-          return `${fmtNum(Math.round(r.qty))}× ${it ? it.name : r.itemId}`;
-        });
-        card.appendChild(el('div.war-card-row',
-          rows.length ? 'Carrying: ' + rows.join(' · ') : 'Carrying: nothing — awaiting resupply'));
-      }
-      card.appendChild(el('div.war-card-row',
-        u.supplied === false ? el('span.war-card-cutoff', '⚠ CUT OFF') : 'In supply'));
+      const pct = u.strength / (u.maxStrength || u.strength || 1);
+      card.appendChild(bar('Strength', pct, pct < 0.3 ? 'low' : '', `${Math.round(u.strength).toLocaleString('en-US')} / ${(u.maxStrength || 0).toLocaleString('en-US')}`));
+      const org = Math.max(0, Math.min(100, typeof u.org === 'number' ? u.org : 100));
+      card.appendChild(bar('Morale', org / 100, org < WAR_ROUT_ORG ? 'low morale' : 'morale', Math.round(org) + '%'));
+      const stateText = { fighting: 'In contact — fighting', routed: 'Routed — falling back', holding: 'Holding', moving: 'On the move', transport: 'Embarked at sea', idle: 'Idle' }[u.state] || u.state;
+      card.appendChild(el('div.war-card-row', stateText + (u.garrison ? ' · garrison' : '') + ' · ',
+        u.supplied === false ? el('span.war-card-cutoff', '⚠ cut off') : 'in supply'));
+      if (u.kit) card.appendChild(el('div.war-card-row.war-card-kit', `Kit ×${u.kit.dmg} fire · ×${u.kit.hp} armour · ×${u.kit.morale} morale · ×${u.kit.speed} speed`));
+      const rows = (u.inv || []).filter(r => r.qty >= 0.5).map(r => { const it = itemById(r.itemId); return `${fmtNum(Math.round(r.qty))} × ${it ? it.name : r.itemId}`; });
+      if (u.kit || rows.length) card.appendChild(el('div.war-card-row.war-card-kit', rows.length ? 'Carrying ' + rows.join(' · ') : 'Carrying nothing — awaiting resupply'));
+      if (own && this.commandable()) card.appendChild(el('div.btn-row.war-card-actions', el('button.dash-btn.btn-xs', { onclick: () => this._holdSelection() }, '■ Hold position')));
     }
     wrap.appendChild(card);
+    this._dockCard(card, wrap);
+  },
+  // phones: the card sits just above the (wrapping) toolbar
+  _dockCard(card, wrap) {
+    const tb = document.getElementById('war-toolbar');
+    if (window.innerWidth > 640 || !tb || !card) return;
+    card.style.top = 'auto';
+    card.style.bottom = Math.max(8, wrap.clientHeight - tb.offsetTop + 8) + 'px';
   },
   _removeUnitCard() {
     const card = document.getElementById('war-unit-card');
-    if (card && card.parentNode) card.parentNode.removeChild(card);
+    if (card) card.remove();
+    this._cardSig = null;
+  },
+  // Stop the selection where it stands (a move order to its own position).
+  _holdSelection() {
+    const war = (window.WarEngine && this.activePred()) || this.activeAuth();
+    if (!war || !this._sel.size) return;
+    const orders = [...this._sel].map(id => war.units.find(u => u.id === id)).filter(u => u && !u.dead && u.strength > 0)
+      .map(u => ({ unitId: u.id, dest: this._clamp(u.pos) }));
+    if (!orders.length) return;
+    const side = this.commandableSide();
+    if (window.WarEngine) this._optimistic(side, orders);
+    POST('/api/war/command', { side, orders, conflict: this._activeKey }).then(() => toast('Holding position.')).catch(e => toast(e.message, true));
   },
 
   /* ═══════════ WAR ROOM PANEL ═══════════ */
@@ -2043,8 +2324,7 @@ const War = {
       } else this.renderProtestApplications(inner);
       return;
     }
-    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:6px;' },
-      'Command your forces directly on the map — switch to the ⚔ War layer.'));
+    inner.appendChild(el('div.doc-sub', 'situation reports · the battle itself is fought on the map'));
     // A viewer parked on this panel (map not mounted) still drives the
     // heartbeat, keeping the authoritative docs ticking and the counters live.
     if (docs.some(d => d.active) && window.WarEngine) this._ensureRealtime();
@@ -2069,75 +2349,73 @@ const War = {
     } else this.renderProtestApplications(inner);
   },
 
+  // Open the battle map on the War layer (optionally centred on a point).
+  openBattleMap(focus, key) {
+    if (key) this._activeKey = key;
+    W.layer = 'war';
+    App.go('map');
+    if (focus) setTimeout(() => { if (GameMap.focus) GameMap.focus(focus, 3.2); }, 120);
+  },
+
+  // One conflict's situation report: what is happening, who is winning,
+  // what comes next — then the detail in folds (order of battle, arsenal,
+  // the full report) and the GM's levers.
   renderDocPanel(inner, war, key) {
     const protest = war.kind === 'protest';
-    inner.appendChild(Views.secLabel(protest
-      ? `⚒ Protest — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`
-      : `⚔ War — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`));
-
-    // Clock stops when the conflict does — an ended doc used to keep counting
-    // ("104950m elapsed" on a protest from months ago).
+    const st = war.stats || {};
+    const p = war.protest || {};
+    const names = protest ? ['Crowds', 'Police'] : [entName(war.attackerId) || 'Invader', entName(war.defenderId) || 'Defence'];
     const endMs = war.result && war.result.endedAt ? new Date(war.result.endedAt).getTime() : Date.now();
     const elapsed = Math.max(0, Math.round((endMs - new Date(war.startedAt).getTime()) / 1000));
     const hh = Math.floor(elapsed / 3600), mm = Math.floor((elapsed % 3600) / 60), ss = elapsed % 60;
     const lasted = hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : hh ? `${hh}h ${mm}m` : `${mm}m ${ss}s`;
-    const p = war.protest || {};
-    const protestEnd = () => war.result.winner === 'def' ? 'ENDED — CROWDS DISPERSED'
-      : war.result.winner === 'att' ? 'ENDED — DEMANDS CONCEDED'
-        : /called off/i.test(war.result.reason || '') ? 'ENDED — CALLED OFF BY THE ORGANIZERS' : 'ENDED';
+    const protestEnd = () => war.result.winner === 'def' ? 'Ended — crowds dispersed'
+      : war.result.winner === 'att' ? 'Ended — demands conceded'
+        : /called off/i.test(war.result.reason || '') ? 'Ended — called off by the organizers' : 'Ended';
     const statusText = war.result
-      ? (protest ? protestEnd() : (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED'))
-      : (war.paused ? 'PAUSED'
-          : protest ? (p.protestorsViolent ? 'VIOLENT UNREST' : p.govViolent ? 'SECURITY FORCES MOBILISED' : 'PEACEFUL DEMONSTRATION')
-            : war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS');
-    inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${statusText}`));
-    // Phase 36 — say plainly what this operator may do here (observers used
-    // to get a bare panel with no hint why nothing was clickable).
-    if (war.active) inner.appendChild(el('div.war-authority', this.authorityText(war)));
+      ? (protest ? protestEnd() : (war.result.winner === 'att' ? 'Ended — total victory for the invader' : war.result.winner === 'def' ? 'Ended — invasion repelled' : 'Ended'))
+      : (war.paused ? 'Paused'
+        : protest ? (p.protestorsViolent ? 'Violent unrest' : p.govViolent ? 'Security forces mobilised' : 'Peaceful demonstration')
+          : war.totalWar ? 'Total war — no terms' : 'Fighting in progress');
 
-    // Alliance-aware wars (Task 4): list allied belligerents on each side,
-    // whether they auto-joined at startWar (Task 3) or intervened mid-war via
-    // the existing joinWar flow — both land in war.allies the same way.
+    inner.appendChild(Views.secLabel((protest ? '⚒ ' : '⚔ ') + war.name));
+    const head = el('div.war-report-head',
+      el('span.war-report-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live' }, statusText),
+      el('span.war-report-meta', `tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${war.speed}×`),
+      war.active ? el('button.solid-btn.btn-xs', { onclick: () => this.openBattleMap(null, key) }, 'Open the battle map →') : null);
+    inner.appendChild(head);
+    if (war.active) inner.appendChild(el('div.war-authority', this.authorityText(war)));
     if (!protest) {
       const allyLists = war.allies || { att: [], def: [] };
-      if ((allyLists.att || []).length || (allyLists.def || []).length) {
-        const sideLine = (label, ids) => ids && ids.length ? `${label}: ${ids.map(entName).join(', ')}` : null;
-        const lines = [sideLine('Also attacking', allyLists.att), sideLine('Also defending', allyLists.def)].filter(Boolean);
-        if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
-      }
+      const lines = [allyLists.att && allyLists.att.length ? `Also attacking: ${allyLists.att.map(entName).join(', ')}` : null,
+        allyLists.def && allyLists.def.length ? `Also defending: ${allyLists.def.map(entName).join(', ')}` : null].filter(Boolean);
+      if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
     }
 
-    inner.appendChild(Views.statStrip(protest ? [
-      ['Crowd Losses', fmtNum(Math.round(war.stats.attLosses))],
-      ['Police Losses', fmtNum(Math.round(war.stats.defLosses))],
-      ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
-      ['Refugees', fmtCompact(war.stats.refugees || 0)],
-      ['Cities In Unrest', String((war.stats.unrestCities || war.stats.citiesHeld || []).length)],
-      ['Speed', war.speed + '×']
-    ] : [
-      ['Attacker Losses', fmtNum(Math.round(war.stats.attLosses))],
-      ['Defender Losses', fmtNum(Math.round(war.stats.defLosses))],
-      ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
-      ['Refugees', fmtCompact(war.stats.refugees || 0)],
-      ['Cities Held', String((war.stats.citiesHeld || []).length)],
-      ['Speed', war.speed + '×']
+    // balance of forces + the headline numbers
+    const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
+    let attStr = 0, defStr = 0, attN = 0, defN = 0, cut = 0;
+    for (const u of war.units || []) if (live(u)) { if (u.side === 'att') { attStr += u.strength; attN++; } else { defStr += u.strength; defN++; } if (u.supplied === false) cut++; }
+    if (war.active) {
+      const tot = attStr + defStr || 1;
+      inner.appendChild(el('div.war-report-balance',
+        el('div.war-report-side', el('b', names[0]), ` ${fmtCompact(attStr)} · ${attN} unit${attN === 1 ? '' : 's'}`),
+        el('div.war-balance.war-balance-lg',
+          el('div.war-balance-att', { style: `width:${(attStr / tot * 100).toFixed(1)}%` }),
+          el('div.war-balance-def', { style: `width:${(defStr / tot * 100).toFixed(1)}%` })),
+        el('div.war-report-side.right', `${defN} unit${defN === 1 ? '' : 's'} · ${fmtCompact(defStr)} `, el('b', names[1]))));
+    }
+    inner.appendChild(Views.statStrip([
+      [names[0] + ' losses', fmtCompact(st.attLosses || 0)],
+      [names[1] + ' losses', fmtCompact(st.defLosses || 0)],
+      ['Civilian dead', fmtCompact(st.civilianDeaths || 0)],
+      ['Refugees', fmtCompact(st.refugees || 0)],
+      [protest ? 'Cities in unrest' : 'Cities fallen', String((st.unrestCities || st.citiesHeld || []).length)]
     ]));
-
-    // Equipment quality (Phase 26) — the strength-weighted average of every
-    // unit's own kit (war.equip, server-computed): a fleet-wide readout of
-    // what each army's packs are worth. Per-unit detail lives on the unit card.
-    if (!protest && war.equip && (war.equip.att || war.equip.def)) {
-      const fmtEq = (e) => e ? `dmg ${e.dmg}× · armour ${e.hp}× · morale ${e.morale}× · speed ${e.speed}×` : '—';
-      inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint); margin:4px 0 8px; letter-spacing:.04em;' },
-        el('div', 'ATTACKER ARSENAL  ' + fmtEq(war.equip.att)),
-        el('div', 'DEFENDER ARSENAL  ' + fmtEq(war.equip.def))));
-    }
 
     if (isGM()) this.renderControls(inner, war, key);
     else if (protest && war.active) this.renderProtestActions(inner, war, key);
 
-    // Protest-specific readout: who organized this, where it is, and — most
-    // importantly — what the strike is doing to the economy.
     if (protest) {
       const org = S().entities.find(e => e.id === war.attackerId);
       const struckSites = (S().properties || []).filter(pr => pr.vars && pr.vars.strike).map(pr => pr.name);
@@ -2145,12 +2423,8 @@ const War = {
       inner.appendChild(el('div.doc-sub',
         `Organized by ${org ? org.name : war.attackerId} · Rally locations: ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
       if (p.demands) inner.appendChild(el('div.war-demands', '“' + p.demands + '”'));
-      // Live posture chips only while it's live — an ended protest showed
-      // "peaceful crowds / strikes 50%" forever.
       if (war.active) {
         const chips = el('div.btn-row');
-        // posture chips only for viewers without the toggles — the toggle
-        // buttons above already show the same state to whoever holds them
         const ca = this.access(war);
         if (!ca.attLead && !ca.force) {
           chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
@@ -2161,71 +2435,93 @@ const War = {
         if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
         inner.appendChild(chips);
         inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-          t.strikeFrac > 0
-            ? `Properties currently affected: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}`
-            : 'Strike effect is disabled by tuning.'));
+          t.strikeFrac > 0 ? `Properties on strike: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}` : 'Strike effect is disabled by tuning.'));
       } else if (war.result && war.result.reason) {
         inner.appendChild(el('div', { style: 'font-size:13px;' }, war.result.reason + '.'));
       }
       this.renderProtestOpinion(inner, war);
     }
 
-    // Objectives — protests have none (they can't formally "win"; a concession
-    // is a GM end).
-    if (!protest) {
+    // objectives as a checklist, the next one called out
+    if (!protest && (war.objectives || []).length) {
       inner.appendChild(Views.secLabel('Objectives'));
-      const objTbl = el('table.data',
-        el('thead', el('tr', el('th', 'Objective'), el('th', 'Target'), el('th', 'Status'))),
-        el('tbody', [...war.objectives].sort((a, b) => a.priority - b.priority).map(o => el('tr',
-          el('td', this.objLabel(o)),
-          el('td', this.objTarget(o)),
-          el('td', el('span.chip', { class: o.status === 'done' ? 'active' : '' }, o.status.toUpperCase()))
-        ))));
-      inner.appendChild(objTbl);
+      const objs = [...war.objectives].sort((a, b) => a.priority - b.priority);
+      const next = objs.find(o => o.status !== 'done');
+      inner.appendChild(el('div.war-objectives', objs.map(o => el('div.war-objective', { class: o.status === 'done' ? 'done' : o === next ? 'next' : '' },
+        el('span.war-objective-mark', o.status === 'done' ? '✓' : String(o.priority)),
+        el('span.war-objective-text', this.objLabel(o) + ' — ', el('b', this.objTarget(o))),
+        o === next ? el('span.war-objective-tag', 'next') : null,
+        o.pos && war.active ? el('button.ow-btn.ow-act', { title: 'Show on the battle map', onclick: () => this.openBattleMap(o.pos, key) }, '◎') : null))));
     }
 
-    inner.appendChild(Views.secLabel(protest ? 'Districts Under Protest Control' : 'Province Control'));
-    const provBox = el('div');
-    const control = war.stats.provinceControl || {};
+    // ground held
+    const control = st.provinceControl || {};
     let provIds = Object.keys((war.grid || {}).provinceLandCells || control);
-    // A protest that never seized ground has nothing to chart — five empty
-    // 0% bars said less than one line.
+    inner.appendChild(Views.secLabel(protest ? 'Districts under protest control' : 'Province control'));
     if (protest && !provIds.some(pid => (control[pid] || 0) > 0)) {
       provIds = [];
-      provBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
         p.captureMode && war.active ? 'The crowds are moving to seize ground — no district has fallen yet.' : 'Protestors hold no ground — the crowds are gathered in the streets.'));
     }
+    const provBox = el('div');
     for (const pid of provIds) {
       const prov = provById(pid);
-      if (!prov) continue;
-      provBox.appendChild(Views.barRow(prov.name, control[pid] || 0, prov.color));
+      if (prov) provBox.appendChild(Views.barRow(prov.name, control[pid] || 0, prov.color, (control[pid] || 0) + '%'));
     }
     inner.appendChild(provBox);
-
-    // Defender counter-invasion of attacker home soil (Phase 22) — wars only.
     if (!protest) {
-      const enemyCtl = war.stats.enemyControl || {};
+      const enemyCtl = st.enemyControl || {};
       const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
       if (enemyIds.length) {
-        inner.appendChild(Views.secLabel('Enemy Homeland Occupied'));
-        const box = el('div');
+        inner.appendChild(Views.secLabel('Enemy homeland occupied'));
         const countries = ((S().settings || {}).map || {}).countries || [];
         for (const cid of enemyIds) {
           const c = countries.find(x => x.id === cid);
-          box.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
+          inner.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
         }
-        inner.appendChild(box);
       }
     }
 
-    inner.appendChild(Views.secLabel('Front-Line Report'));
-    const evBox = el('div');
-    const recent = (war.events || []).slice(-12).reverse();
-    if (!recent.length) evBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No engagements reported yet.'));
-    for (const ev of recent) {
-      evBox.appendChild(el('div.activity-item', el('span.when', new Date(ev.t).toLocaleTimeString()), ev.text));
+    // the latest reports; the full log folds
+    inner.appendChild(Views.secLabel('Front-line reports'));
+    const evs = [...(war.events || [])].reverse();
+    const evRow = (ev) => el('div.activity-item', el('span.when', new Date(ev.t).toLocaleTimeString()), ev.text,
+      ev.pos && war.active ? el('button.ow-btn.ow-act', { title: 'Show on the battle map', onclick: () => this.openBattleMap(ev.pos, key) }, '◎') : null);
+    if (!evs.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No engagements reported yet.'));
+    // routine rout/kill chatter collapses so captures and landings stand out
+    const notable = evs.filter(e => e.kind !== 'battle').slice(0, 5);
+    for (const ev of (notable.length ? notable : evs.slice(0, 5))) inner.appendChild(evRow(ev));
+    if (evs.length > 5) inner.appendChild(Views.ledgerFold('wrLog_' + key, `Full report — ${evs.length} entries`, () => el('div', evs.slice(0, 60).map(evRow))));
+
+    // order of battle and arsenal, folded
+    const units = (war.units || []).filter(live);
+    if (units.length) {
+      inner.appendChild(Views.ledgerFold('wrOrbat_' + key, `Order of battle — ${units.length} units in the field${cut ? ` · ${cut} cut off` : ''}`, () => {
+        const sorted = units.slice().sort((a, b) => (a.side === b.side ? b.strength - a.strength : a.side === 'def' ? -1 : 1));
+        return el('table.data.war-orbat',
+          el('thead', el('tr', el('th', 'Unit'), el('th', 'Side'), el('th', 'Type'), el('th.num', 'Strength'), el('th.num', 'Morale'), el('th', 'State'), el('th', ''))),
+          el('tbody', sorted.map(u => {
+            const pct = Math.round(u.strength / (u.maxStrength || u.strength || 1) * 100);
+            return el('tr', { class: u.side === 'att' ? 'war-orbat-att' : 'war-orbat-def' },
+              el('td', u.name),
+              el('td', u.side === 'att' ? names[0] : names[1]),
+              el('td', (u.kind || '').replace(/^./, c => c.toUpperCase()) + ' ' + this._echelon(u)),
+              el('td.num', `${pct}%`),
+              el('td.num', Math.round(typeof u.org === 'number' ? u.org : 100) + '%'),
+              el('td', u.state + (u.supplied === false ? ' · cut off' : '')),
+              el('td', war.active ? el('button.ow-btn.ow-act', { title: 'Show on the battle map', onclick: () => this.openBattleMap(u.pos, key) }, '◎') : null));
+          })));
+      }));
     }
-    inner.appendChild(evBox);
+    if (!protest && war.equip && (war.equip.att || war.equip.def)) {
+      inner.appendChild(Views.ledgerFold('wrArsenal_' + key, 'Arsenal & supply', () => {
+        const fmtEq = (e) => e ? `fire ×${e.dmg} · armour ×${e.hp} · morale ×${e.morale} · speed ×${e.speed}` : '—';
+        return el('table.data', el('tbody',
+          el('tr', el('td', names[0]), el('td', fmtEq(war.equip.att))),
+          el('tr', el('td', names[1]), el('td', fmtEq(war.equip.def))),
+          el('tr', el('td', 'Cut off from supply'), el('td', `${cut} unit${cut === 1 ? '' : 's'}`))));
+      }));
+    }
   },
 
   objLabel(o) {
@@ -2431,18 +2727,17 @@ const War = {
   renderControls(inner, war, key) {
     const protest = war.kind === 'protest';
     if (protest && war.active) this.renderProtestActions(inner, war, key);
-    const row = el('div.btn-row');
+    const row = el('div.btn-row.war-gm-row');
     if (!war.result) {
-      row.appendChild(el('button.solid-btn', {
+      row.appendChild(el('span.mono-label', 'GM'));
+      row.appendChild(el('button.solid-btn.btn-xs', {
         onclick: async () => { try { await POST('/api/gm/war/control', { paused: !war.paused, conflict: key }); } catch (e) { toast(e.message, true); } }
       }, war.paused ? '▶ Resume' : '⏸ Pause'));
-      for (const s of [1, 2, 4, 8]) {
-        row.appendChild(el('button.dash-btn', {
-          class: war.speed === s ? 'active' : '',
-          onclick: async () => { try { await POST('/api/gm/war/control', { speed: s, conflict: key }); } catch (e) { toast(e.message, true); } }
-        }, s + '×'));
-      }
-      row.appendChild(el('button.danger-btn', {
+      row.appendChild(el('div.seg', { title: 'Simulation speed' }, [1, 2, 4, 8].map(sp => el('button', {
+        class: war.speed === sp ? 'active' : '',
+        onclick: async () => { try { await POST('/api/gm/war/control', { speed: sp, conflict: key }); } catch (e) { toast(e.message, true); } }
+      }, sp + '×'))));
+      row.appendChild(el('button.danger-btn.btn-xs', {
         onclick: () => confirmModal(protest ? 'END PROTEST' : 'END WAR', protest ? 'End the protest now? The crowds stand down and production resumes.' : 'End the war now? The result stays on record for review.', async () => {
           await POST(protest ? '/api/gm/protest/end' : '/api/gm/war/end', { conflict: key });
           toast(protest ? 'Protest ended by GM order.' : 'War ended by GM order.');

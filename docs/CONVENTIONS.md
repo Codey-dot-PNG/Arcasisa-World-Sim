@@ -112,6 +112,14 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
   (`geometry.provinceAt`), falling back to nearest city.
 - `mapdata.applyMap(db)` self-heals worlds/imports/rollbacks that predate the SVG map —
   call it after swapping the db object wholesale.
+- **Map paint budget.** Anything that changes inside `#map-svg` every frame (a JS transform
+  tween, an infinite CSS animation — even an opacity pulse on a group) makes the browser
+  repaint the whole map, provinces, patterns and clip paths included; on a phone that was
+  the difference between ~17fps and 60fps. So: no infinite CSS animations inside the map
+  svg (gate ambient ones on when they're visible, e.g. `.night-breathe` only at
+  dusk/night/dawn); per-frame movers belong in the transparent overlay svg
+  (`GameMap.overSvg/overWorld`, same viewBox + pan/zoom transform — the war's units,
+  arrows and strike FX live there); rAF loops write attributes only when a value changed.
 
 ## Data & environment
 

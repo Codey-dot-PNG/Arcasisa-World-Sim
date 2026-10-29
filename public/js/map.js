@@ -25,6 +25,20 @@ const GameMap = {
     this.svg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
     this.svg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
     wrap.appendChild(this.svg);
+    // The war's moving parts (units, arrows, strike FX) live in a second,
+    // transparent svg stacked over the map with the same viewBox and the
+    // same pan/zoom transform (applyTransform). A unit gliding across the
+    // map then only repaints this light overlay — inside #map-svg every
+    // moving marker forced the browser to repaint the provinces, hatching
+    // and clip paths beneath it, every frame. Pointer events pass through
+    // except on the war's own interactive marks (see War._bindOverlay).
+    this.overSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    this.overSvg.setAttribute('id', 'war-overlay');
+    this.overSvg.setAttribute('viewBox', `0 0 ${this.VIEW.w} ${this.VIEW.h}`);
+    this.overSvg.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+    this.overWorld = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+    this.overSvg.appendChild(this.overWorld);
+    wrap.appendChild(this.overSvg);
 
     // Night lighting lives INSIDE this svg now (see buildNightLayer in
     // render()): a multiply grade rect + a screen-blended city-glow group,
@@ -339,6 +353,7 @@ const GameMap = {
     if (!this.world) return;
     const t = `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`;
     this.world.setAttribute('transform', t);
+    if (this.overWorld) this.overWorld.setAttribute('transform', t);
     this.updateMarkerScale();
   },
 
@@ -546,6 +561,9 @@ const GameMap = {
     this.trafficLayer.setAttribute('class', 'map-traffic');
     this.world.appendChild(this.trafficLayer);
     this.trafficUnits = [];
+    // A war zone has no ambient traffic — and the moving vehicles forced a
+    // repaint of the whole map every frame, the biggest cost on the War layer.
+    if (W.layer === 'war') return;
     const cfg = (((S().settings || {}).ambience || {}).traffic || {});
     if (cfg.enabled === false || !(Number(cfg.presence) > 0)) return;
     const presence = Math.max(0, Math.min(100, cfg.presence === undefined ? 55 : Number(cfg.presence) || 0)) / 100;
@@ -1163,6 +1181,7 @@ const GameMap = {
     this.editLayer = null;
     if (editing) MapEdit.renderOverlay(this);
     this.svg.classList.toggle('brush-mode', !!painting && Borders.tool === 'brush');
+    this.svg.classList.toggle('war-mode', W.layer === 'war');
 
     this.renderLayerBar();
     this.renderLegend();

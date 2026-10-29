@@ -1771,87 +1771,100 @@ phase/thresholds/notes, and `war.ai` is deleted.
 
 ## Client — `public/js/war.js`
 
-Loaded after `map.js`/`mapedit.js`, before `views.js`.
+Loaded after `map.js`/`mapedit.js`, before `views.js`. Overhauled in the war-system
+pass (situation-map visuals, retained-mode rendering, map controls, situation report).
 
-- **Map layer**: `GameMap.render()` calls `War.renderMapLayer(this, mk, NS)`
-  after the event-marker layer. It draws, per render:
-  - **Territory fracture** — captured cells grouped by province, each drawn
-    as a union of 48px cell rects filled with a hatched `<pattern>`
-    (`#war-hatch`) and clipped to that province's real SVG shape
-    (`<clipPath>`), so captured ground reads as chunks bitten out of the
-    real province outline rather than a floating grid.
-  - **Unit markers** — small NATO-style rectangles, tinted red (attacker) or
-    navy (defender), with a kind glyph, a strength pip bar, and a pulsing
-    ring on `fighting` units. **Two scale modes** (Phase 17): above
-    `WAR_FIXED_MODE_K` (3) map zoom, markers render at a constant WORLD
-    scale — a fixed 40×28 world-unit symbol that grows on screen as you zoom,
-    exactly matching the server's 40px collision/combat range (the hitbox IS
-    the symbol, since the marker group itself is the click target). Below the
-    threshold they counter-scale to a constant SCREEN size so units stay
-    readable over the whole island; `scale = max(1, 3/k)` is continuous at
-    the boundary, so there's no pop mid-zoom. The rAF loop recomputes it
-    every frame.
-  - **Movement arrows** — for every commandable-side live unit with a `dest`,
-    a dashed polyline from the (tweened) marker along its remaining `path`
-    waypoints (straight to `dest` when there's no route), ending in an SVG
-    `<marker>` arrowhead. Selected units get the bright amber
-    `.war-move-arrow-sel`, other own units the fainter `.war-move-arrow`.
-    Enemy movement arrows are deliberately NOT drawn — fog of war on intent.
-  - **Battle flashes** — a fading ring at each recent `war.events` position.
-  - **Craters** — dark scorch circles at each `war.craters` entry, drawn under
-    the territory/unit layers.
-  - **Airstrike planes and impact FX** — see "Client — plane, fireball,
-    shockwave" above: a cosmetic plane sprite per in-flight strike, plus a
-    one-shot fireball/shockwave/debris explosion the instant a strike lands.
-  - **Attack arrows & target rings** — a red dashed line from every live
-    unit with an `attackId` to its target, plus a pulsing red ring on the
-    target (drawn for both sides — an ongoing attack is visible through
-    combat itself, unlike plain movement intent).
-  - **Morale bars** — a 3px steel-blue bar above each HP bar showing `org`
-    (0–100); turns red below the rout threshold (25) and pulses while the
-    unit is routed.
-  - **Damage feedback** — `renderUnits` tracks each unit's strength between
-    passes (`_lastStrength`); a drop stamps `_hitAt` and the marker plays a
-    ~450ms jitter + red flash. The effect lives on an INNER `<g
-    class="war-unit-inner">` wrapping the box+glyph, because the outer
-    group's transform is rewritten every rAF frame by the tween loop — CSS
-    animating the outer transform would fight it. Fighting units also blink
-    small muzzle-flash ticks.
-  - **Unit info card** — `#war-unit-card`, top-right of the map, shown while
-    exactly one own unit is selected or an enemy unit is inspected
-    (`War._inspect`): name, kind, side (+ ally contingent), HP and morale
-    with mini bars, state, speed/atk, garrison tag and supply status.
-    Re-rendered with the toolbar's 1s timer, reading the unit fresh from the
-    predicted war so a unit that dies degrades to a "destroyed" note.
-  - **War toolbar** — a small floating control surface, present only while
-    `W.layer === 'war'`: the gesture hint line, an arm/cooldown "✈ Call
-    Airstrike" button (plus a "✈ Strike inbound — Ts" countdown chip while
-    one is in flight), Clear selection, and (GM-only) a Defender/Attacker
-    command-side toggle. Offset above the GM command bar's footprint when
-    it's visible (`body:has(.gm-bar:not(.hidden)) .war-toolbar`, mirroring
-    the same `:has()` pattern `#toast-root` already used for the same bar)
-    so the toolbar and the bar's Quick Actions dropdown never overlap.
-  - Positions are **tweened client-side**: a module-level `_anim` registry
-    (keyed by unit id, not DOM node) remembers each unit's last interpolated
-    position across renders, so even though `GameMap.render()` tears down
-    and rebuilds the whole SVG on every sync, a unit's marker keeps easing
-    from where it visually was toward the new server position (~900ms ease)
-    instead of snapping. A single shared `requestAnimationFrame` loop
-    (`ensureLoop`) drives both this tween and the battle-flash fade, and
-    also applies the current map zoom as a counter-scale so markers stay a
-    constant screen size.
-- **War Room panel** (`War.renderPanel`, wired into `Views.render` for
-  `W.view === 'war'`, tab added to `App.PAGES`): status line, casualty/city
-  counters, objective table, per-province control bars (`Views.barRow`), and
-  a recent-events feed. GM-only: pause/resume, speed 1×/2×/4×/8×, End War,
-  global tuning sliders, the unit spawner and foreign-intervention controls
-  (see "GM unit spawner" and "Foreign intervention" above), and the scenario
-  picker shown when no war is running or the last one has concluded — the
-  picker's option list is fetched from `GET /api/gm/war/scenarios`
-  (`War._ensureScenarioList`, cached after the first fetch) rather than
-  hardcoded, so a new `server/war-scenarios.js` entry appears automatically;
-  a small hardcoded fallback (`WAR_SCENARIOS_FALLBACK`) covers the one render
-  before the fetch resolves.
+### Rendering — a retained-mode situation map
+
+`GameMap.render()` calls `War.renderMapLayer(map, mk, NS)`; every predicted tick and
+heartbeat goes through `War.refreshLayer → _paint`, which PATCHES the existing nodes.
+Two hosts:
+
+- **In `#map-svg`** (`map.warLayer`, rebuilt with each full map render):
+  - `war-veil` — a parchment wash over the base map on the ⚔ War layer, so the overlay reads
+    like a staff map (ambient traffic is off on the War layer; the map legend hides).
+  - `war-ground` — occupied ground and the **front line**, rebuilt only when the captured-cell
+    set changes (`_groundKey` fingerprint). `_controlField` gives every war-grid cell an
+    owner (captured cells from `war.cells`, the attacker's homeland from `grid.enemyCells`,
+    the Republic's provinces otherwise) and lets sea/neutral cells take their nearest
+    belligerent's value (multi-source BFS), so the 50% line only ever runs BETWEEN the sides.
+    `_contours` (marching squares) → `_loopsToPath` (3× Chaikin) gives smooth loops: filled
+    with `#war-hatch` clipped to the provinces (occupied ground), and stroked twice — a solid
+    line plus a short-dash "teeth" line — clipped to belligerent land (the front). The
+    defence's counter-occupation of enemy homeland fills in `#war-hatch-def`. Craters too.
+- **In the overlay svg** (`GameMap.overSvg/overWorld`, `#war-overlay`: same viewBox and
+  pan/zoom transform as the map; persists across full renders):
+  - `war-marks` — numbered objective targets (the next pending one tagged NEXT, achieved
+    ones filled ✓) and flags on fallen cities (`stats.citiesHeld` / `unrestCities`); rebuilt
+    when their status changes.
+  - `war-orders` — own-side movement arrows (fog of war on enemy intent), attack arrows for
+    both sides, warship fire, and **clash markers**: enemy pairs in contact (≤75px, one of
+    them fighting), clustered within 90px, drawn as a burst with crossed blades. They replace
+    the old per-unit infinite pulse rings.
+  - `war-refugees`, `war-fx` (planes, impact FX, capture/landing flashes).
+  - `war-units` — one KEYED node per unit (`_unitNodes`, key `doc:unitId`), created once and
+    patched in place (attributes written only when they change). NATO-style symbols: a light
+    frame in the side colour (defence blue, invader red, protest crowds amber; naval kinds a
+    hull frame), the branch symbol in ink (`_symbol`: infantry ✕, armour track, marines ✕ +
+    waves, garrison ✕ + bastion, reserve, boat/warship hulls, crowd flag, police shield; an
+    afloat land unit shows a hull), the size marker above (`_echelon`: I/II/III/X/XX from
+    `maxStrength`), a strength bar (green/amber/red) and a thin morale bar below, a cut-off ⚠
+    triangle, and a name label that appears once zoomed in (`.war-zoomed`, k ≥ 2.4). Corpses
+    show as a grey ✕ frame for 60 ticks. Organiser logos still replace a crowd's symbol.
+  - Clicks: one delegated listener on `war-units` (own unit → select; enemy → inspect, or
+    attack with Tap orders). `_forwardToMap` re-dispatches overlay pointerdown/move, wheel,
+    dblclick and contextmenu to `#map-svg`, so a pan or right-click order that starts over a
+    marker behaves exactly as on open map.
+
+**Why the overlay + retained mode:** under a 6× CPU throttle (phone-class) the old layer —
+rebuilt every tick, every unit transform rewritten every frame, infinite CSS pulses, ambient
+traffic, and the night-lights breathe running even in daylight — repainted the entire map
+SVG continuously (~57ms frames with the music player loaded, ~26ms without). Now units only
+repaint the light overlay, the rAF loop (`ensureLoop`) skips settled units and only
+re-scales `.war-scaled` marks on a zoom change, nothing animates forever, and selection or
+inspection is an in-place refresh instead of a full `GameMap.render()`: ~18ms frames
+(p95 33ms) without the music player, a locked 60fps / ~2ms repaints unthrottled. Keep it that
+way — see docs/CONVENTIONS.md "Map paint budget".
+
+Positions are tweened client-side: `_anim` (keyed like the nodes) remembers each unit's
+interpolated position, a new leg starts from it, and a refresh mid-leg keeps the in-flight
+leg. Move arrows' tails track the tween (`_arrowAnim`).
+
+### Map controls (War layer only)
+
+Three floating surfaces, rebuilt on a 1s UI timer **only when their content signature
+changes** (rebuilding every second used to swallow taps mid-press):
+
+- **Toolbar** (bottom centre) — one contextual hint line (what a click/tap will do right now)
+  plus only the commands this operator holds: War/Protest switch (active conflicts only),
+  Select all, Clear (n), **Tap orders** (left-click/tap on ground = move, on an enemy =
+  attack; on by default on coarse-pointer devices — the touch-friendly scheme, since phones
+  have no right button), ✈ Airstrike (with stock / rearm countdown / inbound countdown),
+  protest levers, the GM's Defence/Invader command side, and **?** (a gestures modal).
+- **Situation HUD** (top-left; collapses to one line, closed by default on phones) — status
+  and tick, a balance-of-forces bar (live strength per side), ground occupied/seized, losses,
+  the next objective, the latest notable report, a **Legend** (symbol key) and a link to the
+  War Room.
+- **Unit card** (top-right; docks above the toolbar on phones) — one unit: strength/morale
+  bars, state, supply, kit and carried items, **■ Hold position** for own units (a move order
+  to its own position); several selected: totals, contact/cut-off counts and Hold for the
+  group; refugee columns: head count and route.
+
+Input gestures are unchanged otherwise (see "Interactive War layer" above): right-click
+move/attack, right-drag route, Ctrl-drag line-up, Shift-drag box select, Esc clears.
+
+### War Room panel (`War.renderPanel`, view `war`)
+
+A situation report per conflict: status chip, tick/elapsed/speed and **Open the battle map
+→**; the operator's authority line; a balance-of-forces bar; a stat strip (losses per side,
+civilian dead, refugees, cities fallen/in unrest); the GM row (Pause, speed 1×/2×/4×/8×
+segmented, End) with tuning / spawn / intervention / treaty folds; objectives as a checklist
+(the next one tagged, ◎ jumps the battle map there); province control bars; the five latest
+notable reports (captures/landings ahead of rout chatter, ◎ to locate) with the full log
+folded; **Order of battle** (every unit: side, type + echelon, strength %, morale, state,
+supply, ◎ locate) and **Arsenal & supply** folds. An ended conflict folds to one line, as
+before; the GM start forms follow. `openBattleMap(pos, key)` switches to the War layer and
+centres the map.
 
 ## Known rough edges
 

@@ -796,8 +796,6 @@ function ensureWarGrid(db) {
 // stepAirstrikes — the deterministic blast — needs to run identically on a
 // predicting client; read via engine.BOMB_RADIUS below where still needed
 // (finding what a strike will destroy on the ground).
-const BOMB_COOLDOWN_MS = 12000;       // per-side cooldown between airstrike orders — starts at ORDER time, not impact
-const AIRSTRIKE_FLIGHT_TICKS = 4;     // ticks between order and impact — 4 × the default 2000ms tickMs ≈ 8s at 1×, within the ~6–10s cinematic window
 const TUNING_MIN = 0.1, TUNING_MAX = 10; // clamp range for GM global tuning sliders (war.mods)
 
 // GM spawn/join tunables (Feature: mid-war reinforcements) — clamp ranges
@@ -1389,6 +1387,9 @@ function startWar(db, scenario) {
   // meta.weapon.kind:'tank'/'warship' items and turned into fresh armoured/
   // naval units. No-op on a world where those items haven't been seeded yet.
   deployArsenalUnits(db, db.war, defender, attacker, stage, landStart);
+  // the air wings: both sides' aircraft stock, plus the invader's scenario wing
+  syncAirWings(db, db.war);
+  addScenarioAirWing(db, db.war, 'att', scenario.airWing);
   // The defender's Tier-1 baseline includes its arsenal formations (armour,
   // fleet) deployed just above; the attacker's deliberately does NOT include
   // its own fleet — attackerStartStrength was minted before deployment, and
@@ -2002,6 +2003,7 @@ function startProtest(db, opts, actor) {
     `Mass demonstrations are underway in ${civNames} as supporters of ${organizer.name} take to the streets.` +
     (demands ? ` Their demand: “${demands}”` : '') +
     ` The government has ordered police to the affected districts.`);
+  syncAirWings(db, db.protest);
   return db.protest;
 }
 
@@ -2208,90 +2210,254 @@ function annexCountry(db, countryId, actor, applied) {
     `Under the treaty's territorial clauses, ${country.name} ceases to exist as a sovereign state and is incorporated into the Republic as a province. Occupation authorities are standing up a civil administration.`);
 }
 
-// The airstrike's launch point: the seed's airport property (kind:'airport')
-// at its CURRENT position — properties move (GM map edits) and can be
-// destroyed outright (bombs level properties, including airports, so this is
-// a real case), hence the fallback chain: capital city, then a fixed
-// map-edge point derived from the war's own grid bounds (always in range).
-function findAirstrikeOrigin(db) {
-  const airport = (db.properties || []).find(p => p.kind === 'airport' && p.pos);
-  if (airport) return airport.pos.slice();
-  const capital = db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
-  if (capital) return capital.pos.slice();
-  const inset = engine.WORLD_BORDER_INSET || 8;
-  return [inset, inset];
-}
-
-// ---------- dropBomb: ORDERS an airstrike (Feature: cinematic two-phase bombing) ----------
-// Only ENQUEUES the strike onto war.airstrikes — the deterministic blast
-// (unit damage, crater, event) and the strike's done:true flip happen in the
-// engine's stepAirstrikes at war.tick >= strikeTick, so a predicting client
-// detonates it on the same tick as the server. This function keeps the same
-// name/route/auth/cooldown contract the client already calls.
+// ---------- dropBomb: the legacy one-click airstrike ----------
 function dropBomb(db, side, pos, actor, key) {
-  // Bombs are DEFENDER-ONLY — the attacker AI never calls in an airstrike,
-  // and even a GM commanding the attacker side directly has no air arm. This
-  // is enforced here, not just hidden client-side, since the client is
-  // untrusted.
-  if (side !== 'def') return { ok: false, error: 'Only the defence has an air arm in this scenario.' };
+  // Legacy one-click airstrike (older clients): sends the nearest READY
+  // squadron of the side that can reach the target on a strike sortie.
   const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || war.paused) return { ok: false, error: 'No war is active.' };
-  // Phase 36 — a protest climbs the same escalation ladder as its ground
-  // forces: no bombs until force has been authorized (a peaceful sit-in used
-  // to be a legitimate air target at any stage).
-  if (war.kind === 'protest' && !(war.protest && war.protest.govViolent)) {
-    return { ok: false, error: 'Force has not been authorized against the protest — the air wing stays grounded.' };
-  }
-  war.bombs = war.bombs || { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } };
-  const bomb = war.bombs[side] = war.bombs[side] || { cooldownUntil: 0 };
-  const now = Date.now();
-  if (now < bomb.cooldownUntil) return { ok: false, error: 'Bomb is on cooldown.' };
   if (!Array.isArray(pos) || pos.length !== 2) return { ok: false, error: 'Invalid target position.' };
-  const defenderId = war.defenderId || 'ent_gov';
-  const defender = (db.entities || []).find(e => e.id === defenderId) || (db.entities || []).find(e => e.type === 'government');
-  // One serviceable aircraft authorizes one airstrike, drawn from ANY of the
-  // defender's aircraft pools — its own stockpile or the military depots it
-  // owns — since both are legitimately "planes in storage".
-  const pools = aircraftPools(db, war, defender ? defender.id : 'ent_gov');
-  let aircraft = null, aircraftRow = null;
-  for (const pool of pools) {
-    for (const row of pool) {
-      if (!(row && row.qty > 0)) continue;
-      const item = (db.items || []).find(i => i.id === row.itemId);
-      if (item && item.meta && item.meta.weapon && item.meta.weapon.kind === 'aircraft') {
-        aircraft = { item, qty: row.qty }; aircraftRow = row; break;
+  syncAirWings(db, war);
+  let best = null, bd = Infinity;
+  for (const sq of (war.air.squadrons || [])) {
+    if (sq.side !== side || sq.planes <= 0 || sq.state !== 'ready') continue;
+    const base = engine.airBaseOf(war, sq);
+    if (!base) continue;
+    const d = dist(base.pos, pos);
+    if (d <= engine.airRange(sq) && d < bd) { bd = d; best = sq; }
+  }
+  if (!best) return { ok: false, error: 'No squadron is ready and in range of that target.' };
+  return orderSquadron(db, key, best.id, { kind: 'strike', target: pos }, actor);
+}
+
+// ---------- the air force: squadrons mirrored from the real stockpile ----------
+// The engine flies squadrons (war-engine.js stepAir); this layer keeps the
+// war doc's air wing IN STEP WITH THE WORLD, the way every other mirror in
+// the codebase works (docs/CONVENTIONS.md): the aircraft items in a side's
+// pools are the canonical record and war.air.squadrons follows them — planes
+// bought mid-war join a squadron, planes sold leave one, a plane shot down is
+// removed from the inventory (ctx.onAircraftLost). A scenario may also bring
+// a VIRTUAL air wing for an NPC invader (scenario.airWing — no inventory
+// behind it, losses just shrink it). Bases are the airports and military
+// bases a side owns — capture an airfield and it becomes the enemy's forward
+// base — plus, for an invader, an airfield on its own soil.
+const AIR_DEFAULTS = { squadronSize: 4, fuelPerPlane: 10 };
+function airCfg(db) { return Object.assign({}, AIR_DEFAULTS, (((db.settings || {}).war || {}).air) || {}); }
+function airItems(db) { return (db.items || []).filter(i => i.meta && i.meta.weapon && i.meta.weapon.kind === 'aircraft'); }
+// Flight characteristics from the aircraft model's weapon stats: speed in
+// px/tick, endurance in ticks of fuel, q the dogfight quality.
+function airModelStats(item) {
+  const w = (item && item.meta && item.meta.weapon) || {};
+  const num = (v, d) => (Number.isFinite(Number(v)) ? Number(v) : d);
+  const sp = num(w.speed, 0.7), rg = num(w.range, 0.6), hp = num(w.hp, 0.35);
+  return { speed: Math.round(160 + 80 * sp), endurance: Math.round(12 + 5 * rg), q: Math.round((0.7 + hp + 0.4 * sp) * 100) / 100 };
+}
+function aircraftByModel(db, war, entityId) {
+  const ids = new Set(airItems(db).map(i => i.id));
+  const out = {};
+  for (const pool of aircraftPools(db, war, entityId)) {
+    for (const row of pool) if (row && row.qty >= 1 && ids.has(row.itemId)) out[row.itemId] = (out[row.itemId] || 0) + Math.floor(row.qty);
+  }
+  return out;
+}
+function fuelItemIds(db) {
+  return (db.items || []).filter(i => i.meta && i.meta.weapon && i.meta.weapon.kind === 'fuel').map(i => i.id);
+}
+function fuelStock(db, war, entityId) {
+  const ids = new Set(fuelItemIds(db));
+  let n = 0;
+  for (const pool of nationPools(db, war, entityId)) for (const row of pool) if (row && ids.has(row.itemId)) n += Math.max(0, Number(row.qty) || 0);
+  return round1(n);
+}
+const AIRFIELD_KINDS = { airport: 0, military_base: 1 };
+function airBasesFor(db, war, side) {
+  const nid = side === 'att' ? war.attackerId : war.defenderId;
+  const out = [];
+  for (const p of db.properties || []) {
+    if (!Array.isArray(p.pos) || p.ownerId !== nid || !(p.kind in AIRFIELD_KINDS)) continue;
+    out.push({ id: 'ab_' + p.id, side, pos: p.pos.slice(), name: p.name, propId: p.id, kind: p.kind });
+  }
+  out.sort((a, b) => (AIRFIELD_KINDS[a.kind] - AIRFIELD_KINDS[b.kind]) || (a.id < b.id ? -1 : 1));
+  if (side === 'att' && war.kind !== 'protest') {
+    // the invader's own soil nearest the defender's capital
+    const g = war.grid || {};
+    const cap = (db.cities || []).find(c => c.isCapital && c.pos) || (db.cities || []).find(c => c.pos);
+    if (cap && g.enemyCells) {
+      let best = null, bd = Infinity;
+      for (const k in g.enemyCells) {
+        const i = k.indexOf(',');
+        const pt = [(+k.slice(0, i) + 0.5) * g.cell, (+k.slice(i + 1) + 0.5) * g.cell];
+        const d = dist(pt, cap.pos);
+        if (d < bd) { bd = d; best = pt; }
+      }
+      const ent = (db.entities || []).find(e => e.id === nid);
+      if (best) out.push({ id: 'ab_home_' + nid, side, pos: [Math.round(best[0]), Math.round(best[1])], name: (ent ? ent.name : 'Home') + ' air base', kind: 'homeland' });
+    }
+  }
+  if (!out.length) {
+    // no airfield at all: the defence flies from its capital, an invader from
+    // its fleet's staging waters
+    const cap = (db.cities || []).find(c => c.isCapital && c.pos) || (db.cities || []).find(c => c.pos);
+    const anchor = side === 'def' ? (cap && cap.pos) : (war.supplyAnchor || (war.units.find(u => u.side === 'att') || {}).pos);
+    if (anchor) out.push({ id: 'ab_fallback_' + side, side, pos: [Math.round(anchor[0]), Math.round(anchor[1])], name: side === 'def' && cap ? cap.name + ' airstrip' : 'Carrier group', kind: 'fallback' });
+  }
+  return out;
+}
+function airOrdinal(n) { const s = ['th', 'st', 'nd', 'rd'], v = n % 100; return n + (s[(v - 20) % 10] || s[v] || s[0]); }
+function newSquadron(db, war, side, model, planes, base, virtual) {
+  const air = war.air;
+  air.seq[side] = (air.seq[side] || 0) + 1;
+  const item = (db.items || []).find(i => i.id === model);
+  const st = airModelStats(item);
+  const sq = {
+    id: 'sq_' + side + '_' + air.seq[side], side, nationId: side === 'att' ? war.attackerId : war.defenderId,
+    name: airOrdinal(air.seq[side]) + ' Squadron', model, modelName: item ? item.name : 'Aircraft',
+    planes, baseId: base.id, pos: base.pos.slice(), prevPos: base.pos.slice(), heading: 0,
+    state: 'ready', mission: null, order: null, fuel: 0, endurance: st.endurance, speed: st.speed, q: st.q,
+    readyTick: 0, sorties: 0, kills: 0, losses: 0
+  };
+  if (virtual) sq.virtual = true;
+  air.squadrons.push(sq);
+  return sq;
+}
+// Grow/shrink one side's (non-virtual) squadrons to the real stock per model.
+function mirrorAircraft(db, war, side, stock, cfg) {
+  const air = war.air;
+  const size = Math.max(1, Math.round(cfg.squadronSize) || 4);
+  const bases = air.bases.filter(b => b.side === side);
+  if (!bases.length) return;
+  const grounded = (s) => s.state === 'ready' || s.state === 'rearm';
+  const models = new Set(Object.keys(stock));
+  for (const s of air.squadrons) if (s.side === side && !s.virtual && s.planes > 0) models.add(s.model);
+  for (const model of [...models].sort()) {
+    const mine = air.squadrons.filter(s => s.side === side && !s.virtual && s.planes > 0 && s.model === model);
+    const have = mine.reduce((n, s) => n + s.planes, 0);
+    let diff = (stock[model] || 0) - have;
+    if (diff > 0) {
+      for (const s of mine) { if (diff <= 0) break; if (!grounded(s) || s.planes >= size) continue; const add = Math.min(diff, size - s.planes); s.planes += add; diff -= add; }
+      let bi = air.squadrons.filter(s => s.side === side).length;
+      while (diff > 0) { const n = Math.min(size, diff); newSquadron(db, war, side, model, n, bases[bi++ % bases.length]); diff -= n; }
+    } else if (diff < 0) {
+      // sold or transferred away: grounded squadrons give up planes first
+      const order = mine.slice().sort((a, b) => (grounded(b) - grounded(a)) || (a.planes - b.planes));
+      for (const s of order) {
+        if (diff >= 0) break;
+        const take = Math.min(s.planes, -diff);
+        s.planes -= take; diff += take;
+        if (s.planes <= 0) { s.state = 'lost'; s.mission = null; s.order = null; }
       }
     }
-    if (aircraft) break;
   }
-  if (!aircraft || !aircraftRow) return { ok: false, error: 'The air wing has no military aircraft available.' };
-  // Cooldown starts at ORDER time, same as the old instant bomb — a player
-  // can't spam strikes just because the last one hasn't landed yet.
-  bomb.cooldownUntil = now + BOMB_COOLDOWN_MS;
-  aircraftRow.qty -= 1;
-  if (aircraftRow.qty <= 0) {
-    for (const pool of pools) {
-      const idx = pool.indexOf(aircraftRow);
-      if (idx >= 0) { pool.splice(idx, 1); break; }
+}
+function syncAirWings(db, war) {
+  if (!war || !war.active) return;
+  const cfg = airCfg(db);
+  const protest = war.kind === 'protest';
+  const air = war.air = war.air || {
+    squadrons: [], bases: [], fuel: { att: 0, def: 0 }, reserve: { att: 0, def: 0 },
+    auto: { att: !protest, def: false }, lost: { att: 0, def: 0 }, seq: { att: 0, def: 0 }
+  };
+  air.reserve = air.reserve || { att: 0, def: 0 };
+  air.seq = air.seq || { att: 0, def: 0 };
+  air.fuelPerPlane = Math.max(0, Number(cfg.fuelPerPlane) || 0) || 10;
+  const sides = protest ? ['def'] : ['att', 'def'];
+  air.bases = [].concat(...sides.map(side => airBasesFor(db, war, side)));
+  for (const side of sides) {
+    const nid = side === 'att' ? war.attackerId : war.defenderId;
+    air.fuel[side] = round1(fuelStock(db, war, nid) + (air.reserve[side] || 0));
+    mirrorAircraft(db, war, side, aircraftByModel(db, war, nid), cfg);
+    // an airfield lost (captured, destroyed): its squadrons fall back to the
+    // nearest base the side still holds
+    for (const sq of air.squadrons) {
+      if (sq.side !== side || sq.planes <= 0 || air.bases.some(b => b.id === sq.baseId)) continue;
+      let nb = null, bd = Infinity;
+      for (const b of air.bases) if (b.side === side) { const d = dist(b.pos, sq.pos); if (d < bd) { bd = d; nb = b; } }
+      if (!nb) continue;
+      sq.baseId = nb.id;
+      if (!engine.airborne(sq)) { sq.pos = nb.pos.slice(); sq.prevPos = nb.pos.slice(); }
+      engine.pushEvent(war, 'air', nb.pos.slice(), `${sq.name} relocates to ${nb.name}.`);
     }
   }
-
-  war.airstrikes = war.airstrikes || [];
-  const strike = {
-    id: store.uid('airstrike'),
-    side,
-    pos: pos.slice(),
-    from: findAirstrikeOrigin(db),
-    orderedTick: war.tick,
-    strikeTick: war.tick + AIRSTRIKE_FLIGHT_TICKS,
-    orderedAt: now,
-    aircraftItemId: aircraft.item.id,
-    done: false,
-    groundApplied: false // guards applyAirstrikeGroundEffects against double-application
-  };
-  war.airstrikes.push(strike);
-  bomb.aircraftRemaining = aircraftStock(db, defender ? defender.id : 'ent_gov', war);
-  return { ok: true, strike, aircraftRemaining: bomb.aircraftRemaining };
+}
+// A scenario's NPC air wing (scenario.airWing = { planes, itemId?, fuel? }):
+// virtual squadrons with a fuel reserve of their own.
+function addScenarioAirWing(db, war, side, wing) {
+  if (!wing || !(wing.planes > 0)) return;
+  syncAirWings(db, war);
+  const air = war.air;
+  const model = (wing.itemId && (db.items || []).some(i => i.id === wing.itemId)) ? wing.itemId : ((airItems(db)[0] || {}).id || 'aircraft');
+  const bases = air.bases.filter(b => b.side === side);
+  if (!bases.length) return;
+  const size = Math.max(1, Math.round(airCfg(db).squadronSize) || 4);
+  let left = Math.round(wing.planes), i = 0;
+  while (left > 0) { const n = Math.min(size, left); newSquadron(db, war, side, model, n, bases[i++ % bases.length], true); left -= n; }
+  air.reserve[side] = (air.reserve[side] || 0) + Math.max(0, Number(wing.fuel) || 0);
+  air.fuel[side] = round1((air.fuel[side] || 0) + Math.max(0, Number(wing.fuel) || 0));
+}
+// ctx hooks (authority only): a sortie's fuel leaves the stockpile — a
+// scenario reserve first, then the side's refined-fuel pools; a downed plane
+// leaves the inventory.
+function airSortieFuel(db, war, sq, barrels) {
+  const air = war.air || {};
+  air.reserve = air.reserve || {};
+  let left = barrels;
+  const fromReserve = Math.min(left, air.reserve[sq.side] || 0);
+  air.reserve[sq.side] = round1((air.reserve[sq.side] || 0) - fromReserve);
+  left -= fromReserve;
+  const nid = sq.side === 'att' ? war.attackerId : war.defenderId;
+  const pools = nationPools(db, war, nid);
+  for (const id of fuelItemIds(db)) { if (left <= 0) break; left -= drawFromPools(pools, id, left); }
+}
+function airPlanesLost(db, war, sq, n) {
+  if (sq.virtual || !(n > 0)) return;
+  const nid = sq.side === 'att' ? war.attackerId : war.defenderId;
+  const got = drawFromPools(aircraftPools(db, war, nid), sq.model, n);
+  if (got > 0) {
+    const ent = (db.entities || []).find(e => e.id === nid);
+    store.log('event', `${got} aircraft lost`, `${ent ? ent.name : nid}: ${sq.name} lost ${got} × ${sq.modelName || sq.model}${war.name ? ' — ' + war.name : ''}.`, 'WAR ENGINE', [nid]);
+  }
+}
+// A player's (or the GM's) squadron order: patrol | strike | recall. The
+// engine applies it at the next tick (stepAir) and re-checks range and fuel
+// there; this validates up front so the caller gets a clear refusal.
+function orderSquadron(db, key, sqId, order, actor) {
+  const war = key === 'protest' ? db.protest : db.war;
+  if (!war || !war.active) return { ok: false, error: 'No conflict is active.' };
+  syncAirWings(db, war);
+  const sq = ((war.air || {}).squadrons || []).find(s => s.id === sqId);
+  if (!sq || sq.planes <= 0) return { ok: false, error: 'That squadron no longer exists.' };
+  const kind = order && order.kind;
+  if (kind === 'recall') {
+    if (!engine.airborne(sq)) return { ok: false, error: `${sq.name} is on the ground.` };
+    sq.order = { kind: 'recall' };
+    return { ok: true, squadron: sq };
+  }
+  if (kind !== 'patrol' && kind !== 'strike') return { ok: false, error: 'Unknown mission.' };
+  if (war.kind === 'protest' && sq.side === 'def' && !(war.protest && war.protest.govViolent)) {
+    return { ok: false, error: 'Force has not been authorized against the protest — the air wing stays grounded.' };
+  }
+  const t = order.target;
+  if (!Array.isArray(t) || t.length !== 2 || !t.every(Number.isFinite)) return { ok: false, error: 'Invalid target.' };
+  const target = engine.clampToWorld(war, t);
+  const base = engine.airBaseOf(war, sq);
+  if (!engine.airborne(sq)) {
+    if (sq.state === 'rearm') return { ok: false, error: `${sq.name} is still refuelling and rearming.` };
+    if (!base) return { ok: false, error: `${sq.name} has no airfield to fly from.` };
+    if (dist(base.pos, target) > engine.airRange(sq) + 1) return { ok: false, error: `Out of range — ${sq.name} cannot reach that target from ${base.name}.` };
+    const need = sq.planes * (war.air.fuelPerPlane || 10);
+    if ((war.air.fuel[sq.side] || 0) < need) return { ok: false, error: `Not enough refined fuel — a sortie of ${sq.planes} needs ${need} barrels.` };
+  }
+  const radius = kind === 'patrol' ? engine.clamp(Number(order.radius) || engine.AIR_PATROL_R, 80, 400) : undefined;
+  sq.order = { kind, target, radius };
+  return { ok: true, squadron: sq };
+}
+function setAirAuto(db, key, side, on) {
+  const war = key === 'protest' ? db.protest : db.war;
+  if (!war || !war.active) return { ok: false, error: 'No conflict is active.' };
+  syncAirWings(db, war);
+  if (war.kind === 'protest') return { ok: false, error: 'A protest air wing flies only on direct orders.' };
+  war.air.auto[side] = !!on;
+  return { ok: true };
 }
 
 // ---------- authority-only ground effects, wired via ctx.onAirstrike ----------
@@ -2306,7 +2472,7 @@ function applyAirstrikeGroundEffects(db, war, strike) {
   if (strike.groundApplied) return;
   strike.groundApplied = true;
   const pos = strike.pos;
-  const radius = engine.BOMB_RADIUS;
+  const radius = strike.radius || engine.BOMB_RADIUS;
 
   // Destroy properties within the blast; sync the deed mirror ONCE after —
   // properties are never hand-deleted from the deed register (see
@@ -2359,7 +2525,7 @@ function applyAirstrikeGroundEffects(db, war, strike) {
   const cfg = warCfg(db);
   const pid = geometry.provinceAt(db.provinces, pos);
   if (pid) {
-    const deaths = killCivilians(db, war, pid, cfg.civPerStrike * ((war.mods && war.mods.bombDmg) || 1));
+    const deaths = killCivilians(db, war, pid, cfg.civPerStrike * ((war.mods && war.mods.bombDmg) || 1) * (strike.squadronId ? 0.35 : 1));
     if (deaths) {
       store.log('event', 'Civilians killed in air raid',
         `${deaths.toLocaleString('en-US')} civilians confirmed dead after the strike.`, 'WAR ENGINE', []);
@@ -2375,7 +2541,9 @@ function ctxFor(db) {
   return {
     log: SERVER_CTX.log,
     news: SERVER_CTX.news,
-    onAirstrike: (war, strike) => applyAirstrikeGroundEffects(db, war, strike)
+    onAirstrike: (war, strike) => applyAirstrikeGroundEffects(db, war, strike),
+    onSortie: (war, sq, barrels) => airSortieFuel(db, war, sq, barrels),
+    onAircraftLost: (war, sq, n) => airPlanesLost(db, war, sq, n)
   };
 }
 // resupplyUnits runs only when a real tick actually happened (its stockpile
@@ -2396,6 +2564,14 @@ function tickConflict(db, key, force) {
   if (!doc || !doc.active) return false;
   const wat = conflictDoc(db, key);
   ensureWarGrid(wat);
+  const freshAir = !doc.air;
+  syncAirWings(db, doc);
+  // a war already running when the air force arrived still gets its
+  // invader's scenario air wing
+  if (freshAir && doc.kind !== 'protest' && doc.scenarioId) {
+    const sc = (require('./war-scenarios').scenarios || {})[doc.scenarioId];
+    if (sc && sc.airWing) addScenarioAirWing(db, doc, 'att', sc.airWing);
+  }
   const ticked = force ? engine.warTick(wat, ctxFor(db)) : engine.maybeWarTick(wat, ctxFor(db));
   if (ticked) {
     resupplyUnits(db, doc);
@@ -2449,4 +2625,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

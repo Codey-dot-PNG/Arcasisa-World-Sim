@@ -214,6 +214,7 @@ const GameMap = {
     });
     svg.addEventListener('pointermove', (e) => {
       if (window.War && War._input && War._input.active) { War.onMapPointerMove(e); return; }
+      if (W.layer === 'war' && window.War && War.onMapHover) War.onMapHover(e);
       // ---- pinch-zoom (two fingers) ----
       if (this.pinch && this.pointers.has(e.pointerId)) {
         this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
@@ -355,6 +356,8 @@ const GameMap = {
     this.world.setAttribute('transform', t);
     if (this.overWorld) this.overWorld.setAttribute('transform', t);
     this.updateMarkerScale();
+    // the war map's printed frame (margins, scale bar) follows the view
+    if (W.layer === 'war' && window.War && War.onViewChange) War.onViewChange();
   },
 
   /* ---------- night: in-svg grade + city lights ----------

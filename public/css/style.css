@@ -510,7 +510,7 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .war-standoff-att{stroke:#9a5a12;}
 .war-standoff-def{stroke:#24466e;}
 /* orders */
-.war-move{fill:none; pointer-events:none; stroke-width:2.2; stroke-dasharray:8 5; stroke-linecap:round; stroke-linejoin:round; opacity:.6;}
+.war-move{fill:none; pointer-events:none; stroke-width:2.2; stroke-dasharray:8 5; stroke-linecap:round; stroke-linejoin:round; opacity:.8;}
 .war-move-def{stroke:#1f3a5c;}
 .war-move-att{stroke:#7a2418;}
 .war-move-sel{stroke:#c47f12; stroke-width:3.4; opacity:.95; stroke-dasharray:10 5;}
@@ -762,6 +762,185 @@ body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-clashes
 @media (max-width:640px){
   .war-report-balance{grid-template-columns:1fr; gap:4px;}
   .war-report-side.right{text-align:left;}
+}
+/* ═══ The war map sheet (public/js/war-map.js) — grid, printed frame,
+   paper, compass rose, scale bar, measuring tools, routes and trails. The
+   frame/paper/rose/scale are screen-space HTML over the map: static or
+   redrawn only on pan/zoom, never per frame. ═══ */
+.war-grid{pointer-events:none;}
+.war-grid-major{fill:none; stroke:#3b2a20; stroke-opacity:.3; stroke-width:.8px;}
+.war-grid-minor{display:none; fill:none; stroke:#3b2a20; stroke-opacity:.14; stroke-width:.6px;}
+#map-svg.war-grid-fine .war-grid-minor{display:block;}
+#war-paper{
+  position:absolute; inset:0; z-index:2; pointer-events:none; mix-blend-mode:multiply; opacity:.6; transform:translateZ(0);
+  background:
+    radial-gradient(circle at 87% 84%, transparent 30px, rgba(120,80,30,.13) 32px, rgba(120,80,30,.05) 37px, transparent 41px),
+    radial-gradient(130% 100% at 50% 50%, rgba(0,0,0,0) 52%, rgba(84,58,22,.32) 100%),
+    linear-gradient(90deg, transparent calc(33.33% - 2px), rgba(90,66,36,.12) 33.33%, rgba(255,255,255,.18) calc(33.33% + 1px), transparent calc(33.33% + 4px)),
+    linear-gradient(90deg, transparent calc(66.66% - 2px), rgba(90,66,36,.12) 66.66%, rgba(255,255,255,.18) calc(66.66% + 1px), transparent calc(66.66% + 4px)),
+    linear-gradient(0deg, transparent calc(50% - 2px), rgba(90,66,36,.12) 50%, rgba(255,255,255,.18) calc(50% + 1px), transparent calc(50% + 4px)),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .42  0 0 0 0 .33  0 0 0 0 .2  0 0 0 .5 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+#war-frame{position:absolute; inset:0; z-index:3; pointer-events:none;}
+.war-frame-svg{width:100%; height:100%; display:block;}
+.war-frame-margin{fill:#efe4c8; fill-opacity:.94;}
+.war-frame-outer{fill:none; stroke:#2a2018; stroke-width:2;}
+.war-frame-inner{fill:none; stroke:#2a2018; stroke-width:.9;}
+.war-frame-ticks{fill:none; stroke:#2a2018; stroke-width:.8;}
+.war-frame-ref{font-family:var(--font-mono); font-size:9px; font-weight:700; letter-spacing:.06em; fill:#2a2018;}
+#map-wrap:has(#war-frame) #map-compass{display:none;}
+#war-rose{position:absolute; top:128px; right:22px; width:58px; z-index:4; pointer-events:none; filter:drop-shadow(0 1px 1px rgba(0,0,0,.18));}
+#war-rose svg{width:100%; height:auto; display:block;}
+.rose-ring{fill:rgba(244,236,220,.7); stroke:#2a2018; stroke-width:.8;}
+.rose-ring-in{fill:none; stroke-dasharray:1.5 2;}
+.rose-light{fill:#f4ecdc; stroke:#2a2018; stroke-width:.6; stroke-linejoin:round;}
+.rose-dark{fill:#2a2018; stroke:#2a2018; stroke-width:.6; stroke-linejoin:round;}
+.rose-hub{fill:#9b2c22;}
+.rose-n{font-family:var(--font-voice); font-size:11px; font-weight:700; fill:#2a2018;}
+#war-scalebar{position:absolute; right:26px; bottom:26px; z-index:4; pointer-events:none; background:rgba(244,236,220,.9); border:1px solid #2a2018; padding:1px 2px 0; line-height:0;}
+#war-scalebar svg{display:block; width:auto; height:34px;}
+.sb-dark{fill:#2a2018;}
+.sb-light{fill:#f4ecdc;}
+.sb-box{fill:none; stroke:#2a2018; stroke-width:.8;}
+.sb-num, .sb-unit{font-family:var(--font-mono); font-size:8.5px; fill:#2a2018;}
+@media (min-width:641px){
+  #map-wrap:has(#war-frame) #map-layerbar{top:24px; left:24px;}
+  #map-wrap:has(#war-frame) #map-controls{top:24px; right:24px;}
+  #map-wrap:has(#war-frame) .war-hud{left:24px; top:66px;}
+}
+/* the GM bar overlays the map's foot: the sheet ends above it */
+body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper{bottom:66px;}
+body:has(.gm-bar:not(.hidden)) #war-scalebar{bottom:92px;}
+@media (max-width:900px){
+  body:has(.gm-bar:not(.hidden)) #war-frame, body:has(.gm-bar:not(.hidden)) #war-paper{bottom:106px;}
+  body:has(.gm-bar:not(.hidden)) #war-scalebar{bottom:132px;}
+}
+@media (max-width:640px){
+  #war-rose{top:150px; right:12px; width:42px;}
+  #war-scalebar, body:has(.gm-bar:not(.hidden)) #war-scalebar{right:12px; bottom:auto; top:200px;}
+}
+/* measuring tools */
+.war-measure, .war-measure *{pointer-events:none;}
+.war-ruler-case{stroke:#fbf7ee; stroke-width:5px; stroke-opacity:.85;}
+.war-ruler-line{stroke:#2a2018; stroke-width:1.6px;}
+.war-ruler-ticks{fill:none; stroke:#2a2018; stroke-width:1.2px;}
+.war-ruler-end{fill:#9b2c22; stroke:#fbf7ee; stroke-width:.6;}
+.war-range-ring{fill:rgba(36,70,110,.06); stroke:#24466e; stroke-width:1.6px; stroke-dasharray:7 5;}
+.war-range-radius{stroke:#24466e; stroke-width:1.2px; stroke-dasharray:3 3;}
+.war-measure-box{fill:#fbf7ee; fill-opacity:.96; stroke:#2a2018; stroke-width:.8;}
+.war-measure-text{font-family:var(--font-mono); font-size:10px; fill:#2a2018;}
+.war-measure-text.big{font-size:11px; font-weight:700;}
+.war-measure-text.faint{fill:#7d735c;}
+.war-measure-text.bad{fill:#b0251a; font-weight:700;}
+.war-measure-card.bad .war-measure-box{stroke:#b0251a; stroke-width:1.2;}
+/* routes and trails */
+.war-move-case{fill:none; stroke:#fbf7ee; stroke-width:5.5px; stroke-opacity:.75; stroke-linecap:round; stroke-linejoin:round; pointer-events:none;}
+.war-move-case-sel{stroke-width:7px;}
+.war-move-foe{opacity:.35;}
+.war-trail{fill:none; stroke-width:2px; stroke-dasharray:1.5 5; stroke-linecap:round; opacity:.55; pointer-events:none;}
+.war-trail-att{stroke:#7a2418;}
+.war-trail-def{stroke:#1f3a5c;}
+.war-doc-protest .war-trail-att{stroke:#7a5418;}
+.war-route-label{pointer-events:none;}
+.war-route-box{fill:#fbf7ee; fill-opacity:.95; stroke:#c47f12; stroke-width:.9;}
+.war-route-text{font-family:var(--font-mono); font-size:10px; font-weight:700; fill:#5a3a10;}
+
+/* ═══ The air force (public/js/war-air.js) ═══ */
+.war-air-bases, .war-air-sqs, .war-air-missions{pointer-events:none;}
+.war-airfield{pointer-events:auto; cursor:help;}
+.war-airfield-strip{fill:#6b6250; stroke:#2a2018; stroke-width:.8; stroke-linejoin:round;}
+.war-airfield-def .war-airfield-strip{fill:#3d5878;}
+.war-airfield-att .war-airfield-strip{fill:#7a3a30;}
+.war-airfield-dash{fill:none; stroke:#f4ecdc; stroke-width:1.4;}
+.war-airfield-badge{fill:#fbf7ee; stroke:#2a2018; stroke-width:.7;}
+.war-airfield-count{font-family:var(--font-mono); font-size:8.5px; font-weight:700; fill:#2a2018;}
+.war-airfield-name{display:none; font-family:var(--font-mono); font-size:7.5px; font-weight:700; fill:#2a2018; paint-order:stroke; stroke:#f4ecdc; stroke-width:2.4px;}
+.war-zoomed .war-airfield-name{display:block;}
+.war-sq{pointer-events:auto; cursor:pointer;}
+.war-jet{stroke:#f4ecdc; stroke-width:.9; stroke-linejoin:round;}
+.war-sq-def .war-jet{fill:#24466e;}
+.war-sq-att .war-jet{fill:#8c1f15;}
+.war-sq-fight .war-jet{stroke:#f6d27a; stroke-width:1.6;}
+.war-contrail{fill:none; stroke:url(#war-contrail-grad); stroke-width:2.6; stroke-linecap:round;}
+.war-sq-label-bg{fill:#fbf7ee; fill-opacity:.93; stroke:#2a2018; stroke-width:.6;}
+.war-sq-def .war-sq-label-bg{stroke:#24466e;}
+.war-sq-att .war-sq-label-bg{stroke:#8c1f15;}
+.war-sq-sel .war-sq-label-bg{stroke:#f0b429; stroke-width:1.8;}
+.war-sq-label-text{font-family:var(--font-mono); font-size:8px; font-weight:700; fill:#2a2018;}
+.war-sq-fuel-bg{fill:rgba(32,24,16,.22);}
+.war-sq-fuel{fill:#5f7f2e;}
+.war-sq-low .war-sq-fuel{fill:#b0251a;}
+.war-cap{fill-opacity:.05; stroke-width:1.5px; stroke-dasharray:8 6; pointer-events:none;}
+.war-cap-def{fill:#24466e; stroke:#24466e;}
+.war-cap-att{fill:#8c1f15; stroke:#8c1f15;}
+.war-cap-foe{stroke-opacity:.45; fill-opacity:.02;}
+.war-cap-plan{stroke-width:2px; fill-opacity:.08;}
+.war-cap.bad{stroke:#b0251a; fill:#b0251a;}
+.war-cap-tag{pointer-events:none;}
+.war-cap-tag text{font-family:var(--font-mono); font-size:8.5px; font-weight:700; letter-spacing:.08em; paint-order:stroke; stroke:#f4ecdc; stroke-width:2.6px;}
+.war-cap-tag-def text{fill:#24466e;}
+.war-cap-tag-att text{fill:#8c1f15;}
+.war-strike-run{fill:none; stroke-width:1.6px; stroke-dasharray:6 4; pointer-events:none;}
+.war-strike-run-def{stroke:#24466e;}
+.war-strike-run-att{stroke:#8c1f15;}
+.war-reticle{pointer-events:auto; cursor:help;}
+.war-reticle circle, .war-reticle path{fill:none; stroke-width:1.8;}
+.war-reticle-def circle, .war-reticle-def path{stroke:#24466e;}
+.war-reticle-att circle, .war-reticle-att path{stroke:#8c1f15;}
+.war-reticle.bad circle, .war-reticle.bad path{stroke:#b0251a;}
+.war-tracer{fill:none; stroke:#f0b429; stroke-width:1.6px; stroke-dasharray:2 5; pointer-events:none;}
+.war-dogfight{pointer-events:auto; cursor:help;}
+.war-dogfight path{fill:#f6d27a; stroke:#8c1f15; stroke-width:1;}
+.war-flak{fill:#4a4436; fill-opacity:.5; pointer-events:none;}
+.war-air-plan, .war-air-plan *{pointer-events:none;}
+.war-air-range{fill:none;}
+.war-air-range-def{stroke:#24466e;}
+.war-air-range-att{stroke:#8c1f15;}
+.war-air-range-tag text{font-family:var(--font-mono); font-size:10px; font-weight:700; fill:#2a2018; paint-order:stroke; stroke:#fbf7ee; stroke-width:3px;}
+.war-air-plan-line{fill:none; stroke:#2a2018; stroke-width:1.6px; stroke-dasharray:6 4;}
+.war-air-plan-line.bad{stroke:#b0251a;}
+/* the air wing dock */
+.war-air-dock{position:absolute; z-index:21; left:24px; bottom:26px; width:330px; max-height:min(60vh, 520px); overflow:auto;
+  background:var(--paper); border:1px solid var(--rule-strong); box-shadow:0 6px 18px rgba(0,0,0,.18); font-size:12px;}
+.air-head{display:flex; align-items:center; gap:8px; padding:7px 10px; border-bottom:1px solid var(--rule); position:sticky; top:0; background:var(--paper); z-index:1;}
+.air-title{font-family:var(--font-voice); font-size:14px; flex:1;}
+.air-side{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-soft);}
+.air-close{background:none; border:none; font-size:17px; line-height:1; color:var(--ink-faint); cursor:pointer; padding:0 2px;}
+.air-close:hover{color:var(--accent);}
+.air-meta{display:flex; justify-content:space-between; align-items:center; gap:8px; padding:6px 10px; font-family:var(--font-mono); font-size:10.5px; border-bottom:1px dotted var(--rule);}
+.air-fuel.short{color:#b0251a; font-weight:700;}
+.air-faint{color:var(--ink-faint);}
+.air-auto{display:inline-flex; align-items:center; gap:4px; cursor:pointer; font-family:var(--font-mono); font-size:10px; letter-spacing:.06em; text-transform:uppercase; white-space:nowrap;}
+.air-warn{padding:6px 10px; color:var(--accent); font-size:11.5px; border-bottom:1px dotted var(--rule); background:var(--accent-wash);}
+.air-note{padding:5px 10px; color:var(--ink-soft); font-size:11px; border-bottom:1px dotted var(--rule);}
+.air-row{padding:7px 10px 8px; border-bottom:1px dotted var(--rule); cursor:pointer;}
+.air-row:hover{background:var(--hover-wash);}
+.air-row.sel{background:var(--hover-wash); box-shadow:inset 3px 0 0 #f0b429;}
+.air-row.st-lost{opacity:.5;}
+.air-row-top{display:flex; align-items:center; gap:6px;}
+.air-name{font-weight:600; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+.air-planes{white-space:nowrap; font-size:11px;}
+.air-plane.gone{opacity:.25;}
+.air-state{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.05em; text-transform:uppercase; padding:1px 5px; border:1px solid currentColor; white-space:nowrap;}
+.air-state[data-state="ready"]{color:#55691f;}
+.air-state[data-state="out"], .air-state[data-state="station"], .air-state[data-state="return"]{color:#24466e;}
+.air-state[data-state="rearm"]{color:#9a5a12;}
+.air-state[data-state="lost"]{color:var(--ink-faint);}
+.air-row-sub{font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin:2px 0 4px;}
+.air-bar{height:4px; background:var(--hover-wash); border:1px solid var(--rule);}
+.air-bar-fill{height:100%; width:0; background:#55691f; transition:width 1s linear;}
+.air-bar-fill.fuel{background:#24466e;}
+.air-bar-fill.low{background:#b0251a;}
+.air-bar-fill.rearm{background:#c48f1e;}
+.air-row-act{display:flex; gap:5px; margin-top:6px; flex-wrap:wrap; align-items:center;}
+.air-empty{padding:10px; color:var(--ink-faint); font-size:12px;}
+.air-foot{padding:6px 10px 8px; font-size:10.5px; color:var(--ink-faint); line-height:1.4;}
+.air-report-side{font-size:13px; margin:4px 0; display:flex; flex-wrap:wrap; gap:4px; align-items:center;}
+body:has(.gm-bar:not(.hidden)) .war-air-dock{bottom:92px;}
+@media (max-width:640px){
+  .war-air-dock{left:6px; right:6px; width:auto; top:64px; bottom:auto; max-height:calc(100% - 250px);}
+  .war-air-dock.planning{display:none;}
+  body:has(.gm-bar:not(.hidden)) .war-air-dock{bottom:auto;}
 }
 /* airstrikes (cosmetic plane + impact FX, all driven per-frame from JS) */
 .war-plane{pointer-events:none;}

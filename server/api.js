@@ -1129,33 +1129,59 @@ async function handle(req, res, pathname, method) {
       store.save();
       return json(res, 200, { ok: true });
     }
+    // The air force (squadrons — docs/WAR.md "Air force"). A side's air arm
+    // answers to whoever may fly it: the defence's to `cmdAccess.air`, an
+    // invader's to its commanders (never a protest's crowds).
+    const canFly = (doc, ca, side) => side === 'def' ? !!ca.air : (doc.kind !== 'protest' && !!(ca.att || ca.attLead));
+    if (pathname === '/api/war/air' && method === 'POST') {
+      const b = await readBody(req);
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is active.');
+      const sq = ((doc.air || {}).squadrons || []).find(x => x.id === b.squadronId);
+      if (!sq) return bad('Unknown squadron.');
+      if (!canFly(doc, cmdAccessOf(db, doc, u), sq.side)) return deny('You are not cleared to order that air wing.');
+      const inBounds = (p) => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite) && p[0] >= 0 && p[0] <= 3840 && p[1] >= 0 && p[1] <= 2160;
+      if (b.kind !== 'recall' && !inBounds(b.target)) return bad('Invalid target position.');
+      const result = war.orderSquadron(db, key, sq.id, { kind: b.kind, target: b.target, radius: b.radius }, u.user.displayName);
+      if (!result.ok) return bad(result.error);
+      if (b.kind !== 'recall') {
+        store.log('event', `${sq.name} ordered on a ${b.kind}${doc.name ? ' — ' + doc.name : ''}`,
+          `${sq.planes} × ${sq.modelName || 'aircraft'}`, u.user.displayName, [sq.nationId].filter(Boolean));
+      }
+      // save without broadcast (like /api/war/command): the order rides the
+      // next heartbeat to every war-watching client
+      store.save();
+      return json(res, 200, { ok: true, squadron: result.squadron });
+    }
+    if (pathname === '/api/war/air/auto' && method === 'POST') {
+      const b = await readBody(req);
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is active.');
+      const side = b.side === 'att' ? 'att' : 'def';
+      if (!canFly(doc, cmdAccessOf(db, doc, u), side)) return deny('You are not cleared to command that air wing.');
+      const result = war.setAirAuto(db, key, side, !!b.on);
+      if (!result.ok) return bad(result.error);
+      store.log('event', `Air wing ${b.on ? 'handed to' : 'taken back from'} the air staff`, `${side === 'att' ? 'Attacker' : 'Defence'} squadrons ${b.on ? 'now fly automatically' : 'fly only on direct orders'}.`, u.user.displayName, []);
+      store.save();
+      return json(res, 200, { ok: true });
+    }
     if (pathname === '/api/war/bomb' && method === 'POST') {
+      // legacy one-click airstrike — sends the nearest ready squadron
       const b = await readBody(req);
       const key = b.conflict === 'protest' ? 'protest' : 'war';
       const doc = key === 'protest' ? db.protest : db.war;
       if (!doc || !doc.active) return bad('No conflict is active.');
       if (!cmdAccessOf(db, doc, u).air) return deny('You are not cleared to order airstrikes.');
-      // Bombs are defender-only (server/war.js's dropBomb also enforces this
-      // itself) — even a GM commanding the attacker side has no air arm to
-      // call in for this scenario, so unlike /api/war/command there is no
-      // GM 'att' branch here at all.
-      const side = 'def';
       const pos = b.pos;
       if (!Array.isArray(pos) || pos.length !== 2 || !Number.isFinite(pos[0]) || !Number.isFinite(pos[1]) ||
         pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');
-      const result = war.dropBomb(db, side, pos, u.user.displayName, key);
+      const result = war.dropBomb(db, 'def', pos, u.user.displayName, key);
       if (!result.ok) return bad(result.error);
-      store.log('event', `Airstrike ordered${doc.name ? ' — ' + doc.name : ''}`,
-        `${result.aircraftRemaining != null ? result.aircraftRemaining + ' aircraft remaining' : ''}`, u.user.displayName, [doc.defenderId].filter(Boolean));
-      // save without broadcast — same reasoning as /api/war/command above:
-      // the orderer splices the returned strike into its prediction, everyone
-      // else learns of it from the next heartbeat; the blast's ground effects
-      // fire at strikeTick inside warTick, whose milestone signal DOES
-      // broadcast when something world-visible happens.
+      store.log('event', `Airstrike ordered${doc.name ? ' — ' + doc.name : ''}`, `${result.squadron.name} sent`, u.user.displayName, [doc.defenderId].filter(Boolean));
       store.save();
-      // strike is returned so the client can insert it into the predicted
-      // war immediately (plane/countdown start before the next heartbeat).
-      return json(res, 200, { ok: true, cooldownUntil: doc.bombs[side].cooldownUntil, aircraftRemaining: result.aircraftRemaining, strike: result.strike });
+      return json(res, 200, { ok: true, squadron: result.squadron });
     }
 
     if (pathname === '/api/protest/control' && method === 'POST') {

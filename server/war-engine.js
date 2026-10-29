@@ -89,6 +89,20 @@
   const BOMB_RADIUS = 95;             // px — airstrike blast radius (also read by the client for shockwave FX sizing)
   const BOMB_UNIT_DMG = 90;           // max strength damage at the blast centre (falls off to 0 at BOMB_RADIUS)
   const AIRSTRIKE_PRUNE_TICKS = 30;   // a done strike is dropped from war.airstrikes this many ticks after impact
+  // ---- air force (squadrons — see stepAir) ----
+  // A squadron's speed (px/tick) and endurance (ticks of fuel) come from its
+  // aircraft model (server/war.js airModelStats) and live on the squadron;
+  // these are the rules every squadron flies by.
+  const AIR_MIN_STATION = 1;          // ticks over the target a sortie must still afford — sets the range ring (airRange)
+  const AIR_REARM_TICKS = 60;         // ticks on the ground refuelling and rearming after a landing (2 min at 1×)
+  const AIR_COMBAT_R = 70;            // px — opposing airborne squadrons this close dogfight
+  const AIR_KILL_P = 0.14;            // per plane per tick: chance to down an enemy plane (× quality ratio × role)
+  const AIR_AA_R = 75;                // px — enemy ground units this close fire on a squadron
+  const AIR_AA_P = 0.012;             // per unit per tick (× strength factor): ground fire is weak
+  const AIR_PATROL_R = 200;           // px — default patrol area radius
+  const AIR_BOMB_RADIUS = 60;         // px — one plane's bomb (a strike drops a stick, one bomb per plane)
+  const AIR_BOMB_DMG = 0.8;           // × BOMB_UNIT_DMG per bomb
+  const AIR_BOMB_SPACING = 30;        // px between bombs in a stick, along the run-in heading
   const SUPPLY_HEAL_FRAC = 0.004;     // fraction of maxStrength healed per tick for a unit reached by its side's supply flood-fill
   const GARRISON_ROUT_ORG = 5;        // org threshold below which even a dug-in GARRISON routs (non-garrison defenders/attackers still use ROUT_ORG)
   const WARSHIP_RANGE = 180;          // px — warships engage in a separate RANGED pass at this reach, instead of the 40px collision range
@@ -1481,7 +1495,7 @@
   // ---------- airstrikes (cinematic two-phase bombing) ----------
   // Falloff 1 at blast centre → 0 at BOMB_RADIUS, same shape as the old
   // instant-bomb falloff (formerly server/war.js's bombFalloff).
-  function airstrikeFalloff(d) { return clamp(1 - d / BOMB_RADIUS, 0, 1); }
+  function airstrikeFalloff(d, r) { return clamp(1 - d / (r || BOMB_RADIUS), 0, 1); }
   // war.airstrikes: { id, side, pos:[x,y], from:[x,y], orderedTick, strikeTick,
   // orderedAt, done, groundApplied } — enqueued by server/war.js's dropBomb
   // (the order/scheduling is server-only), detonated HERE once
@@ -1492,11 +1506,14 @@
     const bombDmgMod = (war.mods && war.mods.bombDmg) || 1;
     for (const strike of war.airstrikes) {
       if (strike.done || war.tick < strike.strikeTick) continue;
+      // a squadron's stick of bombs carries its own (smaller) radius and
+      // damage; a legacy single-plane strike has neither
+      const R = strike.radius || BOMB_RADIUS, mul = strike.dmgMul || 1;
       for (const u of war.units) {
         if (!isLive(u)) continue;
         const d = dist(u.pos, strike.pos);
-        if (d > BOMB_RADIUS) continue;
-        const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d) * bombDmgMod;
+        if (d > R) continue;
+        const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d, R) * bombDmgMod * mul;
         u.strength = Math.max(0, round1(u.strength - dmg));
         if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
         if (u.strength <= 0) killUnit(war, u);
@@ -1512,8 +1529,8 @@
         for (const r of war.refugees) {
           if (r.count <= 0 || r.arrived != null) continue;
           const rd = dist(r.pos, strike.pos);
-          if (rd > BOMB_RADIUS) continue;
-          const killed = Math.min(r.count, Math.round(r.count * airstrikeFalloff(rd)));
+          if (rd > R) continue;
+          const killed = Math.min(r.count, Math.round(r.count * airstrikeFalloff(rd, R)));
           if (!killed) continue;
           r.count -= killed;
           war.stats.civilianDeaths = (war.stats.civilianDeaths || 0) + killed;
@@ -1526,9 +1543,9 @@
         }
       }
       war.craters = war.craters || [];
-      war.craters.push({ pos: strike.pos.slice(), t: Date.now(), side: strike.side });
+      war.craters.push({ pos: strike.pos.slice(), t: Date.now(), side: strike.side, r: R });
       if (war.craters.length > 40) war.craters.shift();
-      pushEvent(war, 'battle', strike.pos.slice(), 'Airstrike impact — the blast wave rips through the area.');
+      if (!strike.squadronId) pushEvent(war, 'battle', strike.pos.slice(), 'Airstrike impact — the blast wave rips through the area.');
       strike.done = true;
       // Server-only: destroy properties/cut roads/audit log. No-op (and thus
       // safely skipped) on a predicting client, which must never touch
@@ -1539,6 +1556,216 @@
     // the client keeps its plane/FX animation going for a few seconds past
     // impact (see public/js/war.js), well inside this window.
     war.airstrikes = war.airstrikes.filter(s => !s.done || (war.tick - s.strikeTick) < AIRSTRIKE_PRUNE_TICKS);
+  }
+
+  // ---------- air force: squadrons on patrol and strike sorties ----------
+  // war.air = { squadrons, bases, fuel:{att,def}, fuelPerPlane, auto:{att,def} }
+  //   (built and kept in step with the real aircraft inventory by
+  //   server/war.js syncAirWings — the war doc MIRRORS the stockpile).
+  // A squadron: { id, side, nationId, name, model, planes, baseId, pos,
+  //   prevPos, heading, state, mission:{kind,target,radius}|null, order,
+  //   fuel, endurance, speed, q, readyTick, sorties, kills, losses, virtual }
+  //   state: 'ready' (on the ground, armed) → 'out' (flying to the mission)
+  //   → 'station' (patrolling its area) → 'return' → 'rearm' (refuelling,
+  //   AIR_REARM_TICKS) → 'ready'; 'lost' once its last plane is down.
+  // Orders arrive as sq.order (a player via the server route, or the
+  // commander AI in war-ai.js) and are applied HERE at the start of a tick,
+  // so a predicting client launches on the same tick as the server. Fuel:
+  // a sortie fills the tanks from war.air.fuel[side] (the side's refined-fuel
+  // stock, refreshed by the authority every tick) and the real barrels leave
+  // the stockpile through ctx.onSortie; a downed plane leaves the real
+  // inventory through ctx.onAircraftLost. Both hooks are no-ops on a
+  // predicting client, like onAirstrike.
+  function airborne(sq) { return sq.state === 'out' || sq.state === 'station' || sq.state === 'return'; }
+  // How far from its base a squadron can fly a mission and still afford
+  // AIR_MIN_STATION ticks over the target — the range ring.
+  function airRange(sq) { return Math.max(0, ((sq.endurance || 0) - AIR_MIN_STATION) * (sq.speed || 0) / 2); }
+  function airBaseOf(war, sq) {
+    const bases = (war.air && war.air.bases) || [];
+    for (const b of bases) if (b.id === sq.baseId) return b;
+    return null;
+  }
+  // Ticks of flight left the squadron needs to get home from where it is.
+  function airHomeTicks(sq, home) { return Math.ceil(dist(sq.pos, home) / Math.max(1, sq.speed)); }
+  function airPlaceName(db, pos) {
+    let best = null, bd = 320;
+    for (const c of (db.cities || [])) { if (!c.pos) continue; const d = dist(c.pos, pos); if (d < bd) { bd = d; best = c; } }
+    return best ? best.name : 'the front';
+  }
+  function airStep(sq, pt) {
+    const dx = pt[0] - sq.pos[0], dy = pt[1] - sq.pos[1], d = Math.hypot(dx, dy);
+    if (d > 0.01) sq.heading = Math.round(Math.atan2(dy, dx) * 180 / Math.PI);
+    if (d <= sq.speed) { sq.pos = [round1(pt[0]), round1(pt[1])]; return true; }
+    sq.pos = [round1(sq.pos[0] + dx / d * sq.speed), round1(sq.pos[1] + dy / d * sq.speed)];
+    return false;
+  }
+  // A strike's stick of bombs: one per surviving plane, spaced along the
+  // run-in heading, each a regular war.airstrikes entry (stepAirstrikes
+  // detonates them next tick — the client sees the squadron over the target
+  // first). Ids are deterministic so prediction and authority agree.
+  function airReleaseBombs(war, sq, target) {
+    const n = Math.max(1, sq.planes);
+    const a = (sq.heading || 0) * Math.PI / 180, ux = Math.cos(a), uy = Math.sin(a);
+    war.airstrikes = war.airstrikes || [];
+    for (let k = 0; k < n; k++) {
+      const off = (k - (n - 1) / 2) * AIR_BOMB_SPACING;
+      const pos = clampToWorld(war, [round1(target[0] + ux * off), round1(target[1] + uy * off)]);
+      war.airstrikes.push({
+        id: sq.id + '-' + war.tick + '-' + k, side: sq.side, pos, from: sq.pos.slice(),
+        orderedTick: war.tick, strikeTick: war.tick + 1, radius: AIR_BOMB_RADIUS, dmgMul: AIR_BOMB_DMG,
+        squadronId: sq.id, done: false, groundApplied: false
+      });
+    }
+  }
+  function airLosePlanes(war, ctx, sq, n) {
+    n = Math.min(sq.planes, n);
+    if (!(n > 0)) return 0;
+    sq.planes -= n;
+    sq.losses = (sq.losses || 0) + n;
+    war.air.lost = war.air.lost || { att: 0, def: 0 };
+    war.air.lost[sq.side] = (war.air.lost[sq.side] || 0) + n;
+    ctx.onAircraftLost(war, sq, n);
+    if (sq.planes <= 0) { sq.state = 'lost'; sq.mission = null; sq.order = null; }
+    return n;
+  }
+  function stepAir(db, war, ctx, rng) {
+    const air = war.air;
+    if (!air || !Array.isArray(air.squadrons) || !air.squadrons.length) return;
+    air.fuel = air.fuel || { att: 0, def: 0 };
+    const perPlane = air.fuelPerPlane > 0 ? air.fuelPerPlane : 10;
+    // a protest's air wing stays grounded until force is authorized
+    const grounded = (sq) => war.kind === 'protest' && sq.side === 'def' && !(war.protest && war.protest.govViolent);
+    const sqs = air.squadrons;
+    // 1. orders: launches, retasking, recalls; rearmed squadrons come ready
+    for (const sq of sqs) {
+      if (sq.planes <= 0) { sq.order = null; continue; }
+      sq.prevPos = sq.pos.slice();
+      const base = airBaseOf(war, sq);
+      const home = base ? base.pos : sq.pos;
+      if (sq.state === 'rearm' && war.tick >= (sq.readyTick || 0)) sq.state = 'ready';
+      const o = sq.order;
+      if (o) {
+        sq.order = null;
+        if (o.kind === 'recall') {
+          if (airborne(sq) && sq.state !== 'return') { sq.state = 'return'; sq.mission = null; }
+        } else if (grounded(sq)) {
+          pushEvent(war, 'air', home.slice(), `${sq.name} is grounded — force has not been authorized.`);
+        } else if (airborne(sq)) {
+          sq.mission = { kind: o.kind, target: o.target.slice(), radius: o.radius || AIR_PATROL_R };
+          sq.state = 'out';
+        } else if (sq.state === 'ready' && base) {
+          const need = sq.planes * perPlane;
+          if (dist(home, o.target) > airRange(sq) + 1) {
+            pushEvent(war, 'air', home.slice(), `${sq.name} cannot reach that target from ${base.name}.`);
+          } else if ((air.fuel[sq.side] || 0) < need) {
+            pushEvent(war, 'air', home.slice(), `${sq.name} cannot take off — not enough refined fuel (${need} barrels needed).`);
+          } else {
+            air.fuel[sq.side] = round1((air.fuel[sq.side] || 0) - need);
+            sq.state = 'out';
+            sq.fuel = sq.endurance;
+            sq.pos = home.slice(); sq.prevPos = home.slice();
+            sq.sorties = (sq.sorties || 0) + 1;
+            sq.mission = { kind: o.kind, target: o.target.slice(), radius: o.radius || AIR_PATROL_R };
+            ctx.onSortie(war, sq, need);
+            pushEvent(war, 'air', home.slice(), `${sq.name} takes off from ${base.name} — ${o.kind === 'strike' ? 'strike on' : 'patrol over'} ${airPlaceName(db, o.target)}.`);
+          }
+        }
+      }
+      if (grounded(sq) && airborne(sq) && sq.state !== 'return') { sq.state = 'return'; sq.mission = null; }
+    }
+    // 2. flight: fuel burns one tick's worth per tick aloft; a squadron turns
+    //    for home the moment it has only the fuel to get there (bingo)
+    for (const sq of sqs) {
+      if (sq.planes <= 0 || !airborne(sq)) continue;
+      const base = airBaseOf(war, sq);
+      const home = base ? base.pos : sq.prevPos;
+      sq.fuel = (sq.fuel || 0) - 1;
+      if (sq.state !== 'return' && sq.fuel <= airHomeTicks(sq, home) + 1) {
+        if (sq.mission && sq.mission.kind === 'patrol' && sq.state === 'station') pushEvent(war, 'air', sq.pos.slice(), `${sq.name} is low on fuel and leaves its patrol.`);
+        sq.state = 'return'; sq.mission = null; sq.engaging = null;
+      }
+      if (sq.state === 'out') {
+        const m = sq.mission;
+        if (airStep(sq, m.target)) {
+          if (m.kind === 'strike') {
+            airReleaseBombs(war, sq, m.target);
+            pushEvent(war, 'air', m.target.slice(), `${sq.name} bombs ${airPlaceName(db, m.target)} — ${sq.planes} bomb${sq.planes === 1 ? '' : 's'} away.`);
+            sq.state = 'return'; sq.mission = null;
+          } else {
+            sq.state = 'station';
+            sq.orbit = Math.atan2(sq.pos[1] - m.target[1], sq.pos[0] - m.target[0]);
+          }
+        }
+      } else if (sq.state === 'station') {
+        const m = sq.mission;
+        // defend the patrol area: chase the nearest enemy squadron inside it
+        let threat = null, td = Infinity;
+        for (const e of sqs) {
+          if (e.side === sq.side || e.planes <= 0 || !airborne(e)) continue;
+          if (dist(e.pos, m.target) > m.radius * 1.15) continue;
+          const d = dist(e.pos, sq.pos);
+          if (d < td) { td = d; threat = e; }
+        }
+        sq.engaging = threat ? threat.id : null;
+        if (threat) airStep(sq, threat.pos);
+        else {
+          const r = Math.max(40, m.radius * 0.45);
+          sq.orbit = ((sq.orbit || 0) + Math.min(1.2, sq.speed * 0.5 / r)) % (Math.PI * 2);
+          airStep(sq, [m.target[0] + Math.cos(sq.orbit) * r, m.target[1] + Math.sin(sq.orbit) * r]);
+        }
+      } else if (sq.state === 'return') {
+        if (airStep(sq, home)) {
+          sq.state = 'rearm'; sq.readyTick = war.tick + AIR_REARM_TICKS; sq.fuel = 0; sq.mission = null; sq.engaging = null;
+          if (base) pushEvent(war, 'air', home.slice(), `${sq.name} lands at ${base.name} to refuel and rearm.`);
+        } else if (sq.fuel <= 0) {
+          const n = airLosePlanes(war, ctx, sq, sq.planes);
+          pushEvent(war, 'air', sq.pos.slice(), `${sq.name} runs dry short of its base — ${n} aircraft lost.`);
+        }
+      }
+    }
+    // 3. dogfights: every pair of opposing airborne squadrons in range trades
+    //    losses (simultaneous within the pair). Patrols fight as interceptors;
+    //    a bomb-laden strike squadron defends itself poorly.
+    const role = (sq) => sq.mission && sq.mission.kind === 'strike' && sq.state === 'out' ? 0.55 : (sq.state === 'return' ? 0.8 : 1.25);
+    for (let i = 0; i < sqs.length; i++) {
+      const a = sqs[i];
+      if (a.planes <= 0 || !airborne(a)) continue;
+      for (let j = i + 1; j < sqs.length; j++) {
+        const b = sqs[j];
+        if (b.side === a.side || b.planes <= 0 || !airborne(b) || a.planes <= 0) continue;
+        if (dist(a.pos, b.pos) > AIR_COMBAT_R) continue;
+        const pA = AIR_KILL_P * role(a) * (a.q || 1) / (b.q || 1);
+        const pB = AIR_KILL_P * role(b) * (b.q || 1) / (a.q || 1);
+        let downB = 0, downA = 0;
+        for (let k = 0; k < a.planes; k++) if (rng() < pA) downB++;
+        for (let k = 0; k < b.planes; k++) if (rng() < pB) downA++;
+        a.dogfightTick = war.tick; b.dogfightTick = war.tick;
+        const lostB = airLosePlanes(war, ctx, b, downB), lostA = airLosePlanes(war, ctx, a, downA);
+        a.kills = (a.kills || 0) + lostB; b.kills = (b.kills || 0) + lostA;
+        if (lostA || lostB) {
+          const mid = [round1((a.pos[0] + b.pos[0]) / 2), round1((a.pos[1] + b.pos[1]) / 2)];
+          const parts = [];
+          if (lostB) parts.push(`${b.name} loses ${lostB}`);
+          if (lostA) parts.push(`${a.name} loses ${lostA}`);
+          pushEvent(war, 'air', mid, `Dogfight over ${airPlaceName(db, mid)}: ${parts.join(', ')}.`);
+        }
+      }
+    }
+    // 4. ground fire: enemy troops below shoot back — weakly
+    for (const sq of sqs) {
+      if (sq.planes <= 0 || !airborne(sq)) continue;
+      for (const u of war.units) {
+        if (u.side === sq.side || !isLive(u) || u.state === 'embarked') continue;
+        if (dist(u.pos, sq.pos) > AIR_AA_R) continue;
+        const p = AIR_AA_P * clamp((u.strength || 0) / 2000, 0.3, 1.5) * (u.kind === 'warship' ? 3 : 1);
+        if (rng() < p) {
+          airLosePlanes(war, ctx, sq, 1);
+          pushEvent(war, 'air', sq.pos.slice(), `Ground fire from ${u.name} brings down a ${sq.name} aircraft.`);
+          sq.flakTick = war.tick;
+          break;
+        }
+      }
+    }
   }
 
   // ---------- refugee columns (Phase 28) ----------
@@ -2022,7 +2249,8 @@
   const NOOP = function () { };
   function normCtx(ctx) {
     ctx = ctx || {};
-    return { log: ctx.log || NOOP, news: ctx.news || NOOP, onAirstrike: ctx.onAirstrike || NOOP };
+    return { log: ctx.log || NOOP, news: ctx.news || NOOP, onAirstrike: ctx.onAirstrike || NOOP,
+      onSortie: ctx.onSortie || NOOP, onAircraftLost: ctx.onAircraftLost || NOOP };
   }
   function warTick(db, ctx) {
     const war = db.war;
@@ -2053,6 +2281,7 @@
     stepMovement(db, war, ctx, rng);
     stepTransportState(war);
     stepCombat(db, war, ctx, rng);
+    stepAir(db, war, ctx, rng);
     stepAirstrikes(db, war, ctx);
     stepRefugees(war);
     stepTerritory(db, war);
@@ -2097,6 +2326,8 @@
     CELL, COMBAT_RANGE, CAPTURE_RANGE, DEF_MOVE_SPEED, PLAYER_HOLD_TICKS,
     ROAD_SPEED_MULT, MAX_TICKS_PER_CALL, MAX_MANUAL_PATH_POINTS, WORLD_BORDER_INSET,
     BOMB_RADIUS, BOMB_UNIT_DMG, AIRSTRIKE_PRUNE_TICKS, WARSHIP_RANGE, WARSHIP_TRANSPORT_BONUS, NAVAL_KINDS,
+    AIR_REARM_TICKS, AIR_COMBAT_R, AIR_AA_R, AIR_PATROL_R, AIR_BOMB_RADIUS, AIR_MIN_STATION,
+    airborne, airRange, airBaseOf, airHomeTicks,
     REFUGEE_MAX, REFUGEE_FADE_TICKS, REFUGEE_SPEED,
     AI_INTERVAL, TOTAL_VICTORY_PCT,
     // helpers

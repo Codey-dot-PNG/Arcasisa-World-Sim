@@ -43,6 +43,8 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `PATCH /api/company/:id/controls` | CEO/owner: `keepPct, govMix, govPriceMult, wage, govMixByItem` |
 | `PATCH /api/property/:id/controls` | property owner/GM: fractional `produces[].perTurn`, production mode, stock policy, item stock overrides, and local wages |
 | `PATCH /api/trade/controls` | President (controls `ent_gov`) or GM: `govBuy`, `exports`, `imports` |
+| `POST /api/war/air` | squadron order `{conflict?, squadronId, kind: patrol\|strike\|recall, target?, radius?}` — the defence's wing needs `cmdAccess.air`, an invader's its commanders (`att`/`attLead`); range, fuel and the protest force gate are checked (docs/WAR.md "The air force") |
+| `POST /api/war/air/auto` | `{conflict?, side, on}` — hand a wing to the air staff AI or take it back (same authority as above; not for protests) |
 | `POST /api/protest/control` | active-protest toggles, gated by `cmdAccessOf`: `protestorsViolent`/`captureMode` need `attLead` (the organizer's ownership chain), `govViolent` needs `force` (defender chain or the `authorize_force` ability). Response includes the fresh protest doc; responds-sync so the flip lands instantly |
 | `POST /api/protest/disband` | Phase 36 — the organizer's leadership (`attLead`) calls the protest off (no winner) |
 | `POST /api/protest/concede` | Phase 36 — the defender chain (`concede`) concedes: the protest ends with `winner:'att'` and the organizer's party gains `settings.war.protest.concedeSupport` in every province the movement touched |

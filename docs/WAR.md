@@ -1069,6 +1069,9 @@ massed landing is a losing trade only a player may choose).
 
 ## Scenario format — `server/war-scenarios.js`
 
+(Each scenario may also carry `airWing: { planes, fuel, itemId? }` — the
+invader's air force, see "The air force" above.)
+
 Pure data, no engine logic (mirrors the `seed.js`/`sim.js` split). Exports
 `{ scenarios: { <id>: scenario }, UNIT_DEFAULTS }`.
 
@@ -1206,8 +1209,9 @@ client only sends orders; `server/war.js` validates and applies them.
   | Shift+left-drag on ground | Box-select all live units of the commandable side inside the marquee |
   | Plain left-click on ground | Deselect (the dossier handlers stand down on the war layer, so the click reaches the svg-level handler) |
   | Plain left-drag | Pan — exactly the base map, War never consumes it |
-  | Esc | Clear selection + disarm the airstrike (window-level, bound once) |
-  | Airstrike armed + left-click | Orders an airstrike on the click point (defender only — see below), then disarms |
+  | Esc | Clear selection, put the measuring tool away, cancel a planned air mission (window-level, bound once) |
+  | Air mission armed + left-click | Sends the squadron there (desktop); on touch a tap places the target and ✓ Send confirms — see "The air force" |
+  | Ruler / Range + left-drag | Measures instead of panning (a click clears the measurement) |
 
   A right-button drag under ~12 world px is still treated as a plain click
   (move order); at or above that it samples pointer positions into a
@@ -1265,127 +1269,146 @@ for the rest of the war (the roster is small, ~24 units) but pruned once
 older than `CORPSE_MAX_AGE_TICKS` (400) so a very long war doesn't grow
 `war.units` unbounded.
 
-### Airstrikes — defender-only, cinematic two-phase bombing
+### The air force — squadrons, missions, fuel and air combat
 
-Only the defence has an air arm: `dropBomb` rejects any `side !== 'def'`
-outright, and `/api/war/bomb` forces `side = 'def'` for everyone including
-the GM (the GM `att` branch exists only on `/api/war/command`). The client
-mirrors this — the airstrike button is disabled with a "The invader has no
-air arm." hint while the GM is commanding the attacker. `war.bombs` keeps its
-`{att,def}` shape for compatibility with existing war docs, but only `def`
-is ever used now.
+Planes are no longer one-click bombs. Each side has an **air wing** of
+squadrons that fly **patrols** (defend an area against enemy aircraft) or
+**strikes** (bomb a target, then fly home), on limited fuel, from airfields,
+and are lost in dogfights and — rarely — to ground fire. The enemy flies its
+own wing through an air staff AI. Split across the usual boundary:
 
-What used to be an instant blast is now an **order → flight → impact**
-sequence split across the engine/authority boundary the same way everything
-else in this file is:
+**The war doc (`war.air`).** `{ squadrons, bases, fuel:{att,def},
+reserve:{att,def}, fuelPerPlane, auto:{att,def}, lost:{att,def}, seq, aiTick }`.
+A squadron: `{ id ('sq_def_1'…), side, nationId, name ('1st Squadron'),
+model (aircraft item id), modelName, planes, baseId, pos, prevPos, heading,
+state, mission:{kind,target,radius}|null, order, fuel, endurance, speed, q,
+readyTick, sorties, kills, losses, virtual?, dogfightTick?, flakTick? }`.
+`state`: `ready` → `out` (flying to the mission) → `station` (on patrol) →
+`return` → `rearm` (on the ground `AIR_REARM_TICKS` = 60 ticks, 2 min at 1×)
+→ `ready`; `lost` once the last plane is down.
 
-- **`dropBomb(db, side, pos, actor)`** (`server/war.js`, unchanged route/name)
-  — validated exactly as before (side is 'def', war active, not paused, the
-  defender's cooldown expired), but instead of applying the blast it just
-  ENQUEUES a strike onto `war.airstrikes`:
-  `{ id, side, pos:[x,y], from:[x,y], orderedTick: war.tick,
-  strikeTick: war.tick + AIRSTRIKE_FLIGHT_TICKS, orderedAt: <epoch ms>,
-  done: false, groundApplied: false }`. `AIRSTRIKE_FLIGHT_TICKS` is 4 — at
-  the default 2000ms `tickMs` that's an ~8s flight at 1× speed, inside the
-  ~6–10s cinematic window. `from` is the launch point: the seed's
-  `kind:'airport'` property (`prop_airport`, "Lachevan International
-  Airport") at its CURRENT position, falling back to the capital city, then
-  to a fixed map-edge point — the airport can itself be bombed to rubble
-  mid-war, so the fallback chain is a real case, not defensive padding.
-  The `BOMB_COOLDOWN_MS` (12s) cooldown still starts at ORDER time, same as
-  before — a player can't spam strikes just because the last one hasn't
-  landed. Returns `{ ok: true, strike }`; `POST /api/war/bomb` includes
-  `strike` in its response so the client can predict it immediately (see
-  "Client-side prediction" below).
-- **`stepAirstrikes`** (`server/war-engine.js`, shared byte-for-byte with the
-  browser copy) — part of the tick pipeline (see above): once
-  `war.tick >= strike.strikeTick`, applies the DETERMINISTIC blast (moved
-  here from the old `dropBomb` so a predicting client resolves it on the
-  same tick as the server): every live unit within `BOMB_RADIUS` (95px, now
-  an engine constant) takes falloff damage up to `BOMB_UNIT_DMG` (90) ×
-  `war.mods.bombDmg`, a corpse is made via the usual `killUnit` path, a
-  crater is pushed to `war.craters`, a `'battle'` war event fires, and
-  `strike.done = true`. Strikes are processed in array order (determinism);
-  resolved strikes older than `AIRSTRIKE_PRUNE_TICKS` (30) are dropped
-  afterward so the array doesn't grow across a long war.
-- **`ctx.onAirstrike(war, strike)`** — the moment a strike flips
-  `done: true`, the engine calls this hook for everything it must NOT do
-  itself (a predicting client must never mutate `db.properties` or
-  `settings.map.roads`): destroying properties in the blast radius (then
-  `deeds.syncAllDeeds(db)` **once**, the same choke point the old instant
-  bomb used), cutting roads (identical split-the-polyline logic as before),
-  and the audit-log entries for both. `server/war.js`'s
-  `applyAirstrikeGroundEffects(db, war, strike)` implements it, bound into
-  the server's `ctxFor(db)` (closing over `db` per tick call — the only
-  hook that needs it; `log`/`news` don't). It's idempotent via
-  `strike.groundApplied` even though the engine only ever calls it once per
-  strike. A predicting client's ctx simply omits `onAirstrike` and the
-  engine's `normCtx` defaults it to a no-op — exactly the log/news pattern.
+**Server — the mirror (`server/war.js` `syncAirWings`, run before every
+authority tick and at war/protest start).** The aircraft items in a side's
+pools (`aircraftPools`: the nation's inventory, plus the defender's military
+depots) are the canonical record; squadrons follow them per model
+(`mirrorAircraft`): planes bought mid-war join an under-strength grounded
+squadron or form a new one (up to `settings.war.air.squadronSize`, default 4),
+planes sold leave one (grounded squadrons first). A scenario may add a
+VIRTUAL wing for an NPC invader (`scenario.airWing = { planes, fuel,
+itemId? }` — no inventory behind it, its fuel a separate `reserve`); a war
+already running when this shipped gets its scenario wing on its first tick.
+Flight characteristics come from the model's weapon stats (`airModelStats`):
+`speed = 160 + 80 × speed` px/tick, `endurance = 12 + 5 × range` ticks of
+fuel, `q = 0.7 + hp + 0.4 × speed` (dogfight quality) — the SF-50E flies
+226 px/tick for 15 ticks (30s at 1×). **Bases** (`airBasesFor`): every
+`airport` / `military_base` property a side owns (airports first) — capture
+an airfield and it becomes the enemy's forward base — plus, for an invader,
+an airfield on its own soil nearest the defender's capital; with none at
+all, the defence flies from a capital airstrip and an invader from its
+fleet. A squadron whose base is lost relocates to the nearest one left.
+`air.fuel[side]` is refreshed each tick to the side's refined-fuel stock
+(`meta.weapon.kind:'fuel'` items in its `nationPools`) plus its reserve.
 
-`war.airstrikes` is additive/absent-safe: the engine treats a missing array
-as `[]`, no migration was needed.
+**Engine — the flight (`war-engine.js` `stepAir`, deterministic, in the
+tick pipeline after combat and before `stepAirstrikes`):**
+1. **Orders.** `sq.order` (from a player's route call or the air staff AI)
+   is applied at the start of a tick so a predicting client launches on the
+   same tick: `recall` turns an airborne squadron home; a launch needs the
+   squadron `ready`, the target within its **range ring** (`airRange(sq) =
+   (endurance − AIR_MIN_STATION) × speed / 2` from its base — the SF-50E's
+   ~1,580 px covers all of Arcasia from Lachevan) and
+   `planes × fuelPerPlane` barrels (default 10/plane) in `air.fuel[side]`,
+   which it spends (`ctx.onSortie` takes the real barrels — reserve first,
+   then the stockpile). An airborne squadron can be retasked freely.
+2. **Flight.** One tick of fuel burns per tick aloft. The moment a squadron
+   has only the fuel to get home (`fuel ≤ airHomeTicks + 1` — **bingo**) it
+   turns for base, so the farther the target the less time over it. A
+   strike arriving over its target releases a **stick of bombs** — one
+   `war.airstrikes` entry per plane, `AIR_BOMB_SPACING` (30px) apart along
+   the run-in heading, each `radius: AIR_BOMB_RADIUS` (60px), `dmgMul:
+   AIR_BOMB_DMG` (0.8), `squadronId`, deterministic ids — detonated next
+   tick by `stepAirstrikes` (which now honours per-strike radius/damage; the
+   civilian toll of a squadron bomb is 0.35× a legacy strike's). A patrol
+   orbits its point and chases the nearest enemy squadron inside its radius
+   (×1.15). Landing starts the rearm clock.
+3. **Dogfights.** Every pair of opposing airborne squadrons within
+   `AIR_COMBAT_R` (70px) trades losses each tick, simultaneously within the
+   pair: each plane downs an enemy with `AIR_KILL_P` (0.14) × role ×
+   `q_self / q_enemy` — role 1.25 for a patrol (interceptors), 0.55 for a
+   bomb-laden strike on its way in, 0.8 heading home.
+4. **Ground fire.** Each enemy ground unit within `AIR_AA_R` (75px) of an
+   airborne squadron fires with `AIR_AA_P` (0.012) × clamp(strength/2000,
+   0.3, 1.5) (×3 for warships); at most one plane per squadron per tick —
+   weak on purpose.
+A downed plane leaves the real inventory through `ctx.onAircraftLost`
+(`airPlanesLost` — virtual planes just vanish), logged to the timeline.
 
-### Client — plane, fireball, shockwave (all cosmetic)
+**Protests.** A protest's air wing is the security forces' alone and stays
+grounded until force is authorized (`orderSquadron` refuses, `stepAir`
+turns airborne police squadrons home if force is withdrawn). No air AI.
 
-Everything from here down is client-only dressing in `public/js/war.js`
-around the moment `stepAirstrikes` has already decided — none of it feeds
-back into gameplay, so it's safe to render slightly differently on different
-clients:
+**The air staff AI (`war-ai.js` `airPass`, every `AIR_AI_INTERVAL` = 3
+ticks, for each side whose `air.auto[side]` is on — an NPC invader by
+default, a player-run defence only if its commanders hand the wing over).**
+(1) Keep one patrol over the centre of gravity — the fighting if any, else
+the main body — whenever the enemy is aloft or there are squadrons to
+spare. (2) Send the rest against the heaviest enemy concentration in reach
+(≥1500 strength within 70px), never within 120px of its own troops or its
+own airfields, keeping fuel back for cover. Orders go out as `sq.order`;
+no rng.
 
-- **Plane** — a small swept-wing SVG silhouette (`.war-plane`, tinted
-  defender navy), one per in-flight `war.airstrikes` entry. Its position is
-  a pure function of `(strike, "now")`, not a snapshot-to-snapshot tween: a
-  three-leg flight (climb-out from `from` to a turn-in point
-  `AIRSTRIKE_FAR_OFFSET` px away from the target, an attack run from there
-  through `pos` timed to arrive exactly at `strikeTick`, then egress back
-  toward `from` fading over `AIRSTRIKE_EGRESS_TICKS`) computed from the
-  predicted war's `tick`/`_lastTick`/`tickMs`/`speed` every rAF frame
-  (`War._planeState`). Because it's derived fresh each frame instead of
-  tweened between renders, it survives the war-layer's every-render DOM
-  rebuild for free.
-- **Impact FX** — triggered exactly once per strike, the first render where
-  `strike.done` reads true (`War._checkAirstrikeLandings`, keyed by strike
-  id so it's idempotent across rebases). Modelled frame-by-frame on
-  neal.fun's Asteroid Launcher impact (from a 24fps reference capture) —
-  soft light only, no debris lines, no turbulence displacement
-  (`renderExplosions`/`_updateExplosion`, `EXPLOSION_LIFE_MS` 2900ms, all
-  at the impact point):
-  1. a huge soft warm-white **bloom** (pure radial-gradient falloff, no
-     hard edges) washing over ~3× `BOMB_RADIUS` within ~450ms, holding to
-     ~650ms, bled away by ~1600ms — plus a flattened horizontal **lens
-     streak** (an ellipse reusing the same gradient in objectBoundingBox
-     units) for the anamorphic-flare look;
-  2. a bright **core ball** swelling to ~0.55× `BOMB_RADIUS` by 250ms and
-     then shrinking steadily into a small warm **ember** that lingers at
-     ground zero until the very end;
-  3. a **soap-bubble shockwave** detaching at ~480ms and expanding slowly
-     (ease-out) to ~2.6× `BOMB_RADIUS` by ~2750ms — a wide
-     `feGaussianBlur`-softened band plus a thinner bright rim, never a
-     crisp stroke.
-  Nodes are recreated each render (the whole war layer is torn down every
-  render, same as the hatch pattern), with timing carried across rebuilds
-  via `_strikeImpactAt` and per-frame animation driven by the shared rAF
-  loop keyed off `Date.now()` (matching `_strikeImpactAt`'s epoch — NOT the
-  rAF `performance.now()` timestamp, a different clock entirely).
-  **Replay guard:** the `_strikeImpactAt` stamp is kept until the strike
-  leaves `war.airstrikes` entirely (the engine prunes it
-  `AIRSTRIKE_PRUNE_TICKS` after impact) — deleting it when the FX ends (the
-  original code) let `_checkAirstrikeLandings` re-stamp the still-`done`
-  strike on the next render, replaying the explosion every
-  `EXPLOSION_LIFE_MS` until the prune caught up.
-- **UI language** — the toolbar button reads "✈ Call Airstrike"; armed:
-  "Airstrike armed — click the target"; while a strike is inbound, a
-  separate countdown chip reads "✈ Strike inbound — Ts"; cooldown reads "Air
-  wing rearming — Ts"; the attacker-side disabled state reads "✈ No air arm"
-  with the same "The invader has no air arm." hint as before. Esc still
-  disarms.
-- **Prediction** — `War._dropBomb` inserts the strike the POST response
-  returns straight into the predicted war (same optimistic-order pattern as
-  `_issueMove`), so the plane and countdown start before the next heartbeat;
-  the engine's `stepAirstrikes` then predicts the blast locally at
-  `strikeTick` exactly like the server, and the next rebase reconciles
-  anything a predicting client couldn't know (another player's strike, an
-  AI replan).
+**API.** `POST /api/war/air { conflict?, squadronId, kind:
+'patrol'|'strike'|'recall', target?:[x,y], radius? }` (`orderSquadron`
+validates state, range, fuel, the protest gate) and `POST /api/war/air/auto
+{ conflict?, side, on }`. A side's wing answers to whoever may fly it: the
+defence's to `cmdAccess.air`, an invader's to its commanders (`att` /
+`attLead`), the GM to both. `POST /api/war/bomb { pos }` remains for old
+clients: it sends the nearest ready defence squadron in range on a strike.
+GM tuning: `settings.war.air = { squadronSize, fuelPerPlane }`.
+
+### Client — squadrons, the air wing dock and the mission planner
+
+`public/js/war-air.js` (folded into `War`) draws and commands the air war;
+the engine decides everything.
+- **Map** (`renderAir`, overlay sublayer `air`, per conflict doc):
+  airfields (a runway mark per base with its ready ✈ / rearming ⟳ planes,
+  the name once zoomed in); squadrons in flight as a finger-four formation
+  of jets with contrails, turned to their heading and glided between ticks
+  by `_airFrame` (from the shared rAF loop: `prevPos → pos` on the tick
+  clock), a label with the planes left and a fuel gauge (red when low);
+  patrol circles (CAP) and strike runs with a target reticle for the side
+  you command (the GM sees both — fog of war on enemy intent); yellow
+  tracers and a burst where squadrons dogfight; flak puffs where ground fire
+  reaches them. A squadron's bombs draw no lone bomber (`squadronId`) but
+  each gets the impact FX at its own radius.
+- **Air wing dock** (`#war-air-dock`, toolbar ✈ Air wing · n ready) — the
+  wing you fly (the GM switches Defence/Invader): fuel stock and per-sortie
+  cost, the **Auto** switch, warnings (grounded, no fuel), then one row per
+  squadron: name, planes (✈✈✈✈), state with a live countdown (fuel left in
+  the air, time to ready while rearming) and a bar, base · model · mission ·
+  kills/losses, and its actions — ◯ Patrol / ✕ Strike (ready or airborne),
+  ↩ Recall (airborne). Structure rebuilds only when the wing changes;
+  countdowns and bars are patched in place every second. Desktop: stacked
+  under the HUD and kept above the toolbar (`_placeAirDock`); phones: a
+  full-width sheet that tucks away while you plan.
+- **Mission planner** (`_airPlanArm` → `_airPlanHover` → `_airPlanClick`):
+  the base's range ring, a line to the cursor and, for a patrol, its circle;
+  a card with the squadron, mission, grid square, distance, **time out and
+  time over the target** that fuel allows — or why it can't go (out of
+  range, not enough fuel left for an airborne retask). Desktop: click sends.
+  Touch (no hover): a tap places the target and shows the card, **✓ Send**
+  in the toolbar confirms; **✕ Cancel mission** / Esc cancel.
+- **Prediction** — `_airOrder` writes the order into the predicted doc as
+  soon as the POST returns (the squadron takes off locally on the next
+  predicted tick) and into the **air outbox**, which `_rebase` re-applies
+  to a snapshot that doesn't reflect it yet (a heartbeat already in flight)
+  — the replacement for the old strike outbox.
+- **Summaries** — HUD "Air" row (aloft / ready / rearming / lost per side),
+  War Room "Air war" section (per side: aircraft, sorties, shot down, lost,
+  fuel, Auto) with a squadron table fold, legend rows, help modal rows.
+
+The explosion FX themselves are unchanged (neal.fun-style bloom, core,
+shockwave — `renderExplosions`), sized per strike radius.
 
 ## Client-side prediction (Phase 18) — why the war feels realtime now
 
@@ -1445,24 +1468,14 @@ Three mechanisms fix it, all in `public/js/war.js` + the shared engine:
    non-GM), which the client version-guards (`v` monotonic, same rule as
    core.js) and rebases onto.
 
-**Airstrike outbox** — `_dropBomb` splices the strike `POST /api/war/bomb`
-returns straight into the predicted war (see "Prediction" under Airstrikes
-above), but `dropBomb` saves server-side SYNCHRONOUSLY before that response
-returns, and the client ALSO polls `GET /api/war/state` on its own ~1-tick
-timer independently of any order it just sent. A heartbeat request already
-in flight the instant a bomb order lands can resolve with a snapshot from
-just BEFORE the strike existed; adopting that snapshot naively would drop
-the just-ordered strike (no plane, no countdown) for a whole heartbeat
-interval, until the next poll picked it back up. `War._rebase` guards
-against this with a small strike outbox (`_pred.strikeOutbox`, 8s expiry,
-mirroring the order outbox): any outbox strike the incoming snapshot doesn't
-know about yet (by id) is re-spliced into the rebased war BEFORE the
-rollback-reconciliation fast-forward runs below, so a snapshot that needs
-catching up ticks the strike through `stepAirstrikes` exactly like the
-server would — it can even resolve it locally, same as the server, if the
-catch-up crosses `strikeTick`. `tools/war-divergence-check.js` scripts this
-exact race (a snapshot captured one tick before the order, delivered one
-tick after) and reports the gap in ticks with the fix on/off.
+**Air outbox** — a squadron order is written into the predicted war as soon
+as `POST /api/war/air` returns, but a heartbeat already in flight can resolve
+with a snapshot from just BEFORE the order; `War._rebase` re-applies any
+order in `_pred.airOutbox` (8s expiry) to a snapshot whose squadron still
+sits ready without it, BEFORE the fast-forward, so the catch-up launches it
+exactly as the server will. (It replaced the old single-airstrike "strike
+outbox"; `tools/war-divergence-check.js` still measures that original race
+on its own ported copy of the logic.)
 
 Two rendering rules keep it smooth (both born from live-server testing):
 
@@ -1892,6 +1905,46 @@ Positions are tweened client-side: `_anim` (keyed like the nodes) remembers each
 interpolated position, a new leg starts from it, and a refresh mid-leg keeps the in-flight
 leg. Move arrows' tails track the tween (`_arrowAnim`).
 
+### The map sheet (`public/js/war-map.js`)
+
+The War layer reads as a staff officer's map sheet. Scale is world data:
+`settings.map.kmPerPx` (2.17 — Arcasia's ~1.81M px² of land at Brazil's
+8.5M km²; seeded by `store.migrate` only when missing). Distances below are
+km at that scale; times are real seconds at the conflict's current speed.
+- **Grid** — 500 km squares lettered A, B, C… across and numbered down
+  (`War.gridRef(pos)` → "D4", used by unit cards, the planner, squadron
+  tables), 100 km sub-lines once zoomed past ×1.25 (`#map-svg.war-grid-fine`).
+  Drawn ONCE per full render into the base layer's `war-grid` group.
+- **Printed frame** (`#war-frame`, screen space): a double neatline,
+  graduated margins with the grid letters/numbers centred on each visible
+  square, a scale bar re-picking a round length as you zoom
+  (`#war-scalebar`), a compass rose (`#war-rose`), all redrawn by
+  `onViewChange` (hooked into `GameMap.applyTransform`, rAF-coalesced) —
+  never per frame. **Paper** (`#war-paper`): texture, vignette, fold creases
+  and a coffee ring — a static composited layer. The sheet ends above the
+  GM bar.
+- **Measuring tools** (toolbar 📏 Ruler / ◎ Range; overlay sublayer
+  `measure`): a left drag measures instead of panning. The ruler shows km,
+  bearing, graduations and what it takes to cover it (infantry, armour, by
+  road, by air) plus the grid squares; the range compass a circle with the
+  enemy/friendly units, cities and area inside. Labels are screen-sized
+  (`.war-screen`, `_screenScale` = world units per CSS px) and flip to
+  whichever side has room.
+- **Troop movement** — routes follow the actual road/rail path (`u.path`
+  from `pathIdx`) with a light casing under your own; the GM sees both
+  sides' routes (players see only theirs — fog of war on intent); every
+  live unit leaves a dotted **trail** of its last ten moves
+  (`_sampleTrails`, one breadcrumb per tick moved), so you see where any
+  column has come from; selected units get a label at their destination with
+  the remaining route's length and arrival time (`routeEta`), one per
+  destination.
+
+**Per-paint layers.** `_paint` clears each doc's OWN `orders`/`refugees`/
+`fx` groups before redrawing them. (It used to clear the shared sublayers,
+which detached the per-doc groups after the first paint — routes, clash
+markers, refugee columns and impact FX were drawn into detached nodes and
+never shown.)
+
 ### Map controls (War layer only)
 
 Three floating surfaces, rebuilt on a 1s UI timer **only when their content signature
@@ -1901,8 +1954,9 @@ changes** (rebuilding every second used to swallow taps mid-press):
   plus only the commands this operator holds: War/Protest switch (active conflicts only),
   Select all, Clear (n), **Tap orders** (left-click/tap on ground = move, on an enemy =
   attack; on by default on coarse-pointer devices — the touch-friendly scheme, since phones
-  have no right button), ✈ Airstrike (with stock / rearm countdown / inbound countdown),
-  protest levers, the GM's Defence/Invader command side, and **?** (a gestures modal).
+  have no right button), ✈ Air wing (opens the dock; ✓ Send / ✕ Cancel mission while
+  planning), protest levers, the GM's Defence/Invader command side, 📏 Ruler / ◎ Range, and
+  **?** (a gestures modal).
 - **Situation HUD** (top-left; collapses to one line, closed by default on phones) — status
   and tick, a balance-of-forces bar (live strength per side), ground occupied/seized, losses,
   the next objective, the latest notable report, a **Legend** (symbol key) and a link to the

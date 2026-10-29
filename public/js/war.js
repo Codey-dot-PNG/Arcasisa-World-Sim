@@ -134,7 +134,6 @@ const War = {
   // ---- interactive War layer input state (Phase 16) ----
   _sel: new Set(),   // selected unit ids (commandable side only)
   _input: null,      // current pointer gesture: {mode:'box'|'formation', start:[x,y], active, node?}
-  _bombArmed: false,
   _gmSide: 'def',    // GM-only toggle: which side the GM is currently commanding
   _inspect: null,    // Feature: unit info card — enemy unit id under inspection (own-side uses _sel instead)
   // Tap orders: a left-click/tap on ground moves the selection and a tap on
@@ -157,7 +156,7 @@ const War = {
   // and commanded exactly like the war. `_preds` holds one prediction state
   // per conflict key ('war'|'protest'); `_activeKey` is the conflict the
   // toolbar/commands currently target (the map renders BOTH at once).
-  _preds: {},      // key -> { war: <deep copy>, authRef, baseTick, lastAuthTick, outbox, strikeOutbox }
+  _preds: {},      // key -> { war: <deep copy>, authRef, baseTick, lastAuthTick, outbox, airOutbox }
   _activeKey: 'war',
   _warV: 0,          // last /api/war/state version applied — rejects out-of-order heartbeat responses
   _rtTimer: null,    // 250ms realtime driver (local predicted ticks + heartbeat gate)
@@ -304,27 +303,17 @@ const War = {
     const war = JSON.parse(JSON.stringify(auth));
     const sameWar = !!(prev && prev.war && prev.war.startedAt === war.startedAt);
     const now = Date.now();
-    // AIRSTRIKE OUTBOX: _dropBomb splices the strike POST /api/war/bomb
-    // returns straight into the predicted war so the plane/countdown start
-    // immediately (see docs/WAR.md "Prediction"). But dropBomb saves
-    // server-side SYNCHRONOUSLY before that response returns, and this
-    // client also polls GET /api/war/state on its own ~1 tick-interval timer
-    // — a heartbeat request already in flight the instant the order lands
-    // can resolve with a snapshot from just BEFORE the strike existed. Left
-    // alone, adopting that snapshot here would silently drop the strike
-    // (no plane, no countdown) until the NEXT heartbeat/refetch arrives, a
-    // whole interval later. Re-splice any outbox strike this snapshot
-    // doesn't know about yet — BEFORE the fast-forward below, so if the
-    // snapshot needs catching up it ticks the strike through stepAirstrikes
-    // exactly like the server would (it may even resolve it, same as the
-    // server, if the catch-up crosses strikeTick).
-    const strikeOutbox = ((prev && prev.strikeOutbox) || []).filter(o =>
-      o.exp > now && !(auth.airstrikes || []).some(s => s.id === o.strike.id));
-    if (strikeOutbox.length) {
-      war.airstrikes = war.airstrikes || [];
-      for (const o of strikeOutbox) {
-        if (!war.airstrikes.some(s => s.id === o.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(o.strike)));
-      }
+    // AIR OUTBOX: a squadron order (war-air.js _airOrder) is applied to the
+    // predicted doc the moment POST /api/war/air returns, so the squadron
+    // takes off locally on the next predicted tick. A heartbeat already in
+    // flight can still resolve with a snapshot from just BEFORE the order —
+    // re-apply any order such a snapshot doesn't reflect yet (the squadron
+    // still sits ready with no order) BEFORE the fast-forward below, so the
+    // catch-up launches it exactly as the server will.
+    const airOutbox = ((prev && prev.airOutbox) || []).filter(o => o.exp > now);
+    for (const o of airOutbox) {
+      const sq = ((war.air || {}).squadrons || []).find(x => x.id === o.sqId);
+      if (sq && !sq.order && (o.order.kind === 'recall' ? (sq.state === 'out' || sq.state === 'station') : (sq.state === 'ready' && !sq.mission))) sq.order = JSON.parse(JSON.stringify(o.order));
     }
     // ROLLBACK RECONCILIATION: a snapshot describes the war as of the
     // server's last tick, which on live deployments is usually BEHIND the
@@ -351,7 +340,7 @@ const War = {
     if (!phase || now - phase > interval * 2) phase = now;
     war._lastTick = phase;
     const outbox = (prev ? prev.outbox : []).filter(o => o.exp > now);
-    this._preds[key] = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [], strikeOutbox };
+    this._preds[key] = { war, authRef: auth, baseTick: auth.tick || 0, lastAuthTick: auth.tick || 0, outbox: [], airOutbox };
     // Re-apply optimistic orders the server hasn't reflected yet, so an
     // in-flight command's arrow doesn't flicker away on an older snapshot.
     // `o.dest` is always populated (for a path order it's the path's LAST
@@ -534,6 +523,12 @@ const War = {
       return true;
     }
     if (e.button !== 0) return false;
+    // the air mission planner (war-air.js): a click is the target
+    this._swallowUp = false;
+    if (this._airPlan && this._airPlanClick) { e.preventDefault(); this._swallowUp = true; this._airPlanClick(world); return true; }
+    // measuring tools (war-map.js): a left drag measures instead of panning
+    // (no text selection either while dragging across the page)
+    if (this._tool && !e.shiftKey && !e.ctrlKey && !e.metaKey) { e.preventDefault(); this._measureDown(world); return true; }
     if (e.shiftKey) {
       this._input = { mode: 'box', start: world, active: true, node: this._marqueeNode(map) };
       return true;
@@ -549,13 +544,6 @@ const War = {
       this.renderToolbar();
       return true;
     }
-    if (this._bombArmed) {
-      this._bombArmed = false;
-      if (!this.commandable()) { toast('The war has concluded — no bombs can be dropped.', true); this.renderToolbar(); return true; }
-      this._dropBomb(world);
-      this.renderToolbar();
-      return true;
-    }
     // Plain left button: NOT consumed — map.js pans on drag; a motionless
     // click on empty ground deselects via onMapClick (svg pointerup).
     return false;
@@ -564,7 +552,8 @@ const War = {
     if (!this._input || !this._input.active) return;
     const map = GameMap;
     const world = map.clientToWorld(e.clientX, e.clientY);
-    if (this._input.mode === 'box') this._updateMarquee(this._input.node, this._input.start, world);
+    if (this._input.mode === 'measure') this._measureMove(world);
+    else if (this._input.mode === 'box') this._updateMarquee(this._input.node, this._input.start, world);
     else if (this._input.mode === 'formation') this._updateFormationLine(this._input.node, this._input.start, world);
     else if (this._input.mode === 'path') {
       const pts = this._input.points;
@@ -587,6 +576,12 @@ const War = {
     const world = map.clientToWorld(e.clientX, e.clientY);
     const start = this._input.start;
     const tiny = Math.hypot(world[0] - start[0], world[1] - start[1]) < 6;
+    if (this._input.mode === 'measure') {
+      this._measureMove(world);
+      if (tiny) { this._measure = null; this._drawMeasure(); } // a click clears the last measurement
+      this._input = null;
+      return;
+    }
     if (this._input.mode === 'box') {
       if (this._input.node && this._input.node.parentNode) this._input.node.parentNode.removeChild(this._input.node);
       if (tiny) {
@@ -630,8 +625,15 @@ const War = {
 
   // Plain left-click on empty ground (map.js's svg-level pointerup, after the
   // dossier select() handlers stand down on the war layer): clear selection.
+  // Plain pointer movement over the map (map.js, never consumed) — drives the
+  // air mission planner's live preview.
+  onMapHover(e) {
+    if (this._airPlan && this._airPlanHover) this._airPlanHover(GameMap.clientToWorld(e.clientX, e.clientY));
+  },
   onMapClick(e) {
     if (e.button !== 0) return;
+    if (this._swallowUp) { this._swallowUp = false; return; } // the press was a tool/planner gesture
+    if (this._tool) return; // measuring: clicks belong to the tool
     // Tap orders (the touch-friendly scheme — no right button on a phone):
     // with units selected, a tap on open ground is a move order.
     if (this._tapOrders && this._sel.size && this.commandable()) {
@@ -663,9 +665,12 @@ const War = {
     this._keysBound = true;
     window.addEventListener('keydown', (e) => {
       if (e.key !== 'Escape' || W.layer !== 'war') return;
-      const had = this._sel.size || this._bombArmed || this._spawnArmed || this._inspect || this._inspectRef;
-      this._sel.clear(); this._bombArmed = false; this._spawnArmed = false; this._input = null; this._inspect = null; this._inspectRef = null;
-      if (had) this.refreshLayer(true);
+      const had = this._sel.size || this._spawnArmed || this._inspect || this._inspectRef || this._tool || this._measure || this._airPlan;
+      this._sel.clear(); this._spawnArmed = false; this._input = null; this._inspect = null; this._inspectRef = null;
+      this._tool = null; this._measure = null; this._airPlan = null;
+      if (this._drawMeasure) this._drawMeasure();
+      if (this._airPlanClear) this._airPlanClear();
+      if (had) { this.refreshLayer(true); this.renderToolbar(); }
     });
   },
 
@@ -806,39 +811,6 @@ const War = {
     try { await POST('/api/war/command', { side, orders, conflict: this._activeKey }); }
     catch (e) { toast(e.message, true); }
   },
-  async _dropBomb(pos) {
-    try {
-      const key = this._activeKey;
-      const auth = S() && S()[key === 'protest' ? 'protest' : 'war'];
-      const r = await POST('/api/war/bomb', { side: this.commandableSide(), pos: this._clamp(pos), conflict: key });
-      // Insert the server-created strike into the predicted war IMMEDIATELY
-      // (same optimistic-order spirit as _issueMove) — the plane and the
-      // toolbar countdown start now instead of waiting for the next
-      // heartbeat; the engine's deterministic stepAirstrikes then predicts
-      // the blast locally at strikeTick, and rebases reconcile as usual.
-      if (window.WarEngine && r && r.strike) {
-        if (r.aircraftRemaining !== undefined && auth && auth.bombs && auth.bombs.def) {
-          auth.bombs.def.aircraftRemaining = r.aircraftRemaining;
-        }
-        const war = this.predictedDoc(auth);
-        if (war) {
-          war.airstrikes = war.airstrikes || [];
-          if (!war.airstrikes.some(s => s.id === r.strike.id)) war.airstrikes.push(JSON.parse(JSON.stringify(r.strike)));
-          // Remember it in the "strike outbox" too — see _rebase's comment —
-          // so a heartbeat that was already in flight when this order landed
-          // (and therefore resolves with a snapshot from just before it)
-          // doesn't silently drop the strike for a whole interval.
-          const st = this._preds[key];
-          if (st) {
-            (st.strikeOutbox = st.strikeOutbox || [])
-              .push({ strike: JSON.parse(JSON.stringify(r.strike)), exp: Date.now() + 8000 });
-          }
-          this.refreshLayer(true);
-        }
-      }
-      toast('Air wing scrambles — strike inbound.');
-    } catch (e) { toast(e.message, true); }
-  },
   // GM unit spawner (Feature: mid-war reinforcements) — placement click after
   // "Arm placement" in the War Room GM panel (see renderSpawner). Authority
   // (validation, clamping, war.mods.hp scaling) all lives server-side in
@@ -907,7 +879,11 @@ const War = {
         const ar = this._arrowAnim[id];
         if (ar) {
           if (!ar.node.isConnected) delete this._arrowAnim[id];
-          else ar.node.setAttribute('d', 'M' + e.curPos[0].toFixed(1) + ' ' + e.curPos[1].toFixed(1) + (ar.tail ? ' ' + ar.tail : ''));
+          else {
+            const d = 'M' + e.curPos[0].toFixed(1) + ' ' + e.curPos[1].toFixed(1) + (ar.tail ? ' ' + ar.tail : '');
+            ar.node.setAttribute('d', d);
+            if (ar.casing) ar.casing.setAttribute('d', d);
+          }
         }
         e.node.setAttribute('transform', `translate(${e.curPos[0].toFixed(1)},${e.curPos[1].toFixed(1)}) scale(${scale})`);
       }
@@ -922,6 +898,8 @@ const War = {
         e.node.setAttribute('transform', `translate(${e.curPos[0].toFixed(1)},${e.curPos[1].toFixed(1)}) scale(${scale})`);
         e.node.style.opacity = String(this._refOpacity(e.war, e.r));
       }
+      // Squadrons in flight (war-air.js) — interpolated on the tick clock.
+      if (this._airFrame && this._airFrame()) any = true;
       // Airstrike planes — a pure function of the predicted tick clock.
       for (const id in this._airstrikeAnim) {
         const e = this._airstrikeAnim[id];
@@ -980,6 +958,7 @@ const War = {
       this._refAnim = {}; this._inspectRef = null;
       this._lastStrength = {}; this._hitAt = {};
       this._removeToolbar(); this._removeUnitCard(); this._removeHud(); this._inspect = null;
+      this._unmountFrame(); if (this._removeAirDock) this._removeAirDock();
       if (this._O) { this._O.root.remove(); this._O = null; this._unitNodes = new Map(); }
       this._stopRealtime(); this._preds = {}; return;
     }
@@ -993,7 +972,7 @@ const War = {
     map.world.appendChild(layer);
     map.warLayer = layer;
     this._L = { root: layer, docs: {} };
-    for (const name of ['veil', 'ground']) {
+    for (const name of ['veil', 'grid', 'ground']) {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', 'war-' + name);
       layer.appendChild(g);
@@ -1015,7 +994,7 @@ const War = {
     root.setAttribute('class', 'war-overlay-root');
     host.appendChild(root);
     this._O = { root, docs: {} };
-    for (const name of ['marks', 'orders', 'refugees', 'units', 'fx']) {
+    for (const name of ['marks', 'orders', 'refugees', 'units', 'air', 'fx', 'measure']) {
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('class', 'war-' + name);
       root.appendChild(g);
@@ -1039,7 +1018,7 @@ const War = {
       if (e.type === 'pointerdown' && e.button === 0) {
         const n = e.target.closest && e.target.closest('[data-wu]');
         const rec = n && this._unitNodes.get(n.getAttribute('data-wu'));
-        if (rec && rec.own && !this._bombArmed && !this._spawnArmed) return;
+        if (rec && rec.own && !this._airPlan && !this._spawnArmed && !this._tool) return;
       }
       const ev = new ctor(e.type, e);
       ev._warFwd = true;
@@ -1079,7 +1058,9 @@ const War = {
       r.setAttribute('class', 'war-veil-rect');
       this._L.veil.appendChild(r);
     } else if (!onWar && this._L.veil.firstChild) clear(this._L.veil);
-    clear(this._O.orders); clear(this._O.refugees); clear(this._O.fx);
+    // the kilometre grid (war-map.js) — static, drawn once per full render
+    if (onWar && !this._L.grid.firstChild) this._renderGrid(this._L.grid);
+    else if (!onWar && this._L.grid.firstChild) clear(this._L.grid);
     const seen = new Set();
     const anyLive = docs.some(d => d.active);
     for (const auth of docs) {
@@ -1092,15 +1073,21 @@ const War = {
       // the front line the player sees is always at full cadence.
       const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
       const D = this._docLayers(NS, key, war);
+      // the per-paint layers start empty — clear the doc's OWN groups (clearing
+      // the shared sublayer would detach them, and nothing drawn into them
+      // afterwards would ever reach the screen)
+      clear(D.orders); clear(D.refugees); clear(D.fx);
       this.renderGround(map, NS, war, D, key);
       this.renderMarks(map, NS, war, D);
       // Once a conflict concludes the soldiers leave the field — arrows and
       // markers only while it's active; ground and marks stay for review.
       if (war.active) {
+        this._sampleTrails(war, key);
         this.renderOrders(map, NS, war, D);
         this.renderRefugees(map, null, NS, war, D.refugees);
         this.renderUnits(map, NS, war, D, key, seen);
-      }
+        if (this.renderAir) this.renderAir(map, NS, war, D, key, seen);
+      } else if (this.renderAir) clear(D.air);
       this._fx = D.fx;
       this._checkAirstrikeLandings(war);
       this.renderAirstrikePlanes(map, null, NS, war);
@@ -1117,14 +1104,22 @@ const War = {
     }
     this.ensureLoop();
     this.bindKeys();
-    if (onWar) { this.renderToolbar(); this.renderUnitCard(); this.renderHud(); }
-    else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); }
+    if (onWar) {
+      if (!document.getElementById('war-frame')) this._mountFrame();
+      if (this._measure && this._O.measure && !this._O.measure.firstChild) this._drawMeasure();
+      this.renderToolbar(); this.renderUnitCard(); this.renderHud();
+      if (this.renderAirDock) this.renderAirDock();
+    } else {
+      this._unmountFrame();
+      this._removeToolbar(); this._removeUnitCard(); this._removeHud();
+      if (this._removeAirDock) this._removeAirDock();
+    }
   },
 
   _hideDoc(key) {
     const B = this._L.docs[key], O = this._O && this._O.docs[key];
     if (B) { clear(B.ground); clear(B.halo); B._groundKey = null; B._haloKey = null; }
-    if (O) { clear(O.marks); O._marksKey = null; }
+    if (O) { clear(O.marks); O._marksKey = null; clear(O.orders); clear(O.refugees); clear(O.fx); if (O.air) clear(O.air); }
   },
   // one group per conflict doc inside each sublayer (z-order: every doc's
   // ground under every doc's units)
@@ -1133,12 +1128,12 @@ const War = {
     let B = this._L.docs[key];
     if (!B) { B = this._L.docs[key] = { halo: mkG(this._L.ground) }; B.ground = mkG(this._L.ground); }
     let O = this._O.docs[key];
-    if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'orders', 'refugees', 'units', 'fx']) O[name] = mkG(this._O[name]); }
+    if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'orders', 'refugees', 'units', 'air', 'fx']) O[name] = mkG(this._O[name]); }
     const D = Object.assign(O, { ground: B.ground });
     D._groundKey = B._groundKey;
     D._base = B;
     const cls = 'war-doc-' + (war.kind === 'protest' ? 'protest' : 'war');
-    for (const name of ['ground', 'marks', 'orders', 'units']) if (D[name].getAttribute('class') !== cls) D[name].setAttribute('class', cls);
+    for (const name of ['ground', 'marks', 'orders', 'units', 'air']) if (D[name].getAttribute('class') !== cls) D[name].setAttribute('class', cls);
     if (B.halo.getAttribute('class') !== cls) B.halo.setAttribute('class', cls);
     return D;
   },
@@ -1227,7 +1222,7 @@ const War = {
       D.ground.appendChild(n);
       return n;
     };
-    for (const c of (war.craters || [])) add('circle', { cx: c.pos[0], cy: c.pos[1], r: 95, class: 'war-crater' });
+    for (const c of (war.craters || [])) add('circle', { cx: c.pos[0], cy: c.pos[1], r: c.r || 95, class: 'war-crater' });
     const g = war.grid;
     if (!g || !g.cols || !g.rows) return;
     const protest = war.kind === 'protest';
@@ -1515,8 +1510,16 @@ const War = {
       return n;
     };
     this._arrowAnim = this._arrowAnim || {};
+    // trails under everything: where every column has come from (war-map.js)
+    this._renderTrails(war, this.docKeyOf(war), D.orders);
+    // routes: the whole remaining road a unit will take. Your own side's
+    // always; the enemy's only for the GM (fog of war on intent — you see
+    // where they have been, not where they are going).
+    const omniscient = isGM();
     for (const u of war.units) {
-      if (u.side !== side || !live(u) || !u.dest || u.attackId) continue;
+      if (!live(u) || !u.dest || u.attackId) continue;
+      const own = u.side === side;
+      if (!own && !omniscient) continue;
       const key = this._ukey(war, u);
       const pts = [];
       if (Array.isArray(u.path) && u.path.length) for (let i = (u.pathIdx || 0); i < u.path.length; i++) pts.push(u.path[i]);
@@ -1524,13 +1527,15 @@ const War = {
       const from = posOf(u);
       const tail = pts.map(p => 'L' + p[0].toFixed(1) + ' ' + p[1].toFixed(1)).join(' ');
       const sel = this._sel.has(u.id);
+      const d = 'M' + from[0].toFixed(1) + ' ' + from[1].toFixed(1) + ' ' + tail;
+      const casing = own ? add('path', { d, class: 'war-move-case' + (sel ? ' war-move-case-sel' : ''), 'vector-effect': 'non-scaling-stroke' }) : null;
       const node = add('path', {
-        d: 'M' + from[0].toFixed(1) + ' ' + from[1].toFixed(1) + ' ' + tail,
-        class: 'war-move ' + (sel ? 'war-move-sel' : 'war-move-' + u.side),
+        d, class: 'war-move ' + (sel ? 'war-move-sel' : 'war-move-' + u.side) + (own ? '' : ' war-move-foe'),
         'marker-end': `url(#war-head-${sel ? 'sel' : u.side})`, 'vector-effect': 'non-scaling-stroke'
       });
-      this._arrowAnim[key] = { node, tail };
+      this._arrowAnim[key] = { node, casing, tail };
     }
+    this._renderRouteLabels(war, D.orders);
     for (const u of war.units) {
       if (!live(u) || !u.attackId) continue;
       const t = war.units.find(x => x.id === u.attackId);
@@ -1661,7 +1666,7 @@ const War = {
         title.textContent = `Refugee column — ≈${n.toLocaleString('en-US')} civilians fleeing ${r.fromName || r.from} for ${r.toName || r.to}`;
         g.appendChild(title);
         g.addEventListener('pointerup', (e) => {
-          if (e.button !== 0 || this._bombArmed || this._spawnArmed || GameMap.lastDragMoved) return;
+          if (e.button !== 0 || this._airPlan || this._spawnArmed || this._tool || GameMap.lastDragMoved) return;
           e.stopPropagation();
           this._inspectRef = r.id;
           this._inspect = null;
@@ -1731,12 +1736,13 @@ const War = {
     };
     layer.addEventListener('pointerdown', (e) => {
       const rec = hit(e);
-      if (!rec || e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+      if (!rec || e.button !== 0 || this._airPlan || this._spawnArmed || this._tool) return;
       if (rec.own) e.stopPropagation(); // never start a pan under a click on your own unit
     });
     layer.addEventListener('pointerup', (e) => {
+      if (this._swallowUp) { this._swallowUp = false; return; } // the press was a tool/planner gesture
       const rec = hit(e);
-      if (!rec || e.button !== 0 || this._bombArmed || this._spawnArmed) return;
+      if (!rec || e.button !== 0 || this._airPlan || this._spawnArmed || this._tool) return;
       if (!rec.own && GameMap.lastDragMoved) return; // the press over an enemy became a pan
       e.stopPropagation();
       if (rec.own) { this.onUnitClick(rec.unitId, e); return; }
@@ -2005,6 +2011,7 @@ const War = {
     const activeIds = new Set();
     const timing = { tick: war.tick || 0, lastTick: war._lastTick || Date.now(), tickMs: war.tickMs || 2000, speed: war.speed || 1 };
     for (const s of (war.airstrikes || [])) {
+      if (s.squadronId) continue; // a squadron's bombs — the squadron itself is drawn by war-air.js
       const span = Math.max(1, s.strikeTick - s.orderedTick);
       const state = this._planeState(s, timing);
       if (state.egressDone) continue; // fully faded — nothing to draw
@@ -2128,7 +2135,8 @@ const War = {
       g.appendChild(core);
 
       (this._fx || map.warLayer).appendChild(g);
-      const entry = { node: g, streak, bloom, ring, rim, core, t0, life: EXPLOSION_LIFE_MS, bombR };
+      // a squadron's stick of bombs: each blast its own (smaller) radius
+      const entry = { node: g, streak, bloom, ring, rim, core, t0, life: EXPLOSION_LIFE_MS, bombR: strike.radius || bombR };
       this._explosionAnim[id] = entry;
       this._updateExplosion(entry, age);
     }
@@ -2187,8 +2195,8 @@ const War = {
   _uiTimer() {
     if (this._toolbarTimer) return;
     this._toolbarTimer = setInterval(() => {
-      if (W.layer === 'war' && this.active() && document.getElementById('map-wrap')) { this.renderToolbar(); this.renderUnitCard(); this.renderHud(); }
-      else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); }
+      if (W.layer === 'war' && this.active() && document.getElementById('map-wrap')) { this.renderToolbar(); this.renderUnitCard(); this.renderHud(); if (this.renderAirDock) this.renderAirDock(); }
+      else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); if (this._removeAirDock) this._removeAirDock(); }
     }, 1000);
   },
   renderToolbar() {
@@ -2201,34 +2209,26 @@ const War = {
     const side = this.commandableSide(war);
     const protest = war.kind === 'protest';
     const ca = this.access(war);
-    // The air arm is the defence's alone (bombs.def), whoever orders it.
-    const bomb = (war.bombs || {}).def || { cooldownUntil: 0 };
-    const now = Date.now();
-    const cooldownS = Math.max(0, Math.ceil((bomb.cooldownUntil - now) / 1000));
-    const aircraftKnown = Number.isFinite(Number(bomb.aircraftRemaining));
-    const aircraft = aircraftKnown ? Math.max(0, Number(bomb.aircraftRemaining)) : null;
+    // the air wing (war-air.js): squadrons ready across the sides you fly
     const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
-    const grounded = protest && !(war.protest && war.protest.govViolent);
-    const canAir = ca.air && side !== 'att';
-    if (!canAir || grounded) this._bombArmed = false; // never leave an airstrike armed that the server would refuse
-    const pending = ca.air ? (predWar.airstrikes || []).find(s => !s.done && s.side === 'def') : null;
-    let inboundS = 0;
-    if (pending) {
-      const interval = Math.max(200, (predWar.tickMs || 2000) / (predWar.speed || 1));
-      inboundS = Math.ceil((Math.max(0, pending.strikeTick - this._continuousTick(predWar)) * interval) / 1000);
-    }
+    const airSides = this.airSidesFor ? this.airSidesFor(predWar) : [];
+    const airReady = airSides.reduce((n, sd) => n + this.airCounts(predWar, sd).ready, 0);
+    const airAloft = airSides.reduce((n, sd) => n + this.airCounts(predWar, sd).aloft, 0);
+    const plan = this._airPlan;
     const other = this.authDocs().find(d => d !== war && d.active);
     const p = war.protest || {};
-    const sig = [key, live, side, this._sel.size, this._bombArmed, this._spawnArmed, this._tapOrders, cooldownS, aircraft, inboundS, grounded,
-      !!other, isGM() && this._gmSide, p.protestorsViolent, p.captureMode, p.govViolent, JSON.stringify(ca)].join('|');
+    const sig = [key, live, side, this._sel.size, this._spawnArmed, this._tapOrders, airSides.join(), airReady, airAloft, !!W.warAirDock,
+      plan && plan.sqId + plan.kind + !!plan.target, this._tool, !!other, isGM() && this._gmSide, p.protestorsViolent, p.captureMode, p.govViolent, JSON.stringify(ca)].join('|');
     const old = document.getElementById('war-toolbar');
     if (old && old.isConnected && this._toolbarSig === sig) return;
     this._toolbarSig = sig;
     if (old) old.remove();
 
     const n = this._sel.size;
-    const hint = !live ? 'This conflict has concluded — the field can be reviewed but no longer commanded.'
-      : this._bombArmed ? '✈ Airstrike armed — click the target. Esc cancels.'
+    const hint = this._tool === 'ruler' ? '📏 Ruler — drag on the map to measure a distance and the time to cover it. A click clears it; Esc puts the ruler away.'
+      : this._tool === 'range' ? '◎ Range — drag out a circle to see what lies within reach. A click clears it; Esc puts the compass away.'
+      : !live ? 'This conflict has concluded — the field can be reviewed but no longer commanded.'
+      : plan ? `✈ ${plan.kind === 'patrol' ? 'Patrol' : 'Strike'} — move over the map to see reach and time over the target, then click to send. Esc cancels.`
         : this._spawnArmed ? '➕ Reinforcements armed — click where they should appear. Esc cancels.'
           : !side ? this.authorityText(war) + ' Click a unit for details.'
             : protest && !n ? (side === 'att'
@@ -2254,15 +2254,16 @@ const War = {
         onclick: () => { this._tapOrders = !this._tapOrders; this.renderToolbar(); }
       }, (this._tapOrders ? '✓ ' : '') + 'Tap orders'));
     }
-    if (canAir) {
-      row.appendChild(el('button.btn-xs', {
-        class: (this._bombArmed ? 'solid-btn active' : 'dash-btn') + ' war-air-btn',
-        disabled: (cooldownS > 0 || (aircraftKnown && aircraft <= 0) || !live || grounded) ? 'disabled' : undefined,
-        title: grounded ? 'Force has not been authorized against the protest.' : 'Defence air wing',
-        onclick: () => { if (!live || grounded) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-      }, grounded ? '✈ Grounded' : cooldownS > 0 ? `✈ Rearming ${cooldownS}s` : this._bombArmed ? '✈ Pick target…' : '✈ Airstrike' + (aircraftKnown ? ` · ${aircraft}` : '')));
+    if (plan) {
+      if (plan.target) row.appendChild(el('button.solid-btn.btn-xs', { onclick: () => this._airPlanSend() }, '✓ Send'));
+      row.appendChild(el('button.dash-btn.btn-xs', { onclick: () => { this._airPlan = null; this._airPlanClear(); this.renderAirDock(true); this.renderToolbar(); } }, '✕ Cancel mission'));
     }
-    if (pending) row.appendChild(el('span.chip.active', `✈ Inbound ${inboundS}s`));
+    if (airSides.length && live) {
+      row.appendChild(el('button.btn-xs', {
+        class: (W.warAirDock ? 'solid-btn active' : 'dash-btn') + ' war-air-btn', title: 'Your air wing: squadrons, fuel, patrols and strikes',
+        onclick: () => { W.warAirDock = !W.warAirDock; if (!W.warAirDock) { this._airPlan = null; this._airPlanClear(); } this.renderAirDock(true); this.renderToolbar(); }
+      }, `✈ Air wing · ${airReady} ready` + (airAloft ? ` · ${airAloft} aloft` : '')));
+    }
     if (protest && live) {
       // levers are named for what a click DOES; the solid style marks the
       // escalation in force, and the tooltip says what it costs
@@ -2277,6 +2278,9 @@ const War = {
         el('button', { class: this._gmSide === 'def' ? 'active' : '', onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Police' : 'Defence'),
         el('button', { class: this._gmSide === 'att' ? 'active' : '', onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Crowds' : 'Invader')));
     }
+    row.appendChild(el('div.seg', { title: 'Measuring tools' },
+      el('button', { class: this._tool === 'ruler' ? 'active' : '', title: 'Ruler: distance, bearing and travel times', onclick: () => this.setTool('ruler') }, '📏 Ruler'),
+      el('button', { class: this._tool === 'range' ? 'active' : '', title: 'Range compass: a circle and what lies inside it', onclick: () => this.setTool('range') }, '◎ Range')));
     row.appendChild(el('button.dash-btn.btn-xs', { title: 'How to command', onclick: () => this._helpModal() }, '?'));
     bar.appendChild(row);
     wrap.appendChild(bar);
@@ -2332,7 +2336,7 @@ const War = {
         ['Strike', 'Park a crowd next to factories, offices and shops: within reach, the workforce walks out at the end of each turn (output drops, the owner loses money).'],
         ['Unrest', 'Every city with a crowd in its streets is in unrest. Peaceful crowds win the movement sympathy and cost the government approval.'],
         ['Escalate', 'Turn violent (organizers) or Use force (security) — see the War Room for what each combination does.'],
-        ['Airstrike', 'Grounded until force is authorized.'],
+        ['Air wing', 'Grounded until force is authorized; then ✈ Air wing sends squadrons on patrols or strikes.'],
         ['Cancel', 'Esc, or click open ground']
       ];
       openModal('LEADING A PROTEST', el('div',
@@ -2347,7 +2351,9 @@ const War = {
       ['Route', 'Right-drag to draw the exact road your units should take'],
       ['Line up', 'Ctrl-drag a line — the selection spreads out along it'],
       ['Hold', 'Hold position on the unit card stops a unit where it stands'],
-      ['Airstrike', 'Defence only: ✈ Airstrike, then click the target'],
+      ['Air wing', '✈ Air wing opens your squadrons: Patrol defends an area against enemy aircraft, Strike bombs a target. The planner shows reach and time over the target before you click.'],
+      ['Fuel', 'Each sortie burns refined fuel; tanks last ~30s at 1× and the farther the target the less time over it. Landed squadrons need 2 min to refuel and rearm.'],
+      ['Measure', '📏 Ruler: drag for distance, bearing and travel times · ◎ Range: drag a circle to see what lies inside'],
       ['Cancel', 'Esc, or click open ground']
     ];
     openModal('COMMANDING YOUR FORCES', el('div',
@@ -2380,7 +2386,11 @@ const War = {
       [sw('<path d="M14,0 L7,3 L10,10 L3,6 L0,14 L-3,6 L-10,10 L-7,3 L-14,0 L-7,-3 L-10,-10 L-3,-6 L0,-14 L3,-6 L10,-10 L7,-3 Z" fill="#f6d27a" stroke="#8c1f15" stroke-width="1.2"/>'), 'Fighting'],
       [sw('<circle r="9" fill="#f4ecdc" stroke="#8c1f15" stroke-width="2"/><text y="4" text-anchor="middle" font-size="11" font-weight="700" fill="#8c1f15">1</text>'), 'Objective'],
       [sw('<path d="M-2,10 V-12" stroke="#3b2a20" stroke-width="2"/><path d="M-2,-12 h13 l-3,4.5 l3,4.5 h-13 z" fill="#9b2c22"/>'), 'Fallen city'],
-      [sw('<path d="M-3,-10 l9,16 h-18 z" fill="#e0a458" stroke="#7a5418"/>'), 'Cut off from supply']
+      [sw('<path d="M-3,-10 l9,16 h-18 z" fill="#e0a458" stroke="#7a5418"/>'), 'Cut off from supply'],
+      [sw('<g transform="rotate(-20) scale(.55)"><path d="M-11,0 H-40" stroke="#c9c2b0" stroke-width="3"/><path d="M11.5,0 L5,-1.7 L1.2,-1.9 L-2,-9 L-4.8,-9 L-3.6,-1.9 L-8.2,-1.5 L-10.6,-4.4 L-12.2,-4.4 L-11,0 L-12.2,4.4 L-10.6,4.4 L-8.2,1.5 L-3.6,1.9 L-4.8,9 L-2,9 L1.2,1.9 L5,1.7 Z" fill="#24466e"/></g>'), 'Squadron in flight'],
+      [sw('<path d="M-15,4 L11,-11 L15,-4 L-11,11 Z" fill="#6b6250"/><path d="M-9,4.5 L-3,1 M1,-1.4 L7,-4.9" stroke="#f4ecdc" stroke-width="1.4"/>'), 'Airfield'],
+      [sw('<circle r="11" fill="#24466e" fill-opacity=".08" stroke="#24466e" stroke-dasharray="4 3"/>'), 'Patrol area'],
+      [sw('<path d="M-16,8 L10,-6" stroke="#b0251a" stroke-dasharray="4 3" stroke-width="1.6"/><circle cx="10" cy="-6" r="5" fill="none" stroke="#b0251a" stroke-width="1.6"/>'), 'Strike run & target']
     ];
   },
   renderHud() {
@@ -2400,7 +2410,8 @@ const War = {
     const evs = war.events || [];
     const lastEv = [...evs].reverse().find(e => e.kind !== 'battle') || evs[evs.length - 1];
     const sig = [war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, fmtCompact(attStr), fmtCompact(defStr), attN, defN, control.join(), next && next.id, lastEv && lastEv.t,
-      fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar].join('|');
+      fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar,
+      this.airHudText ? this.airHudText(war) : ''].join('|');
     const old = document.getElementById('war-hud');
     const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : protest ? ((war.protest || {}).protestorsViolent ? 'VIOLENT' : 'PEACEFUL') : war.totalWar ? 'TOTAL WAR' : 'LIVE') + ' · T' + war.tick + (war.speed > 1 ? ' · ' + war.speed + '×' : '');
     if (old && old.isConnected && this._hudSig === sig) {
@@ -2429,6 +2440,8 @@ const War = {
       : el('span', { style: 'color:var(--ink-faint)' }, protest ? 'no district seized' : 'no ground lost yet')));
     hud.appendChild(row('Losses', `${names[0]} ${fmtCompact(st.attLosses || 0)} · ${names[1]} ${fmtCompact(st.defLosses || 0)}` + (st.civilianDeaths ? ` · civilians ${fmtCompact(st.civilianDeaths)}` : '')));
     if (!protest) hud.appendChild(row('Next', next ? `${next.priority}. ${this.objLabel(next)} — ${this.objTarget(next)}` : (war.result ? '—' : 'all objectives achieved')));
+    const airText = this.airHudText && this.airHudText(war);
+    if (airText) hud.appendChild(row('Air', airText));
     if (war.result) hud.appendChild(row('Result', (war.result.reason || 'ended')));
     if (lastEv) {
       const ago = Math.max(0, Math.round((Date.now() - lastEv.t) / 1000));
@@ -2603,7 +2616,7 @@ const War = {
     const own = this._sel.has(u.id);
     card.classList.add(u.side === 'att' ? 'war-card-att' : 'war-card-def');
     card.appendChild(el('div.war-card-title', u.name));
-    card.appendChild(el('div.war-card-sub', `${kindLabel} · ${this._echelon(u)} · ${sideName}` + (u.nationId ? ` · ${entName(u.nationId)}` : '') + (own ? '' : ' · enemy')));
+    card.appendChild(el('div.war-card-sub', `${kindLabel} · ${this._echelon(u)} · ${sideName}` + (u.nationId ? ` · ${entName(u.nationId)}` : '') + (own ? '' : ' · enemy') + (this.gridRef ? ' · ' + this.gridRef(u.pos) : '')));
     if (isDead) {
       card.appendChild(el('div.war-card-row', 'Destroyed in action.'));
     } else {
@@ -2739,8 +2752,12 @@ const War = {
   // Open the battle map on the War layer (optionally centred on a point).
   openBattleMap(focus, key) {
     if (key) this._activeKey = key;
+    const already = W.view === 'map' && GameMap.svg && GameMap.svg.isConnected;
     W.layer = 'war';
     App.go('map');
+    // already on the map: App.go is a no-op, so redraw the base map in the
+    // war layer (veil, grid, layer bar) ourselves
+    if (already && W.layer === 'war') GameMap.render();
     if (focus) setTimeout(() => { if (GameMap.focus) GameMap.focus(focus, 3.2); }, 120);
   },
 
@@ -2826,6 +2843,7 @@ const War = {
           el('tr', el('td', 'Cut off from supply'), el('td', `${cut} unit${cut === 1 ? '' : 's'}`))));
       }));
     }
+    if (this.renderAirReport) this.renderAirReport(inner, (window.WarEngine && this.predictedDoc(war)) || war, key);
   },
 
   // The report's masthead, shared by wars and protests: name, status, clock,
@@ -2966,6 +2984,7 @@ const War = {
       for (const [pid, v] of sm.control) { const prov = provById(pid); if (prov) inner.appendChild(Views.barRow(prov.name, v, prov.color, v + '%')); }
     }
 
+    if (this.renderAirReport) this.renderAirReport(inner, (window.WarEngine && this.predictedDoc(war)) || war, key);
     this._reportEvents(inner, war, key, 'Reports from the streets', 'Nothing to report yet.');
     this._reportOrbat(inner, war, key, ['Crowds', 'Police'], 0);
   },
@@ -3178,7 +3197,7 @@ const War = {
       onclick: () => {
         this._spawnDraft.conflict = key; // placement lands in THIS conflict's doc
         this._spawnArmed = !this._spawnArmed;
-        if (this._spawnArmed) this._bombArmed = false;
+        if (this._spawnArmed) { this._airPlan = null; this._tool = null; }
         this._reRenderPanel();
         this.renderToolbar();
       }

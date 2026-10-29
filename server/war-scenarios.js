@@ -20,6 +20,10 @@
 //            — war.js spawns one defender garrison per city (by `size`) and
 //              one per property with type:'military', using these numbers.
 //              Generic: no city/property ids are named here.
+//   airWing: { planes, fuel, itemId? }         — the invader's air force: virtual
+//            squadrons (no inventory behind them) plus a refined-fuel
+//            reserve for their sorties; its own aircraft stock flies too
+//            (server/war.js syncAirWings / addScenarioAirWing)
 //   tuning: { consolidateFrac, collapseFrac }  — fractions of the attacker's
 //            starting total strength that trigger the AI's consolidate phase
 //            / the defender's outright victory.
@@ -95,6 +99,7 @@ const valksland_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 12, fuel: 1440 },
   tuning: {
     consolidateFrac: 0.35, // AI digs in and stops pushing below this fraction of its starting strength
     collapseFrac: 0.12     // below this the invasion is REPELLED — the war turns total; the remnants fight to the last
@@ -133,6 +138,7 @@ const delcasia_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 8, fuel: 960 },
   tuning: {
     consolidateFrac: 0.35,
     collapseFrac: 0.12
@@ -181,6 +187,7 @@ const qinal_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 12, fuel: 1440 },
   tuning: {
     consolidateFrac: 0.35,
     collapseFrac: 0.12
@@ -223,6 +230,7 @@ const madrosia_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 8, fuel: 960 },
   tuning: {
     consolidateFrac: 0.35,
     collapseFrac: 0.12
@@ -259,6 +267,7 @@ const solme_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 4, fuel: 480 },
   tuning: {
     consolidateFrac: 0.30, // digs in sooner — lighter invasion
     collapseFrac: 0.10     // collapses faster — no deep supply
@@ -298,6 +307,7 @@ const mazon_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 6, fuel: 720 },
   tuning: {
     consolidateFrac: 0.35,
     collapseFrac: 0.12
@@ -345,6 +355,7 @@ const aldonesia_invasion = {
     citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 },
     militaryPropertyStrength: 2600
   },
+  airWing: { planes: 6, fuel: 720 },
   tuning: {
     consolidateFrac: 0.35,  // standard consolidation
     collapseFrac: 0.12      // standard collapse threshold

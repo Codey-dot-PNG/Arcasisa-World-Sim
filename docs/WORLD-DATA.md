@@ -124,7 +124,9 @@ scripts a province's vote outright, bypassing the demographic election model.
 Territory is `shape` (SVG path data, evenodd); the GM border painter rewrites it for the
 regions it touches (docs/FRONTEND.md "Border painter"). `settings.map.land` — the pristine
 coastline, frozen on the first border save — is never shipped to clients (GM-only
-`GET /api/gm/map/land`).
+`GET /api/gm/map/land`). `settings.map.kmPerPx` is the map's real-world scale (2.17 km per
+map pixel — Arcasia is about the size of Brazil); `store.migrate` seeds it only when
+missing. The war map's grid, scale bar, ruler and travel times read it.
 
 ## Properties (Phase 13 production model)
 
@@ -257,5 +259,10 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
 - **Phase 36 (permissions & protests, no schema bump):** `_abilitiesSeeded` (role
   abilities), `protestApplications: []`, the `settings.war.protest` opinion/application
   defaults, and a heal of users whose persona was stored as the literal `'__null__'`.
+- **War map & air force (no schema bump):** `settings.map.kmPerPx` (2.17, only when
+  missing). Optional GM knobs `settings.war.air = { squadronSize, fuelPerPlane }`
+  (defaults 4 / 10). A conflict doc's `war.air` (squadrons mirrored from the aircraft
+  stock, bases, fuel) is built by `server/war.js` `syncAirWings` on the next tick of any
+  war or protest — no migration needed (docs/WAR.md "The air force").
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino
   owner self-heal, certificate/deed reconciliation…). Follow the existing patterns when adding.

@@ -914,6 +914,81 @@
     }
   }
 
+  // ---------- Tier 3 — the air staff (every AIR_AI_INTERVAL ticks) ----------
+  // Flies a side's squadrons when its air wing is on automatic
+  // (war.air.auto[side] — an NPC invader always, a player-run defence only if
+  // its commanders hand the wing over): keep one patrol over the centre of
+  // gravity (the fighting, else the main body) whenever the enemy is aloft or
+  // there are squadrons to spare, then send the rest against the heaviest
+  // enemy concentration in reach that is clear of its own troops. Orders go
+  // out as sq.order exactly like a player's; the engine launches them (and
+  // re-checks range and fuel) in stepAir. Uses no rng.
+  const AIR_AI_INTERVAL = 3;
+  const AIR_STRIKE_MIN = 1500;      // enemy strength a strike target must gather within AIR_CLUSTER_R
+  const AIR_CLUSTER_R = 70;
+  const AIR_FRIENDLY_SAFE = 120;    // never bomb within this of own troops
+  function airPass(E, db, war) {
+    const air = war.air;
+    if (!air || !Array.isArray(air.squadrons)) return;
+    const per = air.fuelPerPlane || 10;
+    for (const side of ['att', 'def']) {
+      if (!(air.auto && air.auto[side])) continue;
+      const enemy = side === 'att' ? 'def' : 'att';
+      const mine = air.squadrons.filter(s => s.side === side && s.planes > 0);
+      const ready = mine.filter(s => s.state === 'ready' && !s.order);
+      if (!ready.length) continue;
+      let fuel = (air.fuel && air.fuel[side]) || 0;
+      const baseOf = (s) => E.airBaseOf(war, s);
+      const canReach = (s, pt) => { const b = baseOf(s); return !!b && E.dist(b.pos, pt) <= E.airRange(s); };
+      const nearestReady = (pt) => ready.filter(s => canReach(s, pt))
+        .sort((a, b) => (E.dist(baseOf(a).pos, pt) - E.dist(baseOf(b).pos, pt)) || (a.id < b.id ? -1 : 1))[0] || null;
+      const launch = (s, kind, target, radius) => {
+        const need = s.planes * per;
+        if (fuel < need) return false;
+        fuel -= need;
+        s.order = { kind, target: [Math.round(target[0]), Math.round(target[1])], radius };
+        ready.splice(ready.indexOf(s), 1);
+        return true;
+      };
+      const own = war.units.filter(u => u.side === side && E.isLive(u) && u.state !== 'embarked');
+      const foes = war.units.filter(u => u.side === enemy && E.isLive(u) && u.state !== 'embarked');
+      const myFields = (air.bases || []).filter(b => b.side === side);
+      // 1. air cover
+      const covering = mine.some(s => (E.airborne(s) && s.state !== 'return' && s.mission && s.mission.kind === 'patrol') || (s.order && s.order.kind === 'patrol'));
+      const enemyAloft = air.squadrons.some(s => s.side === enemy && s.planes > 0 && E.airborne(s));
+      if (!covering && own.length && (enemyAloft || ready.length >= 2)) {
+        const hot = own.filter(u => u.state === 'fighting');
+        const body = hot.length ? hot : own;
+        let sx = 0, sy = 0, sw = 0;
+        for (const u of body) { sx += u.pos[0] * u.strength; sy += u.pos[1] * u.strength; sw += u.strength; }
+        if (sw > 0) {
+          const c = [sx / sw, sy / sw];
+          const s = nearestReady(c);
+          if (s) launch(s, 'patrol', c, 220);
+        }
+      }
+      // 2. strikes
+      const claimed = [];
+      for (let guard = 0; guard < 12 && ready.length; guard++) {
+        let best = null, bestScore = AIR_STRIKE_MIN;
+        for (const f of foes) {
+          if (claimed.some(p => E.dist(p, f.pos) < AIR_CLUSTER_R * 2)) continue;
+          if (own.some(u => E.dist(u.pos, f.pos) < AIR_FRIENDLY_SAFE)) continue;
+          if (myFields.some(b => E.dist(b.pos, f.pos) < AIR_FRIENDLY_SAFE)) continue; // never crater our own runways
+          let score = 0;
+          for (const g of foes) if (E.dist(g.pos, f.pos) <= AIR_CLUSTER_R) score += g.strength;
+          if (score > bestScore) { bestScore = score; best = f; }
+        }
+        if (!best) break;
+        claimed.push(best.pos);
+        const s = nearestReady(best.pos);
+        if (!s) continue;
+        if (fuel < s.planes * per * 2) break; // keep fuel back for air cover
+        launch(s, 'strike', best.pos);
+      }
+    }
+  }
+
   // ---------- entry point (called from the engine's warTick) ----------
   function run(E, db, war, ctx, rng) {
     // A legacy snapshot with neither ai nor command (a non-GM predicted doc
@@ -930,6 +1005,10 @@
       operateAttackers(E, db, war, ctx, rng);
       if (war.active) operateDefenders(E, db, war, ctx, rng);
       cmd.lastPlanTick = war.tick;
+    }
+    if (war.active && war.air && war.tick - (war.air.aiTick || 0) >= AIR_AI_INTERVAL) {
+      airPass(E, db, war);
+      war.air.aiTick = war.tick;
     }
   }
 

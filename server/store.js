@@ -1979,6 +1979,15 @@ function migrate(world) {
   // award instead). Shed any data old worlds still carry — idempotent.
   if (world.contracts !== undefined) { delete world.contracts; changed = true; }
 
+  // The map's real-world scale (the war map's grid, scale bar, ruler and
+  // air ranges read it): kilometres per map pixel. Arcasia is about the size
+  // of Brazil — 8.5M km² over its ~1.81M px² of land → 2.17 km/px. World
+  // data, set only when missing (a GM-tuned value is never overwritten).
+  if (world.settings && world.settings.map && !(Number(world.settings.map.kmPerPx) > 0)) {
+    world.settings.map.kmPerPx = 2.17;
+    changed = true;
+  }
+
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed
   // themselves on already-migrated worlds at next load. Old worlds start the

@@ -69,6 +69,47 @@ const WAR_HIT_FX_MS = 450;
 // Matches the engine's rout threshold (war-engine.js: org < 25 → routed) —
 // used purely for the client's morale-bar/info-card color, not gameplay.
 const WAR_ROUT_ORG = 25;
+const WAR_GROUND_MIN_MS = 1500; // see renderGround
+const MAX_PROTEST_UNITS_CLIENT = 300; // server/war.js MAX_PROTEST_UNITS
+// Protest unit glyphs (see War._symbol): a crowd pill holding three figures,
+// a police shield holding a star badge.
+const WAR_CROWD_FRAME = 'M-10,-11 H10 Q18,-11 18,-3 V3 Q18,11 10,11 H-10 Q-18,11 -18,3 V-3 Q-18,-11 -10,-11 Z';
+const WAR_CROWD_FIGS = 'M-11.4,-1 a2.4,2.4 0 1 0 4.8,0 a2.4,2.4 0 1 0 -4.8,0 M-14,9 Q-14,3.5 -9,3.5 Q-4,3.5 -4,9 Z' +
+  ' M6.6,-1 a2.4,2.4 0 1 0 4.8,0 a2.4,2.4 0 1 0 -4.8,0 M4,9 Q4,3.5 9,3.5 Q14,3.5 14,9 Z' +
+  ' M-3,-4 a3,3 0 1 0 6,0 a3,3 0 1 0 -6,0 M-6,9 Q-6,1 0,1 Q6,1 6,9 Z';
+const WAR_POLICE_FRAME = 'M-15,-11 H15 V-2 Q15,6 0,11 Q-15,6 -15,-2 Z';
+const WAR_POLICE_BADGE = 'M' + Array.from({ length: 10 }, (_, i) => {
+  const a = (-90 + i * 36) * Math.PI / 180, r = i % 2 ? 2.7 : 6.4;
+  return (Math.cos(a) * r).toFixed(2) + ',' + (Math.sin(a) * r - 1.5).toFixed(2);
+}).join(' L') + ' Z';
+// A crowd's marker grows with its headcount (police with their detachment).
+function warCrowdScale(u) {
+  if (u.kind !== 'protestor' && u.kind !== 'police') return 1;
+  const s = 0.82 + Math.sqrt(Math.max(0, u.strength || 0) / 2000) * 0.24;
+  return Math.round(Math.max(0.82, Math.min(u.kind === 'police' ? 1.25 : 1.5, s)) * 20) / 20;
+}
+// A protest's posture is two independent choices — do the crowds fight, has
+// the government authorized force — so it reads as a 2×2: each cell what
+// that combination does (server/war.js applyProtestPolitics + canFight).
+const PROTEST_POSTURE = {
+  peaceful: { label: 'Peaceful', status: 'PEACEFUL', short: 'Nobody can strike. Sympathy for the movement builds.',
+    text: 'A peaceful demonstration: neither side can strike. Every minute in the streets wins the movement sympathy and costs the government approval.' },
+  riot: { label: 'Riot', status: 'RIOTING', short: 'Police fight back. The public turns on the movement.',
+    text: 'The crowds are fighting and the police defend themselves. Rioting costs the movement public support, kills bystanders and drives people from their homes.' },
+  crackdown: { label: 'Crackdown', status: 'CRACKDOWN', short: 'Force on a peaceful crowd — approval collapses.',
+    text: 'Force against a peaceful crowd: sympathy for the movement doubles and government approval falls several times faster. The air wing is cleared.' },
+  clashes: { label: 'Open clashes', status: 'CLASHES', short: 'Both sides fighting. Air wing cleared.',
+    text: 'Both sides are fighting and the air wing is cleared. Expect casualties and refugees; the rioting still costs the movement support.' }
+};
+function protestPosture(p) {
+  p = p || {};
+  return p.protestorsViolent ? (p.govViolent ? 'clashes' : 'riot') : (p.govViolent ? 'crackdown' : 'peaceful');
+}
+// "≈2.4k" — compact headcount for crowd markers and their tooltips
+function warHeads(n) {
+  n = Math.max(0, Math.round(n || 0));
+  return n >= 1000 ? (n / 1000).toFixed(n >= 10000 ? 0 : 1) + 'k' : String(n);
+}
 
 const War = {
   _anim: {},        // unitId -> { from:[x,y], to:[x,y], t0, dur, curPos:[x,y], node }
@@ -1040,8 +1081,13 @@ const War = {
     } else if (!onWar && this._L.veil.firstChild) clear(this._L.veil);
     clear(this._O.orders); clear(this._O.refugees); clear(this._O.fx);
     const seen = new Set();
+    const anyLive = docs.some(d => d.active);
     for (const auth of docs) {
       const key = this.docKeyOf(auth);
+      // an ended conflict's ground stays up for review — unless another one
+      // is live, whose map it would bury (a finished invasion's occupation
+      // hatch under a running protest)
+      if (anyLive && !auth.active) { this._hideDoc(key); continue; }
       // Render the PREDICTED doc (rebased-on-authority + locally ticked), so
       // the front line the player sees is always at full cadence.
       const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
@@ -1075,12 +1121,17 @@ const War = {
     else { this._removeToolbar(); this._removeUnitCard(); this._removeHud(); }
   },
 
+  _hideDoc(key) {
+    const B = this._L.docs[key], O = this._O && this._O.docs[key];
+    if (B) { clear(B.ground); clear(B.halo); B._groundKey = null; B._haloKey = null; }
+    if (O) { clear(O.marks); O._marksKey = null; }
+  },
   // one group per conflict doc inside each sublayer (z-order: every doc's
   // ground under every doc's units)
   _docLayers(NS, key, war) {
     const mkG = (parent) => { const g = document.createElementNS(NS, 'g'); g.setAttribute('data-doc', key); parent.appendChild(g); return g; };
     let B = this._L.docs[key];
-    if (!B) B = this._L.docs[key] = { ground: mkG(this._L.ground) };
+    if (!B) { B = this._L.docs[key] = { halo: mkG(this._L.ground) }; B.ground = mkG(this._L.ground); }
     let O = this._O.docs[key];
     if (!O) { O = this._O.docs[key] = {}; for (const name of ['marks', 'orders', 'refugees', 'units', 'fx']) O[name] = mkG(this._O[name]); }
     const D = Object.assign(O, { ground: B.ground });
@@ -1088,6 +1139,7 @@ const War = {
     D._base = B;
     const cls = 'war-doc-' + (war.kind === 'protest' ? 'protest' : 'war');
     for (const name of ['ground', 'marks', 'orders', 'units']) if (D[name].getAttribute('class') !== cls) D[name].setAttribute('class', cls);
+    if (B.halo.getAttribute('class') !== cls) B.halo.setAttribute('class', cls);
     return D;
   },
 
@@ -1111,6 +1163,8 @@ const War = {
       pattern('war-hatch', '#9b2c22', '0.16', '0.30');
       pattern('war-hatch-def', '#24466e', '0.16', '0.30');
       pattern('war-hatch-protest', '#b0701c', '0.14', '0.30');
+      defs.appendChild(this._radialGrad(NS, 'war-unrest-glow', [[0, '#e3a03c', 0.42], [0.55, '#e3a03c', 0.2], [1, '#e3a03c', 0]]));
+      defs.appendChild(this._radialGrad(NS, 'war-unrest-riot', [[0, '#d2502a', 0.45], [0.55, '#d2502a', 0.22], [1, '#d2502a', 0]]));
     }
     const head = (id, cls) => {
       const m = document.createElementNS(NS, 'marker');
@@ -1153,8 +1207,18 @@ const War = {
     return [war.startedAt, Object.keys(war.cells || {}).length, h, (war.craters || []).length, (S().provinces || []).length, W.layer === 'war'].join(':');
   },
   renderGround(map, NS, war, D, key) {
+    this._renderHalos(NS, war, D._base);
     const gk = this._groundKey(war);
     if (D._base._groundKey === gk) return;
+    // the ground lives in the base map, so every rebuild repaints the whole
+    // map: a front that moves every tick redraws at most every
+    // WAR_GROUND_MIN_MS (a timer catches the last change up)
+    const now = performance.now(), since = now - (D._base._groundAt || 0);
+    if (D._base._groundKey && since < WAR_GROUND_MIN_MS) {
+      if (!this._groundTimer) this._groundTimer = setTimeout(() => { this._groundTimer = null; this.refreshLayer(true); }, WAR_GROUND_MIN_MS - since + 30);
+      return;
+    }
+    D._base._groundAt = now;
     D._base._groundKey = gk;
     clear(D.ground);
     const add = (tag, attrs) => {
@@ -1172,7 +1236,7 @@ const War = {
     const attD = this._loopsToPath(this._contours(field, g.cols, g.rows), g.cell);
     // clip targets: the Republic's provinces, and the belligerents' homelands
     const provShapes = (S().provinces || []).map(p => p.shape || (p.path ? 'M' + p.path.map(q => q.join(' ')).join(' L') + ' Z' : '')).filter(Boolean);
-    const enemyIds = new Set(Object.values(g.enemyCells || {}));
+    const enemyIds = new Set(protest ? [] : Object.values(g.enemyCells || {}));
     const countries = ((S().settings || {}).map || {}).countries || [];
     const enemyShapes = countries.filter(c => enemyIds.has(c.id) && c.shape).map(c => c.shape);
     const defs = add('defs', {});
@@ -1198,6 +1262,24 @@ const War = {
       add('path', { d: attD, 'clip-path': clipAll, class: 'war-front war-front-teeth' + (protest ? ' war-front-protest' : ''), 'vector-effect': 'non-scaling-stroke' });
     }
   },
+  // Civil unrest glows where it is: a soft amber halo (the server's unrest
+  // radius) round every city with a crowd in its streets. Drawn in the base
+  // map under the city labels, rebuilt only when the set of cities changes.
+  _renderHalos(NS, war, B) {
+    const ids = war.kind === 'protest' && war.active ? ((war.stats || {}).unrestCities || []) : [];
+    const hk = ids.join(',') + '|' + (war.protest && war.protest.protestorsViolent ? 1 : 0);
+    if (B._haloKey === hk) return;
+    B._haloKey = hk;
+    clear(B.halo);
+    for (const cid of ids) {
+      const c = cityById(cid);
+      if (!c || !c.pos) continue;
+      const n = document.createElementNS(NS, 'circle');
+      n.setAttribute('cx', c.pos[0]); n.setAttribute('cy', c.pos[1]); n.setAttribute('r', 150);
+      n.setAttribute('class', 'war-unrest' + (war.protest && war.protest.protestorsViolent ? ' war-unrest-riot' : ''));
+      B.halo.appendChild(n);
+    }
+  },
   // 1 where `side` holds the ground, 0 where the other side does; everything
   // else (sea, neutral soil) takes its nearest belligerent cell's value.
   _controlField(war, side) {
@@ -1208,7 +1290,8 @@ const War = {
     const set = (key, v) => { const p = key.indexOf(','); const i = idx(+key.slice(0, p), +key.slice(p + 1)); if (i >= 0) f[i] = v; };
     const att = side === 'att' ? 1 : 0, def = 1 - att;
     for (const pid in (g.provinceCells || {})) for (const c of g.provinceCells[pid]) { const i = idx(c[0], c[1]); if (i >= 0) f[i] = def; }
-    for (const k in (g.enemyCells || {})) set(k, att);
+    const protest = war.kind === 'protest';
+    if (!protest) for (const k in (g.enemyCells || {})) set(k, att);
     let any = false;
     for (const k in (war.cells || {})) {
       const o = war.cells[k].o;
@@ -1217,7 +1300,7 @@ const War = {
     // for 'att' the homeland alone already draws the border front; for the
     // defence's counter-occupation we need at least one captured cell
     if (!any && side === 'def') return null;
-    if (side === 'att' && !any && !Object.keys(g.enemyCells || {}).length) return null;
+    if (side === 'att' && !any && (protest || !Object.keys(g.enemyCells || {}).length)) return null;
     // multi-source BFS: unknown cells copy the nearest known value
     const q = new Int32Array(N); let qh = 0, qt = 0;
     for (let i = 0; i < N; i++) if (f[i] >= 0) q[qt++] = i;
@@ -1318,8 +1401,9 @@ const War = {
     return g;
   },
   renderMarks(map, NS, war, D) {
+    if (war.kind === 'protest') { this._renderProtestMarks(NS, war, D); return; }
     const objs = (war.objectives || []).filter(o => o.pos);
-    const held = (war.stats && (war.stats.citiesHeld || war.stats.unrestCities)) || [];
+    const held = (war.stats && war.stats.citiesHeld) || [];
     const mk = [war.startedAt, objs.map(o => o.id + o.status).join(','), held.join(',')].join('|');
     if (D._marksKey === mk) return;
     D._marksKey = mk;
@@ -1338,7 +1422,7 @@ const War = {
       const g = this._scaledGroup(NS, D.marks, c.pos, 'war-fallen');
       add(g, 'path', { d: 'M-1,-2 V-24', class: 'war-fallen-pole' });
       add(g, 'path', { d: 'M-1,-24 h13 l-3,4.5 l3,4.5 h-13 z', class: 'war-fallen-flag' });
-      add(g, 'title', {}, (c.name || cid) + (war.kind === 'protest' ? ' — in unrest' : ' — held by the invader'));
+      add(g, 'title', {}, (c.name || cid) + ' — held by the invader');
     }
     // objectives: a numbered target; the next one pending is emphasised
     const pending = objs.filter(o => o.status !== 'done').sort((a, b) => a.priority - b.priority);
@@ -1355,6 +1439,62 @@ const War = {
       add(g, 'text', { y: 4, 'text-anchor': 'middle', class: 'war-obj-num' }, done ? '✓' : String(o.priority));
       if (o === next) add(g, 'text', { y: -25, 'text-anchor': 'middle', class: 'war-obj-tag' }, 'NEXT OBJECTIVE');
       add(g, 'title', {}, `Objective ${o.priority}: ${this.objLabel(o)} — ${this.objTarget(o)} · ${done ? 'achieved' : 'pending'}`);
+    }
+  },
+
+  // A protest's map furniture: the movement's rally points (where the crowds
+  // first gathered), the police posts, and a STRIKE sign on every workplace
+  // the crowds have shut (property.vars.strike, set by the economy turn).
+  // Live only while the protest runs; a finished one leaves the map clean.
+  _renderProtestMarks(NS, war, D) {
+    const p = war.protest || {};
+    const strikes = war.active ? (S().properties || []).filter(pr => pr.vars && pr.vars.strike && Array.isArray(pr.pos)) : [];
+    // a rally point / police post is marked once its people have moved off
+    // it (while they stand there, their own markers say it)
+    const vacant = (ids, side) => (ids || []).filter(cid => {
+      const c = cityById(cid);
+      return c && c.pos && !(war.units || []).some(u => u.side === side && !u.dead && u.strength > 0 && Math.hypot(u.pos[0] - c.pos[0], u.pos[1] - c.pos[1]) < 70);
+    });
+    const rally = vacant(p.baseCities, 'att'), posts = vacant(p.policeCities, 'def');
+    const mk = [war.startedAt, war.active, rally.join(','), posts.join(','),
+      strikes.map(pr => pr.id + ':' + Math.round(pr.vars.strike.degree * 100)).join(',')].join('|');
+    if (D._marksKey === mk) return;
+    D._marksKey = mk;
+    clear(D.marks);
+    if (!war.active) return;
+    const add = (parent, tag, attrs, text) => {
+      const n = document.createElementNS(NS, tag);
+      for (const a in attrs) n.setAttribute(a, attrs[a]);
+      if (text !== undefined) n.textContent = text;
+      parent.appendChild(n);
+      return n;
+    };
+    const org = entById(p.organizerId || war.attackerId);
+    for (const cid of rally) {
+      const c = cityById(cid);
+      const g = this._scaledGroup(NS, D.marks, c.pos, 'war-rally');
+      add(g, 'path', { d: 'M-12,-4 V-34', class: 'war-rally-pole' });
+      add(g, 'path', { d: 'M-12,-34 H14 L9,-27.5 L14,-21 H-12 Z', class: 'war-rally-flag' });
+      add(g, 'text', { x: 0, y: -24.6, 'text-anchor': 'middle', class: 'war-rally-text' }, 'RALLY');
+      add(g, 'title', {}, `${c.name} — rally point${org ? ' of ' + org.name : ''}. The crowds gathered here first.`);
+    }
+    for (const cid of posts) {
+      const c = cityById(cid);
+      const g = this._scaledGroup(NS, D.marks, c.pos, 'war-post');
+      add(g, 'rect', { x: -21, y: -33, width: 42, height: 12, rx: 2, class: 'war-post-box' });
+      add(g, 'path', { d: 'M-17,-30.5 H-9 V-27 Q-9,-23.5 -13,-22 Q-17,-23.5 -17,-27 Z', class: 'war-post-shield' });
+      add(g, 'text', { x: 4, y: -24.2, 'text-anchor': 'middle', class: 'war-post-text' }, 'POLICE');
+      add(g, 'path', { d: 'M0,-21 V-6', class: 'war-post-stem' });
+      add(g, 'title', {}, `${c.name} — police post. Detachments were stationed here when the protest began.`);
+    }
+    for (const pr of strikes) {
+      const pct = Math.round((pr.vars.strike.degree || 0) * 100);
+      const g = this._scaledGroup(NS, D.marks, pr.pos, 'war-strike-sign');
+      add(g, 'path', { d: 'M0,-1 V-12', class: 'war-strike-stick' });
+      add(g, 'rect', { x: -15, y: -23, width: 30, height: 11, rx: 1.5, class: 'war-strike-board' });
+      add(g, 'text', { x: 0, y: -15.3, 'text-anchor': 'middle', class: 'war-strike-text' }, 'STRIKE');
+      add(g, 'text', { x: 0, y: -26, 'text-anchor': 'middle', class: 'war-strike-pct' }, '−' + pct + '% output');
+      add(g, 'title', {}, `${pr.name} — on strike since turn ${pr.vars.strike.sinceTurn}: output down ${pct}% while the crowds stay within reach.`);
     }
   },
 
@@ -1425,6 +1565,29 @@ const War = {
         const near = clashes.find(c => Math.hypot(c.pos[0] - mid[0], c.pos[1] - mid[1]) < 90);
         if (near) { near.n++; near.str += a.strength + d.strength; }
         else clashes.push({ pos: mid, n: 1, str: a.strength + d.strength });
+      }
+    }
+    // protests: a crowd face to face with a police line while neither side
+    // may fight is a standoff — two opposed chevrons between them
+    if (war.kind === 'protest' && protestPosture(war.protest) === 'peaceful') {
+      const stand = [];
+      for (const a of atts) {
+        if (a.state === 'fighting') continue;
+        for (const d of defs) {
+          if (d.state === 'fighting') continue;
+          const dist = Math.hypot(a.pos[0] - d.pos[0], a.pos[1] - d.pos[1]);
+          if (dist > 70) continue;
+          const mid = [(a.pos[0] + d.pos[0]) / 2, (a.pos[1] + d.pos[1]) / 2];
+          if (clashes.some(c => Math.hypot(c.pos[0] - mid[0], c.pos[1] - mid[1]) < 60)) continue;
+          const near = stand.find(c => Math.hypot(c.pos[0] - mid[0], c.pos[1] - mid[1]) < 90);
+          if (near) near.n++; else stand.push({ pos: mid, n: 1 });
+        }
+      }
+      for (const c of stand) {
+        const g = this._scaledGroup(NS, D.orders, c.pos, 'war-standoff');
+        g.innerHTML = '<rect x="-15" y="-9" width="30" height="18" rx="9" class="war-standoff-bg"/>' +
+          '<path d="M-10,-5 L-3,0 L-10,5" class="war-standoff-att"/><path d="M10,-5 L3,0 L10,5" class="war-standoff-def"/>' +
+          '<title>Standoff — the crowd faces the police line. No one can strike until one side escalates.</title>';
       }
     }
     for (const c of clashes) {
@@ -1538,6 +1701,10 @@ const War = {
   _symbol(u) {
     const naval = u.kind === 'boat' || u.kind === 'warship';
     const afloat = u.state === 'transport';
+    // Civil unrest reads as people, not formations: a crowd is a rounded
+    // pill of figures, the police a shield with a badge.
+    if (!afloat && u.kind === 'protestor') return { frame: WAR_CROWD_FRAME, sym: WAR_CROWD_FIGS, naval: false };
+    if (!afloat && u.kind === 'police') return { frame: WAR_POLICE_FRAME, sym: WAR_POLICE_BADGE, naval: false };
     const frame = (naval || afloat)
       ? 'M-16,-6 Q-16,-11 -11,-11 H11 Q16,-11 16,-6 V3 Q16,11 0,11 Q-16,11 -16,3 Z'
       : 'M-17,-11 H17 V11 H-17 Z';
@@ -1599,6 +1766,8 @@ const War = {
       if (!rec) {
         const g = document.createElementNS(NS, 'g');
         g.setAttribute('data-wu', k);
+        // body: the (crowd-size) scale; inner: the hit jolt (a CSS transform)
+        const body = document.createElementNS(NS, 'g');
         const inner = document.createElementNS(NS, 'g');
         inner.setAttribute('class', 'wu-inner');
         const ring = document.createElementNS(NS, 'circle'); ring.setAttribute('r', 25); ring.setAttribute('class', 'wu-ring');
@@ -1606,14 +1775,17 @@ const War = {
         const sym = document.createElementNS(NS, 'path'); sym.setAttribute('class', 'wu-sym');
         const ech = document.createElementNS(NS, 'text'); ech.setAttribute('class', 'wu-ech'); ech.setAttribute('y', -14); ech.setAttribute('text-anchor', 'middle');
         const cut = document.createElementNS(NS, 'path'); cut.setAttribute('class', 'wu-cut'); cut.setAttribute('d', 'M17,-17 l6,10 h-12 z');
+        const bars = document.createElementNS(NS, 'g');
         const hpBg = document.createElementNS(NS, 'rect'); hpBg.setAttribute('class', 'wu-bar-bg'); hpBg.setAttribute('x', -17); hpBg.setAttribute('y', 13); hpBg.setAttribute('width', 34); hpBg.setAttribute('height', 6);
         const hp = document.createElementNS(NS, 'rect'); hp.setAttribute('class', 'wu-hp'); hp.setAttribute('x', -17); hp.setAttribute('y', 13); hp.setAttribute('height', 3.5);
         const org = document.createElementNS(NS, 'rect'); org.setAttribute('class', 'wu-org'); org.setAttribute('x', -17); org.setAttribute('y', 17); org.setAttribute('height', 2);
         const label = document.createElementNS(NS, 'text'); label.setAttribute('class', 'wu-label'); label.setAttribute('y', 30); label.setAttribute('text-anchor', 'middle');
         const title = document.createElementNS(NS, 'title');
         inner.appendChild(frame); inner.appendChild(sym); inner.appendChild(ech);
-        g.appendChild(ring); g.appendChild(inner); g.appendChild(cut); g.appendChild(hpBg); g.appendChild(hp); g.appendChild(org); g.appendChild(label); g.appendChild(title);
-        rec = { g, inner, frame, sym, ech, hp, org, label, title, img: null, v: {} };
+        body.appendChild(inner);
+        bars.appendChild(hpBg); bars.appendChild(hp); bars.appendChild(org); bars.appendChild(label);
+        g.appendChild(ring); g.appendChild(body); g.appendChild(cut); g.appendChild(bars); g.appendChild(title);
+        rec = { g, ring, body, inner, bars, frame, sym, ech, hp, org, label, title, img: null, extra: null, v: {} };
         this._unitNodes.set(k, rec);
       }
       if (rec.g.parentNode !== D.units) D.units.appendChild(rec.g);
@@ -1623,15 +1795,34 @@ const War = {
       rec.enemy = isActiveDoc && !isDead && u.side !== cmdSide;
       // shape: kind/state-dependent frame + symbol (or the organiser's flag)
       const flag = !isDead && flagOf(u);
+      const civil = (u.kind === 'protestor' || u.kind === 'police') && u.state !== 'transport';
       const shapeSig = u.kind + '|' + (u.state === 'transport') + '|' + (flag || '') + '|' + this._echelon(u) + '|' + isDead;
       if (v.shape !== shapeSig) {
         v.shape = shapeSig;
         const s = this._symbol(u);
         rec.frame.setAttribute('d', s.frame);
         rec.sym.setAttribute('d', isDead ? 'M-11,-7 L11,7 M11,-7 L-11,7' : s.sym);
-        rec.ech.textContent = isDead ? '' : this._echelon(u);
+        v.ech = null;
         if (rec.img) { rec.img.remove(); rec.img = null; }
-        if (flag) {
+        if (rec.extra) { rec.extra.remove(); rec.extra = null; }
+        if (!isDead && u.kind === 'protestor' && civil) {
+          // a crowd carries placards while peaceful; flames show once it riots
+          // (CSS swaps them on .wu-riot); the organizer's banner flies above
+          const x = rec.extra = document.createElementNS(NS, 'g');
+          x.setAttribute('class', 'wu-extra');
+          x.innerHTML = '<path class="wu-placard-stick" d="M13,-10 V-21"/><path class="wu-placard" d="M7,-27 H19 V-20 H7 Z"/>' +
+            '<path class="wu-fire" d="M14,-9 C8,-12 9,-19 13,-25 C14,-20 16,-19 17,-22 C21,-16 20,-11 14,-9 Z"/>' +
+            (flag ? '<path class="wu-banner-pole" d="M-16,-10 V-29"/><rect class="wu-banner" x="-16" y="-29" width="11" height="8"/>' : '');
+          if (flag) {
+            rec.img = document.createElementNS(NS, 'image');
+            rec.img.setAttribute('class', 'wu-flag');
+            rec.img.setAttribute('href', flag);
+            rec.img.setAttribute('x', -16); rec.img.setAttribute('y', -29); rec.img.setAttribute('width', 11); rec.img.setAttribute('height', 8);
+            rec.img.setAttribute('preserveAspectRatio', 'xMidYMid slice');
+            x.appendChild(rec.img);
+          }
+          rec.inner.insertBefore(x, rec.frame);
+        } else if (flag) {
           rec.img = document.createElementNS(NS, 'image');
           rec.img.setAttribute('class', 'wu-flag');
           rec.img.setAttribute('href', flag);
@@ -1640,12 +1831,25 @@ const War = {
           rec.sym.setAttribute('d', '');
         }
       }
+      // size marker: a headcount for crowds and police, the echelon otherwise
+      const ech = isDead ? '' : civil ? warHeads(u.strength) : this._echelon(u);
+      if (v.ech !== ech) { v.ech = ech; rec.ech.textContent = ech; }
+      const sc = isDead || !civil ? 1 : warCrowdScale(u);
+      if (v.scale !== sc) {
+        v.scale = sc;
+        rec.body.setAttribute('transform', sc === 1 ? '' : `scale(${sc})`);
+        rec.bars.setAttribute('transform', sc === 1 ? '' : `translate(0,${(11 * (sc - 1)).toFixed(1)})`);
+        rec.ring.setAttribute('r', Math.round(25 * Math.max(1, sc)));
+      }
       // state classes
       const fighting = u.state === 'fighting';
-      const cls = 'wu wu-' + u.side +
+      const pp = war.protest || {};
+      const cls = 'wu wu-' + u.side + ' wu-k-' + (civil ? u.kind : 'mil') +
+        (civil && u.kind === 'protestor' && pp.protestorsViolent ? ' wu-riot' : '') +
+        (civil && u.kind === 'police' && (pp.govViolent || pp.protestorsViolent) ? ' wu-force' : '') +
         (isDead ? ' wu-dead' : '') + (this._sel.has(u.id) && isActiveDoc ? ' wu-sel' : '') +
         (rec.own ? ' wu-cmd' : '') + (rec.enemy ? ' wu-inspect' + (this._sel.size ? ' wu-attackable' : '') : '') +
-        (u.nationId ? ' wu-ally' : '') + (fighting ? ' wu-fight' : '') + (u.state === 'routed' ? ' wu-routed' : '') +
+        (u.nationId && !civil ? ' wu-ally' : '') + (fighting ? ' wu-fight' : '') + (u.state === 'routed' ? ' wu-routed' : '') +
         (!isDead && u.supplied === false ? ' wu-cutoff' : '') + (this._inspect === u.id && isActiveDoc ? ' wu-inspected' : '');
       if (v.cls !== cls) { v.cls = cls; rec.g.setAttribute('class', cls); }
       // bars
@@ -1658,7 +1862,9 @@ const War = {
       const orgW = isDead ? 0 : Math.round(orgPct * 0.34 * 2) / 2;
       if (v.orgW !== orgW) { v.orgW = orgW; rec.org.setAttribute('width', orgW); rec.org.setAttribute('class', 'wu-org' + (orgPct < WAR_ROUT_ORG ? ' wu-org-low' : '')); }
       if (v.name !== u.name) { v.name = u.name; rec.label.textContent = u.name.length > 26 ? u.name.slice(0, 25) + '…' : u.name; }
-      const tip = isDead ? `${u.name} — destroyed`
+      const tip = isDead ? `${u.name} — ${civil ? 'dispersed' : 'destroyed'}`
+        : civil ? `${u.name} — ${u.kind === 'protestor' ? 'crowd of ≈' + warHeads(u.strength) + (pp.protestorsViolent ? ' · rioting' : ' · peaceful') : warHeads(u.strength) + ' officers' + (pp.govViolent ? ' · force authorized' : pp.protestorsViolent ? ' · defending' : ' · holding the line')}` +
+          (u.state === 'fighting' ? ' · in clashes' : u.state === 'routed' ? ' · scattering' : u.dest ? ' · on the move' : '') + ` · morale ${Math.round(orgPct)}%`
         : `${u.name} — ${Math.round(u.strength).toLocaleString('en-US')}/${(u.maxStrength || 0).toLocaleString('en-US')} · ${u.state} · morale ${Math.round(orgPct)}%` +
           (u.nationId ? ` · ${entName(u.nationId)} contingent` : '') + (u.supplied === false ? ' · CUT OFF' : '');
       if (v.tip !== tip) { v.tip = tip; rec.title.textContent = tip; }
@@ -2025,7 +2231,10 @@ const War = {
       : this._bombArmed ? '✈ Airstrike armed — click the target. Esc cancels.'
         : this._spawnArmed ? '➕ Reinforcements armed — click where they should appear. Esc cancels.'
           : !side ? this.authorityText(war) + ' Click a unit for details.'
-            : n ? `${n} unit${n === 1 ? '' : 's'} selected — ` + (this._tapOrders
+            : protest && !n ? (side === 'att'
+              ? (this._tapOrders ? 'Tap your crowds' : 'Click your crowds (Shift adds)') + ' and march them to factories and offices — workplaces next to a crowd walk out at turn end.'
+              : (this._tapOrders ? 'Tap police detachments' : 'Click police detachments (Shift adds)') + ' to move them. They only fight once the crowds riot or force is authorized.')
+            : n ? `${n} ${protest ? (side === 'att' ? 'crowd' : 'detachment') : 'unit'}${n === 1 ? '' : 's'} selected — ` + (this._tapOrders
               ? 'tap ground to move · tap an enemy to attack · right-drag draws a route'
               : 'right-click to move · right-click an enemy to attack · right-drag draws a route · Ctrl-drag a line')
               : (this._tapOrders ? 'Tap your units to select them, or Select all.' : 'Click your units to select (Shift adds) · Shift-drag to box-select · or Select all.');
@@ -2055,19 +2264,12 @@ const War = {
     }
     if (pending) row.appendChild(el('span.chip.active', `✈ Inbound ${inboundS}s`));
     if (protest && live) {
-      const flip = (prop) => (s) => { const d = s && s[key]; if (d && d.protest) d.protest[prop] = !d.protest[prop]; };
-      const toggle = (prop, on, off, cls) => el('button.btn-xs', {
-        class: (p[prop] ? 'solid-btn active' : (cls || 'dash-btn')),
-        onclick: async () => {
-          try { await POST('/api/protest/control', { [prop]: !p[prop], conflict: key }, { optimistic: flip(prop) }); this.renderToolbar(); }
-          catch (e) { toast(e.message, true); }
-        }
-      }, p[prop] ? on : off);
-      if (ca.attLead) {
-        row.appendChild(toggle('protestorsViolent', '⚒ Crowds violent', '⚒ Allow fighting'));
-        row.appendChild(toggle('captureMode', '⚑ Seizing ground', '⚑ Seize ground'));
+      // levers are named for what a click DOES; the solid style marks the
+      // escalation in force, and the tooltip says what it costs
+      for (const lv of this._protestLevers(war, key, ca)) {
+        row.appendChild(el('button.btn-xs', { class: lv.on ? 'solid-btn active' : (lv.danger ? 'danger-btn' : 'dash-btn'), title: lv.title,
+          onclick: async () => { await lv.run(); this.renderToolbar(); } }, lv.label));
       }
-      if (ca.force) row.appendChild(toggle('govViolent', '⛨ Force engaged', '⛨ Use force', 'danger-btn'));
     }
     if (isGM() && this._spawnArmed) row.appendChild(el('button.dash-btn.btn-xs.active', { onclick: () => { this._spawnArmed = false; this.renderToolbar(); } }, '➕ Placing — cancel'));
     if (isGM()) {
@@ -2085,6 +2287,34 @@ const War = {
     this._toolbarSig = null;
     if (this._toolbarTimer && !(W.layer === 'war' && this.active())) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
   },
+  // The protest's escalation levers this viewer holds (cmdAccess), each a
+  // toggle POSTed with an optimistic flip so the button answers at once.
+  _protestLevers(war, key, ca) {
+    const p = war.protest || {};
+    const flip = (prop) => (s) => { const d = s && s[key]; if (d && d.protest) d.protest[prop] = !d.protest[prop]; };
+    const lever = (prop, on, off, title, danger) => ({
+      prop, on: !!p[prop], label: p[prop] ? on : off, title, danger,
+      run: async () => {
+        try { await POST('/api/protest/control', { [prop]: !p[prop], conflict: key }, { optimistic: flip(prop) }); }
+        catch (e) { toast(e.message, true); }
+      }
+    });
+    const out = [];
+    if (ca.attLead) {
+      out.push(lever('protestorsViolent', '☮ Call for calm', '⚒ Turn violent', p.protestorsViolent
+        ? 'The crowds are rioting. Calling for calm stops their attacks — the police then stand down unless force is authorized.'
+        : 'Let the crowds fight. The police fight back, bystanders get hurt, and the public turns against the movement.'));
+      out.push(lever('captureMode', '⚑ Give up ground', '⚑ Seize districts', p.captureMode
+        ? 'The crowds are seizing the districts they stand in. Click to stop claiming ground.'
+        : 'Let the crowds occupy the districts they stand in, behind barricades.'));
+    }
+    if (ca.force) {
+      out.push(lever('govViolent', '⛨ Stand police down', '⛨ Use force', p.govViolent
+        ? 'Force is authorized. Standing the police down stops them attacking (they still defend themselves against a riot).'
+        : (p.protestorsViolent ? 'Authorize the police to attack and clear the air wing.' : 'Force against a PEACEFUL crowd is a crackdown: sympathy for the movement doubles and approval falls fast.'), true));
+    }
+    return out;
+  },
   _selectAll() {
     const war = (window.WarEngine && this.activePred()) || this.activeAuth();
     const side = this.commandableSide(war);
@@ -2094,6 +2324,22 @@ const War = {
     this.refreshLayer(true);
   },
   _helpModal() {
+    const war = this.activeAuth();
+    if (war && war.kind === 'protest') {
+      const rows = [
+        ['Select', 'Click a crowd or police detachment (Shift adds) · Shift-drag a box · Select all'],
+        ['March', 'Right-click the ground — or with Tap orders on, just click / tap it. Right-drag draws a route.'],
+        ['Strike', 'Park a crowd next to factories, offices and shops: within reach, the workforce walks out at the end of each turn (output drops, the owner loses money).'],
+        ['Unrest', 'Every city with a crowd in its streets is in unrest. Peaceful crowds win the movement sympathy and cost the government approval.'],
+        ['Escalate', 'Turn violent (organizers) or Use force (security) — see the War Room for what each combination does.'],
+        ['Airstrike', 'Grounded until force is authorized.'],
+        ['Cancel', 'Esc, or click open ground']
+      ];
+      openModal('LEADING A PROTEST', el('div',
+        el('table.data', el('tbody', rows.map(r => el('tr', el('td', el('b', r[0])), el('td', r[1])))))),
+        [{ label: 'Close', cls: 'dash-btn', onClick: () => { } }]);
+      return;
+    }
     const rows = [
       ['Select', 'Click a unit (Shift adds) · Shift-drag a box · Select all'],
       ['Move', 'Right-click the ground — or with Tap orders on, just click / tap it'],
@@ -2111,8 +2357,21 @@ const War = {
   },
 
   // ---- the situation HUD ----
-  _legendRows() {
+  _legendRows(protest) {
     const sw = (inner) => el('span.war-legend-sw', { html: `<svg viewBox="-20 -14 40 28" width="30" height="21">${inner}</svg>` });
+    if (protest) {
+      const crowd = (fill, ink, stroke) => `<g transform="scale(.62) translate(0,2)"><path d="${WAR_CROWD_FRAME}" fill="${fill}" stroke="${stroke}" stroke-width="2"/><path d="${WAR_CROWD_FIGS}" fill="${ink}" stroke="${fill}"/></g>`;
+      return [
+        [sw(crowd('#f0d8a6', '#5a3a10', '#7a5418')), 'Peaceful crowd'],
+        [sw(crowd('#eaa27a', '#4a1a0c', '#9b2c22') + '<path d="M9,-3 C5,-5 6,-10 8,-13 C9,-10 10,-10 11,-11 C13,-8 12,-5 9,-3 Z" fill="#e8742a" stroke="#9b2c22" stroke-width=".8"/>'), 'Rioting crowd'],
+        [sw(`<g transform="scale(.7) translate(0,1)"><path d="${WAR_POLICE_FRAME}" fill="#c6d6ea" stroke="#1f3a5c" stroke-width="2"/><path d="${WAR_POLICE_BADGE}" fill="#1f3a5c"/></g>`), 'Police'],
+        [sw('<rect x="-15" y="-9" width="30" height="18" rx="9" fill="#f4ecdc" stroke="#6b6250"/><path d="M-10,-5 L-3,0 L-10,5" fill="none" stroke="#9a5a12" stroke-width="2.4"/><path d="M10,-5 L3,0 L10,5" fill="none" stroke="#24466e" stroke-width="2.4"/>'), 'Standoff'],
+        [sw('<path d="M14,0 L7,3 L10,10 L3,6 L0,14 L-3,6 L-10,10 L-7,3 L-14,0 L-7,-3 L-10,-10 L-3,-6 L0,-14 L3,-6 L10,-10 L7,-3 Z" fill="#f6d27a" stroke="#8c1f15" stroke-width="1.2"/>'), 'Clashes'],
+        [sw('<path d="M0,12 V2" stroke="#3b2a20" stroke-width="2"/><rect x="-15" y="-9" width="30" height="11" fill="#f6efe0" stroke="#9b2c22" stroke-width="1.4"/><text y="-1" text-anchor="middle" font-size="7" font-weight="700" fill="#9b2c22">STRIKE</text>'), 'Workplace on strike'],
+        [sw('<circle r="12" fill="#e3a03c" fill-opacity=".35" stroke="#9a5a12" stroke-dasharray="4 3"/>'), 'City in unrest'],
+        [sw('<rect x="-18" y="-11" width="36" height="22" fill="#b0701c" fill-opacity=".25"/><path d="M-18,6 Q-4,-12 18,-4" fill="none" stroke="#8a4e10" stroke-width="2.4" stroke-dasharray="7 3"/>'), 'Seized ground']
+      ];
+    }
     return [
       [sw('<path d="M-18,4 Q-6,-8 4,0 T18,-4" fill="none" stroke="#8c1f15" stroke-width="3"/><path d="M-18,4 Q-6,-8 4,0 T18,-4" fill="none" stroke="#8c1f15" stroke-width="8" stroke-dasharray="1.5 6"/>'), 'Front line'],
       [sw('<rect x="-18" y="-11" width="36" height="22" fill="#9b2c22" fill-opacity=".3"/><path d="M-18,6 L-6,-11 M-10,11 L6,-11 M-2,11 L14,-11 M6,11 L18,-6" stroke="#9b2c22" stroke-opacity=".6" stroke-width="2.5"/>'), 'Occupied ground'],
@@ -2130,6 +2389,8 @@ const War = {
     if (!wrap || !auth) { this._removeHud(); return; }
     const war = (window.WarEngine && this.predictedDoc(auth)) || auth;
     const protest = war.kind === 'protest';
+    const open = W.warHudOpen !== undefined ? W.warHudOpen : window.innerWidth > 640;
+    if (protest) { this._renderProtestHud(wrap, war, open); return; }
     const st = war.stats || {};
     const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
     let attStr = 0, defStr = 0, attN = 0, defN = 0;
@@ -2138,7 +2399,6 @@ const War = {
     const next = [...(war.objectives || [])].filter(o => o.status !== 'done').sort((a, b) => a.priority - b.priority)[0];
     const evs = war.events || [];
     const lastEv = [...evs].reverse().find(e => e.kind !== 'battle') || evs[evs.length - 1];
-    const open = W.warHudOpen !== undefined ? W.warHudOpen : window.innerWidth > 640;
     const sig = [war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, fmtCompact(attStr), fmtCompact(defStr), attN, defN, control.join(), next && next.id, lastEv && lastEv.t,
       fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar].join('|');
     const old = document.getElementById('war-hud');
@@ -2180,6 +2440,94 @@ const War = {
     if (W.warLegend) hud.appendChild(el('div.war-legend', this._legendRows().map(([sw, label]) => el('div.war-legend-row', sw, el('span', label)))));
     wrap.appendChild(hud);
   },
+  // What a protest amounts to right now — shared by the HUD and the War Room.
+  _protestSummary(war) {
+    const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
+    let crowd = 0, crowdN = 0, police = 0, policeN = 0;
+    for (const u of war.units || []) if (live(u)) { if (u.side === 'att') { crowd += u.strength; crowdN++; } else { police += u.strength; policeN++; } }
+    const st = war.stats || {};
+    const pol = st.politics || null;
+    const sum = (o) => Object.values(o || {}).reduce((s, v) => s + (Number(v) || 0), 0);
+    const strikes = war.active ? (S().properties || []).filter(pr => pr.vars && pr.vars.strike) : [];
+    // the party the movement builds: the organizer itself, or the party it leads
+    const orgId = (war.protest || {}).organizerId || war.attackerId;
+    const org = entById(orgId);
+    const party = (pol && pol.partyId && entById(pol.partyId)) ||
+      (org && org.type === 'party' ? org : (S().entities || []).find(e => e.type === 'party' && e.leaderId === orgId)) || null;
+    return {
+      crowd, crowdN, police, policeN, pol, party, org,
+      support: pol ? sum(pol.support) : 0, approval: pol ? sum(pol.approval) : 0,
+      strikes, maxCut: strikes.reduce((m, pr) => Math.max(m, pr.vars.strike.degree || 0), 0),
+      unrest: war.active ? (st.unrestCities || []) : [],
+      control: Object.entries(st.provinceControl || {}).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1])
+    };
+  },
+  _signed(v) { const r = Math.round(v * 100) / 100; return (r > 0 ? '+' : r < 0 ? '−' : '±') + Math.abs(r); },
+  _renderProtestHud(wrap, war, open) {
+    const p = war.protest || {};
+    const st = war.stats || {};
+    const sm = this._protestSummary(war);
+    const posture = protestPosture(p);
+    const P = PROTEST_POSTURE[posture];
+    const evs = war.events || [];
+    const lastEv = [...evs].reverse().find(e => e.kind !== 'battle') || evs[evs.length - 1];
+    const sig = ['protest', war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, posture, p.captureMode,
+      warHeads(sm.crowd), warHeads(sm.police), sm.crowdN, sm.policeN, sm.control.join(), lastEv && lastEv.t,
+      Math.round(sm.support * 10), Math.round(sm.approval * 10), sm.strikes.length, Math.round(sm.maxCut * 100), sm.unrest.join(),
+      fmtCompact(st.civilianDeaths || 0), fmtCompact(st.refugees || 0), fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), (war.result || {}).winner].join('|');
+    const old = document.getElementById('war-hud');
+    const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : P.status) + ' · T' + war.tick + (war.speed > 1 ? ' · ' + war.speed + '×' : '');
+    if (old && old.isConnected && this._hudSig === sig) {
+      const stEl = old.querySelector('.war-hud-status');
+      if (stEl && stEl.textContent !== statusText()) stEl.textContent = statusText();
+      return;
+    }
+    this._hudSig = sig;
+    if (old) old.remove();
+    const hud = el('div#war-hud.war-hud.war-hud-protest', { class: open ? '' : 'collapsed' });
+    hud.appendChild(el('div.war-hud-head', { onclick: () => { W.warHudOpen = !open; this.renderHud(); } },
+      el('span.war-hud-title', '⚒ ' + war.name),
+      el('span.war-hud-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live posture-' + posture }, statusText()),
+      el('span.war-hud-caret', open ? '▾' : '▸')));
+    if (!open) { wrap.appendChild(hud); return; }
+    const faint = (t) => el('span', { style: 'color:var(--ink-faint)' }, t);
+    const row = (label, ...v) => el('div.war-hud-row', el('span.war-hud-k', label), el('span.war-hud-v', ...v));
+    if (!war.result) hud.appendChild(el('div.war-hud-posture', { class: 'posture-' + posture }, el('b', P.label + ' — '), P.short));
+    const tot = sm.crowd + sm.police || 1;
+    hud.appendChild(row('Streets', el('div.war-balance',
+      el('div.war-balance-crowd', { style: `width:${(sm.crowd / tot * 100).toFixed(1)}%` }),
+      el('div.war-balance-police', { style: `width:${(sm.police / tot * 100).toFixed(1)}%` }))));
+    hud.appendChild(el('div.war-hud-sub', `≈${warHeads(sm.crowd)} marching (${sm.crowdN}) · ${fmtNum(Math.round(sm.police))} police (${sm.policeN})`));
+    const tone = (v, goodWhenUp) => el('span', { style: 'color:' + ((goodWhenUp ? v >= 0 : v < 0) ? 'var(--good)' : 'var(--accent)') }, this._signed(v));
+    hud.appendChild(row('Opinion', sm.pol
+      ? el('span', sm.party ? el('span', (sm.party.abbrev || sm.party.name) + ' support ', tone(sm.support, true), ' · ') : null, 'gov. approval ', tone(sm.approval, true))
+      : faint(war.active ? 'first reading within the minute' : 'no measurable shift')));
+    hud.appendChild(row('Strikes', sm.strikes.length
+      ? `${sm.strikes.length} workplace${sm.strikes.length === 1 ? '' : 's'} out · up to −${Math.round(sm.maxCut * 100)}% output`
+      : faint(war.active ? 'none yet — sites near a crowd walk out at turn end' : '—')));
+    hud.appendChild(row('Unrest', sm.unrest.length ? sm.unrest.map(id => (cityById(id) || {}).name || id).join(', ') : faint('the streets are quiet')));
+    if (p.captureMode || sm.control.length) {
+      hud.appendChild(row('Seized', sm.control.length
+        ? sm.control.slice(0, 3).map(([pid, v]) => `${(provById(pid) || {}).name || pid} ${v}%`).join(' · ')
+        : faint('crowds are moving to seize ground')));
+    }
+    const hurt = (st.attLosses || 0) + (st.defLosses || 0);
+    if (hurt > 0 || st.civilianDeaths || st.refugees) {
+      hud.appendChild(row('Toll', [st.civilianDeaths ? `${fmtCompact(st.civilianDeaths)} civilians dead` : null,
+        st.refugees ? `${fmtCompact(st.refugees)} fled` : null,
+        hurt > 0 ? `crowds −${fmtCompact(st.attLosses || 0)} · police −${fmtCompact(st.defLosses || 0)}` : null].filter(Boolean).join(' · ')));
+    }
+    if (war.result) hud.appendChild(row('Result', (war.result.reason || 'ended')));
+    if (lastEv) {
+      const ago = Math.max(0, Math.round((Date.now() - lastEv.t) / 1000));
+      hud.appendChild(row('Latest', el('span', lastEv.text, el('span.war-hud-ago', ago < 90 ? ` ${ago}s ago` : ` ${Math.round(ago / 60)}m ago`))));
+    }
+    hud.appendChild(el('div.war-hud-foot',
+      el('button.dash-btn.btn-xs', { onclick: () => { W.warLegend = !W.warLegend; this.renderHud(); } }, W.warLegend ? 'Hide legend' : 'Legend'),
+      el('button.dash-btn.btn-xs', { onclick: () => App.go('war') }, 'War Room →')));
+    if (W.warLegend) hud.appendChild(el('div.war-legend', this._legendRows(true).map(([sw, label]) => el('div.war-legend-row', sw, el('span', label)))));
+    wrap.appendChild(hud);
+  },
   _removeHud() {
     const h = document.getElementById('war-hud');
     if (h) h.remove();
@@ -2192,9 +2540,12 @@ const War = {
     const war = (window.WarEngine && this.activePred()) || this.activeAuth();
     if (!wrap || !war) { this._removeUnitCard(); return; }
     const old = document.getElementById('war-unit-card');
-    const shown = (id) => { const u = war.units.find(x => x.id === id); return u ? [Math.round(u.strength), Math.round(u.org || 0), u.state, u.supplied, u.dead, JSON.stringify(u.kit || ''), (u.inv || []).map(r => Math.round(r.qty)).join()].join(',') : 'gone'; };
+    const shown = (id) => { const u = war.units.find(x => x.id === id); return u ? [Math.round(u.strength), Math.round(u.org || 0), u.state, u.supplied, u.dead, JSON.stringify(u.kit || ''), (u.inv || []).map(r => Math.round(r.qty)).join(),
+      war.kind === 'protest' ? Math.round(u.pos[0] / 25) + ':' + Math.round(u.pos[1] / 25) + ':' + !!u.dest : ''].join(',') : 'gone'; };
     const ids = this._sel.size ? [...this._sel] : [this._inspect];
+    const pp = war.protest || {};
     const sigBase = [this._sel.size, ids.join(), this._inspect, this._inspectRef, this.commandable(), ids.map(shown).join(';'),
+      war.kind === 'protest' ? [pp.protestorsViolent, pp.govViolent, (S().properties || []).filter(pr => pr.vars && pr.vars.strike).length].join() : '',
       this._inspectRef ? JSON.stringify((war.refugees || []).find(x => x.id === this._inspectRef) || null) : ''].join('|');
     if (old && old.isConnected && this._cardSig === sigBase) return;
     this._cardSig = sigBase;
@@ -2246,6 +2597,7 @@ const War = {
       return;
     }
     const isDead = !live(u);
+    if ((u.kind === 'protestor' || u.kind === 'police') && u.state !== 'transport') { this._civilCard(card, wrap, war, u, isDead, bar); return; }
     const kindLabel = (u.state === 'transport' ? 'At sea — ' : '') + (u.kind || '?').replace(/^./, (c) => c.toUpperCase());
     const sideName = war.kind === 'protest' ? (u.side === 'att' ? 'Crowd' : 'Police') : (u.side === 'att' ? 'Invader' : 'Defence');
     const own = this._sel.has(u.id);
@@ -2267,6 +2619,41 @@ const War = {
       if (u.kit || rows.length) card.appendChild(el('div.war-card-row.war-card-kit', rows.length ? 'Carrying ' + rows.join(' · ') : 'Carrying nothing — awaiting resupply'));
       if (own && this.commandable()) card.appendChild(el('div.btn-row.war-card-actions', el('button.dash-btn.btn-xs', { onclick: () => this._holdSelection() }, '■ Hold position')));
     }
+    wrap.appendChild(card);
+    this._dockCard(card, wrap);
+  },
+  // A crowd or police detachment: people, not a formation — headcount and
+  // resolve, what it is doing, and (for a crowd) the workplaces it has shut.
+  _civilCard(card, wrap, war, u, isDead, bar) {
+    const p = war.protest || {};
+    const crowd = u.kind === 'protestor';
+    const own = this._sel.has(u.id);
+    card.classList.add(crowd ? 'war-card-crowd' : 'war-card-def');
+    card.appendChild(el('div.war-card-title', u.name));
+    const who = entName(crowd ? (p.organizerId || war.attackerId) : war.defenderId);
+    card.appendChild(el('div.war-card-sub', (crowd ? 'Crowd' : 'Police detachment') + (who ? ' · ' + who : '') + (own ? '' : this.commandableSide(war) ? ' · other side' : '')));
+    if (isDead) {
+      card.appendChild(el('div.war-card-row', crowd ? 'This crowd has dispersed.' : 'This detachment has been overrun.'));
+      wrap.appendChild(card); this._dockCard(card, wrap); return;
+    }
+    const pct = u.strength / (u.maxStrength || u.strength || 1);
+    card.appendChild(bar(crowd ? 'People' : 'Officers', pct, pct < 0.3 ? 'low' : '', `${Math.round(u.strength).toLocaleString('en-US')} of ${(u.maxStrength || 0).toLocaleString('en-US')}`));
+    const org = Math.max(0, Math.min(100, typeof u.org === 'number' ? u.org : 100));
+    card.appendChild(bar('Resolve', org / 100, org < WAR_ROUT_ORG ? 'low morale' : 'morale', Math.round(org) + '%'));
+    const doing = u.state === 'fighting' ? (crowd ? 'Rioting — in clashes with the police' : 'In clashes with the crowds')
+      : u.state === 'routed' ? (crowd ? 'Scattering — the crowd is breaking up' : 'Falling back in disorder')
+        : u.dest ? (crowd ? 'Marching' : 'Redeploying')
+          : crowd ? (p.protestorsViolent ? 'Rioting where it stands' : 'Demonstrating peacefully') : (p.govViolent ? 'Cleared to use force' : p.protestorsViolent ? 'Defending itself' : 'Holding the line');
+    card.appendChild(el('div.war-card-row', doing));
+    if (crowd) {
+      const R = 120; // the economy's strike radius (server/sim.js STRIKE_RADIUS)
+      const near = (S().properties || []).filter(pr => Array.isArray(pr.pos) && Math.hypot(pr.pos[0] - u.pos[0], pr.pos[1] - u.pos[1]) <= R);
+      const out = near.filter(pr => pr.vars && pr.vars.strike);
+      card.appendChild(el('div.war-card-row.war-card-kit', near.length
+        ? `${near.length} workplace${near.length === 1 ? '' : 's'} within reach · ${out.length} on strike` + (out.length < near.length ? ' — the rest walk out at turn end' : '')
+        : 'No workplaces within reach — march closer to factories and offices to strike.'));
+    }
+    if (own && this.commandable()) card.appendChild(el('div.btn-row.war-card-actions', el('button.dash-btn.btn-xs', { onclick: () => this._holdSelection() }, crowd ? '■ Stay put' : '■ Hold the line')));
     wrap.appendChild(card);
     this._dockCard(card, wrap);
   },
@@ -2331,7 +2718,7 @@ const War = {
     // Phase 36 UX: a conflict that has ENDED folds into one line (its full
     // after-action report is still a click away) so live business and the
     // start forms aren't pushed below a screen of zeros.
-    for (const auth of docs) {
+    for (const auth of [...docs].sort((a, b) => (b.active ? 1 : 0) - (a.active ? 1 : 0))) {
       const key = this.docKeyOf(auth);
       if (auth.active) { this.renderDocPanel(inner, auth, key); continue; }
       const what = auth.kind === 'protest' ? 'Protest' : 'War';
@@ -2361,36 +2748,17 @@ const War = {
   // what comes next — then the detail in folds (order of battle, arsenal,
   // the full report) and the GM's levers.
   renderDocPanel(inner, war, key) {
-    const protest = war.kind === 'protest';
+    if (war.kind === 'protest') { this.renderProtestReport(inner, war, key); return; }
     const st = war.stats || {};
-    const p = war.protest || {};
-    const names = protest ? ['Crowds', 'Police'] : [entName(war.attackerId) || 'Invader', entName(war.defenderId) || 'Defence'];
-    const endMs = war.result && war.result.endedAt ? new Date(war.result.endedAt).getTime() : Date.now();
-    const elapsed = Math.max(0, Math.round((endMs - new Date(war.startedAt).getTime()) / 1000));
-    const hh = Math.floor(elapsed / 3600), mm = Math.floor((elapsed % 3600) / 60), ss = elapsed % 60;
-    const lasted = hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : hh ? `${hh}h ${mm}m` : `${mm}m ${ss}s`;
-    const protestEnd = () => war.result.winner === 'def' ? 'Ended — crowds dispersed'
-      : war.result.winner === 'att' ? 'Ended — demands conceded'
-        : /called off/i.test(war.result.reason || '') ? 'Ended — called off by the organizers' : 'Ended';
+    const names = [entName(war.attackerId) || 'Invader', entName(war.defenderId) || 'Defence'];
     const statusText = war.result
-      ? (protest ? protestEnd() : (war.result.winner === 'att' ? 'Ended — total victory for the invader' : war.result.winner === 'def' ? 'Ended — invasion repelled' : 'Ended'))
-      : (war.paused ? 'Paused'
-        : protest ? (p.protestorsViolent ? 'Violent unrest' : p.govViolent ? 'Security forces mobilised' : 'Peaceful demonstration')
-          : war.totalWar ? 'Total war — no terms' : 'Fighting in progress');
-
-    inner.appendChild(Views.secLabel((protest ? '⚒ ' : '⚔ ') + war.name));
-    const head = el('div.war-report-head',
-      el('span.war-report-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live' }, statusText),
-      el('span.war-report-meta', `tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${war.speed}×`),
-      war.active ? el('button.solid-btn.btn-xs', { onclick: () => this.openBattleMap(null, key) }, 'Open the battle map →') : null);
-    inner.appendChild(head);
-    if (war.active) inner.appendChild(el('div.war-authority', this.authorityText(war)));
-    if (!protest) {
-      const allyLists = war.allies || { att: [], def: [] };
-      const lines = [allyLists.att && allyLists.att.length ? `Also attacking: ${allyLists.att.map(entName).join(', ')}` : null,
-        allyLists.def && allyLists.def.length ? `Also defending: ${allyLists.def.map(entName).join(', ')}` : null].filter(Boolean);
-      if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
-    }
+      ? (war.result.winner === 'att' ? 'Ended — total victory for the invader' : war.result.winner === 'def' ? 'Ended — invasion repelled' : 'Ended')
+      : (war.paused ? 'Paused' : war.totalWar ? 'Total war — no terms' : 'Fighting in progress');
+    this._reportHead(inner, war, key, '⚔ ', statusText, '');
+    const allyLists = war.allies || { att: [], def: [] };
+    const lines = [allyLists.att && allyLists.att.length ? `Also attacking: ${allyLists.att.map(entName).join(', ')}` : null,
+      allyLists.def && allyLists.def.length ? `Also defending: ${allyLists.def.map(entName).join(', ')}` : null].filter(Boolean);
+    if (lines.length) inner.appendChild(el('div.doc-sub', lines.join(' · ')));
 
     // balance of forces + the headline numbers
     const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
@@ -2410,40 +2778,13 @@ const War = {
       [names[1] + ' losses', fmtCompact(st.defLosses || 0)],
       ['Civilian dead', fmtCompact(st.civilianDeaths || 0)],
       ['Refugees', fmtCompact(st.refugees || 0)],
-      [protest ? 'Cities in unrest' : 'Cities fallen', String((st.unrestCities || st.citiesHeld || []).length)]
+      ['Cities fallen', String((st.citiesHeld || []).length)]
     ]));
 
     if (isGM()) this.renderControls(inner, war, key);
-    else if (protest && war.active) this.renderProtestActions(inner, war, key);
-
-    if (protest) {
-      const org = S().entities.find(e => e.id === war.attackerId);
-      const struckSites = (S().properties || []).filter(pr => pr.vars && pr.vars.strike).map(pr => pr.name);
-      inner.appendChild(Views.secLabel('The Unrest'));
-      inner.appendChild(el('div.doc-sub',
-        `Organized by ${org ? org.name : war.attackerId} · Rally locations: ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
-      if (p.demands) inner.appendChild(el('div.war-demands', '“' + p.demands + '”'));
-      if (war.active) {
-        const chips = el('div.btn-row');
-        const ca = this.access(war);
-        if (!ca.attLead && !ca.force) {
-          chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
-          chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
-          chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
-        }
-        const t = p.tuning || {};
-        if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
-        inner.appendChild(chips);
-        inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-          t.strikeFrac > 0 ? `Properties on strike: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}` : 'Strike effect is disabled by tuning.'));
-      } else if (war.result && war.result.reason) {
-        inner.appendChild(el('div', { style: 'font-size:13px;' }, war.result.reason + '.'));
-      }
-      this.renderProtestOpinion(inner, war);
-    }
 
     // objectives as a checklist, the next one called out
-    if (!protest && (war.objectives || []).length) {
+    if ((war.objectives || []).length) {
       inner.appendChild(Views.secLabel('Objectives'));
       const objs = [...war.objectives].sort((a, b) => a.priority - b.priority);
       const next = objs.find(o => o.status !== 'done');
@@ -2456,64 +2797,27 @@ const War = {
 
     // ground held
     const control = st.provinceControl || {};
-    let provIds = Object.keys((war.grid || {}).provinceLandCells || control);
-    inner.appendChild(Views.secLabel(protest ? 'Districts under protest control' : 'Province control'));
-    if (protest && !provIds.some(pid => (control[pid] || 0) > 0)) {
-      provIds = [];
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
-        p.captureMode && war.active ? 'The crowds are moving to seize ground — no district has fallen yet.' : 'Protestors hold no ground — the crowds are gathered in the streets.'));
-    }
+    inner.appendChild(Views.secLabel('Province control'));
     const provBox = el('div');
-    for (const pid of provIds) {
+    for (const pid of Object.keys((war.grid || {}).provinceLandCells || control)) {
       const prov = provById(pid);
       if (prov) provBox.appendChild(Views.barRow(prov.name, control[pid] || 0, prov.color, (control[pid] || 0) + '%'));
     }
     inner.appendChild(provBox);
-    if (!protest) {
-      const enemyCtl = st.enemyControl || {};
-      const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
-      if (enemyIds.length) {
-        inner.appendChild(Views.secLabel('Enemy homeland occupied'));
-        const countries = ((S().settings || {}).map || {}).countries || [];
-        for (const cid of enemyIds) {
-          const c = countries.find(x => x.id === cid);
-          inner.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
-        }
+    const enemyCtl = st.enemyControl || {};
+    const enemyIds = Object.keys(enemyCtl).filter(cid => enemyCtl[cid] > 0);
+    if (enemyIds.length) {
+      inner.appendChild(Views.secLabel('Enemy homeland occupied'));
+      const countries = ((S().settings || {}).map || {}).countries || [];
+      for (const cid of enemyIds) {
+        const c = countries.find(x => x.id === cid);
+        inner.appendChild(Views.barRow(c ? c.name : cid, enemyCtl[cid], '#2f4a6e'));
       }
     }
 
-    // the latest reports; the full log folds
-    inner.appendChild(Views.secLabel('Front-line reports'));
-    const evs = [...(war.events || [])].reverse();
-    const evRow = (ev) => el('div.activity-item', el('span.when', new Date(ev.t).toLocaleTimeString()), ev.text,
-      ev.pos && war.active ? el('button.ow-btn.ow-act', { title: 'Show on the battle map', onclick: () => this.openBattleMap(ev.pos, key) }, '◎') : null);
-    if (!evs.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No engagements reported yet.'));
-    // routine rout/kill chatter collapses so captures and landings stand out
-    const notable = evs.filter(e => e.kind !== 'battle').slice(0, 5);
-    for (const ev of (notable.length ? notable : evs.slice(0, 5))) inner.appendChild(evRow(ev));
-    if (evs.length > 5) inner.appendChild(Views.ledgerFold('wrLog_' + key, `Full report — ${evs.length} entries`, () => el('div', evs.slice(0, 60).map(evRow))));
-
-    // order of battle and arsenal, folded
-    const units = (war.units || []).filter(live);
-    if (units.length) {
-      inner.appendChild(Views.ledgerFold('wrOrbat_' + key, `Order of battle — ${units.length} units in the field${cut ? ` · ${cut} cut off` : ''}`, () => {
-        const sorted = units.slice().sort((a, b) => (a.side === b.side ? b.strength - a.strength : a.side === 'def' ? -1 : 1));
-        return el('table.data.war-orbat',
-          el('thead', el('tr', el('th', 'Unit'), el('th', 'Side'), el('th', 'Type'), el('th.num', 'Strength'), el('th.num', 'Morale'), el('th', 'State'), el('th', ''))),
-          el('tbody', sorted.map(u => {
-            const pct = Math.round(u.strength / (u.maxStrength || u.strength || 1) * 100);
-            return el('tr', { class: u.side === 'att' ? 'war-orbat-att' : 'war-orbat-def' },
-              el('td', u.name),
-              el('td', u.side === 'att' ? names[0] : names[1]),
-              el('td', (u.kind || '').replace(/^./, c => c.toUpperCase()) + ' ' + this._echelon(u)),
-              el('td.num', `${pct}%`),
-              el('td.num', Math.round(typeof u.org === 'number' ? u.org : 100) + '%'),
-              el('td', u.state + (u.supplied === false ? ' · cut off' : '')),
-              el('td', war.active ? el('button.ow-btn.ow-act', { title: 'Show on the battle map', onclick: () => this.openBattleMap(u.pos, key) }, '◎') : null));
-          })));
-      }));
-    }
-    if (!protest && war.equip && (war.equip.att || war.equip.def)) {
+    this._reportEvents(inner, war, key, 'Front-line reports', 'No engagements reported yet.');
+    this._reportOrbat(inner, war, key, names, cut);
+    if (war.equip && (war.equip.att || war.equip.def)) {
       inner.appendChild(Views.ledgerFold('wrArsenal_' + key, 'Arsenal & supply', () => {
         const fmtEq = (e) => e ? `fire ×${e.dmg} · armour ×${e.hp} · morale ×${e.morale} · speed ×${e.speed}` : '—';
         return el('table.data', el('tbody',
@@ -2522,6 +2826,190 @@ const War = {
           el('tr', el('td', 'Cut off from supply'), el('td', `${cut} unit${cut === 1 ? '' : 's'}`))));
       }));
     }
+  },
+
+  // The report's masthead, shared by wars and protests: name, status, clock,
+  // the way onto the map, and who may command what.
+  _reportHead(inner, war, key, glyph, statusText, statusCls) {
+    const endMs = war.result && war.result.endedAt ? new Date(war.result.endedAt).getTime() : Date.now();
+    const elapsed = Math.max(0, Math.round((endMs - new Date(war.startedAt).getTime()) / 1000));
+    const hh = Math.floor(elapsed / 3600), mm = Math.floor((elapsed % 3600) / 60), ss = elapsed % 60;
+    const lasted = hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : hh ? `${hh}h ${mm}m` : `${mm}m ${ss}s`;
+    inner.appendChild(Views.secLabel(glyph + war.name));
+    inner.appendChild(el('div.war-report-head',
+      el('span.war-report-status', { class: (war.result ? 'ended' : war.paused ? 'paused' : 'live') + (statusCls ? ' ' + statusCls : '') }, statusText),
+      el('span.war-report-meta', `tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${war.speed}×`),
+      war.active ? el('button.solid-btn.btn-xs', { onclick: () => this.openBattleMap(null, key) }, war.kind === 'protest' ? 'Open the street map →' : 'Open the battle map →') : null));
+    if (war.active) inner.appendChild(el('div.war-authority', this.authorityText(war)));
+  },
+  // the latest reports; the full log folds
+  _reportEvents(inner, war, key, title, empty) {
+    inner.appendChild(Views.secLabel(title));
+    const evs = [...(war.events || [])].reverse();
+    const evRow = (ev) => el('div.activity-item', el('span.when', new Date(ev.t).toLocaleTimeString()), ev.text,
+      ev.pos && war.active ? el('button.ow-btn.ow-act', { title: 'Show on the map', onclick: () => this.openBattleMap(ev.pos, key) }, '◎') : null);
+    if (!evs.length) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, empty));
+    // routine rout/kill chatter collapses so captures and landings stand out
+    const notable = evs.filter(e => e.kind !== 'battle').slice(0, 5);
+    for (const ev of (notable.length ? notable : evs.slice(0, 5))) inner.appendChild(evRow(ev));
+    if (evs.length > 5) inner.appendChild(Views.ledgerFold('wrLog_' + key, `Full report — ${evs.length} entries`, () => el('div', evs.slice(0, 60).map(evRow))));
+  },
+  // order of battle, folded
+  _reportOrbat(inner, war, key, names, cut) {
+    const live = (u) => !u.dead && u.state !== 'dead' && u.strength > 0;
+    const units = (war.units || []).filter(live);
+    if (!units.length) return;
+    const protest = war.kind === 'protest';
+    const label = protest ? `Who is on the streets — ${units.length} crowd${units.length === 1 ? '' : 's'} & detachments`
+      : `Order of battle — ${units.length} units in the field${cut ? ` · ${cut} cut off` : ''}`;
+    inner.appendChild(Views.ledgerFold('wrOrbat_' + key, label, () => {
+      const sorted = units.slice().sort((a, b) => (a.side === b.side ? b.strength - a.strength : a.side === 'def' ? -1 : 1));
+      return el('table.data.war-orbat',
+        el('thead', el('tr', el('th', protest ? 'Crowd / detachment' : 'Unit'), el('th', 'Side'), el('th', 'Type'), el('th.num', protest ? 'People' : 'Strength'), el('th.num', protest ? 'Resolve' : 'Morale'), el('th', 'State'), el('th', ''))),
+        el('tbody', sorted.map(u => {
+          const pct = Math.round(u.strength / (u.maxStrength || u.strength || 1) * 100);
+          return el('tr', { class: u.side === 'att' ? 'war-orbat-att' : 'war-orbat-def' },
+            el('td', u.name),
+            el('td', u.side === 'att' ? names[0] : names[1]),
+            el('td', protest ? (u.kind === 'protestor' ? 'Crowd' : u.kind === 'police' ? 'Police' : (u.kind || '').replace(/^./, c => c.toUpperCase())) : (u.kind || '').replace(/^./, c => c.toUpperCase()) + ' ' + this._echelon(u)),
+            el('td.num', protest ? fmtNum(Math.round(u.strength)) : `${pct}%`),
+            el('td.num', Math.round(typeof u.org === 'number' ? u.org : 100) + '%'),
+            el('td', u.state + (u.supplied === false && !protest ? ' · cut off' : '')),
+            el('td', war.active ? el('button.ow-btn.ow-act', { title: 'Show on the map', onclick: () => this.openBattleMap(u.pos, key) }, '◎') : null));
+        })));
+    }));
+  },
+
+  // ═══ A protest's situation report ═══
+  // Who marches and why, where the standoff sits on the 2×2 escalation grid
+  // (with the levers this viewer holds), what the streets look like, what it
+  // is doing to opinion and to the economy (strikes) — then the log.
+  renderProtestReport(inner, war, key) {
+    const p = war.protest || {};
+    const st = war.stats || {};
+    const sm = this._protestSummary(war);
+    const posture = protestPosture(p);
+    const endText = !war.result ? '' : war.result.winner === 'def' ? 'Ended — crowds dispersed'
+      : war.result.winner === 'att' ? 'Ended — demands conceded'
+        : /called off/i.test(war.result.reason || '') ? 'Ended — called off by the organizers' : 'Ended';
+    const statusText = war.result ? endText : war.paused ? 'Paused' : PROTEST_POSTURE[posture].label + (posture === 'peaceful' ? ' demonstration' : '');
+    this._reportHead(inner, war, key, '⚒ ', statusText, war.result ? '' : 'posture-' + posture);
+
+    // the movement
+    const org = sm.org;
+    const cityNames = (ids) => (ids || []).map(cityById).filter(Boolean).map(c => c.name).join(', ');
+    inner.appendChild(el('div.protest-banner',
+      org && org.logo ? el('img.protest-banner-logo', { src: org.logo, alt: '' }) : el('span.protest-banner-glyph', '⚒'),
+      el('div.protest-banner-body',
+        el('div.protest-banner-org', 'Organized by ', el('b', org ? org.name : '—'),
+          sm.party && org && sm.party.id !== org.id ? ` · marching for ${sm.party.name}` : ''),
+        p.demands ? el('div.war-demands', '“' + p.demands + '”') : el('div.protest-banner-where', 'No demands were published.'),
+        el('div.protest-banner-where', 'Rallied in ' + (cityNames(p.baseCities) || 'several cities') +
+          ((p.policeCities || []).length ? ' · police posted to ' + cityNames(p.policeCities) : '')))));
+
+    if (war.active) this._postureGrid(inner, war, key);
+    else if (war.result && war.result.reason) inner.appendChild(el('div.protest-outcome', war.result.reason + '.'));
+    if (isGM()) this.renderControls(inner, war, key);
+
+    // the streets
+    inner.appendChild(Views.secLabel('The streets'));
+    if (war.active) {
+      const tot = sm.crowd + sm.police || 1;
+      inner.appendChild(el('div.war-report-balance',
+        el('div.war-report-side', el('b', 'Crowds'), ` ≈${warHeads(sm.crowd)} · ${sm.crowdN}`),
+        el('div.war-balance.war-balance-lg',
+          el('div.war-balance-crowd', { style: `width:${(sm.crowd / tot * 100).toFixed(1)}%` }),
+          el('div.war-balance-police', { style: `width:${(sm.police / tot * 100).toFixed(1)}%` })),
+        el('div.war-report-side.right', `${sm.policeN} · ${fmtNum(Math.round(sm.police))} `, el('b', 'Police'))));
+    }
+    inner.appendChild(Views.statStrip([
+      ['Cities in unrest', String(sm.unrest.length)],
+      ['Workplaces on strike', String(sm.strikes.length)],
+      ['Civilian dead', fmtCompact(st.civilianDeaths || 0)],
+      ['Fled their homes', fmtCompact(st.refugees || 0)],
+      ['Crowd / police hurt', `${fmtCompact(st.attLosses || 0)} / ${fmtCompact(st.defLosses || 0)}`]
+    ]));
+    if (war.active && sm.unrest.length) {
+      inner.appendChild(el('div.protest-places', el('span.mono-label', 'In unrest'),
+        sm.unrest.map(cid => { const c = cityById(cid); return c ? el('button.chip', { title: 'Show on the map', onclick: () => this.openBattleMap(c.pos, key) }, c.name + ' ◎') : null; })));
+    }
+
+    this.renderProtestOpinion(inner, war, sm);
+
+    // strikes
+    inner.appendChild(Views.secLabel('Strikes'));
+    const cap = Number(((p.tuning || {}).strikeFrac));
+    if (!(cap > 0)) {
+      inner.appendChild(el('div.protest-note', 'The strike effect is switched off for this protest (GM tuning).'));
+    } else if (sm.strikes.length) {
+      const sorted = sm.strikes.slice().sort((a, b) => (b.vars.strike.degree || 0) - (a.vars.strike.degree || 0));
+      const table = (rows) => el('table.data.protest-strikes',
+        el('thead', el('tr', el('th', 'Workplace'), el('th', 'Owner'), el('th.num', 'Output'), el('th.num', 'Since'), el('th', ''))),
+        el('tbody', rows.map(pr => el('tr',
+          el('td', pr.name),
+          el('td', entName(pr.ownerId) || '—'),
+          el('td.num', { style: 'color:var(--accent)' }, '−' + Math.round((pr.vars.strike.degree || 0) * 100) + '%'),
+          el('td.num', 'T' + pr.vars.strike.sinceTurn),
+          el('td', war.active && pr.pos ? el('button.ow-btn.ow-act', { title: 'Show on the map', onclick: () => this.openBattleMap(pr.pos, key) }, '◎') : null)))));
+      inner.appendChild(table(sorted.slice(0, 5)));
+      if (sorted.length > 5) inner.appendChild(Views.ledgerFold('wrStrikes_' + (war.startedAt || ''), `All ${sorted.length} workplaces on strike`, () => table(sorted)));
+    } else {
+      inner.appendChild(el('div.protest-note', war.active
+        ? `No workplace is out yet. At the end of each turn, every factory, office or shop within reach of a crowd walks out — its output drops by up to ${Math.round(cap * 100)}% while the crowd stays.`
+        : 'Work has resumed everywhere.'));
+    }
+
+    // seized ground — only once the crowds claim any
+    if (p.captureMode || sm.control.length) {
+      inner.appendChild(Views.secLabel('Seized districts'));
+      if (!sm.control.length) inner.appendChild(el('div.protest-note', 'The crowds are moving to seize ground — no district has fallen yet.'));
+      for (const [pid, v] of sm.control) { const prov = provById(pid); if (prov) inner.appendChild(Views.barRow(prov.name, v, prov.color, v + '%')); }
+    }
+
+    this._reportEvents(inner, war, key, 'Reports from the streets', 'Nothing to report yet.');
+    this._reportOrbat(inner, war, key, ['Crowds', 'Police'], 0);
+  },
+  // The 2×2: crowds peaceful/violent × police holding/force — the current
+  // cell lit, what it means spelled out, then this viewer's levers.
+  _postureGrid(inner, war, key) {
+    const p = war.protest || {};
+    const ca = this.access(war);
+    const cur = protestPosture(p);
+    inner.appendChild(Views.secLabel('Escalation'));
+    const cell = (k) => el('div.posture-cell', { class: 'posture-' + k + (k === cur ? ' current' : '') },
+      el('div.posture-cell-head', PROTEST_POSTURE[k].label, k === cur ? el('span.posture-now', 'now') : null),
+      el('div.posture-cell-text', PROTEST_POSTURE[k].short));
+    inner.appendChild(el('div.posture-grid',
+      el('div'), el('div.posture-axis', 'Police hold back'), el('div.posture-axis', 'Force authorized'),
+      el('div.posture-axis.posture-row', 'Crowds peaceful'), cell('peaceful'), cell('crackdown'),
+      el('div.posture-axis.posture-row', 'Crowds violent'), cell('riot'), cell('clashes')));
+    inner.appendChild(el('div.protest-note', PROTEST_POSTURE[cur].text));
+    const row = el('div.btn-row.protest-levers');
+    for (const lv of this._protestLevers(war, key, ca)) {
+      row.appendChild(el('button', { class: lv.on ? 'solid-btn active' : (lv.danger ? 'danger-btn' : 'dash-btn'), title: lv.title, onclick: () => lv.run() }, lv.label));
+    }
+    if (ca.attLead && !isGM()) {
+      row.appendChild(el('button.dash-btn', {
+        title: 'End the protest. The opinion it has already won stays won.',
+        onclick: () => confirmModal('CALL OFF THE PROTEST', 'Send the crowds home? The protest ends now; the opinion it has already won stays won.', async () => {
+          await POST('/api/protest/disband', {});
+          toast('The organizers call the protest off.');
+        }, 'Call It Off')
+      }, '✋ Call it off'));
+    }
+    if (ca.concede) {
+      const cs = Number((((S().settings || {}).war || {}).protest || {}).concedeSupport);
+      row.appendChild(el('button.dash-btn', {
+        title: 'Give the protestors what they ask. The protest ends in their victory.',
+        onclick: () => confirmModal('CONCEDE TO THE DEMANDS', 'Give the protestors what they ask' + (p.demands ? ` (“${p.demands}”)` : '') + '? The protest ends in their victory' +
+          (cs > 0 ? ` and the movement's party gains +${cs} support in every province it marched in.` : '.'), async () => {
+          await POST('/api/protest/concede', {});
+          toast('The government concedes.');
+        }, 'Concede')
+      }, '🤝 Concede the demands'));
+    }
+    if (row.childNodes.length) inner.appendChild(row);
+    else inner.appendChild(el('div.protest-note', 'Only the organizers can escalate or call the protest off, and only cleared security officials can authorize force.'));
   },
 
   objLabel(o) {
@@ -2578,10 +3066,37 @@ const War = {
   // startProtest); both conflict docs run simultaneously, so a protest can
   // begin mid-war.
   _protestDraft: null,
+  // A city picker as tappable chips (wrapping, thumb-sized). stateOf(cid)
+  // names a chip's state ('' | 'rally' | 'police'); onTap(cid) changes it.
+  // Chips repaint in place, so a pick never re-renders the form mid-edit.
+  _cityChips(cities, stateOf, onTap) {
+    const box = el('div.city-chips');
+    const paint = () => {
+      for (const b of box.children) {
+        const st = stateOf(b.getAttribute('data-city'));
+        b.setAttribute('class', 'city-chip' + (st ? ' city-chip-' + st : ''));
+      }
+    };
+    for (const c of cities) {
+      box.appendChild(el('button', { type: 'button', 'data-city': c.id, 'data-name': String(c.name || '').toLocaleLowerCase(),
+        onclick: () => { onTap(c.id); paint(); } }, c.name + (c.isCapital ? ' ★' : '')));
+    }
+    paint();
+    return box;
+  },
+  _citySearch(inner, box) {
+    return el('input.text-input.city-chip-search', {
+      type: 'search', placeholder: 'Filter cities…',
+      oninput: (e) => {
+        const q = e.target.value.trim().toLocaleLowerCase();
+        for (const b of box.children) b.style.display = !q || b.getAttribute('data-name').includes(q) ? '' : 'none';
+      }
+    });
+  },
   renderProtestStartForm(inner) {
     inner.appendChild(Views.secLabel('Start a Protest'));
     const d = this._protestDraft = this._protestDraft || {
-      name: 'Popular unrest', organizerId: '', baseCities: [], policeCities: [],
+      name: 'Popular unrest', organizerId: '', demands: '', baseCities: [], policeCities: [],
       crowds: 2, perCity: 2000
     };
     const organizerOpts = (S().entities || [])
@@ -2589,73 +3104,51 @@ const War = {
       .map(e => [e.id, e.name + ' (' + e.type + ')']);
     if (!d.organizerId && organizerOpts.length) d.organizerId = organizerOpts[0][0];
     const cities = S().cities || [];
-    const maxUnits = 300;
-    const search = String(d.citySearch || '').trim().toLocaleLowerCase();
-    const effectivePolice = () => d.policeCities.filter(id => !d.baseCities.includes(id));
-    const deploymentSize = () => d.baseCities.length * (Number(d.crowds) || 1) + effectivePolice().length * 2;
-    const summary = el('div', { style: 'color:var(--ink-faint); font-size:12px; margin:4px 0;' });
+    const maxUnits = MAX_PROTEST_UNITS_CLIENT;
+    const plan = el('div.protest-plan');
     let startButton;
-    const updateDeployment = () => {
-      const count = deploymentSize();
-      summary.textContent = `Estimated deployment: ${count} units (${d.baseCities.length * (Number(d.crowds) || 1)} crowds, ${effectivePolice().length * 2} police) · limit ${maxUnits}`;
-      summary.style.color = count > maxUnits ? 'var(--danger, #c44)' : 'var(--ink-faint)';
-      if (startButton) startButton.disabled = count > maxUnits;
+    const update = () => {
+      const crowds = d.baseCities.length * (Number(d.crowds) || 1);
+      const posts = d.policeCities.length * 2;
+      const count = crowds + posts;
+      const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+      clear(plan);
+      plan.appendChild(el('span', d.baseCities.length
+        ? `${n(crowds, 'crowd', 'crowds')} · ≈${warHeads(crowds * (Number(d.perCity) || 0))} people in ${n(d.baseCities.length, 'city', 'cities')}`
+        : 'Tap at least one city for a rally.'));
+      plan.appendChild(el('span', d.policeCities.length ? ` · ${n(posts, 'police detachment', 'police detachments')} in ${n(d.policeCities.length, 'city', 'cities')}` : ' · no police posted'));
+      plan.appendChild(el('span', { class: count > maxUnits ? 'over' : '' }, ` · ${count}/${maxUnits} units`));
+      if (startButton) startButton.disabled = !d.baseCities.length || count > maxUnits;
     };
-    const cityGrid = (key) => {
-      const g = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:2px 8px; font-size:12px;' });
-      for (const c of cities) {
-        const lab = el('label', { 'data-city-id': c.id, 'data-city-group': key, 'data-city-name': c.name.toLocaleLowerCase(), style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
-          el('input', { type: 'checkbox', checked: d[key].includes(c.id) ? 'checked' : undefined,
-            onchange: (e) => {
-              const set = new Set(d[key]);
-              if (e.target.checked) set.add(c.id); else set.delete(c.id);
-              d[key] = [...set];
-              // A city can host a rally or a police detachment, not both.
-              const other = key === 'baseCities' ? 'policeCities' : 'baseCities';
-              if (e.target.checked) d[other] = d[other].filter(id => id !== c.id);
-              for (const item of inner.querySelectorAll('[data-city-id]')) {
-                const group = item.getAttribute('data-city-group');
-                const selected = group === 'baseCities' ? d.baseCities : d.policeCities;
-                const input = item.querySelector('input');
-                if (input) input.checked = selected.includes(item.getAttribute('data-city-id'));
-              }
-              updateDeployment();
-            } }), c.name);
-        if (search && !c.name.toLocaleLowerCase().includes(search)) lab.style.display = 'none';
-        g.appendChild(lab);
-      }
-      return g;
-    };
-    const box = el('div.form-grid',
+    inner.appendChild(el('div.form-grid',
       Forms.field('Movement name', Forms.text(d, 'name')),
       Forms.field('Organizer', Forms.sel(d, 'organizerId', organizerOpts)),
-      Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 6, { step: 1, suffix: ' crowds', onInput: updateDeployment })),
-      Forms.field('Crowd strength each', Forms.sliderNum(d, 'perCity', 500, 20000, { step: 500 })));
-    inner.appendChild(box);
-    inner.appendChild(Forms.field('Find cities', el('input.text-input', {
-      type: 'search', value: d.citySearch || '', placeholder: 'Filter city names…',
-      oninput: (e) => {
-        d.citySearch = e.target.value;
-        const query = d.citySearch.trim().toLocaleLowerCase();
-        for (const item of inner.querySelectorAll('[data-city-id]')) {
-          item.style.display = !query || item.getAttribute('data-city-name').includes(query) ? 'flex' : 'none';
-        }
-      }
-    })));
-    inner.appendChild(Forms.field('Cities where crowds gather', cityGrid('baseCities')));
-    inner.appendChild(Forms.field('Cities with police detachments', cityGrid('policeCities')));
-    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin-top:4px;' }, 'A city selected for crowds is automatically removed from the police list.'));
-    inner.appendChild(summary);
+      Forms.field('Crowds per rally city', Forms.sliderNum(d, 'crowds', 1, 6, { step: 1, onInput: update })),
+      Forms.field('People per crowd', Forms.sliderNum(d, 'perCity', 500, 20000, { step: 500, onInput: update }))));
+    inner.appendChild(Forms.field('Demands', Forms.area(d, 'demands', 'min-height:44px;'), 'What would send the crowds home? Printed on the wire and in the War Room.'));
+    // one list, three states: tap → rally, tap again → police post, again → clear
+    const chips = this._cityChips(cities,
+      (cid) => d.baseCities.includes(cid) ? 'rally' : d.policeCities.includes(cid) ? 'police' : '',
+      (cid) => {
+        if (d.baseCities.includes(cid)) { d.baseCities = d.baseCities.filter(x => x !== cid); d.policeCities = [...d.policeCities, cid]; }
+        else if (d.policeCities.includes(cid)) d.policeCities = d.policeCities.filter(x => x !== cid);
+        else d.baseCities = [...d.baseCities, cid];
+        update();
+      });
+    inner.appendChild(Forms.field('Where', el('div',
+      el('div.city-chip-key', el('span.city-chip.city-chip-rally', 'Rally'), ' tap once · ', el('span.city-chip.city-chip-police', 'Police'), ' tap twice · again to clear'),
+      cities.length > 12 ? this._citySearch(inner, chips) : null,
+      chips)));
+    inner.appendChild(plan);
     startButton = el('button.solid-btn', {
       onclick: async () => {
-        if (!d.baseCities.length) return toast('Choose at least one base city.', true);
-        if (deploymentSize() > maxUnits) return toast(`Reduce the deployment to ${maxUnits} units or fewer.`, true);
-        try { await POST('/api/gm/protest/start', d); toast('The crowds take to the streets.'); }
+        if (!d.baseCities.length) return toast('Tap at least one city for a rally.', true);
+        try { await POST('/api/gm/protest/start', d); this._protestDraft = null; toast('The crowds take to the streets.'); }
         catch (e) { toast(e.message, true); }
       }
-    }, '⚒ Start Protest');
+    }, '⚒ Start the protest');
     inner.appendChild(el('div.btn-row', startButton));
-    updateDeployment();
+    update();
   },
 
   // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/
@@ -2726,7 +3219,6 @@ const War = {
 
   renderControls(inner, war, key) {
     const protest = war.kind === 'protest';
-    if (protest && war.active) this.renderProtestActions(inner, war, key);
     const row = el('div.btn-row.war-gm-row');
     if (!war.result) {
       row.appendChild(el('span.mono-label', 'GM'));
@@ -2762,110 +3254,40 @@ const War = {
     }
   },
 
-  // Protest controls — offered per lever the server granted in `cmdAccess`
-  // (see api.js cmdAccessOf, Phase 36): the movement's leadership (attLead)
-  // escalates or calls the protest off, a force-cleared operator (force)
-  // orders the police in, the government's leadership (concede) gives in.
-  // Each toggle POST paints its flip into W.state optimistically (core.js's
-  // Optimistic helper — the same 0ms-feedback pattern transfers/market orders
-  // use) so the button answers the click instantly and stays flipped through
-  // intervening syncs until the response-sync confirms it; a rejection rolls
-  // the guess back to server truth.
-  renderProtestActions(inner, war, key) {
-    if (!war.active) return;
-    const ca = this.access(war);
-    const p = war.protest || {};
-    const flip = (prop) => (s) => {
-      const d = s && s[key]; // the authoritative doc for this conflict ('war'|'protest')
-      if (d && d.protest) d.protest[prop] = !d.protest[prop];
-    };
-    if (ca.attLead || ca.force || ca.concede) {
-      inner.appendChild(Views.secLabel('Protest Control'));
-      const row = el('div.btn-row');
-      if (ca.attLead) {
-        row.appendChild(el('button.solid-btn', {
-          class: p.protestorsViolent ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.protestorsViolent ? '⚒ Crowds violent — stand down' : '⚒ Allow fighting'));
-        row.appendChild(el('button.dash-btn', {
-          class: p.captureMode ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.captureMode ? '⚑ Seizing territory' : '⚑ Capture territory'));
-        if (!isGM()) {
-          row.appendChild(el('button.dash-btn', {
-            onclick: () => confirmModal('CALL OFF THE PROTEST', 'Send the crowds home? The protest ends now; the opinion it has already won stays won.', async () => {
-              await POST('/api/protest/disband', {});
-              toast('The organizers call the protest off.');
-            }, 'Call It Off')
-          }, '✋ Call off the protest'));
-        }
-      }
-      if (ca.force) {
-        row.appendChild(el('button.danger-btn', {
-          class: p.govViolent ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.govViolent ? '⛨ Force authorized — stand down' : '⛨ Authorize force'));
-      }
-      if (ca.concede) {
-        const cs = Number((((S().settings || {}).war || {}).protest || {}).concedeSupport);
-        row.appendChild(el('button.dash-btn', {
-          onclick: () => confirmModal('CONCEDE TO THE DEMANDS', 'Give the protestors what they ask' + (p.demands ? ` (“${p.demands}”)` : '') + '? The protest ends in their victory' +
-            (cs > 0 ? ` and the movement's party gains +${cs} support in every province it marched in.` : '.'), async () => {
-            await POST('/api/protest/concede', {});
-            toast('The government concedes.');
-          }, 'Concede')
-        }, '🤝 Concede to the demands'));
-      }
-      inner.appendChild(row);
-    }
-    // What the current rung of the escalation ladder means — the old copy
-    // said "neither side can attack" even after force had been authorized.
-    const help = p.protestorsViolent && p.govViolent
-      ? 'Open clashes: both sides are fighting and the air wing is cleared. Rioting costs the movement public support.'
-      : p.protestorsViolent
-        ? 'The crowds are fighting — the police defend themselves. Rioting costs the movement public support; authorizing force also clears the air wing.'
-        : p.govViolent
-          ? 'Force is authorized against a PEACEFUL crowd — a crackdown: sympathy for the movement grows and government approval falls fast.'
-          : 'The demonstration is peaceful: neither side can attack until one escalates. Every minute in the streets builds sympathy for the movement and erodes government approval.';
-    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' }, help));
-  },
-
   // Phase 36 — what the protest is doing to public opinion (server/war.js
   // applyProtestPolitics keeps running totals on war.stats.politics).
-  renderProtestOpinion(inner, war) {
-    inner.appendChild(Views.secLabel('Public Opinion'));
-    const pol = (war.stats || {}).politics;
+  renderProtestOpinion(inner, war, sm) {
+    sm = sm || this._protestSummary(war);
+    inner.appendChild(Views.secLabel('Public opinion'));
+    const pol = sm.pol;
     if (!pol) {
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+      inner.appendChild(el('div.protest-note',
         war.active ? 'Opinion shifts while the crowds hold the streets — the first reading arrives within the minute.' : 'The protest left no measurable mark on public opinion.'));
       return;
     }
     const MOOD = {
-      sympathy: 'Peaceful protest — the public is sympathetic to the movement.',
-      crackdown: 'Crackdown — force against peaceful crowds is turning the public on the government.',
-      backlash: 'Rioting — the public is turning against the movement.'
+      sympathy: 'The public is sympathetic — peaceful crowds are winning hearts.',
+      crackdown: 'The crackdown is turning the public against the government.',
+      backlash: 'The rioting is turning the public against the movement.'
     };
-    const party = pol.partyId ? entById(pol.partyId) : null;
-    if (war.active && pol.mood) inner.appendChild(el('div', { style: 'font-size:13px; margin-bottom:4px;' }, MOOD[pol.mood] || ''));
+    const party = sm.party;
+    if (war.active && pol.mood) inner.appendChild(el('div.protest-mood', { class: 'mood-' + pol.mood }, MOOD[pol.mood] || ''));
+    inner.appendChild(el('div.protest-opinion',
+      el('div.protest-op', el('div.protest-op-v', { class: sm.support >= 0 ? 'up' : 'down' }, party ? this._signed(sm.support) : '—'),
+        el('div.protest-op-k', party ? (party.abbrev || party.name) + ' support' : 'No party behind it')),
+      el('div.protest-op', el('div.protest-op-v', { class: sm.approval >= 0 ? 'up' : 'down' }, this._signed(sm.approval) + ' pts'),
+        el('div.protest-op-k', 'Government approval'))));
     const provIds = [...new Set([...Object.keys(pol.support || {}), ...Object.keys(pol.approval || {})])];
-    if (!provIds.length) return;
-    const signed = (v) => (v > 0 ? '+' : '') + (Math.round(v * 100) / 100);
-    inner.appendChild(el('table.data',
-      el('thead', el('tr', el('th', 'Province'), el('th.num', party ? (party.abbrev || party.name) + ' support' : 'Party support'), el('th.num', 'Gov. approval'))),
-      el('tbody', provIds.map(pid => el('tr',
-        el('td', (provById(pid) || {}).name || pid),
-        el('td.num', { style: 'color:' + ((pol.support || {})[pid] >= 0 ? 'var(--good)' : 'var(--accent)') }, party ? signed((pol.support || {})[pid] || 0) : '—'),
-        el('td.num', { style: 'color:' + ((pol.approval || {})[pid] < 0 ? 'var(--accent)' : 'var(--good)') }, signed((pol.approval || {})[pid] || 0) + ' pts'))))));
-    if (!party) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin-top:4px;' }, 'No party leads this movement, so its sympathy builds no party support.'));
+    if (provIds.length) {
+      const signed = (v) => this._signed(v || 0);
+      inner.appendChild(Views.ledgerFold('wrOpinion_' + (war.startedAt || ''), `By province — summed over ${provIds.length} province${provIds.length === 1 ? '' : 's'}`, () => el('table.data',
+        el('thead', el('tr', el('th', 'Province'), el('th.num', party ? (party.abbrev || party.name) + ' support' : 'Party support'), el('th.num', 'Gov. approval'))),
+        el('tbody', provIds.map(pid => el('tr',
+          el('td', (provById(pid) || {}).name || pid),
+          el('td.num', { style: 'color:' + ((pol.support || {})[pid] >= 0 ? 'var(--good)' : 'var(--accent)') }, party ? signed((pol.support || {})[pid]) : '—'),
+          el('td.num', { style: 'color:' + ((pol.approval || {})[pid] < 0 ? 'var(--accent)' : 'var(--good)') }, signed((pol.approval || {})[pid]) + ' pts')))))));
+    }
+    if (!party) inner.appendChild(el('div.protest-note', 'No party leads this movement, so its sympathy builds no party support.'));
   },
 
   // Phase 36 — player-called protests. Anyone leading a party, organisation,
@@ -2916,18 +3338,12 @@ const War = {
       Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 3, { step: 1 })),
       Forms.field('People per crowd', Forms.sliderNum(d, 'perCity', 500, 5000, { step: 250 }))));
     inner.appendChild(Forms.field('Demands', Forms.area(d, 'demands', 'min-height:54px;'), 'What would make the crowds go home? Shown on the wire if approved.'));
-    const grid = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:2px 8px; font-size:12px;' });
-    for (const c of (s.cities || [])) {
-      grid.appendChild(el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
-        el('input', { type: 'checkbox', checked: d.baseCities.includes(c.id) ? 'checked' : undefined,
-          onchange: (e) => {
-            if (e.target.checked) {
-              if (d.baseCities.length >= 3) { e.target.checked = false; return toast('A petition may name at most 3 cities.', true); }
-              d.baseCities = [...new Set([...d.baseCities, c.id])];
-            } else d.baseCities = d.baseCities.filter(id => id !== c.id);
-          } }), c.name));
-    }
-    inner.appendChild(Forms.field('Rally cities (up to 3)', grid));
+    const chips = this._cityChips(s.cities || [], (cid) => d.baseCities.includes(cid) ? 'rally' : '', (cid) => {
+      if (d.baseCities.includes(cid)) d.baseCities = d.baseCities.filter(id => id !== cid);
+      else if (d.baseCities.length >= 3) toast('A petition may name at most 3 cities.', true);
+      else d.baseCities = [...d.baseCities, cid];
+    });
+    inner.appendChild(Forms.field('Rally cities — up to 3', chips));
     inner.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async () => {
         if (!d.baseCities.length) return toast('Choose at least one city to rally in.', true);
@@ -2989,14 +3405,9 @@ const War = {
       box.appendChild(el('div', { style: 'font-size:12px;' },
         `Rally in ${a.baseCities.map(id => (cityById(id) || {}).name || id).join(', ')} · ${a.crowds} crowd(s) of ${fmtNum(a.perCity)} per city`));
       if (a.demands) box.appendChild(el('div.war-demands', '“' + a.demands + '”'));
-      const grid = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(120px,1fr)); gap:2px 8px; font-size:12px;' });
-      for (const c of cities) {
-        if (a.baseCities.includes(c.id)) continue;
-        grid.appendChild(el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
-          el('input', { type: 'checkbox', checked: dec.policeCities.includes(c.id) ? 'checked' : undefined,
-            onchange: (e) => { dec.policeCities = e.target.checked ? [...new Set([...dec.policeCities, c.id])] : dec.policeCities.filter(id => id !== c.id); } }), c.name));
-      }
-      box.appendChild(Forms.field('Police deploy to', grid));
+      box.appendChild(Forms.field('Post police to', this._cityChips(cities.filter(c => !a.baseCities.includes(c.id)),
+        (cid) => dec.policeCities.includes(cid) ? 'police' : '',
+        (cid) => { dec.policeCities = dec.policeCities.includes(cid) ? dec.policeCities.filter(id => id !== cid) : [...dec.policeCities, cid]; })));
       box.appendChild(Forms.field('Note to the applicant (optional)', Forms.text(dec, 'note')));
       box.appendChild(el('div.btn-row',
         el('button.solid-btn', { disabled: busy ? 'disabled' : undefined, onclick: async () => {

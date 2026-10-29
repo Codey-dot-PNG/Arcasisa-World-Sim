@@ -441,6 +441,19 @@ function summarizeProtestPolitics(db, war, actor) {
     actor || 'WAR ENGINE', [war.attackerId, war.defenderId].filter(Boolean));
 }
 
+// A strike never outlives the crowd that caused it: when a protest ends by
+// any path, every struck workplace goes back to work at once (with the same
+// closing audit line sim.applyStrikes writes) instead of at the next turn —
+// a protest started meanwhile would otherwise inherit the old strikes.
+function endStrikes(db) {
+  for (const pr of db.properties || []) {
+    if (pr.vars && pr.vars.strike) {
+      store.log('economy', `Work resumes at ${pr.name}`, 'The strike is over and the workforce has returned to the job.', 'STRIKE', [pr.ownerId]);
+      delete pr.vars.strike;
+    }
+  }
+}
+
 // ---------- occupation ownership (Task 2: occupation transfers property) ----------
 // AUTHORITY-ONLY, like applyDevastation — property ownership lives outside
 // db.war, so a predicting client never runs this. Throttled (every
@@ -1477,6 +1490,7 @@ function endWar(db, actor, reason, key, opts) {
   store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   if (war.kind === 'protest') {
     summarizeProtestPolitics(db, war, actor);
+    endStrikes(db);
     if (!(opts && opts.quiet)) SERVER_CTX.news('THE STREETS FALL QUIET', 'The protests have ended. Banners are being folded away and the affected districts return to their daily routines.');
   }
   return war;
@@ -2394,7 +2408,7 @@ function tickConflict(db, key, force) {
   // survivors still demobilise.
   if (ticked && doc && !doc.active) {
     demobilizeUnits(db, doc, 'WAR ENGINE');
-    if (doc.kind === 'protest') summarizeProtestPolitics(db, doc, 'WAR ENGINE');
+    if (doc.kind === 'protest') { summarizeProtestPolitics(db, doc, 'WAR ENGINE'); endStrikes(db); }
   }
   return ticked;
 }

@@ -485,6 +485,30 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .war-fallen-pole{stroke:#3b2a20; stroke-width:2;}
 .war-fallen-flag{fill:#9b2c22; stroke:#5a120c; stroke-width:.8;}
 .war-doc-protest .war-fallen-flag{fill:#c98a2a; stroke:#7a5418;}
+/* protests: seized districts behind a barricade line, unrest halos, rally
+   points, police posts, strike signs, standoffs */
+.war-front-base.war-front-protest{stroke:#8a4e10; stroke-width:2.2; stroke-dasharray:9 3;}
+.war-front-teeth.war-front-protest{stroke:#8a4e10; stroke-width:7; stroke-dasharray:2 9;}
+.war-unrest{fill:url(#war-unrest-glow); stroke:#9a5a12; stroke-opacity:.55; stroke-width:1.6px; stroke-dasharray:6 5; vector-effect:non-scaling-stroke; pointer-events:none;}
+.war-unrest.war-unrest-riot{fill:url(#war-unrest-riot); stroke:#9b2c22;}
+.war-rally, .war-post, .war-strike-sign{pointer-events:auto; cursor:help;}
+.war-rally-pole{stroke:#3b2a20; stroke-width:2; stroke-linecap:round;}
+.war-rally-flag{fill:#e2b25a; stroke:#7a5418; stroke-width:1; stroke-linejoin:round;}
+.war-rally-text{font-family:var(--font-mono); font-size:7.5px; font-weight:700; letter-spacing:.1em; fill:#4a2e08;}
+.war-post-box{fill:#e6eef7; stroke:#1f3a5c; stroke-width:1.2;}
+.war-post-shield{fill:#24466e;}
+.war-post-text{font-family:var(--font-mono); font-size:7.5px; font-weight:700; letter-spacing:.1em; fill:#1f3a5c;}
+.war-post-stem{stroke:#1f3a5c; stroke-width:1.4; stroke-dasharray:2 2;}
+.war-strike-stick{stroke:#3b2a20; stroke-width:2; stroke-linecap:round;}
+.war-strike-board{fill:#f6efe0; stroke:#9b2c22; stroke-width:1.6;}
+.war-strike-text{font-family:var(--font-mono); font-size:6.8px; font-weight:700; letter-spacing:.1em; fill:#9b2c22;}
+.war-strike-pct{display:none; font-family:var(--font-mono); font-size:7px; font-weight:700; fill:#9b2c22; paint-order:stroke; stroke:#f6efe0; stroke-width:2.6px;}
+.war-zoomed .war-strike-pct{display:block;}
+.war-standoff{pointer-events:auto; cursor:help;}
+.war-standoff-bg{fill:#f4ecdc; stroke:#6b6250; stroke-width:1.1;}
+.war-standoff-att, .war-standoff-def{fill:none; stroke-width:2.4; stroke-linecap:round; stroke-linejoin:round;}
+.war-standoff-att{stroke:#9a5a12;}
+.war-standoff-def{stroke:#24466e;}
 /* orders */
 .war-move{fill:none; pointer-events:none; stroke-width:2.2; stroke-dasharray:8 5; stroke-linecap:round; stroke-linejoin:round; opacity:.6;}
 .war-move-def{stroke:#1f3a5c;}
@@ -539,6 +563,22 @@ table.data .row-link:hover td:first-child{color:var(--accent);}
 .wu-dead .wu-sym{stroke:#4a4436 !important;}
 .wu-dead .wu-bar-bg, .wu-dead .wu-hp, .wu-dead .wu-org, .wu-dead .wu-ech{display:none;}
 .wu-flag{pointer-events:none;}
+/* crowds and police (civil unrest) */
+.wu-k-protestor .wu-sym, .wu-k-police .wu-sym{stroke-width:1; stroke-linejoin:round;}
+.war-doc-protest .wu-k-protestor .wu-frame{fill:#f0d8a6; stroke:#7a5418; stroke-width:1.5;}
+.war-doc-protest .wu-k-protestor .wu-sym{fill:#5a3a10; stroke:#f0d8a6;}
+.wu-k-police .wu-frame{fill:#c6d6ea; stroke:#1f3a5c;}
+.wu-k-police .wu-sym{fill:#1f3a5c; stroke:none;}
+.wu-placard-stick, .wu-banner-pole{stroke:#3b2a20; stroke-width:1.4; stroke-linecap:round;}
+.wu-placard{fill:#fbf6ea; stroke:#5a3a10; stroke-width:1;}
+.wu-banner{fill:#fbf6ea; stroke:#3b2a20; stroke-width:.8;}
+.wu-fire{display:none; fill:#e8742a; stroke:#9b2c22; stroke-width:.9;}
+.wu-riot .wu-fire{display:block;}
+.wu-riot .wu-placard, .wu-riot .wu-placard-stick{display:none;}
+.war-doc-protest .wu-riot .wu-frame{fill:#eaa27a; stroke:#9b2c22; stroke-width:2;}
+.war-doc-protest .wu-riot .wu-sym{fill:#4a1a0c; stroke:#eaa27a;}
+.wu-force .wu-frame{fill:#7f9fc6; stroke:#0f2440; stroke-width:2.2;}
+.wu-force .wu-sym{fill:#0f2440;}
 .wu-hit{animation:war-hit-jitter .45s ease-out;}
 .wu-hit2{animation:war-hit-jitter2 .45s ease-out;}
 @keyframes war-hit-jitter{
@@ -644,6 +684,81 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 .war-orbat-att td:first-child{border-left:3px solid #b0251a;}
 .war-orbat-def td:first-child{border-left:3px solid #24466e;}
 .war-gm-row{align-items:center; gap:6px; padding:6px 8px; border:1px dashed var(--rule-strong); margin:4px 0 10px;}
+/* protests: posture colours (peaceful olive, riot red, crackdown navy, clashes deep red) */
+.war-hud-status.posture-peaceful, .war-report-status.posture-peaceful{color:#55691f;}
+.war-hud-status.posture-riot, .war-report-status.posture-riot{color:#b0251a;}
+.war-hud-status.posture-crackdown, .war-report-status.posture-crackdown{color:#24466e;}
+.war-hud-status.posture-clashes, .war-report-status.posture-clashes{color:#7a160d;}
+.war-hud-posture{font-size:11.5px; line-height:1.35; padding:5px 10px 6px; border-bottom:1px dotted var(--rule); color:var(--ink-soft);}
+.war-hud-posture b{color:var(--ink); font-weight:600;}
+.war-balance-crowd{background:#c98a2a;}
+.war-balance-police{background:#24466e;}
+.war-card-crowd{border-top:3px solid #c98a2a;}
+.protest-banner{display:flex; gap:12px; align-items:flex-start; padding:10px 12px; margin:2px 0 12px; border:1px solid var(--rule); border-left:3px solid #c98a2a; background:var(--hover-wash);}
+.protest-banner-logo{width:38px; height:38px; object-fit:contain; flex:0 0 38px;}
+.protest-banner-glyph{width:38px; height:38px; flex:0 0 38px; display:inline-flex; align-items:center; justify-content:center; font-size:22px; border:1px solid var(--rule-strong); color:#9a5a12;}
+.protest-banner-body{flex:1; min-width:0;}
+.protest-banner-org{font-size:13px;}
+.protest-banner-body .war-demands{margin:4px 0;}
+.protest-banner-where{font-family:var(--font-mono); font-size:10px; letter-spacing:.04em; color:var(--ink-faint);}
+.protest-outcome{font-size:13px; margin:4px 0 10px;}
+.protest-note{font-size:12px; color:var(--ink-soft); line-height:1.45; margin:4px 0 6px;}
+.protest-places{display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin:6px 0 2px;}
+.protest-places .chip{margin:0; cursor:pointer;}
+.posture-grid{display:grid; grid-template-columns:minmax(64px,auto) 1fr 1fr; gap:4px; margin:2px 0 6px;}
+.posture-axis{font-family:var(--font-mono); font-size:9px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-faint); text-align:center; align-self:end; padding-bottom:2px;}
+.posture-axis.posture-row{text-align:right; align-self:center; padding:0 4px 0 0;}
+.posture-cell{border:1px solid var(--rule); padding:7px 9px; min-height:58px; background:var(--paper); opacity:.62;}
+.posture-cell-head{font-family:var(--font-mono); font-size:10px; font-weight:700; letter-spacing:.08em; text-transform:uppercase; display:flex; justify-content:space-between; gap:4px;}
+.posture-cell-text{font-size:11.5px; line-height:1.35; color:var(--ink-soft); margin-top:3px;}
+.posture-cell.current{opacity:1; border-width:2px; box-shadow:0 2px 8px rgba(0,0,0,.08);}
+.posture-now{font-size:8.5px; padding:0 4px; border:1px solid currentColor;}
+.posture-cell.posture-peaceful .posture-cell-head{color:#55691f;}
+.posture-cell.posture-riot .posture-cell-head{color:#b0251a;}
+.posture-cell.posture-crackdown .posture-cell-head{color:#24466e;}
+.posture-cell.posture-clashes .posture-cell-head{color:#7a160d;}
+.posture-cell.current.posture-peaceful{border-color:#55691f; background:#f1f2e2;}
+.posture-cell.current.posture-riot{border-color:#b0251a; background:#f8e6df;}
+.posture-cell.current.posture-crackdown{border-color:#24466e; background:#e5ecf4;}
+.posture-cell.current.posture-clashes{border-color:#7a160d; background:#f3dcd6;}
+.protest-levers{margin:6px 0 12px; gap:6px;}
+.protest-mood{font-size:13px; margin:0 0 6px; padding-left:8px; border-left:2px solid var(--rule-strong);}
+.protest-mood.mood-sympathy{border-color:#55691f;}
+.protest-mood.mood-crackdown{border-color:#24466e;}
+.protest-mood.mood-backlash{border-color:#b0251a;}
+.protest-opinion{display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:4px 0 8px;}
+.protest-op{border:1px solid var(--rule); padding:8px 10px;}
+.protest-op-v{font-family:var(--font-voice); font-size:24px; line-height:1.1;}
+.protest-op-v.up{color:var(--good);}
+.protest-op-v.down{color:var(--accent);}
+.protest-op-k{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.08em; text-transform:uppercase; color:var(--ink-faint); margin-top:2px;}
+.protest-strikes td{font-size:12px;}
+.protest-plan{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.03em; color:var(--ink-soft); margin:8px 0 6px;}
+.protest-plan .over{color:var(--accent); font-weight:700;}
+/* city chip pickers (protest start form, petitions, approvals) */
+.city-chips{display:flex; flex-wrap:wrap; gap:5px; margin-top:4px;}
+.city-chip{font-family:var(--font-mono); font-size:10.5px; letter-spacing:.04em; padding:5px 9px; border:1px solid var(--rule-strong); background:var(--paper); color:var(--ink-soft); cursor:pointer; line-height:1.2;}
+.city-chip:hover{border-color:var(--ink);}
+.city-chip.city-chip-rally{background:#f0d8a6; border-color:#9a5a12; color:#4a2e08; font-weight:700;}
+.city-chip.city-chip-police{background:#c6d6ea; border-color:#24466e; color:#0f2440; font-weight:700;}
+.city-chip-key{font-size:11px; color:var(--ink-faint); display:flex; flex-wrap:wrap; align-items:center; gap:4px; margin-bottom:4px;}
+.city-chip-key .city-chip{cursor:default; padding:1px 6px; font-size:9.5px;}
+.city-chip-search{max-width:240px; margin:2px 0 4px;}
+body:is([data-mood="dark"],[data-mood="red"]) .posture-cell.current{background:var(--paper-deep);}
+body:is([data-mood="dark"],[data-mood="red"]) .posture-cell.posture-peaceful .posture-cell-head,
+body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-peaceful{color:#a8bd6a;}
+body:is([data-mood="dark"],[data-mood="red"]) .posture-cell.posture-riot .posture-cell-head,
+body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-riot{color:#e07d64;}
+body:is([data-mood="dark"],[data-mood="red"]) .posture-cell.posture-crackdown .posture-cell-head,
+body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-crackdown{color:#8fb0e0;}
+body:is([data-mood="dark"],[data-mood="red"]) .posture-cell.posture-clashes .posture-cell-head,
+body:is([data-mood="dark"],[data-mood="red"]) .war-report-status.posture-clashes{color:#f09a86;}
+@media (max-width:640px){
+  .posture-grid{grid-template-columns:52px 1fr 1fr; gap:3px;}
+  .posture-cell{padding:6px 7px;}
+  .posture-cell-text{font-size:11px;}
+  .city-chip{padding:7px 10px;}
+}
 @media (max-width:640px){
   .war-report-balance{grid-template-columns:1fr; gap:4px;}
   .war-report-side.right{text-align:left;}

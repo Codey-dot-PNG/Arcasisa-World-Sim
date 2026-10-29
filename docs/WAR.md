@@ -1658,7 +1658,10 @@ within `STRIKE_RADIUS` (120px) of a property and writes
 `tuning.strikeFrac` and scaled by crowd strength (a 5000-strong crowd applies
 its full fraction). Production is multiplied by `Math.max(0, 1 − degree)`.
 The first strike of a protest emits a Wire Service `draftNews`; the flags
-clear (with a closing log) the moment the crowds leave or the protest ends.
+clear (with a closing log) at the next turn once the crowds leave, and at
+once when the protest ends by ANY path (`endStrikes` in war.js, called from
+`endWar` and the engine-ended branch of `maybeWarTick`) — a protest started
+afterwards never inherits the old strikes.
 Striking employees stay employed — no layoffs, no pay stops.
 
 ### Riot casualties & refugees
@@ -1677,10 +1680,63 @@ like war refugees; civilian deaths and refugee counts feed
 layer (one shared `_preds` map keyed by conflict, one heartbeat polling
 `GET /api/war/state` returning `{war, protest, v}`). The floating toolbar
 gains a ⚔ / ⚒ conflict switch (commands, selection and the GM side toggle
-target the active conflict); the War Room stacks a section per conflict with
-protest-specific status chips, side toggles, tuning sliders and a GM start
-form (organizer picker, city check-lists, crowd sizing). The map layer label
-and registration trigger on `S().war || S().protest`.
+target the active conflict). The map layer label and registration trigger on
+`S().war || S().protest`. Overhauled in the protest pass — the same
+principles as the war overhaul (read at a glance, people not formations,
+only the levers you hold, phone-sized targets):
+
+- **The posture is a 2×2.** Whether the crowds fight and whether force is
+  authorized are independent levers, so `protestPosture(p)` names the four
+  combinations — `peaceful`, `riot`, `crackdown`, `clashes` — and
+  `PROTEST_POSTURE` holds each one's label, status word and what it does
+  (mirrors `canFight` + `applyProtestPolitics`). Every surface uses it: the
+  HUD status, the War Room grid, the unit card.
+- **Street map.** Crowds draw as a rounded pill of three figures
+  (`WAR_CROWD_FRAME/FIGS`), police as a shield with a star badge
+  (`WAR_POLICE_FRAME/BADGE`); the marker scales with headcount
+  (`warCrowdScale`) and its size label is the headcount (`warHeads`, "4.0k"),
+  not a NATO echelon. A peaceful crowd carries a placard; a rioting one
+  (`.wu-riot`) turns red with flames; police under force (`.wu-force`) darken.
+  The organizer's logo flies as a banner on a pole above the crowd. Cities in
+  unrest glow (an amber halo at the server's 150px unrest radius, red while
+  rioting — `_renderHalos`, in the base map under the labels, rebuilt only
+  when the city set changes). `_renderProtestMarks` adds RALLY flags and
+  POLICE posts once their people have moved off them, and a STRIKE sign on
+  every struck property (−% output once zoomed in). A crowd face to face with
+  police it may not fight shows a **standoff** marker (opposed chevrons);
+  real fighting shows the usual clash burst. Seized districts are hatched
+  amber behind a dashed barricade line. A protest never draws a "front"
+  along a foreign border (its organizer may be a foreign entity —
+  `enemyCells` are ignored for protests).
+- **HUD** (`_renderProtestHud`): posture + one-line consequence, a streets
+  bar (crowds amber vs police blue, headcounts), opinion (party support /
+  government approval, summed), strikes (sites out, max cut), cities in
+  unrest, seized ground and the toll only when they apply, the latest report.
+  The Legend switches to protest symbols (`_legendRows(true)`).
+- **Toolbar levers** (`_protestLevers`) are named for what a click does —
+  ⚒ Turn violent / ☮ Call for calm, ⚑ Seize districts / Give up ground,
+  ⛨ Use force / Stand police down — with tooltips spelling out the cost; the
+  hint tells crowds to march on workplaces and police when they may act. The
+  **?** modal explains leading a protest.
+- **Unit card** (`_civilCard`): people / officers and resolve bars, what the
+  crowd is doing in words, and how many workplaces are within strike reach
+  (120px) and already out.
+- **War Room** (`renderProtestReport`): the movement banner (organizer logo,
+  demands, rally and police cities), the **escalation grid** (`_postureGrid`:
+  crowds peaceful/violent × police holding/force, the current cell lit,
+  its consequence spelled out, then the viewer's levers — plus ✋ Call it off
+  for organizers and 🤝 Concede for the government), the GM row, **The
+  streets** (balance bar, stat strip, ◎ chips for cities in unrest), **Public
+  opinion** (two big numbers + mood; per-province table folded), **Strikes**
+  (top five workplaces with owner, cut and ◎; the rest folded; an
+  explanation when none are out yet), seized districts when any, reports and
+  the crowd/detachment roster. Shared pieces with the war report:
+  `_reportHead`, `_reportEvents`, `_reportOrbat`.
+- **Forms** use tappable city chips (`_cityChips`) instead of checkbox
+  grids: the GM start form is one list where a tap marks a rally, a second
+  tap a police post, a third clears it, with a demands field and a live
+  deployment line (crowds · people · detachments · units/300); petitions pick
+  up to three rally cities; the GM approval queue picks police posts.
 
 
 
@@ -1784,7 +1840,9 @@ Two hosts:
   - `war-veil` — a parchment wash over the base map on the ⚔ War layer, so the overlay reads
     like a staff map (ambient traffic is off on the War layer; the map legend hides).
   - `war-ground` — occupied ground and the **front line**, rebuilt only when the captured-cell
-    set changes (`_groundKey` fingerprint). `_controlField` gives every war-grid cell an
+    set changes (`_groundKey` fingerprint) and at most every `WAR_GROUND_MIN_MS` (1.5s — each
+    rebuild repaints the whole base map; a timer catches the last change up). A protest's
+    unrest halos sit in a sibling group (`halo`) with their own key. `_controlField` gives every war-grid cell an
     owner (captured cells from `war.cells`, the attacker's homeland from `grid.enemyCells`,
     the Republic's provinces otherwise) and lets sea/neutral cells take their nearest
     belligerent's value (multi-source BFS), so the 50% line only ever runs BETWEEN the sides.
@@ -1795,8 +1853,10 @@ Two hosts:
 - **In the overlay svg** (`GameMap.overSvg/overWorld`, `#war-overlay`: same viewBox and
   pan/zoom transform as the map; persists across full renders):
   - `war-marks` — numbered objective targets (the next pending one tagged NEXT, achieved
-    ones filled ✓) and flags on fallen cities (`stats.citiesHeld` / `unrestCities`); rebuilt
-    when their status changes.
+    ones filled ✓) and flags on fallen cities (`stats.citiesHeld`); for a protest, rally
+    points, police posts and strike signs (`_renderProtestMarks`). Rebuilt when their status
+    changes. An ended conflict's ground and marks stay up for review only while no other
+    conflict is live (`_hideDoc`).
   - `war-orders` — own-side movement arrows (fog of war on enemy intent), attack arrows for
     both sides, warship fire, and **clash markers**: enemy pairs in contact (≤75px, one of
     them fighting), clustered within 90px, drawn as a burst with crossed blades. They replace
@@ -1810,7 +1870,9 @@ Two hosts:
     afloat land unit shows a hull), the size marker above (`_echelon`: I/II/III/X/XX from
     `maxStrength`), a strength bar (green/amber/red) and a thin morale bar below, a cut-off ⚠
     triangle, and a name label that appears once zoomed in (`.war-zoomed`, k ≥ 2.4). Corpses
-    show as a grey ✕ frame for 60 ticks. Organiser logos still replace a crowd's symbol.
+    show as a grey ✕ frame for 60 ticks. Crowds and police have their own glyphs (see
+    "Protests → Client"); each node is `g > body (crowd scale) > inner (hit jolt)`, with the
+    bars group shifted under a scaled body.
   - Clicks: one delegated listener on `war-units` (own unit → select; enemy → inspect, or
     attack with Tap orders). `_forwardToMap` re-dispatches overlay pointerdown/move, wheel,
     dblclick and contextmenu to `#map-svg`, so a pan or right-click order that starts over a

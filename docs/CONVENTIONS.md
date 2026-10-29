@@ -120,6 +120,8 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
   dusk/night/dawn); per-frame movers belong in the transparent overlay svg
   (`GameMap.overSvg/overWorld`, same viewBox + pan/zoom transform — the war's units,
   arrows and strike FX live there); rAF loops write attributes only when a value changed.
+  Things that must live in the map svg but change often (the war's occupied ground) are
+  rate-limited (`WAR_GROUND_MIN_MS`), not rebuilt on every tick.
 
 ## Data & environment
 

@@ -39,10 +39,12 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
   Re-fitted on every render and on resize.
 - **War Room** (`war.js`): `War.access(doc)` returns the caller's full `cmdAccess`;
   `War.authorityText(doc)` is the one-line "Your authority …" shown under each conflict and
-  as the observer's toolbar hint. Protest controls render per lever (`attLead` / `force` /
-  `concede`), plus Public Opinion (`renderProtestOpinion`), player petitions
-  (`renderProtestApplications`), the GM petition queue (`renderApplicationQueue`) and Protest
-  Rules (`renderProtestRules`).
+  as the observer's toolbar hint. A protest gets its own report (`renderProtestReport`):
+  the escalation grid with only the levers the caller holds (`_protestLevers` — `attLead` /
+  `force`, plus Call off / Concede), the streets, Public Opinion (`renderProtestOpinion`) and
+  strikes; player petitions (`renderProtestApplications`), the GM petition queue
+  (`renderApplicationQueue`) and Protest Rules (`renderProtestRules`). City pickers are
+  tappable chips (`_cityChips`). See docs/WAR.md "Protests → Client".
 - **Delegation** (`core.js`): `grantCoversClient(entityId, scope)`, `actsForSetClient(scope)`
   (chain + grant entities) and `canSpendFromClient(account)` mirror `ownership.canAct` over
   `S().myGrants`; the transfer/trade/contract pickers, inventory, trade view and the company/

@@ -1819,13 +1819,6 @@ const War = {
         if (d && d.protest) d.protest[prop] = !d.protest[prop];
       };
       if (ca.att) {
-        row.appendChild(el('button.solid-btn', {
-          class: p.protestorsViolent ? 'active' : '',
-          onclick: async () => {
-            try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); this.renderToolbar(); }
-            catch (e) { toast(e.message, true); }
-          }
-        }, p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Allow fighting'));
         row.appendChild(el('button.dash-btn', {
           class: p.captureMode ? 'active' : '',
           onclick: async () => {
@@ -2067,10 +2060,9 @@ const War = {
     // importantly — what the strike is doing to the economy.
     if (protest) {
       const org = S().entities.find(e => e.id === war.attackerId);
-      const struckSites = (S().properties || []).filter(pr => pr.vars && pr.vars.strike).map(pr => pr.name);
       inner.appendChild(Views.secLabel('The Unrest'));
       inner.appendChild(el('div.doc-sub',
-        `Organized by ${org ? org.name : war.attackerId} · Rally locations: ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
+        `Organized by ${org ? org.name : war.attackerId} · ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
       const chips = el('div.btn-row');
       chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
       chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
@@ -2079,9 +2071,7 @@ const War = {
       if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
       inner.appendChild(chips);
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-        t.strikeFrac > 0
-          ? `Properties currently affected: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}`
-          : 'Strike effect is disabled by tuning.'));
+        'Strike-hit industries:' + (((p.strikeCityNames || []).length) ? ' ' + p.strikeCityNames.join(', ') : ' none — production running normally.')));
     }
 
     // Objectives — protests have none (they can't formally "win"; a concession
@@ -2204,39 +2194,16 @@ const War = {
       .map(e => [e.id, e.name + ' (' + e.type + ')']);
     if (!d.organizerId && organizerOpts.length) d.organizerId = organizerOpts[0][0];
     const cities = S().cities || [];
-    const maxUnits = 300;
-    const search = String(d.citySearch || '').trim().toLocaleLowerCase();
-    const effectivePolice = () => d.policeCities.filter(id => !d.baseCities.includes(id));
-    const deploymentSize = () => d.baseCities.length * (Number(d.crowds) || 1) + effectivePolice().length * 2;
-    const summary = el('div', { style: 'color:var(--ink-faint); font-size:12px; margin:4px 0;' });
-    let startButton;
-    const updateDeployment = () => {
-      const count = deploymentSize();
-      summary.textContent = `Estimated deployment: ${count} units (${d.baseCities.length * (Number(d.crowds) || 1)} crowds, ${effectivePolice().length * 2} police) · limit ${maxUnits}`;
-      summary.style.color = count > maxUnits ? 'var(--danger, #c44)' : 'var(--ink-faint)';
-      if (startButton) startButton.disabled = count > maxUnits;
-    };
     const cityGrid = (key) => {
       const g = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:2px 8px; font-size:12px;' });
       for (const c of cities) {
-        const lab = el('label', { 'data-city-id': c.id, 'data-city-group': key, 'data-city-name': c.name.toLocaleLowerCase(), style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
+        const lab = el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
           el('input', { type: 'checkbox', checked: d[key].includes(c.id) ? 'checked' : undefined,
             onchange: (e) => {
               const set = new Set(d[key]);
               if (e.target.checked) set.add(c.id); else set.delete(c.id);
               d[key] = [...set];
-              // A city can host a rally or a police detachment, not both.
-              const other = key === 'baseCities' ? 'policeCities' : 'baseCities';
-              if (e.target.checked) d[other] = d[other].filter(id => id !== c.id);
-              for (const item of inner.querySelectorAll('[data-city-id]')) {
-                const group = item.getAttribute('data-city-group');
-                const selected = group === 'baseCities' ? d.baseCities : d.policeCities;
-                const input = item.querySelector('input');
-                if (input) input.checked = selected.includes(item.getAttribute('data-city-id'));
-              }
-              updateDeployment();
             } }), c.name);
-        if (search && !c.name.toLocaleLowerCase().includes(search)) lab.style.display = 'none';
         g.appendChild(lab);
       }
       return g;
@@ -2244,33 +2211,18 @@ const War = {
     const box = el('div.form-grid',
       Forms.field('Movement name', Forms.text(d, 'name')),
       Forms.field('Organizer', Forms.sel(d, 'organizerId', organizerOpts)),
-      Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 6, { step: 1, suffix: ' crowds', onInput: updateDeployment })),
+      Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 6, { step: 1, suffix: ' crowds' })),
       Forms.field('Crowd strength each', Forms.sliderNum(d, 'perCity', 500, 20000, { step: 500 })));
     inner.appendChild(box);
-    inner.appendChild(Forms.field('Find cities', el('input.text-input', {
-      type: 'search', value: d.citySearch || '', placeholder: 'Filter city names…',
-      oninput: (e) => {
-        d.citySearch = e.target.value;
-        const query = d.citySearch.trim().toLocaleLowerCase();
-        for (const item of inner.querySelectorAll('[data-city-id]')) {
-          item.style.display = !query || item.getAttribute('data-city-name').includes(query) ? 'flex' : 'none';
-        }
-      }
-    })));
     inner.appendChild(Forms.field('Cities where crowds gather', cityGrid('baseCities')));
     inner.appendChild(Forms.field('Cities with police detachments', cityGrid('policeCities')));
-    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin-top:4px;' }, 'A city selected for crowds is automatically removed from the police list.'));
-    inner.appendChild(summary);
-    startButton = el('button.solid-btn', {
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async () => {
         if (!d.baseCities.length) return toast('Choose at least one base city.', true);
-        if (deploymentSize() > maxUnits) return toast(`Reduce the deployment to ${maxUnits} units or fewer.`, true);
         try { await POST('/api/gm/protest/start', d); toast('The crowds take to the streets.'); }
         catch (e) { toast(e.message, true); }
       }
-    }, '⚒ Start Protest');
-    inner.appendChild(el('div.btn-row', startButton));
-    updateDeployment();
+    }, '⚒ Start Protest')));
   },
 
   // GM unit spawner (Feature: mid-war reinforcements) — side/kind/count/HP/

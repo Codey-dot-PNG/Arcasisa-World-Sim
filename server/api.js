@@ -3147,10 +3147,14 @@ async function handle(req, res, pathname, method) {
           return json(res, 200, { ok: true });
         }
       }
-      return json(res, 404, { error: 'Unknown GM endpoint' });
+      return json(res, 404, { error: `Unknown GM endpoint: ${method} ${pathname}` });
     }
 
-    return json(res, 404, { error: 'Unknown API endpoint' });
+    // Name what actually arrived: a bare "Unknown API endpoint" on the sign-in
+    // screen gave no hint whether the method, the path or a host rewrite
+    // (proxy prefix, trailing slash, platform rewrite) was at fault.
+    console.warn(`404 ${method} ${pathname} (url ${req.url})`);
+    return json(res, 404, { error: `Unknown API endpoint: ${method} ${pathname}` });
   } catch (e) {
     return json(res, 500, { error: e.message });
   }

@@ -70,8 +70,8 @@ const WAR_HIT_FX_MS = 450;
 // Matches the engine's rout threshold (war-engine.js: org < 25 → routed) —
 // used purely for the client's morale-bar/info-card color, not gameplay.
 const WAR_ROUT_ORG = 25;
-// The GM's speed slider stops (server/war.js clamps to [0.05, 8]).
-const WAR_SPEEDS = [0.05, 0.1, 0.15, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 6, 8];
+// The GM's speed slider stops (server/war.js clamps to [0.5, 8]).
+const WAR_SPEEDS = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
 function warSpeedLabel(v) { return String(Math.round((Number(v) || 1) * 100) / 100) + '×'; }
 const WAR_GROUND_MIN_MS = 1500; // see renderGround
 const MAX_PROTEST_UNITS_CLIENT = 300; // server/war.js MAX_PROTEST_UNITS
@@ -3320,7 +3320,7 @@ const War = {
     inner.appendChild(box);
   },
 
-  // The conflict clock as a slider (log-spaced stops 0.05×–8×): the label
+  // The conflict clock as a slider (log-spaced stops 0.5×–8×): the label
   // follows the thumb, the POST goes on release.
   _speedSlider(war, key) {
     const cur = Number(war.speed) || 1;

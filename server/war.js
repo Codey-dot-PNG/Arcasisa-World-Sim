@@ -89,14 +89,13 @@ const PROTEST_DEFAULTS = {
 };
 const MAX_PROTEST_UNITS = 300;
 // The conflict clock: a speed multiplier on tickMs (2000ms at 1×). New wars
-// and protests start at settings.war.defaultSpeed — 0.05× by default, a tick
-// every 40s, so a conflict unfolds over real hours like the rest of the
-// world; the GM's slider moves it anywhere in [SPEED_MIN, SPEED_MAX].
-const SPEED_MIN = 0.05, SPEED_MAX = 8;
+// and protests start at settings.war.defaultSpeed — 1× by default; the GM's
+// slider moves it anywhere in [SPEED_MIN, SPEED_MAX].
+const SPEED_MIN = 0.5, SPEED_MAX = 8;
 function clampSpeed(v) { return Math.round(engine.clamp(Number(v) || 1, SPEED_MIN, SPEED_MAX) * 100) / 100; }
 function defaultSpeed(db) {
   const v = Number((((db.settings || {}).war || {}).defaultSpeed));
-  return Number.isFinite(v) && v > 0 ? clampSpeed(v) : 0.05;
+  return Number.isFinite(v) && v > 0 ? clampSpeed(v) : 1;
 }
 function protestCfg(db) {
   return Object.assign({}, PROTEST_DEFAULTS, (((db.settings || {}).war || {}).protest) || {});
@@ -2641,6 +2640,9 @@ function tickConflict(db, key, force) {
   if (!doc || !doc.active) return false;
   const wat = conflictDoc(db, key);
   ensureWarGrid(wat);
+  // a conflict still on a speed below today's minimum (the old 0.05×
+  // default) moves to the default
+  if (!(Number(doc.speed) >= SPEED_MIN)) doc.speed = defaultSpeed(db);
   const freshAir = !doc.air;
   syncAirWings(db, doc);
   // a war already running when the air force arrived still gets its

@@ -1391,7 +1391,12 @@ include the protest's defender) or the other camp:
   friendly to their own.
 Units in such a fight hold their ground (`xHold`) and trade damage like any
 engagement; losses land in each doc's own stats; crowds broken by troops
-scatter. Each doc's bombs hit the other doc's units too; patrols chase
+scatter. A unit hit from the other conflict — in contact or under its bombs —
+stays ENGAGED (`engagedUntil`, counted in its own doc's ticks and stretched by
+the two docs' speed ratio, `holdUntil`): its own combat step doesn't stand it
+down and supply doesn't heal it. Without this, the protest's own tick reset
+crowds out of `fighting` and healed them every tick, so troops and bombs
+seemed to do nothing to protesters while the protesters' blows stuck. Each doc's bombs hit the other doc's units too; patrols chase
 hostile aircraft from either doc; cross-doc dogfights resolve with the same
 odds. Everything cross-doc resolves ONCE, in the war's tick — the war reaches
 the protest as `db.protest`, the protest's tick reaches the war as

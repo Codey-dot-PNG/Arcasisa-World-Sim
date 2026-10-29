@@ -1246,7 +1246,7 @@
         }
         if (stepChase(db, war, u)) continue;
         if (!u.dest) continue;
-        if (u.xHold >= war.tick - 1) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
+        if ((u.xHold || -1) >= war.tick) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
         const spd = u.speed || DEF_MOVE_SPEED;
@@ -1285,7 +1285,7 @@
       }
       if (stepChase(db, war, u)) continue;
       if (u.dest) {
-        if (u.xHold >= war.tick - 1) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
+        if ((u.xHold || -1) >= war.tick) { u.state = 'fighting'; continue; } // locked in a fight with the other conflict
         const near = nearestLiveEnemy(war, u);
         if (near.unit && near.dist <= COLLIDE_ENEMY) { u.state = 'fighting'; continue; }
         stepAlongPath(war, u, u.speed);
@@ -1404,7 +1404,7 @@
       // re-ran the rout/kill bookkeeping on a dead unit (duplicate
       // "destroyed" events, a corpse flipped back to state 'routed').
       for (const d of defs) { if (!isLive(d)) continue; const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
-      if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed' && a.state !== 'transport') a.state = a.dest ? 'moving' : 'holding'; continue; }
+      if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed' && a.state !== 'transport' && !engaged(war, a)) a.state = a.dest ? 'moving' : 'holding'; continue; }
       const d = nearest;
       anyFight = true;
       // Transport ships & Boats feature: a transport-state land unit (or a
@@ -1448,7 +1448,7 @@
     // forever, which since Phase 20 also silently blocked its supply healing
     // (stepSupply skips units in 'fighting').
     for (const d of defs) {
-      if (isLive(d) && d.state === 'fighting' && !engagedDefs.has(d.id)) d.state = d.dest ? 'moving' : 'holding';
+      if (isLive(d) && d.state === 'fighting' && !engagedDefs.has(d.id) && !engaged(war, d)) d.state = d.dest ? 'moving' : 'holding';
     }
     stepWarshipFire(war, ctx, rng, dmgMod);
     pruneCorpses(war);
@@ -1517,6 +1517,7 @@
         if (d > R) continue;
         const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d, R) * bombDmgMod * mul;
         u.strength = Math.max(0, round1(u.strength - dmg));
+        u.engagedUntil = Math.max(u.engagedUntil || -1, war.tick + 4); // the wounded don't heal it straight back
         if (u.side === 'att') war.stats.attLosses += dmg; else war.stats.defLosses += dmg;
         if (u.strength <= 0) killUnit(war, u);
       }
@@ -1530,6 +1531,7 @@
           if (d > R) continue;
           const dmg = BOMB_UNIT_DMG * airstrikeFalloff(d, R) * bombDmgMod * mul;
           u.strength = Math.max(0, round1(u.strength - dmg));
+          u.engagedUntil = Math.max(u.engagedUntil || -1, holdUntil(war, O, 4));
           O.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] = (O.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] || 0) + dmg;
           if (u.strength <= 0) killUnit(O, u);
         }
@@ -1613,6 +1615,15 @@
     if (ps.side === 'att') return true;
     return ws.side !== govSideOf(W, P);
   }
+  // A unit hit from the OTHER conflict stays engaged (no supply healing, its
+  // own combat step won't stand it down) until `engagedUntil` — counted in
+  // ITS doc's ticks, stretched by the speed ratio: a crowd ticking 20× faster
+  // than the war must stay engaged across all its ticks between war ticks.
+  function holdUntil(fromDoc, toDoc, extra) {
+    const iv = (d) => Math.max(200, (d.tickMs || 2000) / (d.speed || 1));
+    return toDoc.tick + Math.max(1, Math.ceil(iv(fromDoc) / iv(toDoc))) + (extra || 1);
+  }
+  function engaged(war, u) { return (u.engagedUntil || -1) >= war.tick; }
   function stepCrossCombat(db, war, ctx, rng) {
     if (war.kind === 'protest') return;
     const P = otherDoc(db, war);
@@ -1634,8 +1645,10 @@
         u.strength = Math.max(0, round1(u.strength - toU));
         war.stats[u.side === 'att' ? 'attLosses' : 'defLosses'] += toU;
         P.stats[p.side === 'att' ? 'attLosses' : 'defLosses'] = (P.stats[p.side === 'att' ? 'attLosses' : 'defLosses'] || 0) + toP;
-        // both stand and fight while the contact lasts (stepMovement reads xHold)
-        u.xHold = war.tick; p.xHold = P.tick;
+        // both stand and fight while the contact lasts (stepMovement reads
+        // xHold; stepCombat and stepSupply read engagedUntil)
+        u.xHold = u.engagedUntil = holdUntil(war, war, 1);
+        p.xHold = p.engagedUntil = holdUntil(war, P, 1);
         if (u.state !== 'routed') u.state = 'fighting';
         if (p.state !== 'routed') p.state = 'fighting';
         if (toU > 0) u.org = clamp((u.org || 0) - ORG_DRAIN * 0.7, 0, 100);
@@ -2157,7 +2170,7 @@
       } else {
         u.supplied = defSupply ? suppliedNear(defSupply, cx, cy) : true; // no cities at all (legacy/malformed doc) — treat as supplied
       }
-      if (u.supplied && u.state !== 'fighting') {
+      if (u.supplied && u.state !== 'fighting' && !engaged(war, u)) {
         u.strength = round1(Math.min(u.maxStrength || u.strength, u.strength + (u.maxStrength || u.strength) * SUPPLY_HEAL_FRAC));
       }
     }

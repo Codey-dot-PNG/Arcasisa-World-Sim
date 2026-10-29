@@ -1616,8 +1616,12 @@ call out the army: `POST /api/protest/army { cityId, count 1–4 }` (server
 `armyMax` (8) on the streets at once; `{ withdraw: true }` sends them all back
 to barracks. They draw rifles from the government's stockpiles like any army
 unit (resupplyUnits), fight under the same gates as the police and carry the
-same dispersal multiplier. Security forces charging a crowd that never fights
-back don't lose morale doing it. Client: 🪖 Deploy the army / Withdraw troops
+same dispersal multiplier. Soldiers facing crowds hold their nerve: they lose
+morale `armyResolve` times slower (`war.protest.tuning.armyResolve`, default
+4, GM slider "Army resolve vs crowds") and only break at total collapse
+(`GARRISON_ROUT_ORG`) — army battalions in the protest and the war's troops
+fighting crowds alike; police keep the ordinary rates. Security forces
+charging a crowd that never fights back don't lose morale doing it. Client: 🪖 Deploy the army / Withdraw troops
 in the War Room escalation section and 🪖 Army on the map toolbar (city chips
 + battalions picker).
 

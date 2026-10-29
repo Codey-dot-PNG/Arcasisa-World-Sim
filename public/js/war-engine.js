@@ -1439,15 +1439,18 @@
       if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
       // ...and a crowd under a crackdown breaks even though it never fights back
       else if (protest && dmgToAtt > 0) a.org = clamp(a.org - ORG_DRAIN, 0, 100);
-      // (security forces charging a crowd that never fights back don't wear down)
-      if (dFights && (aFights || !protest)) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
+      // (security forces charging a crowd that never fights back don't wear
+      // down; soldiers facing a crowd hold far longer than police —
+      // war.protest.tuning.armyResolve, default ×4)
+      const resolve = protest && d.army ? armyResolve(war) : 1;
+      if (dFights && (aFights || !protest)) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale') / resolve, 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a
       // garrison's morale can still fully collapse, just at a much lower
       // threshold (GARRISON_ROUT_ORG) than a field unit's ROUT_ORG — a
       // garrison keeps fighting well past the point a mobile unit would break,
       // but total organisational collapse still routs it.
-      const dRoutOrg = d.garrison ? GARRISON_ROUT_ORG : ROUT_ORG;
+      const dRoutOrg = (d.garrison || (protest && d.army)) ? GARRISON_ROUT_ORG : ROUT_ORG;
       if (d.org < dRoutOrg && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
       if (a.strength <= 0) killUnit(war, a);
       if (d.strength <= 0) killUnit(war, d);
@@ -1636,6 +1639,8 @@
     return toDoc.tick + Math.max(1, Math.ceil(iv(fromDoc) / iv(toDoc))) + (extra || 1);
   }
   function engaged(war, u) { return (u.engagedUntil || -1) >= war.tick; }
+  // how much slower soldiers lose morale facing crowds than in battle
+  function armyResolve(protestDoc) { return Math.max(1, Number((((protestDoc || {}).protest || {}).tuning || {}).armyResolve) || 4); }
   function stepCrossCombat(db, war, ctx, rng) {
     if (war.kind === 'protest') return;
     const P = otherDoc(db, war);
@@ -1663,10 +1668,12 @@
         p.xHold = p.engagedUntil = holdUntil(war, P, 1);
         if (u.state !== 'routed') u.state = 'fighting';
         if (p.state !== 'routed') p.state = 'fighting';
-        if (toU > 0) u.org = clamp((u.org || 0) - ORG_DRAIN * 0.7, 0, 100);
+        // soldiers facing crowds hold their nerve (the protest's armyResolve);
+        // a police line in a real battle with invading troops does not
+        if (toU > 0) u.org = clamp((u.org || 0) - ORG_DRAIN * 0.7 / (p.side === 'att' ? armyResolve(P) : 1), 0, 100);
         if (toP > 0) p.org = clamp((p.org || 0) - ORG_DRAIN, 0, 100);
         if (p.org < ROUT_ORG && p.state !== 'routed') { p.state = 'routed'; pushEvent(P, 'battle', p.pos.slice(), `${p.name} breaks and scatters before ${u.name}.`); }
-        if (u.org < ROUT_ORG && u.state !== 'routed' && !u.garrison) { u.state = 'routed'; pushEvent(war, 'battle', u.pos.slice(), `${u.name} breaks under the crowds.`); }
+        if (u.org < (p.side === 'att' ? GARRISON_ROUT_ORG : ROUT_ORG) && u.state !== 'routed' && !u.garrison) { u.state = 'routed'; pushEvent(war, 'battle', u.pos.slice(), `${u.name} breaks under the crowds.`); }
         if (p.strength <= 0) { killUnit(P, p); pushEvent(P, 'battle', p.pos.slice(), `${p.name} is wiped out by ${u.name}.`); }
         if (u.strength <= 0) { killUnit(war, u); pushEvent(war, 'battle', u.pos.slice(), `${u.name} is overwhelmed by ${p.name}.`); }
       }

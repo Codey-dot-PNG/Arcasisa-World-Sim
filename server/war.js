@@ -73,6 +73,7 @@ const PROTEST_DEFAULTS = {
   policeMult: 3,           // police dispersal power against crowds (batons, gas, riot lines) — engine stepCombat
   armyMax: 8,              // army battalions the government may have on the streets at once (deployArmy)
   armyStrength: 2100,      // men per battalion
+  armyResolve: 4,          // soldiers lose morale this many times slower facing crowds (engine stepCombat / stepCrossCombat)
   hp: 1,
   // Phase 36 — public opinion (applyProtestPolitics). Every politicsEvery
   // ticks each province's crowd presence (live protestor strength ÷
@@ -1999,7 +2000,8 @@ function startProtest(db, opts, actor) {
         civFrac: cfg.civPerRiotFrac,
         refugeeFrac: cfg.refugeeRiotFrac,
         refugeeEvery: cfg.refugeeRiotEvery,
-        policeMult: cfg.policeMult
+        policeMult: cfg.policeMult,
+        armyResolve: cfg.armyResolve
       },
       strikeCityNames: baseIds.map(id => cityOf(id).name),
       // Phase 36 — what the movement wants (shown in the War Room and the
@@ -2126,6 +2128,10 @@ function setProtestTuning(db, patch, actor) {
   if (patch.policeMult !== undefined && Number.isFinite(Number(patch.policeMult))) {
     p.tuning.policeMult = engine.clamp(Number(patch.policeMult), 0.1, 10);
     changes.push(`policeMult=${p.tuning.policeMult}×`);
+  }
+  if (patch.armyResolve !== undefined && Number.isFinite(Number(patch.armyResolve))) {
+    p.tuning.armyResolve = engine.clamp(Number(patch.armyResolve), 1, 20);
+    changes.push(`armyResolve=${p.tuning.armyResolve}×`);
   }
   if (patch.refugeeEvery !== undefined && Number.isFinite(Number(patch.refugeeEvery))) {
     p.tuning.refugeeEvery = Math.round(engine.clamp(Number(patch.refugeeEvery), 2, 12));

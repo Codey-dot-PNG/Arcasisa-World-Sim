@@ -77,6 +77,16 @@ async function handleRequest(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
     let pathname = decodeURIComponent(url.pathname);
+    // TEMPORARY routing diagnostic (remove once the Vercel path issue is
+    // settled): ?__debug=1 on any /api url echoes what the function received.
+    if (url.searchParams.get('__debug') === '1' || /__debug=1/.test(String(req.url))) {
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      const h = {};
+      for (const k of Object.keys(req.headers)) if (!/cookie|authorization/i.test(k)) h[k] = req.headers[k];
+      res.end(JSON.stringify({ reqUrl: req.url, pathname, query: req.query || null, headers: h, file: __filename }));
+      return;
+    }
     // Vercel may hand the function its REWRITTEN url (/api/index) rather
     // than the one the browser asked for — every route then 404'd ("Unknown
     // API endpoint: POST /api/index" on sign-in). vercel.json forwards the

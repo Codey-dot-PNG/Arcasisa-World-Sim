@@ -171,6 +171,9 @@ const GameMap = {
       // gestures, shift/ctrl-drags and armed-bomb clicks — a plain left
       // press always falls through so the base pan keeps working.
       if (W.layer === 'war' && window.War && War.onMapPointerDown(e)) { return; }
+      // GM border painter: a left drag pushes borders instead of panning
+      // (Space, the ✋ Pan tool or a second finger still pan/pinch)
+      if (this.editing() && MapEdit.mode === 'borders' && window.Borders && Borders.pointerDown(e)) return;
       // The right button never pans — and must not leave stale drag
       // bookkeeping behind when War didn't consume it (no war doc, other
       // layer, …); the context-menu suppression above only covers 'war'.
@@ -846,11 +849,20 @@ const GameMap = {
     for (let y = -1280; y <= this.VIEW.h + 1280; y += 320) mk('line', { x1: -1400, y1: y, x2: this.VIEW.w + 1400, y2: y, class: 'graticule' });
     mk('rect', { x: 0, y: 0, width: this.VIEW.w, height: this.VIEW.h, class: 'map-frame' });
 
+    // Region outlines: while the GM border painter holds unsaved work its
+    // live traces override the stored shapes (so a sync can't wipe them);
+    // regionNodes lets the painter update paths in place mid-stroke.
+    const painting = editing && MapEdit.mode === 'borders' && window.Borders;
+    const shapeOf = (kind, id, base) => { const o = painting ? Borders.shapeFor(kind, id) : undefined; return o === undefined ? base : o; };
+    this.regionNodes = {};
+    const regionNode = (key, node) => { (this.regionNodes[key] = this.regionNodes[key] || []).push(node); };
+
     // foreign powers — international borders in their shades of grey
     this.countryNodes = {};
     for (const c of (map.countries || [])) {
-      if (!c.shape) continue;
-      const node = mk('path', { d: c.shape, 'fill-rule': 'evenodd', class: 'country-shape', fill: c.fill || '#a8a196', 'vector-effect': 'non-scaling-stroke' });
+      const cShape = shapeOf('country', c.id, c.shape);
+      if (!cShape) continue;
+      const node = mk('path', { d: cShape, 'fill-rule': 'evenodd', class: 'country-shape', fill: c.fill || '#a8a196', 'vector-effect': 'non-scaling-stroke' });
       node.addEventListener('pointerup', (e) => {
         if (W.layer === 'war') return; // war layer: clicks are battlefield input, not dossier lookups — bubble to the svg (deselect)
         if (this.dragMoved() || W.placing || this.editing()) return;
@@ -859,20 +871,23 @@ const GameMap = {
         else toast(c.name + ' — no dossier on file.');
       });
       title(node, c.name);
+      regionNode('c:' + c.id, node);
       if (c.entityId) this.countryNodes[c.entityId] = node;
     }
 
     // island drop shadow, then the provinces themselves
     for (const p of S().provinces) {
-      if (p.shape) mk('path', { d: p.shape, 'fill-rule': 'evenodd', fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
-      else if (p.path && p.path.length > 2) mk('polygon', { points: ptsStr(p.path), fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
+      const pShape = shapeOf('province', p.id, p.shape);
+      if (pShape) regionNode('p:' + p.id, mk('path', { d: pShape, 'fill-rule': 'evenodd', fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' }));
+      else if (p.path && p.path.length > 2 && pShape === p.shape) mk('polygon', { points: ptsStr(p.path), fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
     }
     this.provNodes = {};
     for (const p of S().provinces) {
       const f = this.provFill(p);
+      const pShape = shapeOf('province', p.id, p.shape);
       let poly = null;
-      if (p.shape) poly = mk('path', { d: p.shape, 'fill-rule': 'evenodd', class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
-      else if (p.path && p.path.length > 2) poly = mk('polygon', { points: ptsStr(p.path), class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
+      if (pShape) { poly = mk('path', { d: pShape, 'fill-rule': 'evenodd', class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' }); regionNode('p:' + p.id, poly); }
+      else if (p.path && p.path.length > 2 && pShape === p.shape) poly = mk('polygon', { points: ptsStr(p.path), class: 'prov-shape', fill: f.fill, 'fill-opacity': f.opacity, 'vector-effect': 'non-scaling-stroke' });
       if (!poly) continue;
       poly.addEventListener('pointerup', (e) => {
         if (W.layer === 'war') return; // war layer: no dossier — let the click bubble so War can deselect
@@ -912,8 +927,11 @@ const GameMap = {
       }
     }
 
-    // editable text markers (country names, seas, notes)
+    // editable text markers (country names, seas, notes) — a country with no
+    // land yet (just founded, or painted away) keeps its name off the map
+    const landless = new Set((map.countries || []).filter(c => !shapeOf('country', c.id, c.shape)).map(c => 'lbl_' + c.id));
     for (const lbl of (map.labels || [])) {
+      if (landless.has(lbl.id)) continue;
       const canEdit = editing && MapEdit.mode === 'labels';
       const t = mk('text', {
         x: lbl.pos[0], y: lbl.pos[1],
@@ -928,7 +946,7 @@ const GameMap = {
 
     // province names (+ data value when the data layer is active)
     for (const p of S().provinces) {
-      if (!p.labelPos) continue;
+      if (!p.labelPos || shapeOf('province', p.id, p.shape) === '') continue;
       const size = p.labelSize || 46;
       const rot = p.labelRot ? `rotate(${p.labelRot} ${p.labelPos[0]} ${p.labelPos[1]})` : '';
       const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': size, 'text-anchor': 'middle', transform: rot });
@@ -1144,6 +1162,7 @@ const GameMap = {
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;
     if (editing) MapEdit.renderOverlay(this);
+    this.svg.classList.toggle('brush-mode', !!painting && Borders.tool === 'brush');
 
     this.renderLayerBar();
     this.renderLegend();

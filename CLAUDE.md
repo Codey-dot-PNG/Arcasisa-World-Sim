@@ -75,6 +75,7 @@ server/war-scenarios.js scenario data (attacker/defender, objectives, roster) �
 server/buildings.js    map building texture assignment per property kind
 server/geometry.js     point-in-polygon province lookup for map placement
 server/mapdata.js      map document (labels/roads/rails/countries); applyMap() self-heal
+server/territory.js    border-painter saves: found province/country, apply painted shapes, re-home places
 server/map-geometry.js AUTO-GENERATED from the master SVG — do not edit (tools/build-mapdata.js)
 server/supabase.js     minimal PostgREST/Realtime client (plain fetch)
 public/js/*            client modules — see docs/FRONTEND.md

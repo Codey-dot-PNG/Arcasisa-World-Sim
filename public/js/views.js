@@ -134,9 +134,17 @@ const Views = {
   },
   gmJump(kind, id) {
     if (!isGM()) return null;
-    const tabByKind = { province: 'provinces', city: 'mapobjects', property: 'mapobjects', entity: 'registry', item: 'items' };
+    const tabByKind = { province: 'provinces', city: 'mapobjects', property: 'mapobjects', item: 'items' };
     return el('button.dash-btn', {
-      onclick: () => { W.gmTab = tabByKind[kind] || 'world'; W.gmSel[W.gmTab] = id; App.go('gm'); }
+      onclick: () => {
+        if (kind === 'entity') {
+          // the Entities desk picks by class, then entity
+          const e = entById(id);
+          if (e) { W.geClass = e.type; W.geSel = id; W.geSub = 'details'; }
+          W.gmTab = 'entities';
+        } else { W.gmTab = tabByKind[kind] || 'world'; W.gmSel[W.gmTab] = id; }
+        App.go('gm');
+      }
     }, '✎ Open in GM Studio');
   },
 

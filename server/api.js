@@ -9,6 +9,7 @@ const deeds = require('./deeds');
 const buildings = require('./buildings');
 const casino = require('./casino');
 const geometry = require('./geometry');
+const territory = require('./territory');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -403,6 +404,8 @@ function filterState(u) {
   const db = store.get();
   const p = u.role.perms;
   const settings = { ...db.settings, time: { ...db.settings.time } };
+  // the pristine coastline is border-painter tooling (GET /api/gm/map/land)
+  if (settings.map && settings.map.land) { settings.map = { ...settings.map }; delete settings.map.land; }
   // Phase 33 — the GM's live-election levers are confidential Commission
   // business (the deviation and the campaign→votes exchange rate would spoil
   // the count); everyone else gets the public knobs only.
@@ -2928,6 +2931,39 @@ async function handle(req, res, pathname, method) {
         broadcast('sync');
         return json(res, 200, { ok: true });
       }
+      // ---- territory: the border painter (public/js/borders.js) ----
+      if (pathname === '/api/gm/map/land' && method === 'GET') {
+        return json(res, 200, { land: territory.landOf(db) });
+      }
+      if (pathname === '/api/gm/territory/province' && method === 'POST') {
+        const b = await readBody(req);
+        let prov;
+        try { prov = territory.createProvince(db, b); } catch (e) { return bad(e.message); }
+        store.log('gm', `Province founded: ${prov.name}`, `${(prov.vars.population || 0).toLocaleString('en-US')} people · territory to be drawn`, actor, [prov.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { id: prov.id, province: prov });
+      }
+      if (pathname === '/api/gm/territory/country' && method === 'POST') {
+        const b = await readBody(req);
+        let r;
+        try { r = territory.createCountry(db, b); } catch (e) { return bad(e.message); }
+        store.log('gm', `Country founded: ${r.country.name}`, 'Territory to be drawn on the map.', actor, [r.entity.id]);
+        store.save(); broadcast('sync');
+        return json(res, 200, { id: r.country.id, entityId: r.entity.id, country: r.country });
+      }
+      if (pathname === '/api/gm/territory' && method === 'PUT') {
+        const b = await readBody(req, 4e6);
+        let r;
+        try { r = territory.applyTerritory(db, b); } catch (e) { return bad(e.message); }
+        const bits = [];
+        if (r.reshaped.length) bits.push('reshaped ' + r.reshaped.join(', '));
+        if (r.removed.length) bits.push('dissolved ' + r.removed.join(', '));
+        if (r.moved) bits.push(r.moved + ' place(s) changed province');
+        store.log('gm', 'Borders redrawn', bits.join(' · '), actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, r);
+      }
+
       if (pathname === '/api/gm/settings' && method === 'PATCH') {
         const b = await readBody(req);
         const s = db.settings;

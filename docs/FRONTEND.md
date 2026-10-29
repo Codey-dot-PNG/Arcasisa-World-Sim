@@ -4,7 +4,7 @@ Vanilla JS, no framework, no build. `public/index.html` loads scripts in depende
 **keep this order** when adding a file:
 
 ```
-core.js → pricepath.js → charts.js → map.js → mapedit.js → views.js → sfx.js
+core.js → pricepath.js → charts.js → map.js → mapedit.js → borders.js → views.js → sfx.js
 → entertainment.js → gm.js → gmbar.js → music.js → app.js
 ```
 
@@ -20,9 +20,10 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `views.js` | All player-facing views (map dossier panels, parliament, companies/exchange, economy, population, news, timeline) + the contextual inspector panel |
 | `charts.js` | Zero-dep SVG charts: `Charts.chartLine(series, opts)`, `Charts.chartBars(rows, opts)` |
 | `map.js` | `GameMap` — SVG world on the **3840×2160** master grid, pan/zoom, layers (political/data/ownership/military), all drawn from state (`settings.map`, provinces, cities, properties). Also owns the day/night cycle: a continuous solar model (`setDayNight`) writes `--dn-night/warm/lights` CSS vars that drive an in-svg night grade + screen-blended city-glow blobs (kept *under* buildings/labels so they stay readable) and the vehicles' headlight beams |
-| `mapedit.js` | GM map editor for `settings.map` labels/roads/rails/lights (saves via `PATCH /api/gm/settings {map}`) |
+| `mapedit.js` | GM map editor for `settings.map` labels/roads/rails/lights (saves via `PATCH /api/gm/settings {map}`) and the host of the **Borders** mode |
+| `borders.js` | GM border painter (`Borders`, map editor mode "Borders"): soft raster ownership fields per region, organic brush, marching-squares re-trace clipped to the pristine coastline, Territory panel (found province/country, give province to a country, annex a country), saves via `PUT /api/gm/territory` — see "Border painter" below |
 | `war.js` | War Room — territory-fracture map overlay + unit markers (drawn into `GameMap` via a hook) and the War Room panel (status/objectives/casualties/controls); see docs/WAR.md |
-| `gm.js` | GM Studio — visual CRUD editors for every collection, Event Engine, templates |
+| `gm.js` | GM Studio — seven desks (`GM.GROUPS`) with sub-pages: World (Settings & Time · Presentation · Archive & Rollback), Map & Territory (Territory · Provinces · Cities & Properties), Entities (one editor: Details · Money · Inventory · Ownership · Properties · Org chart · Trade), Economy & Trade (Levers & Tax · Money Supply · Items & Market · Trade Partners), Election, Rules & Events (Event Engine · Variables · Census Groups), Roles & Operators. Old single-tab ids still work via `GM.LEGACY_TABS` (`W.gmTab = 'trade'` → Economy › Trade Partners); `GM.go(desk, page)` navigates |
 | `gmbar.js` | GM Command Bar (bottom toolbar): advance turns, quick actions. Touches only its own `#gm-bar` subtree |
 | `entertainment.js` | Casino/lottery UI — animates toward server-decided outcomes only. Mirrors `ownership.controls` client-side (`ownership_controlsClient`) — keep in lockstep with server/ownership.js |
 | `music.js` | Shared soundtrack via hidden YouTube IFrame player, driven by `settings.music` (GM changes propagate on sync) |
@@ -165,3 +166,32 @@ GM-only), the **Parliament tab relabels to "Elections"** (`renderTabs` in app.js
   `PATCH /api/gm/settings {election: {campaigns}}`.
 - Party treasuries: balance + stock per party; a Fund input (default ₳10,000) →
   `POST /api/gm/mint` against the party's treasury account.
+
+## Border painter (borders.js)
+
+- **Model.** Every region — a Republic province (`p:<id>`) or a foreign country (`c:<id>`) —
+  is rasterised on a 4-unit grid (960×540) with canvas anti-aliasing into a `Uint16` ownership
+  field (coverage, so the 50% line *is* the drawn border). The pristine land outline
+  (`GET /api/gm/map/land` → `settings.map.land`, frozen server-side on the first save) is
+  rasterised the same way.
+- **Brush.** A stamp raises the target region's share of the land under it by
+  `a = strength · (1 − d²/r²)² · organic-noise` and scales every other region's share by
+  `(1 − a)` (so shares still sum to one); open sea is skipped. The 50% line is therefore
+  *pushed*, not painted. A two-octave seeded value noise (`Borders.noise`) varies how fast each
+  patch gives way — that is what makes pushed borders wander. Panel sliders: Brush (radius),
+  Push (strength), Organic (noise share). Space / ✋ Pan pans, `[ ]` resize, Ctrl+Z undo
+  (12 snapshots of the touched fields).
+- **Trace.** Touched regions only: marching squares over `min(region, land)` at 0.5 →
+  stitched loops → closed Douglas-Peucker (0.6 units) → `M…l…z` path; specks < 30 units²
+  dropped; the largest loop's centroid becomes the label spot of a newly founded region.
+  Untouched regions keep their exact original paths. While unsaved, traces live in
+  `Borders.overrides`, which `GameMap.render` consults (`shapeOf`), and
+  `GameMap.regionNodes[key]` lets the painter update paths in place mid-stroke
+  (`MapEdit.dragging` holds sync re-renders off during a stroke).
+- **Operations** (Territory panel): *give to…* (province → country: fields merge, province
+  dissolved on save), *annex* (country → new province via `POST /api/gm/territory/province`,
+  country dissolved on save), *+ Province* / *+ Country* (founded immediately with no land,
+  then painted). Discard drops regions founded this session that never got land.
+- **Save** → `PUT /api/gm/territory { regions:[{kind,id,shape,labelPos?}], remove:[{kind,id}] }`.
+  Every consumer of `shape` (map, war engine grid, `geometry.provinceAt`) needs no change.
+

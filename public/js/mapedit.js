@@ -7,11 +7,13 @@
                  vertex to remove it, delete whole lines
      · lights — night city-light clusters: place (stays armed for clusters),
                  drag to move, S/M/L halo sizes, delete
+     · borders — the territory brush, province/country founding, cession and
+                 annexation (public/js/borders.js; saves via PUT /api/gm/territory)
    Everything saves through PATCH /api/gm/settings { map: … } (GM only). */
 
 const MapEdit = {
   active: false,
-  mode: 'labels',       // labels | roads | rails | properties | markers | lights
+  mode: 'labels',       // labels | roads | rails | properties | markers | lights | borders
   sel: null,            // selected road/rail id (within current mode)
   selLabel: null,
   selLight: null,       // selected city-light id
@@ -33,15 +35,23 @@ const MapEdit = {
     if (!isGM()) return;
     if (!this.map()) return toast('This world has no map document — reset or migrate it first.', true);
     this.active = on === undefined ? !this.active : on;
+    if (!this.active && window.Borders && Borders.dirty()) toast('Unsaved border changes are kept — reopen Borders to save or discard them.');
+    if (this.active && this.mode === 'borders') this.enterBorders();
     this.sel = null; this.selLabel = null; this.selLight = null; this.drawing = null;
     this.addingLabel = false; this.addingProperty = false; this.addingMarker = false; this.addingLight = false;
     GameMap.render();
   },
   setMode(m) {
     this.mode = m;
+    if (m === 'borders') this.enterBorders();
     this.sel = null; this.selLabel = null; this.selLight = null; this.drawing = null;
     this.addingLabel = false; this.addingProperty = false; this.addingMarker = false; this.addingLight = false;
     GameMap.render();
+  },
+
+  enterBorders() {
+    if (W.layer === 'war' || W.layer === 'data') W.layer = 'political';
+    if (window.Borders) Borders.open().then(() => GameMap.render());
   },
 
   save(immediate) {
@@ -64,10 +74,11 @@ const MapEdit = {
     if (!isGM()) return;
     if (!this.active) {
       bar.appendChild(el('button.chip', { onclick: () => this.toggle(true) }, '✎ Edit map'));
+      if (window.Borders) Borders.renderPanel(); // removes the Territory panel
       return;
     }
     bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '✎ MAP EDITOR'));
-    for (const [m, label] of [['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties'], ['markers', 'Markers'], ['lights', 'Lights']]) {
+    for (const [m, label] of [['borders', 'Borders'], ['labels', 'Labels'], ['roads', 'Roads'], ['rails', 'Railways'], ['properties', 'Properties'], ['markers', 'Markers'], ['lights', 'Lights']]) {
       bar.appendChild(el('button.chip', { class: this.mode === m ? 'active' : '', onclick: () => this.setMode(m) }, label));
     }
     if (this.mode === 'labels') {
@@ -95,7 +106,7 @@ const MapEdit = {
         }, label));
       }
       if (this.selLight) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSelLight() }, '🗑 Delete light'));
-    } else {
+    } else if (this.mode === 'roads' || this.mode === 'rails') {
       const noun = this.mode === 'roads' ? 'road' : 'railway';
       if (this.drawing) {
         bar.appendChild(el('span.chip', { style: 'cursor:default;' }, '⌖ click to add points (' + this.drawing.pts.length + ')'));
@@ -108,6 +119,7 @@ const MapEdit = {
     }
     bar.appendChild(el('button.chip', { onclick: () => this.toggle(false) }, 'Done'));
     const hints = {
+      borders: 'pick a region in the Territory panel, then drag across a border to push it',
       labels: 'drag a label to move · click one to edit or delete',
       roads: 'click a road to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
       rails: 'click a railway to select · drag ○ · ◆ inserts a point · double-click ○ removes it',
@@ -116,11 +128,12 @@ const MapEdit = {
       lights: '"+ Light" then click to place a cluster (stays armed) · drag the dot to move · S/M/L sizes new or selected lights · Delete removes'
     };
     bar.appendChild(el('span.map-edit-hint', hints[this.mode]));
+    if (window.Borders) Borders.renderPanel();
   },
 
   /* ---------- events routed from GameMap ---------- */
   mapClick(pt, e) {
-    if (!this.active) return;
+    if (!this.active || this.mode === 'borders') return;
     pt = [Math.round(pt[0]), Math.round(pt[1])];
     if (this.mode === 'labels') {
       if (this.addingLabel) {
@@ -468,6 +481,7 @@ const MapEdit = {
       gm.editLayer.appendChild(n);
       return n;
     };
+    if (this.mode === 'borders') { if (window.Borders) Borders.overlay(gm, gm.editLayer); return; }
     if (this.mode === 'labels') return;
 
     // city lights: a world-sized halo outline per light (so the GM sees the

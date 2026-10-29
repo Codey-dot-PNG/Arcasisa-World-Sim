@@ -121,6 +121,10 @@ agriculture, oilProduction, trade, infrastructure, healthcare, politicalLeaning 
 governmentSupport, happiness, economicConfidence, employment } }` for the seven seed groups
 (Working/Middle/Upper Class, Students, Retired, Rural, Urban). `voterBase { partyId: pct }`
 scripts a province's vote outright, bypassing the demographic election model.
+Territory is `shape` (SVG path data, evenodd); the GM border painter rewrites it for the
+regions it touches (docs/FRONTEND.md "Border painter"). `settings.map.land` — the pristine
+coastline, frozen on the first border save — is never shipped to clients (GM-only
+`GET /api/gm/map/land`).
 
 ## Properties (Phase 13 production model)
 
@@ -190,8 +194,8 @@ newspaperRouting { Category: paperId }, music { library, playlists, activePlayli
 allowedPlaylists, lockPlaylist, forcedTrack, volume }, entertainment { venues: [casino|
 lottery…] }, economy { baseDailyWage, wageHappinessK, wageEmploymentK, dailyVariance?,
 happinessOutputK?, happinessConfK?, dayTickMs? }, trade { partners, govBuyPrices, govBuy,
-exports, imports, lastFlows, lastExportFill, stockIn, history }, map { countries, labels,
-roads, rails }, mapDecor, election { durationTurns (14), deviationPct (12), supportToVotes
+exports, imports, lastFlows, lastExportFill, stockIn, history }, map { countries [{id, name,
+entityId, fill, shape}], labels, roads, rails, lights, land? }, mapDecor, election { durationTurns (14), deviationPct (12), supportToVotes
 (2500), campaigns: [{ id, name, description, moneyCost, itemCosts: [{itemId, qty,
 or?: [{itemId, qty}]}], strength, enabled }] }`.
 

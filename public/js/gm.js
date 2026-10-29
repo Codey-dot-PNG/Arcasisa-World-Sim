@@ -186,25 +186,38 @@ const VAR_TEMPLATE_PATCH = {
 const GM = {
   draft: null, draftKey: null,
 
-  TABS: [
-    ['globaledit', 'Experimental Global Editor'],
-    ['world', 'World & Time'],
-    ['economy', 'Economy'],
-    ['provinces', 'Provinces'],
-    ['mapobjects', 'Cities & Properties'],
-    ['registry', 'Entity Registry'],
-    ['money', 'Money & Accounts'],
-    ['assets', 'Assets & Ownership'],
-    ['items', 'Items & Market'],
-    ['trade', 'Trade Desk'],
-    ['election', 'Election'],
-    ['variables', 'Variables'],
-    ['events', 'Event Engine'],
-    ['population', 'Population'],
-    ['presentation', 'Presentation'],
-    ['roles', 'Roles & Operators'],
-    ['danger', 'Archive & Danger']
+  // The Studio is seven desks; a desk with several pages shows them as
+  // sub-tabs. Pages that did the same job were merged (Registry + Assets +
+  // the old Global Editor → Entities; Snapshots + Archive & Danger →
+  // Archive; Taxation joined the economy levers).
+  GROUPS: [
+    { id: 'world', label: 'World', subs: [['settings', 'Settings & Time', 'tabWorld'], ['presentation', 'Presentation', 'tabPresentation'], ['archive', 'Archive & Rollback', 'tabArchive']] },
+    { id: 'map', label: 'Map & Territory', subs: [['territory', 'Territory', 'tabTerritory'], ['provinces', 'Provinces', 'tabProvinces'], ['mapobjects', 'Cities & Properties', 'tabMapObjects']] },
+    { id: 'entities', label: 'Entities', subs: [['editor', 'Entities', 'tabGlobalEdit']] },
+    { id: 'economy', label: 'Economy & Trade', subs: [['levers', 'Levers & Tax', 'tabEconomy'], ['money', 'Money Supply', 'tabMoney'], ['items', 'Items & Market', 'tabItems'], ['trade', 'Trade Partners', 'tabTrade']] },
+    { id: 'election', label: 'Election', subs: [['election', 'Election', 'tabElection']] },
+    { id: 'rules', label: 'Rules & Events', subs: [['events', 'Event Engine', 'tabEvents'], ['variables', 'Variables', 'tabVariables'], ['population', 'Census Groups', 'tabPopulation']] },
+    { id: 'roles', label: 'Roles & Operators', subs: [['roles', 'Roles & Operators', 'tabRoles']] }
   ],
+  // old single-page tab ids (still set by links across the app) → desk + page
+  LEGACY_TABS: {
+    globaledit: ['entities', 'editor'], registry: ['entities', 'editor'], assets: ['entities', 'editor'],
+    world: ['world', 'settings'], presentation: ['world', 'presentation'], danger: ['world', 'archive'],
+    provinces: ['map', 'provinces'], mapobjects: ['map', 'mapobjects'], territory: ['map', 'territory'],
+    economy: ['economy', 'levers'], money: ['economy', 'money'], items: ['economy', 'items'], trade: ['economy', 'trade'],
+    variables: ['rules', 'variables'], events: ['rules', 'events'], population: ['rules', 'population']
+  },
+  resolveTab() {
+    W.gmSub = W.gmSub || {};
+    const legacy = !this.GROUPS.some(x => x.id === W.gmTab) && this.LEGACY_TABS[W.gmTab];
+    if (legacy) { W.gmTab = legacy[0]; W.gmSub[legacy[0]] = legacy[1]; }
+    const g = this.GROUPS.find(x => x.id === W.gmTab) || this.GROUPS[0];
+    W.gmTab = g.id;
+    const sub = g.subs.find(x => x[0] === W.gmSub[g.id]) || g.subs[0];
+    W.gmSub[g.id] = sub[0];
+    return { g, sub };
+  },
+  go(group, sub) { W.gmTab = group; W.gmSub = W.gmSub || {}; if (sub) W.gmSub[group] = sub; this.draftKey = null; App.renderView(); },
 
   render(container) {
     // Every sync (turn tick, another player's action) rebuilds the whole
@@ -218,25 +231,20 @@ const GM = {
     // mousedown listener on document.
     if (this._exprPopDoc) { document.removeEventListener('mousedown', this._exprPopDoc, true); }
     this._exprPop = null; this._exprPopDoc = null; this._exprPopFor = null;
+    const { g, sub } = this.resolveTab();
     const layout = el('div.gm-layout');
     const nav = el('div.gm-nav');
-    for (const [id, label] of this.TABS) {
-      nav.appendChild(el('button.gm-nav-item', { class: W.gmTab === id ? 'active' : '', onclick: () => { W.gmTab = id; this.draftKey = null; App.renderView(); } }, label));
+    for (const grp of this.GROUPS) {
+      nav.appendChild(el('button.gm-nav-item', { class: W.gmTab === grp.id ? 'active' : '', onclick: () => this.go(grp.id) }, grp.label));
     }
     const main = el('div.gm-main');
     layout.appendChild(nav); layout.appendChild(main);
     container.appendChild(layout);
-    const fn = {
-      globaledit: this.tabGlobalEdit,
-      world: this.tabWorld, provinces: this.tabProvinces, mapobjects: this.tabMapObjects,
-      registry: this.tabRegistry, economy: this.tabEconomy, money: this.tabMoney, assets: this.tabAssets, items: this.tabItems,
-      trade: this.tabTrade,
-      election: this.tabElection,
-      variables: this.tabVariables, events: this.tabEvents, population: this.tabPopulation,
-      presentation: this.tabPresentation,
-      roles: this.tabRoles, danger: this.tabDanger
-    }[W.gmTab] || this.tabWorld;
-    fn.call(this, main);
+    if (g.subs.length > 1) {
+      main.appendChild(el('div.chip-row.gm-subtabs', g.subs.map(([id, label]) =>
+        el('button.chip', { class: sub[0] === id ? 'active' : '', onclick: () => this.go(g.id, id) }, label))));
+    }
+    this[sub[2]].call(this, main);
     if (scrollTop) main.scrollTop = scrollTop;
   },
 
@@ -254,6 +262,7 @@ const GM = {
   entOptions: Forms.entOptions,
   provOptions: Forms.provOptions,
   itemOptions: Forms.itemOptions,
+  kv(label, value, cls) { return Views.kv(label, value, cls); },
 
   getDraft(key, source) {
     if (this.draftKey !== key) { this.draft = JSON.parse(JSON.stringify(source)); this.draftKey = key; }
@@ -269,7 +278,7 @@ const GM = {
   deleteColl(coll, id, name) {
     confirmModal('DESTROY RECORD', `Delete “${name}” permanently? References will be cleared.`, async () => {
       await DEL(`/api/gm/coll/${coll}/${id}`);
-      if (W.gmSel[W.gmTab] === id) W.gmSel[W.gmTab] = null;
+      for (const k in W.gmSel) if (W.gmSel[k] === id) W.gmSel[k] = null;
       this.draftKey = null;
       toast('Deleted.');
     });
@@ -476,8 +485,8 @@ const GM = {
   ],
 
   tabGlobalEdit(main) {
-    main.appendChild(el('div.doc-title', 'Experimental Global Editor'));
-    main.appendChild(el('div.doc-sub', 'pick a class, then an entity, then edit its money · inventory · ownership · property income · trade'));
+    main.appendChild(el('div.doc-title', 'Entities'));
+    main.appendChild(el('div.doc-sub', 'pick a class, then an entity — its record, money, inventory, ownership, properties, org chart and trade in one place'));
 
     // ── Level 1 — entity class ──────────────────────────────────────────
     if (!this.GE_CLASSES.some(([t]) => t === W.geClass)) W.geClass = 'company';
@@ -509,7 +518,7 @@ const GM = {
     if (!e) { main.appendChild(el('div', { style: 'padding:16px; color:var(--ink-faint);' }, 'No entity of this class yet — use “+ New”.')); return; }
 
     // ── Level 3 — facet ─────────────────────────────────────────────────
-    const SUBS = [['details', 'Details'], ['money', 'Money'], ['inventory', 'Inventory'], ['ownership', 'Ownership'], ['properties', 'Properties']];
+    const SUBS = [['details', 'Details'], ['money', 'Money'], ['inventory', 'Inventory'], ['ownership', 'Ownership'], ['properties', 'Properties'], ['roster', 'Org chart']];
     if (e.type === 'foreign' || e.type === 'org') SUBS.push(['trade', 'Trade Details']);
     if (!W.geSub || !SUBS.some(([s]) => s === W.geSub)) W.geSub = 'details';
     main.appendChild(el('div.mono-label', { style: 'margin-top:14px;' }, '3 · ' + e.name + ' — ' + (TYPE_LABEL[e.type] || e.type)));
@@ -520,11 +529,14 @@ const GM = {
     main.appendChild(panel);
     ({
       details: this.geDetails, money: this.geMoney, inventory: this.geInventory,
-      ownership: this.geOwnership, properties: this.geProperties, trade: this.geTrade
+      ownership: this.geOwnership, properties: this.geProperties, trade: this.geTrade, roster: this.geRoster
     }[W.geSub] || this.geDetails).call(this, panel, e);
   },
 
-  /* ---- Global Editor · Details ---- */
+  /* ---- Entities · Details ----
+     The full record form (was the separate Entity Registry tab): identity,
+     control (owner/CEO, party leader), party ideology & government flag,
+     description and variables. */
   geDetails(main, e) {
     const d = this.getDraft('ge:details:' + e.id, e);
     const types = ['company', 'party', 'person', 'government', 'foreign', 'org'];
@@ -534,14 +546,83 @@ const GM = {
       this.field('Marker colour', this.color(d, 'color')),
       this.field('Logo / image path', this.text(d, 'logo', '/assets/…')),
       d.type === 'company' ? this.field('Industry', this.text(d, 'industry')) : null,
+      d.type === 'company' ? this.field('Controlled by', this.sel(d, 'ownerId', this.entOptions(null, true))) : null,
+      d.type === 'company' ? this.field('Chief Executive', this.sel(d, 'ceoId', this.entOptions(['person'], true))) : null,
       d.type === 'company' ? this.field('Wage / employee / turn (' + CUR() + ')', this.num(d, 'wagePerTurn', '0.01')) : null,
       d.type === 'company' ? this.field('Shares outstanding', this.num(d, 'sharesOutstanding')) : null,
       d.type === 'person' ? this.field('Title', this.text(d, 'title')) : null,
+      d.type === 'party' ? this.field('Leader', this.sel(d, 'leaderId', this.entOptions(['person'], true))) : null,
       d.type === 'party' ? this.field('Abbreviation', this.text(d, 'abbrev')) : null,
       d.type === 'party' ? this.field('Seats (MPs)', this.num(d, 'mpCount')) : null,
       (d.type === 'foreign' || d.type === 'org') ? this.field('Stance / relations', this.text(d, 'stance')) : null));
+    if (d.type === 'party') {
+      d.ideology = d.ideology || { econ: 0, soc: 0 };
+      main.appendChild(el('div.form-grid',
+        this.field('Ideology — economic (−100 left … +100 right)', this.num(d.ideology, 'econ')),
+        this.field('Ideology — social (−100 lib … +100 auth)', this.num(d.ideology, 'soc'))));
+      main.appendChild(this.check(d, 'inGovernment', 'Currently in government'));
+    }
+    if (d.type === 'foreign') {
+      const c = ((S().settings.map || {}).countries || []).find(x => x.entityId === e.id);
+      main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin:6px 0;' },
+        c ? 'Holds territory on the map as “' + c.name + '”. ' : 'No territory on the map. ',
+        el('a', { href: '#', onclick: (ev) => { ev.preventDefault(); this.go('map', 'territory'); } }, 'Map & Territory →')));
+    }
     main.appendChild(this.field('Description', this.area(d, 'description')));
     main.appendChild(this.varsEditor(d, d.type === 'company' ? 'company' : 'entity'));
+    main.appendChild(this.saveBar('entities', d, false));
+  },
+
+  /* ---- Entities · Org chart (was in the Entity Registry) ----
+     Roster members with scoped permissions (the one delegation primitive —
+     roster.userId is an ENTITY id, resolved via ownership.canAct) and the
+     requests waiting on the entity's controller. */
+  geRoster(main, e) {
+    const d = this.getDraft('ge:roster:' + e.id, e);
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
+      'Roster members with scoped permissions. Members see their own entry only; owners see the full list.'));
+    d.roster = Array.isArray(d.roster) ? d.roster : [];
+    const VALID_SCOPES = [['company_controls', 'Company settings'], ['property_controls', 'Property settings'],
+      ['trade', 'Buy/sell items'], ['spend', 'Spend money'], ['campaign_minor', 'Minor campaigns'],
+      ['campaign_major', 'Major campaigns'], ['command_units', 'Command units'], ['manage_tenders', 'Tenders']];
+    const memberOpts = [['', '- choose member -'], ...this.entOptions(null, true)];
+    d.roster.forEach((member, i) => {
+      member.grants = member.grants || { scopes: [], spendLimitPerTurn: null };
+      member.grants.scopes = Array.isArray(member.grants.scopes) ? member.grants.scopes : [];
+      const scopeChips = VALID_SCOPES.map(([k, label]) => {
+        const active = member.grants.scopes.includes(k);
+        return el('button.chip', { class: active ? 'active' : '', style: 'font-size:10px; padding:1px 6px;',
+          onclick: () => { if (active) member.grants.scopes = member.grants.scopes.filter(x => x !== k); else member.grants.scopes.push(k); App.renderView(); }
+        }, label);
+      });
+      const limitInput = el('input.text-input', { type: 'number', step: 'any', style: 'max-width:140px;',
+        value: member.grants.spendLimitPerTurn === null || member.grants.spendLimitPerTurn === undefined ? '' : member.grants.spendLimitPerTurn,
+        placeholder: 'unlimited',
+        oninput: (ev) => { member.grants.spendLimitPerTurn = ev.target.value === '' ? null : Math.max(0, Number(ev.target.value) || 0); } });
+      const expiring = member.expiresAt && member.expiresAt < Date.now();
+      main.appendChild(el('div', { style: `display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap; ${expiring ? 'opacity:0.5;' : ''}` },
+        el('div', { style: 'flex:1 1 150px' }, this.text(member, 'title', 'Title')),
+        el('div', { style: 'flex:1 1 200px' }, this.sel(member, 'userId', memberOpts, () => App.renderView())),
+        el('div', { style: 'flex:1 1 160px' }, limitInput),
+        el('div', { style: 'display:flex; gap:3px; flex-wrap:wrap;' }, ...scopeChips),
+        el('button.icon-btn', { onclick: () => { d.roster.splice(i, 1); App.renderView(); } }, '✕')));
+    });
+    main.appendChild(el('div.btn-row', el('button.dash-btn', {
+      onclick: () => { d.roster.push({ userId: '', title: '', grants: { scopes: [], spendLimitPerTurn: null, properties: [], accounts: [] }, expiresAt: null }); App.renderView(); }
+    }, '+ Add member')));
+    const pending = (d.pendingRequests || []).filter(r => r.status === 'pending');
+    if (pending.length) {
+      main.appendChild(Views.secLabel(`Pending Requests (${pending.length})`));
+      pending.forEach(req => {
+        const reqUser = (S().users || []).find(u => u.entityId === req.userId) || {};
+        main.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; margin-bottom:6px; padding:6px 8px; background:var(--bg-wash); border-radius:4px;' },
+          el('div', { style: 'flex:1;' },
+            el('div', { style: 'font-size:12px;' }, `${reqUser.displayName || req.userId}: ${req.scope}`),
+            el('div', { style: 'font-size:11px; color:var(--ink-soft);' }, req.description || (req.amount ? `₳${req.amount}` : ''))),
+          el('button.dash-btn', { style: 'font-size:11px; padding:2px 8px;', onclick: async () => { await api('POST', `/api/entity/${d.id}/requests/${req.id}/approve`); App.renderView(); } }, 'Approve'),
+          el('button.dash-btn', { style: 'font-size:11px; padding:2px 8px;', onclick: async () => { await api('POST', `/api/entity/${d.id}/requests/${req.id}/deny`); App.renderView(); } }, 'Deny')));
+      });
+    }
     main.appendChild(this.saveBar('entities', d, false));
   },
 
@@ -797,13 +878,7 @@ const GM = {
       taxPropertyRate: (s.taxation || {}).propertyRate || 0
     });
     main.appendChild(el('div.doc-title', 'World & Time'));
-    main.appendChild(el('div.doc-sub', 'turn ' + s.time.turn + ' · ' + fmtDate(s.time.date)));
-
-    main.appendChild(el('div.stage', el('div.stage-header', el('span.stage-chapter', 'Advance the Simulation'), el('span.stage-year', 'T' + s.time.turn)),
-      el('div.btn-row',
-        el('button.solid-btn', { onclick: () => POST('/api/gm/advance', { steps: 1 }).then(() => toast('One turn passes.')).catch(e => toast(e.message, true)) }, '▸ 1 Turn'),
-        el('button.solid-btn', { onclick: () => POST('/api/gm/advance', { steps: 7 }).then(() => toast('A week passes.')).catch(e => toast(e.message, true)) }, '▸▸ 7 Turns'),
-        el('button.solid-btn', { onclick: () => POST('/api/gm/advance', { steps: 30 }).then(() => toast('A month passes.')).catch(e => toast(e.message, true)) }, '▸▸▸ 30 Turns'))));
+    main.appendChild(el('div.doc-sub', 'turn ' + s.time.turn + ' · ' + fmtDate(s.time.date) + ' · advance turns from the GM bar below'));
 
     main.appendChild(Views.secLabel('World'));
     const g1 = el('div.form-grid',
@@ -876,28 +951,6 @@ const GM = {
       }
     }, 'Save World Settings')));
 
-    main.appendChild(Views.secLabel('Taxation'));
-    d.taxVatRate = d.taxVatRate === undefined ? ((s.taxation || {}).vatRate || 0) : d.taxVatRate;
-    d.taxGamblingRate = d.taxGamblingRate === undefined ? ((s.taxation || {}).gamblingRate || 0) : d.taxGamblingRate;
-    main.appendChild(this.check(d, 'taxEnabled', 'Enable taxation (corporate/property monthly; VAT & gambling duty on every transaction)'));
-    main.appendChild(el('div.form-grid',
-      this.field('Corporate tax rate (%)', this.num(d, 'taxCorporateRate')),
-      this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate')),
-      this.field('VAT on purchases (%)', this.num(d, 'taxVatRate')),
-      this.field('Gambling duty (%)', this.num(d, 'taxGamblingRate'))));
-    main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-      'Corporate/property tax is collected monthly from net property income. VAT is added to market purchases; gambling duty skims the casinos’ winnings. All flow into the Federal Treasury (raising it, shrinking the money supply).'));
-    main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
-      onclick: async () => {
-        try {
-          await PATCH('/api/gm/settings', {
-            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0, vatRate: Number(d.taxVatRate) || 0, gamblingRate: Number(d.taxGamblingRate) || 0 }
-          });
-          toast('Taxation settings saved.');
-        } catch (e) { toast(e.message, true); }
-      }
-    }, 'Save Taxation')));
-
     // Phase 35 — cadence intervals (world-clock hours between ticks)
     main.appendChild(Views.secLabel('Real-Time Cadences'));
     d.cadProdHours = d.cadProdHours === undefined ? (((s.cadence || {}).productionHours) || 1) : d.cadProdHours;
@@ -923,25 +976,82 @@ const GM = {
       }
     }, 'Save Cadences')));
 
-    main.appendChild(Views.secLabel('Snapshots & Rollback'));
-    const snapBox = el('div', el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Consulting the archive…'));
-    main.appendChild(snapBox);
-    GET('/api/gm/snapshots').then(({ snapshots }) => {
-      clear(snapBox);
-      const snaps = [...(snapshots || [])].reverse().slice(0, 20);
-      if (!snaps.length) return snapBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'A snapshot is written before every turn advance. None yet.'));
-      snapBox.appendChild(el('table.data', el('thead', el('tr', el('th', 'Turn'), el('th', 'Size'), el('th', 'Taken'), el('th', ''))),
-        el('tbody', snaps.map(sn => el('tr',
-          el('td', 'T' + sn.turn),
-          el('td', sn.bytes ? Math.round(sn.bytes / 1024) + ' KB' : '—'),
-          el('td', new Date(sn.mtime).toLocaleString()),
-          el('td', el('button.outline-btn', {
-            onclick: () => confirmModal('ROLL BACK THE WORLD', `Restore the world as it stood at the start of turn ${sn.turn}? Operator accounts and roles are preserved.`, async () => {
-              await POST('/api/gm/rollback', { turn: sn.turn });
-              toast('The world rolls back to turn ' + sn.turn + '.');
-            }, 'Roll Back')
-          }, '↺ Roll back')))))));
-    }).catch(e => { clear(snapBox); snapBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Archive unavailable: ' + e.message)); });
+  },
+
+  /* ═══════════ MAP & TERRITORY · Territory ═══════════
+     Who holds which land. The drawing itself happens on the map (the border
+     painter, public/js/borders.js); this page lists every region, edits the
+     foreign countries' map entries and jumps into the painter. */
+  openPainter(key, then) {
+    App.go('map');
+    setTimeout(async () => {
+      if (!window.MapEdit || !window.Borders) return;
+      MapEdit.toggle(true);
+      MapEdit.setMode('borders');
+      await Borders.open();
+      if (key && Borders.byKey[key]) Borders.target = key;
+      Borders.renderPanel();
+      if (then) then();
+    }, 80);
+  },
+  tabTerritory(main) {
+    main.appendChild(el('div.doc-title', 'Territory'));
+    main.appendChild(el('div.doc-sub', 'provinces & countries · paint borders on the map · found, cede and annex'));
+    main.appendChild(el('div.stage',
+      el('p', { style: 'font-size:13.5px; line-height:1.6; margin:0 0 10px;' },
+        'Borders are drawn with the border painter on the map: pick who gains land, then drag across a border to push it — the line wanders like a real frontier, coastlines never move. Found new provinces or countries, give a province to a foreign power, or annex a country as a province, all from the painter’s Territory panel.'),
+      el('div.btn-row',
+        el('button.solid-btn', { onclick: () => this.openPainter() }, '🖌 Open the border painter'),
+        el('button.dash-btn', { onclick: () => this.openPainter(null, () => Borders.newRegion('province')) }, '+ Found a province'),
+        el('button.dash-btn', { onclick: () => this.openPainter(null, () => Borders.newRegion('country')) }, '+ Found a country'))));
+
+    main.appendChild(Views.secLabel('Republic provinces'));
+    main.appendChild(el('table.data',
+      el('thead', el('tr', el('th', ''), el('th', 'Province'), el('th.num', 'Population'), el('th', 'Land'), el('th', ''))),
+      el('tbody', S().provinces.map(p => el('tr',
+        el('td', el('span.bp-swatch', { style: 'display:inline-block; background:' + (p.color || '#8a8a6a') })),
+        el('td', p.name),
+        el('td.num', fmtNum((p.vars || {}).population || 0)),
+        el('td', p.shape || (p.path && p.path.length) ? 'drawn' : el('span', { style: 'color:var(--accent);' }, 'none yet')),
+        el('td', { style: 'white-space:nowrap; text-align:right;' },
+          el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('p:' + p.id) }, '🖌 Paint'), ' ',
+          el('button.dash-btn.btn-xs', { onclick: () => { W.gmSel.provinces = p.id; this.go('map', 'provinces'); } }, 'Edit')))))));
+
+    const map = S().settings.map || {};
+    const d = this.getDraft('countries', { countries: (map.countries || []).map(c => ({ id: c.id, name: c.name, fill: c.fill || '#a8a196', entityId: c.entityId || '' })) });
+    main.appendChild(Views.secLabel('Foreign countries'));
+    main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:6px;' },
+      'A country on the map is a shade of grey plus a dossier (a foreign entity). Rename, reshade or relink it here; its land is painted on the map.'));
+    const foreign = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
+    const tbody = el('tbody');
+    for (const c of d.countries) {
+      const live = (map.countries || []).find(x => x.id === c.id) || {};
+      tbody.appendChild(el('tr',
+        el('td', this.color(c, 'fill')),
+        el('td', this.text(c, 'name')),
+        el('td', this.sel(c, 'entityId', [['', '— no dossier —'], ...foreign.map(e => [e.id, e.name])])),
+        el('td', live.shape ? 'drawn' : el('span', { style: 'color:var(--accent);' }, 'none yet')),
+        el('td', { style: 'white-space:nowrap; text-align:right;' }, el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('c:' + c.id) }, '🖌 Paint'))));
+    }
+    main.appendChild(el('table.data', el('thead', el('tr', el('th', 'Shade'), el('th', 'Name'), el('th', 'Dossier'), el('th', 'Land'), el('th', ''))), tbody));
+    main.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          // merge the edited fields into the live entries (shapes stay as stored)
+          const countries = (S().settings.map.countries || []).map(c => {
+            const e = d.countries.find(x => x.id === c.id);
+            return e ? Object.assign({}, c, { name: String(e.name || c.name).slice(0, 60), fill: e.fill, entityId: e.entityId || null }) : c;
+          });
+          const labels = (S().settings.map.labels || []).map(l => {
+            const e = d.countries.find(x => 'lbl_' + x.id === l.id);
+            return e ? Object.assign({}, l, { text: String(e.name || '').toUpperCase() || l.text }) : l;
+          });
+          await PATCH('/api/gm/settings', { map: { countries, labels } });
+          this.draftKey = null;
+          toast('Countries saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save countries')));
   },
 
   /* ═══════════ PROVINCES ═══════════ */
@@ -951,7 +1061,7 @@ const GM = {
     const selId = W.gmSel.provinces;
     main.appendChild(this.listPane(S().provinces, selId, (id) => { W.gmSel.provinces = id; this.draftKey = null; App.renderView(); },
       p => p.name, p => fmtCompact(p.vars.population), 'New Province',
-      () => { W.gmSel.provinces = '__new__'; this.draftKey = null; App.renderView(); }));
+      () => this.openPainter(null, () => Borders.newRegion('province'))));
 
     if (!selId) return;
     const isNew = selId === '__new__';
@@ -971,7 +1081,9 @@ const GM = {
       this.field('Label rotation (°)', this.num(d, 'labelRot')),
       this.field('Label size', this.num(d, 'labelSize'))));
     main.appendChild(this.field('Description', this.area(d, 'description')));
-    main.appendChild(this.field('Boundary — SVG path data ("M x y L x y … Z") or points "x,y x,y …" on the 3840×2160 map grid', this.area(d, 'shapeText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;')));
+    if (!isNew) main.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.openPainter('p:' + source.id) }, '🖌 Paint its borders on the map')));
+    main.appendChild(el('details.gm-advanced', el('summary', 'Advanced — raw boundary path'),
+      this.field('Boundary — SVG path data ("M x y L x y … Z") or points "x,y x,y …" on the 3840×2160 map grid', this.area(d, 'shapeText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;'))));
     main.appendChild(this.varsEditor(d, 'province'));
 
     // demographics — one metric at a time (the old grid crammed every metric
@@ -1187,159 +1299,6 @@ const GM = {
     return box;
   },
 
-  /* ═══════════ ENTITY REGISTRY ═══════════ */
-  tabRegistry(main) {
-    main.appendChild(el('div.doc-title', 'Entity Registry'));
-    main.appendChild(el('div.doc-sub', 'companies · parties · people · governments · foreign powers'));
-    if (!W.gmEntType) W.gmEntType = 'company';
-    const types = ['company', 'party', 'person', 'government', 'foreign', 'org'];
-    main.appendChild(el('div.chip-row', types.map(t =>
-      el('button.chip', { class: W.gmEntType === t ? 'active' : '', onclick: () => { W.gmEntType = t; this.draftKey = null; App.renderView(); } }, TYPE_LABEL[t] || t))));
-
-    const list = S().entities.filter(e => e.type === W.gmEntType);
-    const selId = W.gmSel.registry;
-    main.appendChild(this.listPane(list, selId, (id) => { W.gmSel.registry = id; this.draftKey = null; App.renderView(); },
-      e => e.name, e => e.industry || e.title || e.stance || '', 'New ' + (TYPE_LABEL[W.gmEntType] || 'Entity'),
-      () => { W.gmSel.registry = '__new__'; this.draftKey = null; App.renderView(); }));
-    if (!selId) return;
-    const isNew = selId === '__new__';
-    const source = isNew
-      ? { name: 'New ' + (TYPE_LABEL[W.gmEntType] || 'Entity'), type: W.gmEntType, color: '#5c5340', description: '', vars: {}, inventory: [] }
-      : entById(selId);
-    if (!source) return;
-    const d = this.getDraft('ent:' + selId, source);
-
-    main.appendChild(Views.secLabel(isNew ? 'New Record' : 'Edit — ' + source.name));
-    main.appendChild(el('div.form-grid',
-      this.field('Name', this.text(d, 'name')),
-      this.field('Type', this.sel(d, 'type', types.map(t => [t, TYPE_LABEL[t] || t]))),
-      this.field('Marker colour', this.color(d, 'color')),
-      this.field('Logo / image path', this.text(d, 'logo', '/assets/…')),
-      d.type === 'company' ? this.field('Industry', this.text(d, 'industry')) : null,
-      d.type === 'company' ? this.field('Controlled by', this.sel(d, 'ownerId', this.entOptions(null, true))) : null,
-      d.type === 'company' ? this.field('Chief Executive', this.sel(d, 'ceoId', this.entOptions(['person'], true))) : null,
-      d.type === 'company' ? this.field('Wage / employee / turn (' + CUR() + ')', this.num(d, 'wagePerTurn', '0.01')) : null,
-      d.type === 'company' ? this.field('Shares outstanding', this.num(d, 'sharesOutstanding')) : null,
-      d.type === 'party' ? this.field('Leader', this.sel(d, 'leaderId', this.entOptions(['person'], true))) : null,
-      d.type === 'party' ? this.field('Abbreviation', this.text(d, 'abbrev')) : null,
-      d.type === 'party' ? this.field('Seats (MPs)', this.num(d, 'mpCount')) : null,
-      d.type === 'person' ? this.field('Title', this.text(d, 'title')) : null,
-      (d.type === 'foreign' || d.type === 'org') ? this.field('Stance / relations', this.text(d, 'stance')) : null
-    ));
-    if (d.type === 'party') {
-      d.ideology = d.ideology || { econ: 0, soc: 0 };
-      main.appendChild(el('div.form-grid',
-        this.field('Ideology — economic (−100 left … +100 right)', this.num(d.ideology, 'econ')),
-        this.field('Ideology — social (−100 lib … +100 auth)', this.num(d.ideology, 'soc'))));
-      main.appendChild(this.check(d, 'inGovernment', 'Currently in government'));
-    }
-    main.appendChild(this.field('Description', this.area(d, 'description')));
-
-    if (d.type === 'company') {
-      main.appendChild(Views.secLabel('Share Register'));
-      d.shareholders = d.shareholders || [];
-      d.shareholders.forEach((sh, i) => {
-        main.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:flex-end; margin-bottom:4px;' },
-          el('div', { style: 'flex:1' }, this.sel(sh, 'entityId', this.entOptions())),
-          el('div', { style: 'width:130px' }, this.num(sh, 'shares')),
-          el('button.icon-btn', { onclick: () => { d.shareholders.splice(i, 1); App.renderView(); } }, '✕')));
-      });
-      main.appendChild(el('div.btn-row', el('button.dash-btn', {
-        onclick: () => { d.shareholders.push({ entityId: S().entities[0].id, shares: 0 }); App.renderView(); }
-      }, '+ Add shareholder')));
-      main.appendChild(this.varsEditor(d, 'company'));
-    } else {
-      main.appendChild(this.varsEditor(d, 'entity'));
-    }
-    // Phase 35 roster — Org Chart for entity members (the ONE delegation
-    // primitive; roster.userId is an ENTITY id, resolved via ownership.canAct)
-    if (!isNew) {
-      main.appendChild(Views.secLabel('Org Chart'));
-      main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-        'Roster members with scoped permissions. Members see their own entry only; owners see the full list.'));
-      d.roster = Array.isArray(d.roster) ? d.roster : [];
-      const VALID_SCOPES = [['company_controls', 'Company settings'], ['property_controls', 'Property settings'],
-        ['trade', 'Buy/sell items'], ['spend', 'Spend money'], ['campaign_minor', 'Minor campaigns'],
-        ['campaign_major', 'Major campaigns'], ['command_units', 'Command units'], ['manage_tenders', 'Tenders']];
-      const memberOpts = [['', '- choose member -'], ...this.entOptions(null, true)];
-      d.roster.forEach((member, i) => {
-        member.grants = member.grants || { scopes: [], spendLimitPerTurn: null };
-        member.grants.scopes = Array.isArray(member.grants.scopes) ? member.grants.scopes : [];
-        const scopeChips = VALID_SCOPES.map(([k, label]) => {
-          const active = member.grants.scopes.includes(k);
-          return el('button.chip', { class: active ? 'active' : '', style: 'font-size:10px; padding:1px 6px;',
-            onclick: () => { if (active) member.grants.scopes = member.grants.scopes.filter(s => s !== k); else member.grants.scopes.push(k); App.renderView(); }
-          }, label);
-        });
-        const limitInput = el('input.text-input', { type: 'number', step: 'any', style: 'max-width:140px;',
-          value: member.grants.spendLimitPerTurn === null || member.grants.spendLimitPerTurn === undefined ? '' : member.grants.spendLimitPerTurn,
-          placeholder: 'unlimited',
-          oninput: (e) => { member.grants.spendLimitPerTurn = e.target.value === '' ? null : Math.max(0, Number(e.target.value) || 0); } });
-        const expiring = member.expiresAt && member.expiresAt < Date.now();
-        main.appendChild(el('div', { style: `display:flex; gap:10px; align-items:center; margin-bottom:8px; flex-wrap:wrap; ${expiring ? 'opacity:0.5;' : ''}` },
-          el('div', { style: 'flex:1 1 150px' }, this.text(member, 'title', 'Title')),
-          el('div', { style: 'flex:1 1 200px' }, this.sel(member, 'userId', memberOpts, () => App.renderView())),
-          el('div', { style: 'flex:1 1 160px' }, limitInput),
-          el('div', { style: 'display:flex; gap:3px; flex-wrap:wrap;' }, ...scopeChips),
-          el('button.icon-btn', { onclick: () => { d.roster.splice(i, 1); App.renderView(); } }, '✕')));
-      });
-      main.appendChild(el('div.btn-row', el('button.dash-btn', {
-        onclick: () => { d.roster = d.roster || []; d.roster.push({ userId: '', title: '', grants: { scopes: [], spendLimitPerTurn: null, properties: [], accounts: [] }, expiresAt: null }); App.renderView(); }
-      }, '+ Add member')));
-      // Pending requests badge
-      const pending = (d.pendingRequests || []).filter(r => r.status === 'pending');
-      if (pending.length) {
-        main.appendChild(Views.secLabel(`Pending Requests (${pending.length})`));
-        pending.forEach(req => {
-          const reqUser = (S().users || []).find(u => u.entityId === req.userId) || {};
-          main.appendChild(el('div', { style: 'display:flex; gap:10px; align-items:center; margin-bottom:6px; padding:6px 8px; background:var(--bg-wash); border-radius:4px;' },
-            el('div', { style: 'flex:1;' },
-              el('div', { style: 'font-size:12px;' }, `${reqUser.displayName || req.userId}: ${req.scope}`),
-              el('div', { style: 'font-size:11px; color:var(--ink-soft);' }, req.description || (req.amount ? `₳${req.amount}` : ''))),
-            el('button.dash-btn', { style: 'font-size:11px; padding:2px 8px;', onclick: async () => {
-              await api('POST', `/api/entity/${d.id}/requests/${req.id}/approve`); App.renderView();
-            } }, 'Approve'),
-            el('button.dash-btn', { style: 'font-size:11px; padding:2px 8px;', onclick: async () => {
-              await api('POST', `/api/entity/${d.id}/requests/${req.id}/deny`); App.renderView();
-            } }, 'Deny')));
-        });
-      }
-    }
-    // Foreign powers: a read-only trade profile (what they buy & sell, at what
-    // level and price) right here in the registry, with a jump to the Trade Desk
-    // to edit — so a GM can size up any country's demand without hunting for it.
-    if ((d.type === 'foreign' || d.type === 'org') && !isNew) {
-      const partner = ((S().settings.trade || {}).partners || []).find(p => p.entityId === d.id);
-      main.appendChild(Views.secLabel('Trade profile'));
-      if (!partner) {
-        main.appendChild(el('div', { style: 'font-size:12.5px; color:var(--ink-faint);' }, 'Not yet a trade partner. '));
-        main.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'trade'; this.draftKey = null; App.renderView(); } }, 'Set up on the Trade Desk →'));
-      } else {
-        const priceOf = (iid) => {
-          const it = itemById(iid); if (!it) return 0;
-          const m = (partner.priceMult && partner.priceMult[iid] > 0) ? partner.priceMult[iid]
-            : (partner.prices && partner.prices[iid] > 0 && it.marketValue > 0 ? partner.prices[iid] / it.marketValue : 1);
-          return Math.round((it.marketValue || 0) * m * 100) / 100;
-        };
-        const profile = (title, ids, lvlMap, kind) => {
-          const wrap = el('div', { style: 'margin-bottom:8px;' });
-          wrap.appendChild(el('div.mono-label', title));
-          if (!ids.length) { wrap.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint);' }, '— none —')); return wrap; }
-          const tbl = el('table.data', el('thead', el('tr', el('th', 'Good'), el('th', 'Level'), el('th.num', 'Price'))));
-          const body = el('tbody');
-          const kindMult = econMult(kind === 'demand' ? 'exportMultiplier' : 'importMultiplier');
-          ids.forEach(iid => { const it = itemById(iid); if (!it) return; body.appendChild(el('tr', el('td', it.name), el('td', (lvlMap || {})[iid] || 'Med'), el('td.num', CUR() + fmtNum(priceOf(iid) * kindMult)))); });
-          tbl.appendChild(body); wrap.appendChild(tbl); return wrap;
-        };
-        main.appendChild(profile('Buys from Arcasia — our exports', partner.exports || [], partner.demand, 'demand'));
-        main.appendChild(profile('Sells to Arcasia — our imports', partner.imports || [], partner.supply, 'supply'));
-        main.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'trade'; this.draftKey = null; App.renderView(); } }, 'Edit on the Trade Desk →'));
-      }
-    }
-    main.appendChild(this.inventoryEditor(d));
-    main.appendChild(this.saveBar('entities', d, isNew));
-  },
-
   /* ═══════════ MONEY ═══════════ */
   tabMoney(main) {
     main.appendChild(el('div.doc-title', 'Money & Accounts'));
@@ -1374,6 +1333,39 @@ const GM = {
       el('tbody', [...S().accounts].sort((a, b) => b.balance - a.balance).map(a => el('tr',
         el('td', entName(a.ownerId)), el('td', a.name), el('td.num', fmtMoney(a.balance)),
         el('td', el('button.icon-btn', { title: 'Close account', onclick: () => this.deleteColl('accounts', a.id, a.name) }, '✕')))))));
+  },
+
+  /* Taxation (was on World & Time) — rendered under the economy levers. */
+  taxSection(main) {
+    const s = S().settings;
+    const d = this._taxDraft || (this._taxDraft = {
+      taxEnabled: (s.taxation || {}).enabled || false,
+      taxCorporateRate: (s.taxation || {}).corporateRate || 0,
+      taxPropertyRate: (s.taxation || {}).propertyRate || 0
+    });
+    main.appendChild(Views.secLabel('Taxation'));
+    d.taxVatRate = d.taxVatRate === undefined ? ((s.taxation || {}).vatRate || 0) : d.taxVatRate;
+    d.taxGamblingRate = d.taxGamblingRate === undefined ? ((s.taxation || {}).gamblingRate || 0) : d.taxGamblingRate;
+    main.appendChild(this.check(d, 'taxEnabled', 'Enable taxation (corporate/property monthly; VAT & gambling duty on every transaction)'));
+    main.appendChild(el('div.form-grid',
+      this.field('Corporate tax rate (%)', this.num(d, 'taxCorporateRate')),
+      this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate')),
+      this.field('VAT on purchases (%)', this.num(d, 'taxVatRate')),
+      this.field('Gambling duty (%)', this.num(d, 'taxGamblingRate'))));
+    main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
+      'Corporate/property tax is collected monthly from net property income. VAT is added to market purchases; gambling duty skims the casinos’ winnings. All flow into the Federal Treasury (raising it, shrinking the money supply).'));
+    main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
+      onclick: async () => {
+        try {
+          await PATCH('/api/gm/settings', {
+            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0, vatRate: Number(d.taxVatRate) || 0, gamblingRate: Number(d.taxGamblingRate) || 0 }
+          });
+          this._taxDraft = null;
+          toast('Taxation settings saved.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, 'Save Taxation')));
+
   },
 
   /* ═══════════ ECONOMY (global levers) ═══════════ */
@@ -1507,6 +1499,7 @@ const GM = {
         } catch (e) { toast(e.message, true); }
       }
     }, 'Save Household Settings')));
+    this.taxSection(main);
   },
 
   /* ═══════════ ELECTION (Phase 33) ═══════════
@@ -1753,90 +1746,6 @@ const GM = {
     main.appendChild(trTbl);
     main.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
       el('button.dash-btn', { onclick: () => { W.gmTab = 'money'; App.renderView(); } }, 'Money & Accounts →')));
-  },
-
-  /* ═══════════ ASSETS & OWNERSHIP (Workstream C) ═══════════
-     A single desk for moving items, assigning/transferring shares and
-     reassigning company/property control — the ergonomic twin of Money &
-     Accounts, so a GM never has to hand-edit an entity record for these. Every
-     action hits a small /api/gm/* route that store.save()s + broadcasts and
-     runs the relevant reconciliation (syncAllCertificates / syncAllDeeds). */
-  tabAssets(main) {
-    main.appendChild(el('div.doc-title', 'Assets & Ownership'));
-    main.appendChild(el('div.doc-sub', 'move items, assign shares and reassign control — no record-editing required'));
-
-    const ents = S().entities;
-    const companies = ents.filter(e => e.type === 'company' && e.sharesOutstanding);
-
-    // ---- Item transfer ----
-    main.appendChild(Views.secLabel('Move an Item'));
-    const it = this._assetItem || (this._assetItem = { fromEntityId: (ents[0] || {}).id, toEntityId: (ents[1] || {}).id, itemId: (S().items[0] || {}).id, qty: 1 });
-    main.appendChild(el('div.form-grid',
-      this.field('From holder', this.sel(it, 'fromEntityId', this.entOptions())),
-      this.field('To holder', this.sel(it, 'toEntityId', this.entOptions())),
-      this.field('Item', this.sel(it, 'itemId', this.itemOptions())),
-      this.field('Quantity', this.num(it, 'qty'))));
-    main.appendChild(el('div.btn-row', el('button.solid-btn', {
-      onclick: async () => { try { await POST('/api/gm/give-item', it); toast('Item moved.'); } catch (e) { toast(e.message, true); } }
-    }, 'Move Item')));
-
-    // ---- Share transfer / assignment ----
-    main.appendChild(Views.secLabel('Assign / Transfer Shares'));
-    const sh = this._assetShare || (this._assetShare = { companyId: (companies[0] || {}).id, fromEntityId: 'float', toEntityId: (ents[0] || {}).id, shares: 1 });
-    const holderOpts = [['float', '— Float (Exchange) —'], ...this.entOptions()];
-    main.appendChild(el('div.form-grid',
-      this.field('Company', this.sel(sh, 'companyId', companies.map(c => [c.id, c.name]), () => App.renderView())),
-      this.field('From', this.sel(sh, 'fromEntityId', holderOpts)),
-      this.field('To', this.sel(sh, 'toEntityId', holderOpts)),
-      this.field('Shares', this.num(sh, 'shares'))));
-    const co = entById(sh.companyId);
-    if (co) {
-      const pool = market_treasuryPoolClient(co);
-      main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-soft); margin:2px 0 8px; font-family:var(--font-mono);' },
-        'Outstanding ' + fmtNum(co.sharesOutstanding) + ' · Float ' + fmtNum(pool) +
-        ((co.shareholders || []).length ? ' · ' + (co.shareholders || []).map(s => entName(s.entityId) + ' ' + fmtNum(s.shares)).join(' · ') : '')));
-    }
-    main.appendChild(el('div.btn-row', el('button.solid-btn', {
-      onclick: async () => { try { await POST('/api/gm/set-holding', sh); toast('Shares reassigned.'); } catch (e) { toast(e.message, true); } }
-    }, 'Assign Shares')));
-
-    // ---- Company ownership ----
-    main.appendChild(Views.secLabel('Company Ownership'));
-    const ownCo = entById(W.gmAssetCo) || companies[0];
-    if (ownCo) {
-      const draft = (this._assetOwn && this._assetOwn.id === ownCo.id) ? this._assetOwn
-        : (this._assetOwn = { id: ownCo.id, ownerId: ownCo.ownerId || '', ceoId: ownCo.ceoId || '' });
-      main.appendChild(el('div.form-grid',
-        this.field('Company', this.sel({ v: ownCo.id }, 'v', companies.map(c => [c.id, c.name]), (v) => { W.gmAssetCo = v; this._assetOwn = null; App.renderView(); })),
-        this.field('Owner', this.sel(draft, 'ownerId', this.entOptions())),
-        this.field('CEO', this.sel(draft, 'ceoId', this.entOptions()))));
-      main.appendChild(el('div.btn-row', el('button.solid-btn', {
-        onclick: async () => {
-          try {
-            await PATCH('/api/gm/coll/entities/' + ownCo.id, { ownerId: draft.ownerId, ceoId: draft.ceoId });
-            this._assetOwn = null; toast('Ownership updated.');
-          } catch (e) { toast(e.message, true); }
-        }
-      }, 'Save Ownership')));
-    }
-
-    // ---- Property ownership ----
-    main.appendChild(Views.secLabel('Property Ownership'));
-    const props = S().properties || [];
-    if (props.length) {
-      const prop = props.find(p => p.id === W.gmAssetProp) || props[0];
-      const pd = (this._assetProp && this._assetProp.id === prop.id) ? this._assetProp
-        : (this._assetProp = { id: prop.id, ownerId: prop.ownerId || '' });
-      main.appendChild(el('div.form-grid',
-        this.field('Property', this.sel({ v: prop.id }, 'v', props.map(p => [p.id, p.name]), (v) => { W.gmAssetProp = v; this._assetProp = null; App.renderView(); })),
-        this.field('Owner', this.sel(pd, 'ownerId', this.entOptions()))));
-      main.appendChild(el('div.btn-row', el('button.solid-btn', {
-        onclick: async () => {
-          try { await PATCH('/api/gm/coll/properties/' + prop.id, { ownerId: pd.ownerId }); this._assetProp = null; toast('Property reassigned.'); }
-          catch (e) { toast(e.message, true); }
-        }
-      }, 'Save Property Owner')));
-    }
   },
 
   /* ═══════════ ITEMS ═══════════ */
@@ -2736,9 +2645,29 @@ const GM = {
   },
 
   /* ═══════════ DANGER ═══════════ */
-  tabDanger(main) {
-    main.appendChild(el('div.doc-title', 'Archive & Danger'));
-    main.appendChild(el('div.doc-sub', 'export, restore, or burn it all down'));
+  tabArchive(main) {
+    main.appendChild(el('div.doc-title', 'Archive & Rollback'));
+    main.appendChild(el('div.doc-sub', 'turn snapshots · export, restore, or burn it all down'));
+    main.appendChild(Views.secLabel('Snapshots & Rollback'));
+    const snapBox = el('div', el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Consulting the archive…'));
+    main.appendChild(snapBox);
+    GET('/api/gm/snapshots').then(({ snapshots }) => {
+      clear(snapBox);
+      const snaps = [...(snapshots || [])].reverse().slice(0, 20);
+      if (!snaps.length) return snapBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'A snapshot is written before every turn advance. None yet.'));
+      snapBox.appendChild(el('table.data', el('thead', el('tr', el('th', 'Turn'), el('th', 'Size'), el('th', 'Taken'), el('th', ''))),
+        el('tbody', snaps.map(sn => el('tr',
+          el('td', 'T' + sn.turn),
+          el('td', sn.bytes ? Math.round(sn.bytes / 1024) + ' KB' : '—'),
+          el('td', new Date(sn.mtime).toLocaleString()),
+          el('td', el('button.outline-btn', {
+            onclick: () => confirmModal('ROLL BACK THE WORLD', `Restore the world as it stood at the start of turn ${sn.turn}? Operator accounts and roles are preserved.`, async () => {
+              await POST('/api/gm/rollback', { turn: sn.turn });
+              toast('The world rolls back to turn ' + sn.turn + '.');
+            }, 'Roll Back')
+          }, '↺ Roll back')))))));
+    }).catch(e => { clear(snapBox); snapBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Archive unavailable: ' + e.message)); });
+    main.appendChild(Views.secLabel('Archive'));
     main.appendChild(el('div.stage',
       el('div.stage-header', el('span.stage-chapter', 'Archive'), el('span.stage-year', '§1')),
       el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Download the complete world as a single JSON file — every province, account, article and log entry. Keep it somewhere safe; paper burns.'),

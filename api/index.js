@@ -76,7 +76,19 @@ module.exports = (req, res) => {
 async function handleRequest(req, res) {
   try {
     const url = new URL(req.url, 'http://localhost');
-    const pathname = decodeURIComponent(url.pathname);
+    let pathname = decodeURIComponent(url.pathname);
+    // Vercel may hand the function its REWRITTEN url (/api/index) rather
+    // than the one the browser asked for — every route then 404'd ("Unknown
+    // API endpoint: POST /api/index" on sign-in). vercel.json forwards the
+    // captured path as ?__path=; fall back to Vercel's route-match header.
+    if (pathname === '/api/index' || pathname === '/api/index.js') {
+      let orig = url.searchParams.get('__path');
+      if (orig === null) {
+        const m = String(req.headers['x-now-route-matches'] || '').match(/(?:^|&)path=([^&]*)/);
+        if (m) orig = decodeURIComponent(m[1]);
+      }
+      if (orig !== null) pathname = '/api/' + String(orig).replace(/^\/+/, '');
+    }
 
     // Read the body once, up front, so re-running the handler on a conflict
     // retry is safe (server/api.js readBody() prefers req.body when set).

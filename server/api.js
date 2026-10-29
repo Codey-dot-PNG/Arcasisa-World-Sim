@@ -663,15 +663,6 @@ async function handle(req, res, pathname, method) {
   if (pathname === '/api' || pathname === '/api/') pathname = '/api/index';
   if (!pathname.startsWith('/api/')) return false;
   pathname = originalApiPath(req, pathname);
-  // TEMPORARY routing diagnostic (remove once the Vercel path issue is
-  // settled): ?__debug=1 on any /api url echoes what the process received.
-  if (/[?&]__debug=1\b/.test(String(req.url))) {
-    const h = {};
-    for (const k of Object.keys(req.headers)) if (!/cookie|authorization/i.test(k)) h[k] = req.headers[k];
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    res.end(JSON.stringify({ reqUrl: req.url, pathname, headers: h, entry: require.main && require.main.filename }));
-    return true;
-  }
   const db = store.get();
   const u = getUser(req);
   // response-sync context (see attachSync) — per-response, never module state

@@ -636,8 +636,42 @@ async function ledgerPage(u, query) {
 }
 
 // ---------- request handling ----------------------------------------------
+// Hosting rewrites (vercel.json sends /api/:path* to /api/index) can hand
+// the process the REWRITTEN url instead of the one the browser asked for —
+// on the live Vercel deployment every request arrived as /api/index and
+// 404'd/401'd. Recover the original path from the forwarded ?__path= query
+// or the headers platforms use for it. Done here, in the one handler every
+// entry point (server.js, api/index.js, api/[...path].js) shares.
+function originalApiPath(req, pathname) {
+  if (pathname !== '/api/index' && pathname !== '/api/index.js' && pathname !== '/api' && pathname !== '/api/') return pathname;
+  const url = new URL(req.url, 'http://localhost');
+  let orig = url.searchParams.get('__path');
+  if (orig === null) orig = url.searchParams.get('path');
+  if (orig === null) {
+    const m = String(req.headers['x-now-route-matches'] || '').match(/(?:^|&)(?:__)?path=([^&]*)/);
+    if (m) orig = decodeURIComponent(m[1]);
+  }
+  if (orig === null) {
+    for (const h of ['x-matched-path', 'x-invoke-path', 'x-forwarded-uri', 'x-original-url', 'x-rewrite-url']) {
+      const v = req.headers[h];
+      if (v && String(v).startsWith('/api/') && !String(v).startsWith('/api/index')) { orig = String(v).split('?')[0].slice(5); break; }
+    }
+  }
+  return orig === null ? pathname : '/api/' + String(orig).replace(/^\/+/, '');
+}
 async function handle(req, res, pathname, method) {
+  if (pathname === '/api' || pathname === '/api/') pathname = '/api/index';
   if (!pathname.startsWith('/api/')) return false;
+  pathname = originalApiPath(req, pathname);
+  // TEMPORARY routing diagnostic (remove once the Vercel path issue is
+  // settled): ?__debug=1 on any /api url echoes what the process received.
+  if (/[?&]__debug=1\b/.test(String(req.url))) {
+    const h = {};
+    for (const k of Object.keys(req.headers)) if (!/cookie|authorization/i.test(k)) h[k] = req.headers[k];
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    res.end(JSON.stringify({ reqUrl: req.url, pathname, headers: h, entry: require.main && require.main.filename }));
+    return true;
+  }
   const db = store.get();
   const u = getUser(req);
   // response-sync context (see attachSync) — per-response, never module state

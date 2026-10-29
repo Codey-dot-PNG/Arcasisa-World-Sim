@@ -271,6 +271,33 @@ const ABILITIES = {
   order_airstrikes: 'Order airstrikes',
   distribute_food: 'Release food from the national stockpile'
 };
+// Audit detail for an edit: "field: old → new" for each key the patch
+// actually changes (objects are named, not dumped), capped so a big Studio
+// save can't bloat the timeline. Secrets are listed by name only.
+// "entities" → "entity", "properties" → "property", "markers" → "marker"
+function singular(coll) { return /ies$/.test(coll) ? coll.slice(0, -3) + 'y' : coll.replace(/s$/, ''); }
+
+function describeChanges(obj, patch, secret) {
+  if (!patch || typeof patch !== 'object') return '';
+  const short = (v) => {
+    if (v === undefined || v === null || v === '') return '—';
+    if (typeof v === 'object') return Array.isArray(v) ? `[${v.length}]` : '{…}';
+    const t = String(v);
+    return t.length > 40 ? t.slice(0, 39) + '…' : t;
+  };
+  const out = [];
+  for (const k of Object.keys(patch)) {
+    if (k === 'id') continue;
+    const a = obj ? obj[k] : undefined, b = patch[k];
+    if (JSON.stringify(a) === JSON.stringify(b)) continue;
+    if (secret && secret.includes(k)) { out.push(k + ' changed'); continue; }
+    if ((a && typeof a === 'object') || (b && typeof b === 'object')) out.push(k + ' edited');
+    else out.push(`${k}: ${short(a)} → ${short(b)}`);
+  }
+  const txt = out.join(' · ');
+  return txt.length > 400 ? txt.slice(0, 399) + '…' : txt;
+}
+
 function hasAbility(u, key) {
   const p = (u && u.role && u.role.perms) || {};
   return !!(p.gm || (Array.isArray(p.abilities) && p.abilities.includes(key)));
@@ -466,13 +493,17 @@ function filterState(u) {
     .map(n => { const { body, ...meta } = n; return meta; });
 
   // Timeline visibility (Phase 6, tightened): the full record is GM-only.
-  // Non-GM operators receive only transfer/trade/market/inventory entries
-  // that concern their own ownership chain (their entity and companies it
-  // controls) — no account creation, system notices or anyone else's
-  // business. Cap kept at 400 after filtering.
-  const playerTlTypes = new Set(['economy', 'ownership', 'market', 'inventory']);
+  // Non-GM operators receive (a) everything THEY did — matched on the
+  // entry's actor (logged by display name; the cloud timeline table has no
+  // user-id column), so a protest filed, food released, roster edit or
+  // article published shows up in their own record whatever its type — and
+  // (b) business/politics entries that concern their own ownership chain
+  // (their entity and what it controls). No account creation, system
+  // notices or anyone else's business. Cap kept at 400 after filtering.
+  const playerTlTypes = new Set(['economy', 'ownership', 'market', 'inventory', 'roster', 'politics', 'election', 'event']);
   const timeline = (p.gm ? db.timeline
-    : db.timeline.filter(e => playerTlTypes.has(e.type) && e.refs && e.refs.some(r => controlled.has(r)))).slice(-400);
+    : db.timeline.filter(e => (e.actor && (e.actor === u.user.displayName || e.actor === 'GM ' + u.user.displayName)) ||
+      (playerTlTypes.has(e.type) && e.refs && e.refs.some(r => controlled.has(r))))).slice(-400);
 
   // Trade offers (Phase 4.3): a user sees offers where either side is in their
   // ownership chain — or an entity they hold a trade grant on (Phase 36:
@@ -645,7 +676,7 @@ async function ledgerPage(u, query) {
 // Office widget catalogue (Phase 36) — the client's Office.TYPES mirrors these
 // keys (public/js/office.js); unknown types are dropped on save.
 const OFFICE_TYPES = ['accounts', 'portfolio', 'quotes', 'inventory', 'news', 'trades', 'polling',
-  'parliament', 'food', 'conflict', 'notes', 'clock', 'province', 'dossier', 'ledger'];
+  'parliament', 'food', 'conflict', 'notes', 'clock', 'province', 'dossier', 'ledger', 'holdings'];
 const OFFICE_STYLES = ['ledger', 'card', 'dark', 'telegram', 'accent'];
 const OFFICE_MAX_WIDGETS = 24;
 
@@ -778,6 +809,7 @@ async function handle(req, res, pathname, method) {
       if (String(b.new || '').length < 4) return bad('New passphrase too short.');
       const { salt, hash } = hashPassword(String(b.new));
       u.user.salt = salt; u.user.passHash = hash;
+      store.log('system', 'Passphrase changed', u.user.username, u.user.displayName, []);
       store.save();
       return json(res, 200, { ok: true });
     }
@@ -795,7 +827,7 @@ async function handle(req, res, pathname, method) {
         if (!w || !OFFICE_TYPES.includes(w.type)) continue;
         let opts = (w.opts && typeof w.opts === 'object' && !Array.isArray(w.opts)) ? w.opts : {};
         if (JSON.stringify(opts).length > 3000) opts = {};
-        widgets.push({
+        const ow = {
           id: String(w.id || store.uid('ow')).replace(/[^\w-]/g, '').slice(0, 32) || store.uid('ow'),
           type: w.type,
           w: Math.max(1, Math.min(4, Math.round(Number(w.w) || 1))),
@@ -805,7 +837,14 @@ async function handle(req, res, pathname, method) {
           style: OFFICE_STYLES.includes(w.style) ? w.style : 'ledger',
           title: String(w.title || '').slice(0, 40),
           opts
-        });
+        };
+        // free placement on the desk canvas: column 0–3 and pixels from the
+        // top; a widget without a spot is packed into the first gap client-side
+        if (w.y !== undefined && w.y !== null && w.y !== '' && Number.isFinite(Number(w.y))) {
+          ow.x = Math.max(0, Math.min(3, Math.round(Number(w.x) || 0)));
+          ow.y = Math.max(0, Math.min(50000, Math.round(Number(w.y))));
+        }
+        widgets.push(ow);
       }
       u.user.office = { widgets, updatedAt: Date.now() };
       store.save();
@@ -1103,6 +1142,8 @@ async function handle(req, res, pathname, method) {
         pos[0] < 0 || pos[0] > 3840 || pos[1] < 0 || pos[1] > 2160) return bad('Invalid target position.');
       const result = war.dropBomb(db, side, pos, u.user.displayName, key);
       if (!result.ok) return bad(result.error);
+      store.log('event', `Airstrike ordered${doc.name ? ' — ' + doc.name : ''}`,
+        `${result.aircraftRemaining != null ? result.aircraftRemaining + ' aircraft remaining' : ''}`, u.user.displayName, [doc.defenderId].filter(Boolean));
       // save without broadcast — same reasoning as /api/war/command above:
       // the orderer splices the returned strike into its prediction, everyone
       // else learns of it from the next heartbeat; the blast's ground effects
@@ -2212,6 +2253,8 @@ async function handle(req, res, pathname, method) {
       if (!gm && !partyControlled) return deny('You are not a party to that contract.');
       if (c.status === 'active' || c.status === 'proposed') return bad('Cancel the contract before removing it.');
       db.tradeContracts.splice(idx, 1);
+      store.log('economy', 'Ongoing contract removed from the books', c.memo || c.itemId || '', u.user.displayName,
+        [c.holderId, c.partnerId, c.fromEntityId, c.toEntityId].filter(Boolean));
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true });
     }
@@ -2600,6 +2643,7 @@ async function handle(req, res, pathname, method) {
         const scenario = { id: 'custom_' + Date.now().toString(36), name: String(b.name || 'Custom War').slice(0, 80), attackerId, defenderId, staging: { x0: 2900, y0: 500, x1: 3100, y1: 900 }, objectives: [{ kind: 'seize_capital', priority: 1 }], units, defense: { citySizeStrength: { 1: 1300, 2: 2200, 3: 3800 }, militaryPropertyStrength: 2600 }, tuning: { consolidateFrac: .35, collapseFrac: .12 } };
         db.settings.warCustomScenarios = db.settings.warCustomScenarios || [];
         db.settings.warCustomScenarios.push(scenario);
+        store.log('gm', `War scenario drafted: ${scenario.name}`, `${attacker.name} vs ${defender.name} · ${units.length} units`, actor, [attackerId, defenderId]);
         store.save(); broadcast('sync');
         return json(res, 200, { scenario });
       }
@@ -2679,6 +2723,8 @@ async function handle(req, res, pathname, method) {
         const b = await readBody(req);
         const applied = war.applyTreaty(db, b || {}, actor);
         if (!applied.length) return bad('The treaty contained no valid clauses.');
+        store.log('event', 'Peace treaty signed', applied.join('; '), actor,
+          [b && b.reparations && b.reparations.fromEntityId, b && b.reparations && b.reparations.toEntityId, b && b.cede && b.cede.toEntityId].filter(Boolean));
         store.save(); broadcast('sync');
         return json(res, 200, { ok: true, applied });
       }
@@ -2745,6 +2791,9 @@ async function handle(req, res, pathname, method) {
         try {
           sim.applyEffect(fx, { actor, eventName: 'GM influence' });
         } catch (e) { return bad(e.message); }
+        // applyEffect only logs some effect types itself — always leave a
+        // GM-side trace of the direct intervention.
+        store.log('gm', `GM influence applied: ${fx.type}`, describeChanges({}, fx), actor, [fx.target, fx.entityId, fx.partyId].filter(x => typeof x === 'string'));
         sim.updateDerived();
         store.save(); broadcast('sync');
         return json(res, 200, { ok: true });
@@ -2882,6 +2931,7 @@ async function handle(req, res, pathname, method) {
       if (pathname === '/api/gm/settings' && method === 'PATCH') {
         const b = await readBody(req);
         const s = db.settings;
+        const settingsChanges = describeChanges(s, b);
         for (const k of ['worldName', 'currency', 'currencyName', 'parliamentSeats']) if (b[k] !== undefined) s[k] = b[k];
         if (b.time) {
           const oldDate = s.time.date;
@@ -3067,7 +3117,7 @@ async function handle(req, res, pathname, method) {
           election.applyTuning(db, s.election);
         }
         sim.scheduleAuto();
-        store.log('system', 'World settings updated', '', actor, []);
+        store.log('system', 'World settings updated', settingsChanges, actor, []);
         store.save(); broadcast('sync');
         return json(res, 200, { settings: s });
       }
@@ -3108,6 +3158,7 @@ async function handle(req, res, pathname, method) {
           store.log('system', `Account deleted: ${target.username}`, '', actor, []);
         } else {
           const b = await readBody(req);
+          const userChanges = [describeChanges(target, b, ['password', 'passHash', 'salt']), b.password ? 'passphrase reset' : ''].filter(Boolean).join(' · ');
           if (b.displayName !== undefined) target.displayName = String(b.displayName).slice(0, 60);
           if (b.roleId !== undefined) {
             if (!db.roles.some(r => r.id === b.roleId)) return bad('Unknown role.');
@@ -3123,7 +3174,7 @@ async function handle(req, res, pathname, method) {
             target.newspaperId = (b.newspaperId && validPaperIds.has(b.newspaperId)) ? b.newspaperId : null;
           }
           if (b.password) { const { salt, hash } = hashPassword(String(b.password)); target.salt = salt; target.passHash = hash; }
-          store.log('system', `Account updated: ${target.username}`, '', actor, []);
+          store.log('system', `Account updated: ${target.username}`, userChanges, actor, [target.entityId].filter(Boolean));
         }
         sim.syncPresidency(db);
         store.save(); broadcast('sync');
@@ -3167,7 +3218,7 @@ async function handle(req, res, pathname, method) {
           db[coll].push(b);
           if (coll === 'properties') deeds.syncAllDeeds(db); // issue the deed item
           if (coll === 'entities') market.syncAllCertificates(db); // mirror register edits into inventories
-          store.log('gm', `Created ${coll.slice(0, -1)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
+          store.log('gm', `Created ${singular(coll)}: ${b.name || b.key || b.id}`, '', actor, [b.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { id: b.id, obj: b });
         }
@@ -3189,6 +3240,7 @@ async function handle(req, res, pathname, method) {
           }
           // re-home a dragged property/marker by geometry when pos moved and
           // the client didn't send an explicit provinceId override
+          const changes = describeChanges(obj, b);
           const posMoved = b.pos !== undefined && b.provinceId === undefined && (coll === 'properties' || coll === 'markers');
           const kindChanged = coll === 'properties' && b.kind !== undefined && b.kind !== obj.kind && b.texture === undefined;
           Object.assign(obj, b);
@@ -3202,7 +3254,7 @@ async function handle(req, res, pathname, method) {
           }
           if (coll === 'properties') deeds.syncAllDeeds(db); // rename/revalue/re-home the deed
           if (coll === 'entities') market.syncAllCertificates(db); // Share-Register edits mirror into inventories immediately (no restart)
-          store.log('gm', `Updated ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, [obj.id]);
+          store.log('gm', `Updated ${singular(coll)}: ${obj.name || obj.key || obj.id}`, changes, actor, [obj.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { obj });
         }
@@ -3214,7 +3266,7 @@ async function handle(req, res, pathname, method) {
           db[coll] = db[coll].filter(x => x.id !== obj.id);
           if (coll === 'properties') deeds.syncAllDeeds(db); // retire the deed item
           if (coll === 'entities') market.syncAllCertificates(db); // drop stale certs when a shareholder entity is removed
-          store.log('gm', `Deleted ${coll.slice(0, -1)}: ${obj.name || obj.key || obj.id}`, '', actor, []);
+          store.log('gm', `Deleted ${singular(coll)}: ${obj.name || obj.key || obj.id}`, '', actor, [obj.id]);
           store.save(); broadcast('sync');
           return json(res, 200, { ok: true });
         }

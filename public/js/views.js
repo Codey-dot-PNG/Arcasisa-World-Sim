@@ -933,13 +933,14 @@ const Views = {
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
-  tradeModal(prefItem, prefTo) {
+  tradeModal(prefItem, prefTo, prefFrom) {
     // sender can be any entity in the controlled chain (or one we hold a
     // trade grant on — Phase 36) that holds something
     const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => (isGM() || mine.has(e.id)) && (e.inventory || []).length);
     if (!sources.length) return toast('No inventory to send — you and your companies hold nothing.', true);
-    let fromId = sources.some(s => s.id === W.me.entityId) ? W.me.entityId : sources[0].id;
+    let fromId = prefFrom && sources.some(s => s.id === prefFrom) ? prefFrom
+      : sources.some(s => s.id === W.me.entityId) ? W.me.entityId : sources[0].id;
 
     const fromSel = el('select.text-input', sources.map(e =>
       el('option', { value: e.id, selected: e.id === fromId ? 'selected' : undefined }, e.name)));
@@ -4174,7 +4175,7 @@ const Views = {
     return row;
   },
 
-  tradeOfferComposer() {
+  tradeOfferComposer(prefFrom) {
     const myEnt = myEntity();
     if (!myEnt && !isGM()) return toast('You have no entity to trade from.', true);
     // offer can come from any entity in the controlled chain (or one we
@@ -4182,8 +4183,9 @@ const Views = {
     const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to trade from.', true);
+    const fromPick = prefFrom && sources.some(e => e.id === prefFrom) ? prefFrom : W.me.entityId;
     const fromSel = el('select.text-input', sources.map(e =>
-      el('option', { value: e.id, selected: e.id === W.me.entityId ? 'selected' : undefined }, e.name)));
+      el('option', { value: e.id, selected: e.id === fromPick ? 'selected' : undefined }, e.name)));
     const toSel = el('select.text-input', S().entities.map(e => el('option', { value: e.id }, e.name)));
     const memo = el('input.text-input', { placeholder: 'Memo (optional)' });
     const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });

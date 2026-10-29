@@ -18,10 +18,15 @@ the codebase document past regressions.
 Every state change follows:
 ```js
 // 1. validate (return bad()/deny() early)   2. mutate db in place
-store.log(type, title, detail, actor, refs); // audit — refs drive player timeline visibility
+store.log(type, title, detail, actor, refs); // audit — refs + actor drive player timeline visibility
 store.save();                                 // debounced file write / cloud dirty flag
 broadcast('sync');                            // ping OTHER clients to refetch
 ```
+- Log every player-visible action, with the operator's `displayName` as `actor` (that is how
+  their own Record/Office Ledger finds it) and the affected entity ids in `refs`. Edits should
+  say WHAT changed: `describeChanges(obj, patch, secretKeys)` in api.js builds the
+  "field: old → new" detail (GM collection/settings/user edits use it). War unit move orders
+  are the deliberate exception (too frequent; the war's own milestones are logged).
 - `broadcast('sync')` is for changes other players must see promptly. High-frequency churn
   whose consumers already pull it (war ticks/orders → the ~1s war heartbeat) saves WITHOUT
   broadcasting — a ping per tick/order forces every client into a full refetch and lags the

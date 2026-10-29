@@ -1,7 +1,7 @@
 'use strict';
-/* The Office (Phase 36) — every operator's own desk: a grid of widgets they
-   add, drag into place, resize and restyle, to run their business from one
-   page. Widgets only RENDER state the server already filtered for this
+/* The Office (Phase 36) — every operator's own desk: a free-placement canvas
+   of widgets they add, drag anywhere, resize and restyle, to run their
+   business from one page. Widgets only RENDER state the server already filtered for this
    operator and reuse the existing desks' actions (transfer/trade modals,
    trade accept/decline, the food release form…) — no new authority here.
 
@@ -205,22 +205,117 @@ const Office = {
         body.appendChild(el('table.data.ow-table', el('tbody', rows.map(r => el('tr', el('td', r[0]), el('td.num', r[1]))))));
         if (e.description) body.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:4px;' }, String(e.description).slice(0, 220)));
       } },
-    ledger: { label: 'Ledger', icon: '≡', desc: 'Your most recent transactions.', size: [2, 'm'],
-      render(body) {
+    holdings: { label: 'Holdings Desk', icon: '⌘', desc: 'Run and trade what you control — companies, properties, parties and groups, shares.', size: [2, 'm'],
+      avail: () => Office.holdings().total > 0 || isGM(),
+      render(body, w) {
+        const H = Office.holdings();
+        const tabs = [['companies', 'Companies', H.companies], ['properties', 'Properties', H.properties], ['groups', 'Groups', H.groups], ['shares', 'Shares', H.shares]];
+        let tab = (w.opts && w.opts.tab) || (tabs.find(t => t[2].length) || tabs[0])[0];
+        const setTab = (k) => Office.update(() => { w.opts = Object.assign({}, w.opts, { tab: k }); });
+        body.appendChild(el('div.chip-row.ow-chips', tabs.map(([k, label, list]) =>
+          el('button.chip', { class: tab === k ? 'active' : '', onclick: () => setTab(k) }, label + (list.length ? ' ' + list.length : '')))));
+        // desk-wide actions: the same modals the Economy desks use
+        body.appendChild(el('div.btn-row.ow-actions',
+          el('button.dash-btn.btn-xs', { onclick: () => Views.tradeOfferComposer() }, '⇄ Trade offer'),
+          el('button.dash-btn.btn-xs', { onclick: () => Views.tradeModal() }, '▣ Send goods'),
+          el('button.dash-btn.btn-xs', { onclick: () => Views.transferModal() }, '₳ Wire money')));
+        const btn = (label, title, fn) => el('button.ow-btn.ow-act', { title, onclick: (e) => { e.stopPropagation(); fn(); } }, label);
+        const balOf = (id) => (S().accounts || []).filter(a => a.ownerId === id).reduce((s, a) => s + (a.balance || 0), 0);
+        const table = (head, rows) => body.appendChild(el('table.data.ow-table',
+          el('thead', el('tr', head.map(h => el(h.startsWith('#') ? 'th.num' : 'th', h.replace(/^#/, ''))))), el('tbody', rows)));
+        const more = (n) => n > 40 ? body.appendChild(el('div.ow-empty', `…and ${n - 40} more — see the Economy desks.`)) : null;
+        if (tab === 'companies') {
+          if (!H.companies.length) return Office.empty(body, 'You direct no company.');
+          table(['Company', '#Price', '#Cash', ''], H.companies.slice(0, 40).map(c => el('tr.row-link', { onclick: () => select('entity', c.id) },
+            el('td', c.abbrev || c.name),
+            el('td.num', c.sharesOutstanding ? el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(Views.livePrice(c))) : '—'),
+            el('td.num', fmtMoney(balOf(c.id))),
+            el('td.ow-acts',
+              btn('⚙', 'Operations desk', () => { W.ecoTab = 'company'; W.opsCo = c.id; W.opsDraft = null; App.go('economy'); }),
+              btn('⇄', 'Trade offer from ' + c.name, () => Views.tradeOfferComposer(c.id)),
+              c.sharesOutstanding && ownership_controlsClient(W.me.entityId, c.id) || (isGM() && c.sharesOutstanding) ? btn('＋', 'Raise capital (issue shares)', () => Views.marketOfferModal(c)) : null))));
+          more(H.companies.length);
+        } else if (tab === 'properties') {
+          if (!H.properties.length) return Office.empty(body, 'You control no property.');
+          table(['Property', 'Owner', '#Staff', ''], H.properties.slice(0, 40).map(pr => {
+            const deed = (S().items || []).find(i => i.meta && i.meta.propertyId === pr.id);
+            return el('tr.row-link', { onclick: () => select('property', pr.id) },
+              el('td', pr.name, el('div.ow-sub-line', (pr.kind || '') + (provById(pr.provinceId) ? ' · ' + provById(pr.provinceId).name : ''))),
+              el('td', entName(pr.ownerId)),
+              el('td.num', fmtNum(pr.employees || 0)),
+              el('td.ow-acts',
+                btn('⚙', 'Property operations', () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); }),
+                btn('◎', 'Show on the map', () => { App.go('map'); setTimeout(() => select('property', pr.id), 300); }),
+                deed ? btn('⇄', 'Sell or transfer the deed', () => Views.tradeModal(deed.id, null, pr.ownerId)) : null));
+          }));
+          more(H.properties.length);
+        } else if (tab === 'groups') {
+          if (!H.groups.length) return Office.empty(body, 'You lead no party, organisation or government.');
+          table(['Group', 'Type', '#Funds', ''], H.groups.slice(0, 40).map(g => el('tr.row-link', { onclick: () => select('entity', g.id) },
+            el('td', g.name),
+            el('td', (TYPE_LABEL[g.type] || g.type) + (g.type === 'party' ? ' · ' + (g.mpCount || 0) + ' MPs' : '')),
+            el('td.num', fmtMoney(balOf(g.id))),
+            el('td.ow-acts',
+              btn('⇄', 'Trade offer from ' + g.name, () => Views.tradeOfferComposer(g.id)),
+              (g.inventory || []).length ? btn('▣', 'Send goods from ' + g.name, () => Views.tradeModal(null, null, g.id)) : null,
+              btn('₳', 'Wire money', () => Views.transferModal())))));
+          more(H.groups.length);
+        } else {
+          if (!H.shares.length) return Office.empty(body, 'No shareholdings across your holdings.');
+          table(['Holding', 'Holder', '#Shares', '#Value', ''], H.shares.slice(0, 40).map(({ c, holder, shares }) => el('tr.row-link', { onclick: () => Office.openExchange(c.id) },
+            el('td', c.abbrev || c.name),
+            el('td', entName(holder)),
+            el('td.num', fmtNum(shares)),
+            el('td.num', CUR() + fmtNum(shares * Views.livePrice(c))),
+            el('td.ow-acts',
+              btn('＋', 'Buy more', () => Views.marketBuyModal(c)),
+              btn('−', 'Sell', () => Views.marketSellModal(c))))));
+          more(H.shares.length);
+        }
+      } },
+    ledger: { label: 'Ledger', icon: '≡', desc: 'Everything you did and everything that touched your holdings — money, trades, goods, shares, politics.', size: [2, 'm'],
+      render(body, w) {
+        const view = (w.opts && w.opts.view) || 'all';
+        const me = W.me.displayName;
+        const byMe = (t) => t.actor === me || t.actor === 'GM ' + me;
         const chain = ownershipSetClient();
         const mineAcct = new Set((S().accounts || []).filter(a => chain.has(a.ownerId)).map(a => a.id));
-        const txns = (S().transactions || []).filter(t => mineAcct.has(t.from) || mineAcct.has(t.to)).slice(-15).reverse();
-        if (!txns.length) return Office.empty(body, 'No transactions on record.');
-        body.appendChild(el('table.data.ow-table',
-          el('tbody', txns.map(t => {
+        const chips = el('div.chip-row.ow-chips');
+        for (const [k, label] of [['all', 'All'], ['money', 'Money'], ['record', 'Record'], ['mine', 'By me']]) {
+          chips.appendChild(el('button.chip', { class: view === k ? 'active' : '', onclick: () => Office.update(() => { w.opts = Object.assign({}, w.opts, { view: k }); }) }, label));
+        }
+        body.appendChild(chips);
+        const rows = [];
+        if (view === 'all' || view === 'money') {
+          for (const t of (S().transactions || [])) {
+            if (!mineAcct.has(t.from) && !mineAcct.has(t.to)) continue;
             const out = mineAcct.has(t.from) && !mineAcct.has(t.to);
+            const internal = mineAcct.has(t.from) && mineAcct.has(t.to);
             const other = out ? acctById(t.to) : acctById(t.from);
-            return el('tr',
-              el('td', { style: 'font-family:var(--font-mono); font-size:10px; white-space:nowrap;' }, 'T' + t.turn),
-              el('td', (out ? 'to ' : 'from ') + (other ? entName(other.ownerId) : '—')),
-              el('td.num', { style: 'color:' + (out ? 'var(--accent)' : 'var(--good)') }, (out ? '−' : '+') + fmtMoney(t.amount)),
-              el('td', { style: 'font-size:11px; color:var(--ink-soft);' }, t.memo || ''));
-          }))));
+            const who = internal ? 'between your accounts' : other ? (out ? 'to ' : 'from ') + entName(other.ownerId) : '';
+            rows.push({ ts: t.ts, turn: t.turn, badge: '₳', text: [who, t.memo || (out ? 'paid out' : 'income')].filter(Boolean).join(' · '),
+              amt: (internal ? '' : out ? '−' : '+') + fmtMoney(t.amount), color: internal ? 'var(--ink-soft)' : out ? 'var(--accent)' : 'var(--good)', actor: t.actor });
+          }
+        }
+        if (view !== 'money') {
+          // money lines the engine mirrors into the record are already shown
+          // above as signed amounts — skip their timeline echo in "All"
+          const txnEcho = (t) => t.type === 'economy' && /(transferred|deposited|withdrawn)$/.test(t.title);
+          for (const t of (S().timeline || [])) {
+            const mine = byMe(t);
+            if (view === 'mine' ? !mine : !(mine || (t.refs && t.refs.some(r => chain.has(r))))) continue;
+            if (view === 'all' && txnEcho(t)) continue;
+            rows.push({ ts: t.ts, turn: t.turn, badge: t.type, text: t.title + (t.detail ? ' — ' + t.detail : ''), actor: t.actor });
+          }
+        }
+        rows.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+        if (!rows.length) return Office.empty(body, view === 'mine' ? 'Nothing done by you on record yet.' : 'Nothing on record yet.');
+        body.appendChild(el('table.data.ow-table', el('tbody', rows.slice(0, 40).map(r => el('tr',
+          el('td', { style: 'font-family:var(--font-mono); font-size:10px; white-space:nowrap; vertical-align:top;' }, 'T' + r.turn),
+          el('td', { style: 'vertical-align:top;' }, el('span.tl-badge', r.badge)),
+          el('td', { style: 'font-size:12px;' }, r.text, r.actor && view !== 'mine' && !byMe(r) && !/^[A-Z][A-Z ]+$/.test(r.actor) ? el('span', { style: 'color:var(--ink-faint); font-size:10.5px;' }, ' · ' + r.actor) : null),
+          el('td.num', { style: 'white-space:nowrap; vertical-align:top;' + (r.color ? 'color:' + r.color : '') }, r.amt || ''))))));
+        if (can('timeline')) body.appendChild(el('div', { style: 'margin-top:6px; font-size:11.5px;' }, el('a', { href: '#', onclick: (e) => { e.preventDefault(); App.go('timeline'); } }, 'The full Record →')));
       } }
   },
 
@@ -229,6 +324,7 @@ const Office = {
     const out = ['accounts', 'clock', 'trades', 'portfolio', 'news', 'quotes'];
     if (Views.canFood()) out.splice(2, 0, 'food');
     if ((S().war && S().war.active) || (S().protest && S().protest.active)) out.splice(1, 0, 'conflict');
+    if (this.holdings().total > 0) out.splice(out.indexOf('portfolio'), 1, 'holdings');
     if (perms().statistics || isGM()) out.push('polling');
     return out.map(t => this.make(t));
   },
@@ -264,6 +360,26 @@ const Office = {
   },
 
   // ---- helpers ----
+  // Everything this operator can run: the same lists the Economy desks use
+  // (opsCompanies/opsProperties honour the control chain and delegated
+  // grants), plus parties/organisations/governments they control or lead,
+  // plus every share position held anywhere in their chain.
+  holdings() {
+    const st = S();
+    if (!st) return { companies: [], properties: [], groups: [], shares: [], total: 0 };
+    const me = W.me && W.me.entityId;
+    const chain = ownershipSetClient();
+    const companies = Views.opsCompanies();
+    const properties = Views.opsProperties();
+    const groups = st.entities.filter(e => ['party', 'org', 'government'].includes(e.type) &&
+      (isGM() || (me && (chain.has(e.id) || e.leaderId === me || e.ceoId === me || grantCoversClient(e.id, 'trade')))));
+    const shares = [];
+    for (const c of st.entities) {
+      if (c.type !== 'company') continue;
+      for (const h of (c.shareholders || [])) if (h.shares > 0 && chain.has(h.entityId)) shares.push({ c, holder: h.entityId, shares: h.shares });
+    }
+    return { companies, properties, groups, shares, total: companies.length + properties.length + groups.length + shares.length };
+  },
   empty(body, text) { body.appendChild(el('div.ow-empty', text)); },
   openExchange(id) { W.ecoTab = 'exchange'; W.exchOpen = id; App.go('economy'); },
   worldTime() {
@@ -302,7 +418,16 @@ const Office = {
     const grid = el('div.office-grid', { class: locked ? 'locked' : '' });
     for (const w of widgets) grid.appendChild(this.card(w, locked));
     inner.appendChild(grid);
-    if (widgets.some(w => w.type === 'quotes' || w.type === 'portfolio' || w.type === 'dossier')) Views.startPriceTicker();
+    const res = this.arrange(grid);
+    // first desktop render of widgets that have no spot yet (new, or saved
+    // before free placement): keep the slot they were packed into
+    if (res.g.cols === 4 && res.items.some(it => !Number.isFinite(it.w.y))) {
+      for (const it of res.items) if (!Number.isFinite(it.w.y)) { it.w.x = it.rx; it.w.y = it.ry; }
+      this.save();
+    }
+    requestAnimationFrame(() => grid.classList.add('ready')); // animate moves from now on, not the first paint
+    this.observe(grid);
+    if (widgets.some(w => ['quotes', 'portfolio', 'dossier', 'holdings'].includes(w.type))) Views.startPriceTicker();
   },
 
   card(w, locked) {
@@ -392,66 +517,182 @@ const Office = {
     openModal('ADD A WIDGET', list, [{ label: 'Done', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
-  // ---- drag & drop (pointer events: mouse, pen and touch alike) ----
-  // The card lifts out of the grid and follows the pointer (position:fixed,
-  // translated per frame); a dashed placeholder holds its slot, and the
-  // other cards glide out of the way (FLIP: measure, move, animate the
-  // difference). Release settles the card into the placeholder. A 5px
-  // threshold keeps a plain click on the title bar a click.
-  _flip(grid, mutate) {
-    const kids = [...grid.children];
-    const before = new Map(kids.map(k => [k, k.getBoundingClientRect()]));
-    mutate();
-    for (const k of kids) {
-      const a = before.get(k), b = k.getBoundingClientRect();
-      const dx = a.left - b.left, dy = a.top - b.top;
-      if (!dx && !dy) continue;
-      k.style.transition = 'none';
-      k.style.transform = `translate(${dx}px, ${dy}px)`;
-      k.getBoundingClientRect(); // commit the inverted position before animating
-      k.style.transition = 'transform 180ms cubic-bezier(.2,.7,.3,1)';
-      k.style.transform = '';
-    }
+  // ---- free-placement canvas ----
+  // Widgets sit on a canvas of N columns (4 on a desk, 2 on a tablet, 1 on a
+  // phone) at absolute positions: x = column, y = pixels from the top. On
+  // the 4-column desk placement is FREE — a window stays wherever it was
+  // dropped, empty space included; overlaps are resolved by pushing the
+  // lower window down. Narrower screens can't honour desk coordinates, so
+  // they keep the desk's reading order and pack windows upward (gravity).
+  // Heights are whatever the content measures (ResizeObserver re-arranges
+  // when a widget grows), so only x/y/w/h are stored.
+  GAP: 14,
+  SNAP: 10,
+  geom(grid) {
+    const width = grid.clientWidth || 1;
+    const cols = width >= 860 ? 4 : width >= 480 ? 2 : 1;
+    const gap = cols === 1 ? 10 : this.GAP;
+    return { width, cols, gap, colW: (width - gap * (cols - 1)) / cols };
   },
+  spanFor(w, cols) { return Math.max(1, Math.min(Math.round(w.w) || 1, cols)); },
+  xFor(w, cols, span) {
+    if (cols === 1) return 0;
+    const x = Number.isFinite(w.x) ? w.x : 0;
+    return Math.max(0, Math.min(cols === 4 ? x : (x >= 2 ? 1 : 0), cols - span));
+  },
+  // items: [{ id, x, y|null, span, h, pinned }] → Map id → { x, y }
+  solve(items, cols, gap, free) {
+    const placed = [];
+    const out = new Map();
+    const hits = (x, span, y, h) => placed.filter(p => x < p.x + p.span && p.x < x + span && y < p.y + p.h + gap && p.y < y + h + gap);
+    const put = (it, x, y) => { placed.push({ x, span: it.span, y, h: it.h }); out.set(it.id, { x, y }); };
+    const settle = (it, y) => { for (let guard = 0; guard < 500; guard++) { const hs = hits(it.x, it.span, y, it.h); if (!hs.length) break; y = Math.max(...hs.map(p => p.y + p.h + gap)); } return y; };
+    for (const it of items) if (it.pinned) put(it, it.x, it.y);
+    const rest = items.filter(i => !i.pinned && i.y !== null).sort((a, b) => a.y - b.y || a.x - b.x);
+    const fresh = items.filter(i => !i.pinned && i.y === null);
+    if (!free) {
+      // narrow screens: keep reading order — no window may sit above the one
+      // before it (else a short widget leaps into an earlier hole); windows
+      // without a desk spot take whichever column lets them sit highest
+      let floor = 0;
+      for (const it of rest.concat(fresh)) {
+        const xs = it.y === null ? [...Array(cols - it.span + 1).keys()] : [it.x];
+        let best = null;
+        for (const x of xs) { it.x = x; const y = settle(it, floor); if (!best || y < best.y) best = { x, y }; }
+        it.x = best.x;
+        put(it, best.x, best.y);
+        floor = best.y;
+      }
+      return out;
+    }
+    for (const it of rest) put(it, it.x, settle(it, it.y));
+    // windows with no spot yet take the first gap, top-to-bottom, left-to-right
+    for (const it of fresh) {
+      const ys = [0, ...placed.map(p => p.y + p.h + gap)].sort((a, b) => a - b);
+      let spot = null;
+      for (const y of ys) {
+        for (let x = 0; x + it.span <= cols; x++) if (!hits(x, it.span, y, it.h).length) { spot = { x, y }; break; }
+        if (spot) break;
+      }
+      it.x = spot ? spot.x : 0;
+      put(it, it.x, spot ? spot.y : Math.max(0, ...placed.map(p => p.y + p.h + gap)));
+    }
+    return out;
+  },
+  // Lay the canvas out. opts.pin {id,x,y,float} holds one window at a spot
+  // (float: it is being dragged — leave its DOM position to the pointer);
+  // opts.span {id,span} overrides a width mid-resize; opts.heights reuses
+  // measurements taken at drag start (no layout thrash per frame).
+  arrange(grid, opts) {
+    opts = opts || {};
+    const g = this.geom(grid);
+    const cards = new Map([...grid.children].filter(c => c.classList.contains('ow')).map(c => [c.getAttribute('data-ow'), c]));
+    const items = [];
+    for (const w of this._local || []) {
+      const c = cards.get(w.id);
+      if (!c) continue;
+      const span = opts.span && opts.span.id === w.id ? opts.span.span : this.spanFor(w, g.cols);
+      const floating = opts.pin && opts.pin.float && opts.pin.id === w.id;
+      if (!floating) c.style.width = (span * g.colW + (span - 1) * g.gap) + 'px';
+      items.push({ id: w.id, w, c, span, x: this.xFor(w, g.cols, span), y: Number.isFinite(w.y) ? w.y : null });
+    }
+    for (const it of items) it.h = (opts.heights && opts.heights.get(it.id)) || it.c.offsetHeight;
+    if (opts.pin) {
+      const it = items.find(i => i.id === opts.pin.id);
+      if (it) { it.pinned = true; it.x = opts.pin.x; it.y = opts.pin.y; }
+    }
+    const pos = this.solve(items, g.cols, g.gap, g.cols === 4);
+    let bottom = 0;
+    for (const it of items) {
+      const p = pos.get(it.id);
+      it.rx = p.x; it.ry = p.y;
+      bottom = Math.max(bottom, p.y + it.h);
+      if (opts.pin && opts.pin.float && it.id === opts.pin.id) continue;
+      it.c.style.left = (p.x * (g.colW + g.gap)) + 'px';
+      it.c.style.top = p.y + 'px';
+    }
+    grid.style.height = Math.max(bottom, opts.minHeight || 0) + 'px';
+    return { g, items, pos, bottom };
+  },
+  // Re-arrange when the canvas width changes (window resize → column
+  // count) or a widget's content grows/shrinks.
+  observe(grid) {
+    if (this._ro) this._ro.disconnect();
+    if (typeof ResizeObserver === 'undefined') return;
+    let raf = 0;
+    const ro = this._ro = new ResizeObserver(() => {
+      if (this._drag || raf) return;
+      raf = requestAnimationFrame(() => {
+        raf = 0;
+        if (!grid.isConnected) { ro.disconnect(); return; }
+        if (!this._drag) this.arrange(grid);
+      });
+    });
+    ro.observe(grid);
+    for (const c of grid.children) if (c.classList.contains('ow')) ro.observe(c);
+  },
+  // Persist a finished arrangement. The desk stores exact spots; a narrow
+  // screen only changes ORDER, so it hands the desk's existing slots out in
+  // the new visual order (the desk view stays tidy instead of inheriting
+  // phone-stacked coordinates).
+  commit(res) {
+    const { g, items } = res;
+    if (g.cols === 4) {
+      for (const it of items) { it.w.x = it.rx; it.w.y = it.ry; }
+    } else {
+      const slots = items.map(it => ({ x: Number.isFinite(it.w.x) ? it.w.x : 0, y: Number.isFinite(it.w.y) ? it.w.y : null }))
+        .sort((a, b) => (a.y === null) - (b.y === null) || a.y - b.y || a.x - b.x);
+      const order = items.slice().sort((a, b) => a.ry - b.ry || a.rx - b.rx);
+      order.forEach((it, i) => { it.w.x = slots[i].x; if (slots[i].y === null) delete it.w.y; else it.w.y = slots[i].y; });
+      // keep the list in visual order too (catalogue/reset logic reads it)
+      this._local = order.map(it => it.w).concat(this._local.filter(w => !order.some(it => it.w === w)));
+    }
+    this.save();
+  },
+
+  // ---- drag (pointer events: mouse, pen and touch alike) ----
+  // Past a 5px threshold the window lifts and follows the pointer freely; a
+  // dashed placeholder shows the snapped spot (column + 10px rows) and the
+  // other windows glide out of its way (CSS transitions on left/top).
+  // Release settles the window into the placeholder.
   dragStart(e, card) {
     if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault();
     const grid = card.parentNode;
-    const st = this._drag = { card, grid, pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, started: false, ph: null, raf: 0, lastX: e.clientX, lastY: e.clientY };
+    const id = card.getAttribute('data-ow');
+    const st = this._drag = { pointerId: e.pointerId, x0: e.clientX, y0: e.clientY, lastX: e.clientX, lastY: e.clientY, started: false, raf: 0, target: null, res: null };
     const begin = () => {
       st.started = true;
-      const r = card.getBoundingClientRect();
-      st.rect = r;
-      st.ph = el('div.ow-placeholder', { class: [...card.classList].filter(c => /^ow-w\d$/.test(c)).join(' ') });
-      st.ph.style.height = r.height + 'px';
-      grid.insertBefore(st.ph, card);
-      grid.parentNode.appendChild(card); // out of the grid, still inside the view's styles
-      Object.assign(card.style, { position: 'fixed', left: r.left + 'px', top: r.top + 'px', width: r.width + 'px', height: r.height + 'px', zIndex: 200, margin: 0, pointerEvents: 'none' });
+      const gr = grid.getBoundingClientRect();
+      st.grabX = st.x0 - gr.left - card.offsetLeft;
+      st.grabY = st.y0 - gr.top - card.offsetTop;
+      st.g = this.geom(grid);
+      st.heights = new Map([...grid.children].filter(c => c.classList.contains('ow')).map(c => [c.getAttribute('data-ow'), c.offsetHeight]));
+      const w = this._local.find(x => x.id === id);
+      st.span = this.spanFor(w, st.g.cols);
+      st.ph = el('div.ow-placeholder');
+      Object.assign(st.ph.style, { width: card.offsetWidth + 'px', height: card.offsetHeight + 'px', left: card.style.left, top: card.style.top });
+      grid.appendChild(st.ph);
       card.classList.add('ow-floating');
       document.body.classList.add('ow-dragging-cursor');
     };
     const place = () => {
       st.raf = 0;
-      card.style.transform = `translate(${st.lastX - st.x0}px, ${st.lastY - st.y0}px) rotate(.6deg) scale(1.02)`;
-      // Hit-test on layout boxes (offsetLeft/Top ignore the FLIP transforms
-      // of cards still gliding), and treat "over the placeholder" as settled
-      // so cards of different widths can't bounce the slot back and forth.
-      const gr = grid.getBoundingClientRect();
-      const x = st.lastX - gr.left, y = st.lastY - gr.top;
-      const hit = (k) => x >= k.offsetLeft && x <= k.offsetLeft + k.offsetWidth && y >= k.offsetTop && y <= k.offsetTop + k.offsetHeight;
-      if (!hit(st.ph)) {
-        const kids = [...grid.querySelectorAll('.ow')];
-        const over = kids.find(hit);
-        if (over) {
-          const after = x > over.offsetLeft + over.offsetWidth / 2;
-          const ref = after ? over.nextSibling : over;
-          if (ref !== st.ph && (after ? over.nextSibling : over.previousSibling) !== st.ph) {
-            this._flip(grid, () => grid.insertBefore(st.ph, ref));
-          }
-        } else if (kids.length && y > Math.max(...kids.map(k => k.offsetTop + k.offsetHeight)) && grid.lastChild !== st.ph) {
-          this._flip(grid, () => grid.appendChild(st.ph)); // below everything: drop at the end
-        }
-      }
+      const g = st.g, gr = grid.getBoundingClientRect();
+      const left = Math.max(0, Math.min(g.width - card.offsetWidth, st.lastX - gr.left - st.grabX));
+      const top = Math.max(0, st.lastY - gr.top - st.grabY);
+      card.style.left = left + 'px';
+      card.style.top = top + 'px';
+      const x = Math.max(0, Math.min(g.cols - st.span, Math.round(left / (g.colW + g.gap))));
+      const y = Math.max(0, Math.round(top / this.SNAP) * this.SNAP);
+      const room = top + card.offsetHeight + 160; // canvas grows so you can drop below the last window
+      if (!st.target || st.target.x !== x || st.target.y !== y) {
+        st.target = { x, y };
+        st.res = this.arrange(grid, { pin: { id, x, y, float: true }, heights: st.heights, minHeight: room });
+        const p = st.res.pos.get(id);
+        st.ph.style.left = (p.x * (g.colW + g.gap)) + 'px';
+        st.ph.style.top = p.y + 'px';
+      } else if (room > (parseFloat(grid.style.height) || 0)) grid.style.height = room + 'px';
       // keep the page scrolling while the pointer rests near its edges
       const dv = grid.closest('.doc-view');
       if (dv) {
@@ -476,27 +717,18 @@ const Office = {
       document.removeEventListener('pointercancel', up);
       if (st.raf) cancelAnimationFrame(st.raf);
       if (!st.started) { this._drag = null; return; }
-      // glide into the placeholder, then drop it in for real
-      const gr = grid.getBoundingClientRect();
-      const target = { left: gr.left + st.ph.offsetLeft, top: gr.top + st.ph.offsetTop };
-      card.style.transition = 'transform 160ms ease-out';
-      card.style.transform = `translate(${target.left - st.rect.left}px, ${target.top - st.rect.top}px)`;
-      setTimeout(() => {
-        grid.insertBefore(card, st.ph);
-        st.ph.remove();
-        card.removeAttribute('style');
-        card.classList.remove('ow-floating');
-        document.body.classList.remove('ow-dragging-cursor');
-        this._drag = null;
-        const order = [...grid.querySelectorAll('.ow')].map(n => n.getAttribute('data-ow'));
-        const byId = Object.fromEntries(this._local.map(w => [w.id, w]));
-        const next = order.map(id => byId[id]).filter(Boolean);
-        if (next.length === this._local.length && next.some((w, i) => w !== this._local[i])) {
-          this._local = next;
-          this.save();
-        }
-        this.rerender();
-      }, 170);
+      // glide into the placeholder (the canvas transitions left/top)
+      const p = st.res && st.res.pos.get(id);
+      card.classList.remove('ow-floating');
+      document.body.classList.remove('ow-dragging-cursor');
+      st.ph.remove();
+      if (p) {
+        card.style.left = (p.x * (st.g.colW + st.g.gap)) + 'px';
+        card.style.top = p.y + 'px';
+      }
+      this._drag = null;
+      if (st.res) this.commit(st.res);
+      setTimeout(() => this.rerender(), 230);
     };
     document.addEventListener('pointermove', move);
     document.addEventListener('pointerup', up);
@@ -504,21 +736,21 @@ const Office = {
   },
 
   // ---- drag-to-scale ----
-  // Width snaps to whole grid columns as you drag (live), height follows the
-  // pointer freely (80–1100px). On a 2-column screen a "full" span keeps the
-  // widget wide on desktop too; phones only resize height.
+  // Width snaps to whole columns as you drag (live), height follows the
+  // pointer freely (80–1100px); neighbours are pushed out of the way live.
+  // On a 2-column screen a "full" span keeps the widget wide on the desk
+  // too; phones only resize height.
   resizeStart(e, card, w) {
     if (e.button !== undefined && e.button !== 0) return;
     e.preventDefault(); e.stopPropagation();
     const grid = card.parentNode;
-    const gs = getComputedStyle(grid);
-    const cols = gs.gridTemplateColumns.split(' ').filter(Boolean).length || 1;
-    const gap = parseFloat(gs.columnGap) || 14;
-    const colW = (grid.getBoundingClientRect().width - gap * (cols - 1)) / cols;
+    const g = this.geom(grid);
     const body = card.querySelector('.ow-body');
-    const r = card.getBoundingClientRect();
+    const span0 = this.spanFor(w, g.cols);
+    const x0 = Math.round((parseFloat(card.style.left) || 0) / (g.colW + g.gap));
+    const y0 = parseFloat(card.style.top) || 0;
     const st = this._drag = { resize: true, pointerId: e.pointerId, x0: e.clientX, y0: e.clientY,
-      w0: r.width, h0: body.getBoundingClientRect().height, span: Math.max(1, Math.round((r.width + gap) / (colW + gap))), h: null, raf: 0 };
+      w0: card.offsetWidth, h0: body.getBoundingClientRect().height, span: span0, h: null, raf: 0, res: null };
     card.classList.add('ow-resizing');
     document.body.classList.add('ow-resize-cursor');
     const badge = el('span.ow-size-badge');
@@ -526,12 +758,12 @@ const Office = {
     let lastX = e.clientX, lastY = e.clientY;
     const apply = () => {
       st.raf = 0;
-      const span = Math.max(1, Math.min(cols, Math.round((st.w0 + lastX - st.x0 + gap) / (colW + gap))));
+      const span = Math.max(1, Math.min(g.cols, Math.round((st.w0 + lastX - st.x0 + g.gap) / (g.colW + g.gap))));
       const h = Math.max(80, Math.min(1100, Math.round(st.h0 + lastY - st.y0)));
-      if (cols > 1 && span !== st.span) this._flip(grid, () => { card.style.gridColumn = 'span ' + span; });
       st.span = span; st.h = h;
       body.style.height = h + 'px'; body.style.maxHeight = 'none';
-      badge.textContent = (cols > 1 ? span + ' col' + (span > 1 ? 's' : '') + ' · ' : '') + h + 'px';
+      st.res = this.arrange(grid, { pin: { id: w.id, x: Math.min(x0, g.cols - span), y: y0 }, span: { id: w.id, span } });
+      badge.textContent = (g.cols > 1 ? span + ' col' + (span > 1 ? 's' : '') + ' · ' : '') + h + 'px';
     };
     const move = (ev) => {
       if (ev.pointerId !== st.pointerId) return;
@@ -550,10 +782,12 @@ const Office = {
       this._drag = null;
       // a plain click leaves the DOM alone so a double-click can still reset
       if (st.h === null) return;
-      if (cols === 4) w.w = st.span;
-      else if (cols === 2) w.w = st.span === 2 ? Math.max(2, w.w) : 1;
       w.h = st.h;
-      this.save();
+      if (g.cols === 4) { w.w = st.span; this.commit(st.res); }
+      else {
+        if (g.cols === 2) w.w = st.span === 2 ? Math.max(2, w.w) : 1;
+        this.save();
+      }
       this.rerender();
     };
     document.addEventListener('pointermove', move);

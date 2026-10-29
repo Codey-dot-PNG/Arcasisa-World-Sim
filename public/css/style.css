@@ -1531,9 +1531,11 @@ details.ledger-fold[open] > summary::before{content:'▾ ';}
 
 /* ═══ Phase 36 — The Office (public/js/office.js) ═══ */
 .office-bar{margin:4px 0 14px;}
-.office-grid{position:relative; display:grid; grid-template-columns:repeat(4, minmax(0,1fr)); gap:14px; grid-auto-flow:row dense; align-items:start;}
-.ow{position:relative; grid-column:span 1; border:1px solid var(--rule-strong); background:var(--paper); display:flex; flex-direction:column; min-width:0;}
-.ow.ow-w2, .ow-placeholder.ow-w2{grid-column:span 2;} .ow.ow-w3, .ow-placeholder.ow-w3{grid-column:span 3;} .ow.ow-w4, .ow-placeholder.ow-w4{grid-column:span 4;}
+/* free-placement canvas: office.js positions every window absolutely */
+.office-grid{position:relative; min-height:160px;}
+.ow{position:absolute; left:0; top:0; box-sizing:border-box; border:1px solid var(--rule-strong); background:var(--paper); display:flex; flex-direction:column; min-width:0;}
+.office-grid.ready .ow{transition:left .2s cubic-bezier(.2,.7,.3,1), top .2s cubic-bezier(.2,.7,.3,1), width .2s cubic-bezier(.2,.7,.3,1);}
+.office-grid.ready .ow.ow-floating, .office-grid.ready .ow.ow-resizing{transition:none;}
 .ow-head{display:flex; align-items:center; gap:6px; padding:6px 8px; border-bottom:1px solid var(--rule); font-family:var(--font-mono); font-size:10px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-soft);}
 .ow-title{flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
 .ow-handle{font-size:15px; line-height:1; padding:2px 4px; color:var(--ink-faint);}
@@ -1547,8 +1549,8 @@ details.ledger-fold[open] > summary::before{content:'▾ ';}
 .ow-h-s .ow-body{max-height:200px;} .ow-h-m .ow-body{max-height:340px;} .ow-h-l .ow-body{max-height:600px;}
 .ow-h-px .ow-body{max-height:none; box-sizing:border-box;}
 /* drag: the lifted card floats over the page, a dashed slot marks where it lands */
-.ow-placeholder{grid-column:span 1; border:2px dashed var(--accent); background:var(--hover-wash); opacity:.7; box-sizing:border-box;}
-.ow.ow-floating{box-shadow:0 18px 40px rgba(0,0,0,.28); opacity:.94; will-change:transform; transition:box-shadow .15s;}
+.ow-placeholder{position:absolute; border:2px dashed var(--accent); background:var(--hover-wash); opacity:.7; box-sizing:border-box; pointer-events:none; transition:left .12s, top .12s;}
+.ow.ow-floating{z-index:50; box-shadow:0 18px 40px rgba(0,0,0,.28); opacity:.94; transform:rotate(.5deg) scale(1.015);}
 body.ow-dragging-cursor, body.ow-dragging-cursor *{cursor:grabbing !important; user-select:none !important;}
 /* drag-to-scale grip, bottom-right corner */
 .ow-resize{position:absolute; right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize; touch-action:none; user-select:none; z-index:2; opacity:.45; transition:opacity .15s;
@@ -1592,17 +1594,18 @@ body.ow-resize-cursor, body.ow-resize-cursor *{cursor:nwse-resize !important; us
 .ow-style-telegram .ow-body, .ow-style-telegram .ow-news-h, .ow-style-telegram .ow-sub{font-family:var(--font-mono); font-size:12px; color:#2b2412;}
 .ow-style-accent{border-top:4px solid var(--accent);}
 .ow-style-accent .ow-head{color:var(--accent); font-weight:700;}
-@media (max-width:1180px){
-  .office-grid{grid-template-columns:repeat(2, minmax(0,1fr));}
-  .ow.ow-w3, .ow.ow-w4, .ow-placeholder.ow-w3, .ow-placeholder.ow-w4{grid-column:span 2;}
-}
 @media (max-width:640px){
-  .office-grid{grid-template-columns:1fr; gap:10px;}
-  .ow.ow-w2, .ow.ow-w3, .ow.ow-w4, .ow-placeholder.ow-w2, .ow-placeholder.ow-w3, .ow-placeholder.ow-w4{grid-column:span 1;}
   .ow-tools{opacity:1;}
   .ow-resize{width:26px; height:26px; opacity:.7;}
   .ow-btn{min-width:28px; min-height:28px; font-size:14px;}
   .ow-handle{font-size:20px; padding:4px 8px;}
 }
 .ow-bar{height:8px; background:var(--hover-wash); border:1px solid var(--rule);}
+.ow-chips{margin:0 0 6px; gap:4px;}
+.ow-chips .chip{padding:2px 8px; font-size:10px;}
+.ow-actions{margin:0 0 6px; gap:4px; flex-wrap:wrap;}
+.ow-acts{white-space:nowrap; text-align:right; width:1%;}
+.ow-act{min-width:22px; padding:1px 4px; border:1px solid var(--rule); margin-left:2px; font-size:11px;}
+.ow-act:hover{border-color:var(--accent);}
+.ow-sub-line{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.06em; color:var(--ink-faint); text-transform:uppercase;}
 .ow-bar > div{height:100%;}

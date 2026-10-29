@@ -50,16 +50,28 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 - **The Office** (`office.js`, tab after Parliament): a per-operator desk of widgets
   (`Office.TYPES` — accounts, portfolio, market watch, stock room, headlines, trade inbox,
   polling, chamber, food distribution, situation room, notepad, desk clock, province watch,
-  pinned file, ledger). Pointer-event drag (mouse and touch) from the whole title bar: past a
-  5px threshold the card lifts out of the grid (`position:fixed`, translated per rAF), a
-  dashed `.ow-placeholder` holds its slot, and the other cards glide aside via FLIP
-  (`Office._flip`). Hit-testing uses `offsetLeft/Top` (layout boxes, immune to in-flight FLIP
-  transforms) and "pointer over the placeholder" is a no-op, which stops mixed-width cards
-  oscillating. The ◢ corner grip (`resizeStart`) scales the window: width snaps live to grid
-  columns, height is free (80–1100px, stored as a number in `w.h`; legacy `s|m|l` presets
-  still render); double-click the grip resets to the type's natural size. ⚙ settings (title,
-  style, widget options), ◐ cycles window style (`ledger|card|dark|telegram|accent`). Layout
-  is kept in `Office._local` and
+  pinned file, ledger, holdings desk). **Free-placement canvas**: windows are absolutely
+  positioned (`Office.arrange` → `Office.solve`) at `x` (column) / `y` (px). On the 4-column
+  desk placement is free — a window stays where it is dropped, empty space included, and
+  overlaps are resolved by pushing the lower window down; windows without a spot (new ones)
+  take the first gap. Tablet (2 cols) and phone (1 col) can't honour desk coordinates, so
+  they keep the desk's reading order and pack upward (no window above the one before it);
+  a drag there only reorders, and `Office.commit` hands the desk's existing slots out in the
+  new order. Heights are measured content, and a `ResizeObserver` re-arranges when a widget
+  grows or the canvas width changes. Drag from the whole title bar (pointer events, 5px
+  threshold): the window follows the pointer, a dashed `.ow-placeholder` marks the snapped
+  spot (column + 10px), neighbours glide via CSS transitions on left/top (enabled by
+  `.office-grid.ready` after the first paint); heights are cached at drag start. The ◢
+  corner grip (`resizeStart`) snaps width to columns live and sets a free height (80–1100px,
+  numeric `w.h`; legacy `s|m|l` still render), pushing neighbours live; double-click resets.
+  ⚙ settings, ◐ style (`ledger|card|dark|telegram|accent`). The **Ledger** widget merges
+  money (signed txns) with the Record (entries you acted on or that touch your chain;
+  All/Money/Record/By me). The **Holdings Desk** (`Office.holdings()`) lists companies
+  (`Views.opsCompanies`), properties (`opsProperties`), groups (party/org/government you
+  control or lead) and share positions, with the existing modals as actions
+  (`tradeOfferComposer(prefFrom)`, `tradeModal(item, to, prefFrom)` — deeds sell from the
+  owning entity — `transferModal`, market buy/sell/offer, ops desks). Layout is kept in
+  `Office._local` and
   saved debounced to `PUT /api/me/office`; `Views.render` skips rebuilding the Office while a
   drag or a focused widget input is live (`Office.busy`). Widgets only render filtered state
   and call existing routes — they add no authority.

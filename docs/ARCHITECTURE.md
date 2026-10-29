@@ -50,7 +50,7 @@ fresh state (body was read once up front; `store.invalidate()` drops the poisone
 - **`migrate(world)`:** brings any loaded/imported/rolled-back world up to the current schema.
   Runs on every load in file mode and on every `begin()` reload in cloud mode, and on fresh
   seeds too — so ALL structural upgrades live only here. Must stay idempotent. One-shot fixes
-  are gated on `world.schema` (currently 4) or boolean flags like `world._loreFixes1`.
+  are gated on `world.schema` (currently 16) or boolean flags like `world._loreFixes1`.
 - **Audit:** `store.log(type, title, detail, actor, refs)` → `db.timeline` (cap 8000);
   `store.recordTxn(t)` → `db.transactions` (cap 12000). Both mirrored to Supabase tables in
   cloud mode. `refs` (entity ids) drive per-player timeline visibility.

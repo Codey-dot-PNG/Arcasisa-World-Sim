@@ -29,6 +29,27 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `sfx.js` | Synthesised WebAudio effects; volume rides Music volume; localStorage toggle |
 | `pricepath.js` | **Byte-identical copy of server/pricepath.js** — deterministic live price wiggle so clients render (never invent) the day-market ticker |
 
+## Phase 36 UX notes
+
+- **Tab overflow** (`App.fitTabs`): when the top bar can't fit every tab beside the
+  clock/music/user cluster, `#topbar.tabs-row` drops the tabs to their own full-width row;
+  if even that overflows, the rightmost tabs fold into a "More ▾" menu (`#tab-menu`,
+  body-level so the strip's overflow doesn't clip it). The active tab always stays visible.
+  Re-fitted on every render and on resize.
+- **War Room** (`war.js`): `War.access(doc)` returns the caller's full `cmdAccess`;
+  `War.authorityText(doc)` is the one-line "Your authority …" shown under each conflict and
+  as the observer's toolbar hint. Protest controls render per lever (`attLead` / `force` /
+  `concede`), plus Public Opinion (`renderProtestOpinion`), player petitions
+  (`renderProtestApplications`), the GM petition queue (`renderApplicationQueue`) and Protest
+  Rules (`renderProtestRules`).
+- **Delegation** (`core.js`): `grantCoversClient(entityId, scope)`, `actsForSetClient(scope)`
+  (chain + grant entities) and `canSpendFromClient(account)` mirror `ownership.canAct` over
+  `S().myGrants`; the transfer/trade/contract pickers, inventory, trade view and the company/
+  property desks use them, and delegated accounts are labelled "(delegated)" and kept out of
+  "Your Money".
+- **Roles editor** (`gm.js tabRoles`): "Abilities — conflict command" checkboxes
+  (`ROLE_ABILITIES`, keys mirror api.js `ABILITIES`).
+
 ## Data flow
 
 1. Boot: `GET /api/config` → storage/realtime mode → `GET /api/state` → `W.state`.

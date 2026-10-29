@@ -492,6 +492,41 @@ function migrate(world) {
     }
   }
 
+  // Role abilities (Phase 36 — permissions overhaul). Information clearance
+  // (the "Government information" flag, the military map layer) used to
+  // double as ACTION authority in a conflict: every MP and judge could
+  // command the police, authorize force against a protest and call in
+  // airstrikes — the protest's own organizer included — while a Police role
+  // that had lost its military layer could command nothing. Actions now ride
+  // explicit, GM-editable `perms.abilities` (catalogue: server/api.js
+  // ABILITIES). One-shot seeding: builtin roles get their natural duties;
+  // custom roles inherit what their military map layer used to imply. A role
+  // created afterwards simply starts with none. Never clobbers an existing
+  // abilities array.
+  if (!world._abilitiesSeeded) {
+    const ALL = ['command_police', 'authorize_force', 'command_military', 'order_airstrikes'];
+    const BUILTIN = {
+      gamemaster: ALL, president: ALL,
+      minister: ['command_police', 'authorize_force', 'command_military'],
+      police: ['command_police'],
+      military: ['command_military', 'order_airstrikes']
+    };
+    for (const r of (world.roles || [])) {
+      if (!r.perms || Array.isArray(r.perms.abilities)) continue;
+      let ab = BUILTIN[r.id];
+      if (!ab) ab = r.perms.gm ? ALL
+        : ((r.perms.mapLayers || []).includes('military') ? ['command_military', 'order_airstrikes'] : []);
+      r.perms.abilities = ab.slice();
+      changed = true;
+    }
+    world._abilitiesSeeded = true; changed = true;
+  }
+  // The operator editor's "— none —" persona option used to be stored
+  // verbatim as the entity id '__null__'. Heal it to a real null.
+  for (const usr of (world.users || [])) {
+    if (usr.entityId === '__null__') { usr.entityId = null; changed = true; }
+  }
+
   // Currency → Arcasian Koren (₳, code ARK). Ungated: only flips the old
   // default 'K' symbol, so a GM's custom symbol is left alone.
   if (world.settings) {
@@ -617,9 +652,18 @@ function migrate(world) {
   // additive — a world without settings.war.protest keeps the hardcoded
   // PROTEST_DEFAULTS in server/war.js, these just give the GM visible knobs.
   if (!world.settings.war) { world.settings.war = {}; changed = true; }
-  const protDefaults = { tickMs: 2000, strikeFrac: 0.5, civPerRiotFrac: 0.6, refugeeRiotFrac: 0.04, refugeeRiotEvery: 4, dmg: 1, hp: 1 };
+  // Phase 36 adds the public-opinion knobs (see server/war.js
+  // applyProtestPolitics) and the player-application switch; the per-key
+  // loop below backfills them onto worlds that already carry the Phase 31 set.
+  const protDefaults = {
+    tickMs: 2000, strikeFrac: 0.5, civPerRiotFrac: 0.6, refugeeRiotFrac: 0.04, refugeeRiotEvery: 4, dmg: 1, hp: 1,
+    politicsEvery: 15, refCrowd: 10000, sympathyPerPass: 0.15, pressurePerPass: 0.12,
+    backlashPerPass: 0.2, crackdownMult: 3, concedeSupport: 3, applications: true
+  };
   if (!world.settings.war.protest) { world.settings.war.protest = Object.assign({}, protDefaults); changed = true; }
   else { for (const k of Object.keys(protDefaults)) if (world.settings.war.protest[k] === undefined) { world.settings.war.protest[k] = protDefaults[k]; changed = true; } }
+  // Phase 36 — player-called protests queue for GM approval here (additive).
+  if (!Array.isArray(world.protestApplications)) { world.protestApplications = []; changed = true; }
   // Phase 16 — interactive War layer (bombs/craters). Additive: a war started
   // before this change simply lacks these fields until the next tick/order.
   if (world.war && !world.war.bombs) { world.war.bombs = { att: { cooldownUntil: 0 }, def: { cooldownUntil: 0 } }; changed = true; }

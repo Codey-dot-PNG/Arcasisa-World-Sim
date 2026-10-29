@@ -184,6 +184,32 @@ const War = {
     if (isGM()) return this._gmSide === 'att' ? 'att' : 'def';
     return ca.att ? 'att' : (ca.def ? 'def' : null);
   },
+  // The caller's full cmdAccess for a doc (Phase 36: att/attLead/def/force/
+  // air/concede — see api.js cmdAccessOf). The server ships it on every
+  // conflict view, the GM's included; the isGM fallback only covers a doc
+  // that predates this change in a long-open tab.
+  access(doc) {
+    const ca = (doc && doc.cmdAccess) || {};
+    if (isGM()) return Object.assign({ att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true }, ca);
+    return ca;
+  },
+  // One line naming what this operator may do in a conflict — the War Room
+  // and toolbar used to show observers the same command hints and airstrike
+  // button as commanders, which the server then refused.
+  authorityText(doc) {
+    const protest = doc.kind === 'protest';
+    const ca = this.access(doc);
+    if (isGM()) return 'Gamemaster — you hold every lever on both sides.';
+    const can = [];
+    if (ca.attLead) can.push(protest ? 'lead the protest (violence, territory, calling it off)' : 'command the invading forces');
+    else if (ca.att) can.push(protest ? 'marshal the crowds' : 'command attacking units');
+    if (ca.def) can.push(protest ? 'command the police' : 'command the national defence');
+    if (ca.force) can.push('authorize force');
+    if (ca.air) can.push('order airstrikes' + (protest ? ' once force is authorized' : ''));
+    if (ca.concede) can.push('concede to the demands');
+    if (!can.length) return 'You are observing — your role holds no command in this conflict.';
+    return 'Your authority: you may ' + can.join(', ') + '.';
+  },
 
   /* ═══════════ CLIENT-SIDE PREDICTION (Phase 18) ═══════════
      The predicted war is a deep copy of the last authoritative snapshot,
@@ -1756,20 +1782,26 @@ const War = {
     const key = this.docKeyOf(war);
     const live = this.commandable(war); // false once the conflict has concluded
     const side = this.commandableSide(war);
-    const bomb = (war.bombs || {})[side] || { cooldownUntil: 0 };
+    // The air arm is the defence's alone, so its cooldown/stock always read
+    // from bombs.def — an airstrike-cleared operator need not command the
+    // defending ground units (a Military role over a protest, say).
+    const bomb = (war.bombs || {}).def || { cooldownUntil: 0 };
     const now = Date.now();
     const onCooldown = now < bomb.cooldownUntil;
     const aircraftKnown = Number.isFinite(Number(bomb.aircraftRemaining));
     const aircraftRemaining = aircraftKnown ? Math.max(0, Number(bomb.aircraftRemaining)) : null;
-    const noAircraft = side === 'def' && aircraftKnown && aircraftRemaining <= 0;
+    const noAircraft = aircraftKnown && aircraftRemaining <= 0;
     // The predicted war (when available) gives a smoother countdown than the
     // authoritative doc — same reasoning as every other tick-driven readout.
     const predWar = (window.WarEngine && this.predictedDoc(war)) || war;
     const protest = war.kind === 'protest';
+    const ca = this.access(war);
     const bar = el('div#war-toolbar.war-toolbar');
-    bar.appendChild(el('div.war-toolbar-hint', live
-      ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
-      : 'This conflict has concluded — units can be reviewed but no longer commanded.'));
+    bar.appendChild(el('div.war-toolbar-hint', !live
+      ? 'This conflict has concluded — units can be reviewed but no longer commanded.'
+      : side
+        ? 'Click soldier: select (Shift adds) · Right-click: move · Right-click enemy: attack · Right-drag: draw path · Ctrl-drag: formation · Shift-drag: box · Click ground / Esc: deselect'
+        : this.authorityText(war) + ' Click a unit to inspect it.'));
     const row = el('div.btn-row');
     // Both conflicts present → a switch, so commands/selection target the
     // other one without leaving the map layer.
@@ -1779,21 +1811,26 @@ const War = {
       row.appendChild(el('div.chip' + (key === 'protest' ? '.active' : ''), { onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.renderToolbar(); if (GameMap.render) GameMap.render(); } }, '⚒ Protest'));
     }
     // Airstrikes are DEFENDER-ONLY (server-enforced in dropBomb / the
-    // /api/war/bomb route) — a GM commanding the attacker gets a disabled
-    // button + hint instead of a call that would only bounce off the server.
-    const bombBtn = (side === 'att')
-      ? el('button.dash-btn', { disabled: 'disabled', title: 'The invader has no air arm.' }, '✈ No air arm')
-      : el('button.dash-btn', {
-          class: (this._bombArmed ? 'active' : '') , disabled: (onCooldown || noAircraft || !live) ? 'disabled' : undefined,
-          onclick: () => { if (!live) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
-        }, (!live ? '✈ Call Airstrike' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
-    row.appendChild(bombBtn);
-    if (side === 'def' && aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' F55 available'));
-    if (side === 'att') this._bombArmed = false; // never leave an airstrike armed while commanding the side that has none
+    // /api/war/bomb route) and need the order_airstrikes clearance (Phase
+    // 36); in a protest the air wing stays grounded until force has been
+    // authorized. Only operators who could actually call one see the button.
+    const grounded = protest && !(war.protest && war.protest.govViolent);
+    if (ca.air && side !== 'att') {
+      const bombBtn = el('button.dash-btn', {
+        class: (this._bombArmed ? 'active' : ''), disabled: (onCooldown || noAircraft || !live || grounded) ? 'disabled' : undefined,
+        title: grounded ? 'Force has not been authorized against the protest.' : undefined,
+        onclick: () => { if (!live || grounded) return; this._bombArmed = !this._bombArmed; if (this._bombArmed) this._spawnArmed = false; this.renderToolbar(); }
+      }, (!live ? '✈ Call Airstrike' : grounded ? '✈ Grounded — force not authorized' : onCooldown ? `Air wing rearming — ${Math.ceil((bomb.cooldownUntil - now) / 1000)}s` : (this._bombArmed ? 'Airstrike armed — click the target' : '✈ Call Airstrike')));
+      row.appendChild(bombBtn);
+      if (aircraftKnown) row.appendChild(el('div.chip', '✈ ' + aircraftRemaining + ' aircraft available'));
+    } else if (isGM() && side === 'att') {
+      row.appendChild(el('button.dash-btn', { disabled: 'disabled', title: 'The attacking side has no air arm.' }, '✈ No air arm'));
+    }
+    if (side === 'att' || !ca.air || grounded) this._bombArmed = false; // never leave an airstrike armed that the server would refuse
     // Countdown chip for a pending (not-yet-landed) strike this side ordered —
     // visible even after clicking away from the arming flow, since the plane
     // is airborne for several seconds.
-    const pendingStrike = (predWar.airstrikes || []).find(s => !s.done && s.side === side);
+    const pendingStrike = ca.air ? (predWar.airstrikes || []).find(s => !s.done && s.side === 'def') : null;
     if (pendingStrike) {
       const remainingTicks = Math.max(0, pendingStrike.strikeTick - this._continuousTick(predWar));
       const interval = Math.max(200, (predWar.tickMs || 2000) / (predWar.speed || 1));
@@ -1812,13 +1849,12 @@ const War = {
     // the moment the click lands, so the toolbar's own 1s re-render loop can
     // never show a stale state while the POST round-trips.
     if (protest && live) {
-      const ca = war.cmdAccess || {};
       const p = war.protest || {};
       const flip = (prop) => (s) => {
         const d = s && s[key]; // 'war'|'protest' — authoritative doc for the active conflict
         if (d && d.protest) d.protest[prop] = !d.protest[prop];
       };
-      if (ca.att) {
+      if (ca.attLead) {
         row.appendChild(el('button.solid-btn', {
           class: p.protestorsViolent ? 'active' : '',
           onclick: async () => {
@@ -1834,7 +1870,7 @@ const War = {
           }
         }, p.captureMode ? '⚑ Seizing territory' : '⚑ Seize territory'));
       }
-      if (ca.def) {
+      if (ca.force) {
         row.appendChild(el('button.danger-btn', {
           class: p.govViolent ? 'active' : '',
           onclick: async () => {
@@ -1987,9 +2023,11 @@ const War = {
     if (!docs.length) {
       inner.appendChild(el('div.doc-sub', 'No conflict is currently active.'));
       if (isGM()) {
+        this.renderApplicationQueue(inner);
         this.renderStartForm(inner);
         this.renderProtestStartForm(inner);
-      }
+        this.renderProtestRules(inner);
+      } else this.renderProtestApplications(inner);
       return;
     }
     inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:6px;' },
@@ -2001,9 +2039,11 @@ const War = {
     // Both conflicts run simultaneously — the GM can start the OTHER kind
     // even while one is live (a protest mid-invasion, or a war mid-strike).
     if (isGM()) {
+      this.renderApplicationQueue(inner);
       if (!S().war || !S().war.active) this.renderStartForm(inner);
       if (!S().protest || !S().protest.active) this.renderProtestStartForm(inner);
-    }
+      this.renderProtestRules(inner);
+    } else this.renderProtestApplications(inner);
   },
 
   renderDocPanel(inner, war, key) {
@@ -2012,15 +2052,25 @@ const War = {
       ? `⚒ Protest — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`
       : `⚔ War — ${war.name}${this.activeAuth() === war ? ' · ACTIVE' : ''}`));
 
-    const elapsed = Math.round((Date.now() - new Date(war.startedAt).getTime()) / 1000);
-    const mm = Math.floor(elapsed / 60), ss = elapsed % 60;
+    // Clock stops when the conflict does — an ended doc used to keep counting
+    // ("104950m elapsed" on a protest from months ago).
+    const endMs = war.result && war.result.endedAt ? new Date(war.result.endedAt).getTime() : Date.now();
+    const elapsed = Math.max(0, Math.round((endMs - new Date(war.startedAt).getTime()) / 1000));
+    const hh = Math.floor(elapsed / 3600), mm = Math.floor((elapsed % 3600) / 60), ss = elapsed % 60;
+    const lasted = hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : hh ? `${hh}h ${mm}m` : `${mm}m ${ss}s`;
     const p = war.protest || {};
+    const protestEnd = () => war.result.winner === 'def' ? 'ENDED — CROWDS DISPERSED'
+      : war.result.winner === 'att' ? 'ENDED — DEMANDS CONCEDED'
+        : /called off/i.test(war.result.reason || '') ? 'ENDED — CALLED OFF BY THE ORGANIZERS' : 'ENDED';
     const statusText = war.result
-      ? (protest ? (war.result.winner === 'def' ? 'ENDED — CROWDS DISPERSED' : 'ENDED') : (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED'))
+      ? (protest ? protestEnd() : (war.result.winner === 'att' ? 'ENDED — TOTAL VICTORY FOR THE INVADER' : war.result.winner === 'def' ? 'ENDED — INVASION REPELLED' : 'ENDED'))
       : (war.paused ? 'PAUSED'
           : protest ? (p.protestorsViolent ? 'VIOLENT UNREST' : p.govViolent ? 'SECURITY FORCES MOBILISED' : 'PEACEFUL DEMONSTRATION')
             : war.totalWar ? 'TOTAL WAR — NO TERMS' : 'IN PROGRESS');
-    inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${mm}m ${ss}s elapsed · ${statusText}`));
+    inner.appendChild(el('div.doc-sub', `${war.name} · tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${statusText}`));
+    // Phase 36 — say plainly what this operator may do here (observers used
+    // to get a bare panel with no hint why nothing was clickable).
+    if (war.active) inner.appendChild(el('div.war-authority', this.authorityText(war)));
 
     // Alliance-aware wars (Task 4): list allied belligerents on each side,
     // whether they auto-joined at startWar (Task 3) or intervened mid-war via
@@ -2039,7 +2089,7 @@ const War = {
       ['Police Losses', fmtNum(Math.round(war.stats.defLosses))],
       ['Civilian Dead', fmtCompact(war.stats.civilianDeaths || 0)],
       ['Refugees', fmtCompact(war.stats.refugees || 0)],
-      ['Cities In Unrest', String((war.stats.citiesHeld || []).length)],
+      ['Cities In Unrest', String((war.stats.unrestCities || war.stats.citiesHeld || []).length)],
       ['Speed', war.speed + '×']
     ] : [
       ['Attacker Losses', fmtNum(Math.round(war.stats.attLosses))],
@@ -2071,17 +2121,25 @@ const War = {
       inner.appendChild(Views.secLabel('The Unrest'));
       inner.appendChild(el('div.doc-sub',
         `Organized by ${org ? org.name : war.attackerId} · Rally locations: ${(p.baseCities || []).map(cityById).filter(Boolean).map(c => c.name).join(', ') || 'several cities'}`));
-      const chips = el('div.btn-row');
-      chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
-      chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
-      chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
-      const t = p.tuning || {};
-      if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
-      inner.appendChild(chips);
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-        t.strikeFrac > 0
-          ? `Properties currently affected: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}`
-          : 'Strike effect is disabled by tuning.'));
+      if (p.demands) inner.appendChild(el('div.war-demands', '“' + p.demands + '”'));
+      // Live posture chips only while it's live — an ended protest showed
+      // "peaceful crowds / strikes 50%" forever.
+      if (war.active) {
+        const chips = el('div.btn-row');
+        chips.appendChild(el('div.chip', p.protestorsViolent ? '⚒ Crowds violent' : '⚒ Peaceful crowds'));
+        chips.appendChild(el('div.chip', p.govViolent ? '⛨ Force authorized' : '⛨ Police holding line'));
+        chips.appendChild(el('div.chip', p.captureMode ? '⚑ Seizing territory' : '⚑ No territory claims'));
+        const t = p.tuning || {};
+        if (t.strikeFrac > 0) chips.appendChild(el('div.chip.active', `☒ Strikes: ${Math.round(t.strikeFrac * 100)}% output`));
+        inner.appendChild(chips);
+        inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
+          t.strikeFrac > 0
+            ? `Properties currently affected: ${struckSites.length ? struckSites.join(', ') : 'none — production is running normally.'}`
+            : 'Strike effect is disabled by tuning.'));
+      } else if (war.result && war.result.reason) {
+        inner.appendChild(el('div', { style: 'font-size:13px;' }, war.result.reason + '.'));
+      }
+      this.renderProtestOpinion(inner, war);
     }
 
     // Objectives — protests have none (they can't formally "win"; a concession
@@ -2101,10 +2159,13 @@ const War = {
     inner.appendChild(Views.secLabel(protest ? 'Districts Under Protest Control' : 'Province Control'));
     const provBox = el('div');
     const control = war.stats.provinceControl || {};
-    const provIds = Object.keys((war.grid || {}).provinceLandCells || control);
-    if (protest && !p.captureMode && !provIds.length) {
+    let provIds = Object.keys((war.grid || {}).provinceLandCells || control);
+    // A protest that never seized ground has nothing to chart — five empty
+    // 0% bars said less than one line.
+    if (protest && !provIds.some(pid => (control[pid] || 0) > 0)) {
+      provIds = [];
       provBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
-        'Protestors hold no ground — the crowds are gathered in the streets.'));
+        p.captureMode && war.active ? 'The crowds are moving to seize ground — no district has fallen yet.' : 'Protestors hold no ground — the crowds are gathered in the streets.'));
     }
     for (const pid of provIds) {
       const prov = provById(pid);
@@ -2375,54 +2436,246 @@ const War = {
     }
   },
 
-  // Protest side toggles — offered to whoever the server granted `cmdAccess`
-  // for (see api.js cmdAccessOf): the organizer's controllers manage the
-  // crowd ('att'), government/military operators manage the police ('def').
-  // Each POST paints its flip into W.state optimistically (core.js's
+  // Protest controls — offered per lever the server granted in `cmdAccess`
+  // (see api.js cmdAccessOf, Phase 36): the movement's leadership (attLead)
+  // escalates or calls the protest off, a force-cleared operator (force)
+  // orders the police in, the government's leadership (concede) gives in.
+  // Each toggle POST paints its flip into W.state optimistically (core.js's
   // Optimistic helper — the same 0ms-feedback pattern transfers/market orders
   // use) so the button answers the click instantly and stays flipped through
   // intervening syncs until the response-sync confirms it; a rejection rolls
   // the guess back to server truth.
   renderProtestActions(inner, war, key) {
     if (!war.active) return;
-    const ca = war.cmdAccess || {};
+    const ca = this.access(war);
     const p = war.protest || {};
     const flip = (prop) => (s) => {
       const d = s && s[key]; // the authoritative doc for this conflict ('war'|'protest')
       if (d && d.protest) d.protest[prop] = !d.protest[prop];
     };
-    inner.appendChild(Views.secLabel('Protest Control'));
-    const row = el('div.btn-row');
-    if (ca.att) {
-      row.appendChild(el('button.solid-btn', {
-        class: p.protestorsViolent ? 'active' : '',
-        onclick: async () => {
-          try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); }
-          catch (e) { toast(e.message, true); }
+    if (ca.attLead || ca.force || ca.concede) {
+      inner.appendChild(Views.secLabel('Protest Control'));
+      const row = el('div.btn-row');
+      if (ca.attLead) {
+        row.appendChild(el('button.solid-btn', {
+          class: p.protestorsViolent ? 'active' : '',
+          onclick: async () => {
+            try { await POST('/api/protest/control', { protestorsViolent: !p.protestorsViolent, conflict: key }, { optimistic: flip('protestorsViolent') }); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, p.protestorsViolent ? '⚒ Crowds violent — stand down' : '⚒ Allow fighting'));
+        row.appendChild(el('button.dash-btn', {
+          class: p.captureMode ? 'active' : '',
+          onclick: async () => {
+            try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, p.captureMode ? '⚑ Seizing territory' : '⚑ Capture territory'));
+        if (!isGM()) {
+          row.appendChild(el('button.dash-btn', {
+            onclick: () => confirmModal('CALL OFF THE PROTEST', 'Send the crowds home? The protest ends now; the opinion it has already won stays won.', async () => {
+              await POST('/api/protest/disband', {});
+              toast('The organizers call the protest off.');
+            }, 'Call It Off')
+          }, '✋ Call off the protest'));
         }
-      }, p.protestorsViolent ? '⚒ Crowds turn violent' : '⚒ Allow fighting'));
-      row.appendChild(el('button.dash-btn', {
-        class: p.captureMode ? 'active' : '',
-        onclick: async () => {
-          try { await POST('/api/protest/control', { captureMode: !p.captureMode, conflict: key }, { optimistic: flip('captureMode') }); }
-          catch (e) { toast(e.message, true); }
-        }
-      }, p.captureMode ? '⚑ Seizing territory' : '⚑ Capture territory'));
+      }
+      if (ca.force) {
+        row.appendChild(el('button.danger-btn', {
+          class: p.govViolent ? 'active' : '',
+          onclick: async () => {
+            try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); }
+            catch (e) { toast(e.message, true); }
+          }
+        }, p.govViolent ? '⛨ Force authorized — stand down' : '⛨ Authorize force'));
+      }
+      if (ca.concede) {
+        const cs = Number((((S().settings || {}).war || {}).protest || {}).concedeSupport);
+        row.appendChild(el('button.dash-btn', {
+          onclick: () => confirmModal('CONCEDE TO THE DEMANDS', 'Give the protestors what they ask' + (p.demands ? ` (“${p.demands}”)` : '') + '? The protest ends in their victory' +
+            (cs > 0 ? ` and the movement's party gains +${cs} support in every province it marched in.` : '.'), async () => {
+            await POST('/api/protest/concede', {});
+            toast('The government concedes.');
+          }, 'Concede')
+        }, '🤝 Concede to the demands'));
+      }
+      inner.appendChild(row);
     }
-    if (ca.def) {
-      row.appendChild(el('button.danger-btn', {
-        class: p.govViolent ? 'active' : '',
-        onclick: async () => {
-          try { await POST('/api/protest/control', { govViolent: !p.govViolent, conflict: key }, { optimistic: flip('govViolent') }); }
-          catch (e) { toast(e.message, true); }
-        }
-      }, p.govViolent ? '⛨ Forces engaged' : '⛨ Use force'));
+    // What the current rung of the escalation ladder means — the old copy
+    // said "neither side can attack" even after force had been authorized.
+    const help = p.protestorsViolent && p.govViolent
+      ? 'Open clashes: both sides are fighting and the air wing is cleared. Rioting costs the movement public support.'
+      : p.protestorsViolent
+        ? 'The crowds are fighting — the police defend themselves. Rioting costs the movement public support; authorizing force also clears the air wing.'
+        : p.govViolent
+          ? 'Force is authorized against a PEACEFUL crowd — a crackdown: sympathy for the movement grows and government approval falls fast.'
+          : 'The demonstration is peaceful: neither side can attack until one escalates. Every minute in the streets builds sympathy for the movement and erodes government approval.';
+    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' }, help));
+  },
+
+  // Phase 36 — what the protest is doing to public opinion (server/war.js
+  // applyProtestPolitics keeps running totals on war.stats.politics).
+  renderProtestOpinion(inner, war) {
+    inner.appendChild(Views.secLabel('Public Opinion'));
+    const pol = (war.stats || {}).politics;
+    if (!pol) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' },
+        war.active ? 'Opinion shifts while the crowds hold the streets — the first reading arrives within the minute.' : 'The protest left no measurable mark on public opinion.'));
+      return;
     }
-    inner.appendChild(row);
-    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-      p.protestorsViolent
-        ? 'The crowds are fighting — the government air arm (defender side) can strike them from the sky.'
-        : 'The demonstration is peaceful: neither side can attack until force is authorized.'));
+    const MOOD = {
+      sympathy: 'Peaceful protest — the public is sympathetic to the movement.',
+      crackdown: 'Crackdown — force against peaceful crowds is turning the public on the government.',
+      backlash: 'Rioting — the public is turning against the movement.'
+    };
+    const party = pol.partyId ? entById(pol.partyId) : null;
+    if (war.active && pol.mood) inner.appendChild(el('div', { style: 'font-size:13px; margin-bottom:4px;' }, MOOD[pol.mood] || ''));
+    const provIds = [...new Set([...Object.keys(pol.support || {}), ...Object.keys(pol.approval || {})])];
+    if (!provIds.length) return;
+    const signed = (v) => (v > 0 ? '+' : '') + (Math.round(v * 100) / 100);
+    inner.appendChild(el('table.data',
+      el('thead', el('tr', el('th', 'Province'), el('th.num', party ? (party.abbrev || party.name) + ' support' : 'Party support'), el('th.num', 'Gov. approval'))),
+      el('tbody', provIds.map(pid => el('tr',
+        el('td', (provById(pid) || {}).name || pid),
+        el('td.num', { style: 'color:' + ((pol.support || {})[pid] >= 0 ? 'var(--good)' : 'var(--accent)') }, party ? signed((pol.support || {})[pid] || 0) : '—'),
+        el('td.num', { style: 'color:' + ((pol.approval || {})[pid] < 0 ? 'var(--accent)' : 'var(--good)') }, signed((pol.approval || {})[pid] || 0) + ' pts'))))));
+    if (!party) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin-top:4px;' }, 'No party leads this movement, so its sympathy builds no party support.'));
+  },
+
+  // Phase 36 — player-called protests. Anyone leading a party, organisation,
+  // company — or just themselves — may petition the GM; the server checks
+  // control (api.js /api/protest/apply) and sizes the petition (≤3 cities ×
+  // ≤3 crowds × ≤5000). The GM rules from renderApplicationQueue.
+  _appDraft: null,
+  renderProtestApplications(inner) {
+    const s = S();
+    const apps = (s.protestApplications || []).slice().reverse();
+    const mine = ownershipSetClient();
+    const orgs = (s.entities || []).filter(e => mine.has(e.id) && ['party', 'org', 'company', 'person'].includes(e.type))
+      .sort((a, b) => (a.type === 'party' ? 0 : 1) - (b.type === 'party' ? 0 : 1));
+    if (!orgs.length && !apps.length) return;
+    const accepting = (((s.settings || {}).war || {}).protest || {}).applications !== false;
+    inner.appendChild(Views.secLabel('Call a Protest'));
+    const STATUS = { pending: 'AWAITING THE GM', approved: 'APPROVED', denied: 'DENIED', withdrawn: 'WITHDRAWN' };
+    for (const a of apps) {
+      const cities = (a.baseCities || []).map(id => (cityById(id) || {}).name || id).join(', ');
+      inner.appendChild(el('div.war-app',
+        el('div', el('b', a.name), ' · ', entName(a.organizerId), ' · ', cities,
+          ' ', el('span.chip', { class: a.status === 'approved' ? 'active' : '' }, STATUS[a.status] || a.status)),
+        a.demands ? el('div.war-demands', '“' + a.demands + '”') : null,
+        a.note ? el('div', { style: 'font-size:12px; color:var(--ink-soft);' }, 'GM: ' + a.note) : null,
+        a.status === 'pending' ? el('div.btn-row', el('button.dash-btn', {
+          onclick: async () => { try { await POST('/api/protest/applications/' + a.id + '/withdraw', {}); toast('Application withdrawn.'); } catch (e) { toast(e.message, true); } }
+        }, 'Withdraw')) : null));
+    }
+    if (!orgs.length) return;
+    if (!accepting) {
+      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'The Gamemaster is not accepting protest applications right now.'));
+      return;
+    }
+    const d = this._appDraft = this._appDraft || { organizerId: orgs[0].id, name: '', demands: '', baseCities: [], crowds: 2, perCity: 2000 };
+    if (!orgs.some(o => o.id === d.organizerId)) d.organizerId = orgs[0].id;
+    inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-bottom:4px;' },
+      'Petition the Gamemaster to let your movement take to the streets. Peaceful crowds build sympathy for the party that leads them; riots cost it.'));
+    inner.appendChild(el('div.form-grid',
+      Forms.field('Organized by', Forms.sel(d, 'organizerId', orgs.map(e => [e.id, e.name + ' (' + e.type + ')']))),
+      Forms.field('Movement name', Forms.text(d, 'name', 'e.g. March for Bread')),
+      Forms.field('Crowds per city', Forms.sliderNum(d, 'crowds', 1, 3, { step: 1 })),
+      Forms.field('People per crowd', Forms.sliderNum(d, 'perCity', 500, 5000, { step: 250 }))));
+    inner.appendChild(Forms.field('Demands', Forms.area(d, 'demands', 'min-height:54px;'), 'What would make the crowds go home? Shown on the wire if approved.'));
+    const grid = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(130px,1fr)); gap:2px 8px; font-size:12px;' });
+    for (const c of (s.cities || [])) {
+      grid.appendChild(el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
+        el('input', { type: 'checkbox', checked: d.baseCities.includes(c.id) ? 'checked' : undefined,
+          onchange: (e) => {
+            if (e.target.checked) {
+              if (d.baseCities.length >= 3) { e.target.checked = false; return toast('A petition may name at most 3 cities.', true); }
+              d.baseCities = [...new Set([...d.baseCities, c.id])];
+            } else d.baseCities = d.baseCities.filter(id => id !== c.id);
+          } }), c.name));
+    }
+    inner.appendChild(Forms.field('Rally cities (up to 3)', grid));
+    inner.appendChild(el('div.btn-row', el('button.solid-btn', {
+      onclick: async () => {
+        if (!d.baseCities.length) return toast('Choose at least one city to rally in.', true);
+        try {
+          await POST('/api/protest/apply', d);
+          this._appDraft = null;
+          toast('Petition filed — the Gamemaster will rule on it.');
+        } catch (e) { toast(e.message, true); }
+      }
+    }, '⚒ File petition')));
+  },
+
+  // GM — standing protest rules (settings.war.protest): whether players may
+  // petition, how hard protests move opinion, and the defaults every NEW
+  // protest starts from. A live protest's own tuning sliders are separate.
+  _rulesDraft: null,
+  renderProtestRules(inner) {
+    const cur = ((S().settings || {}).war || {}).protest || {};
+    const d = this._rulesDraft = this._rulesDraft || JSON.parse(JSON.stringify(cur));
+    inner.appendChild(Views.secLabel('Protest Rules'));
+    const box = el('div');
+    box.appendChild(Forms.check(d, 'applications', 'Players may petition to start protests'));
+    box.appendChild(el('div.form-grid',
+      Forms.field('Opinion pass every (ticks)', Forms.sliderNum(d, 'politicsEvery', 2, 120, { step: 1 })),
+      Forms.field('Full-intensity crowd size', Forms.sliderNum(d, 'refCrowd', 1000, 100000, { step: 500 })),
+      Forms.field('Sympathy per pass (support pts)', Forms.sliderNum(d, 'sympathyPerPass', 0, 2, { step: 0.01 })),
+      Forms.field('Approval lost per pass (pts)', Forms.sliderNum(d, 'pressurePerPass', 0, 2, { step: 0.01 })),
+      Forms.field('Riot backlash per pass (support pts)', Forms.sliderNum(d, 'backlashPerPass', 0, 2, { step: 0.01 })),
+      Forms.field('Crackdown multiplier', Forms.sliderNum(d, 'crackdownMult', 1, 10, { step: 0.5, suffix: '×' })),
+      Forms.field('Support won on concession', Forms.sliderNum(d, 'concedeSupport', 0, 20, { step: 0.5 })),
+      Forms.field('Default strike output drop', Forms.sliderNum(d, 'strikeFrac', 0, 1, { step: 0.05 }))));
+    box.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin-top:4px;' },
+      'Each pass weighs every province’s crowd against the full-intensity size (capped 1.5×). Peaceful crowds win their party sympathy and cost the government approval; force against a peaceful crowd doubles the sympathy and multiplies the approval loss; rioting costs the party support.'));
+    box.appendChild(el('div.btn-row',
+      el('button.solid-btn', { onclick: async () => {
+        try { await PATCH('/api/gm/settings', { war: { protest: d } }); this._rulesDraft = null; toast('Protest rules saved.'); }
+        catch (e) { toast(e.message, true); }
+      } }, 'Save rules'),
+      el('button.dash-btn', { onclick: () => { this._rulesDraft = null; this._reRenderPanel(); } }, 'Revert')));
+    inner.appendChild(box);
+  },
+
+  // GM side of player petitions: approve (choosing where police deploy —
+  // defaults to the capital) or deny with a note the applicant will read.
+  _appDecision: {},
+  renderApplicationQueue(inner) {
+    const pending = (S().protestApplications || []).filter(a => a.status === 'pending');
+    if (!pending.length) return;
+    inner.appendChild(Views.secLabel(`Protest Applications (${pending.length})`));
+    const busy = !!(S().protest && S().protest.active);
+    if (busy) inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'A protest is already underway — end it before approving another.'));
+    const cities = S().cities || [];
+    const cap = cities.find(c => c.isCapital) || cities[0];
+    for (const a of pending) {
+      const dec = this._appDecision[a.id] = this._appDecision[a.id] ||
+        { policeCities: cap && !a.baseCities.includes(cap.id) ? [cap.id] : [], note: '' };
+      const box = el('div.war-app');
+      box.appendChild(el('div', el('b', a.name), ' · ', entName(a.organizerId), ` · filed by ${a.filedBy || '—'} · T${a.turn}`));
+      box.appendChild(el('div', { style: 'font-size:12px;' },
+        `Rally in ${a.baseCities.map(id => (cityById(id) || {}).name || id).join(', ')} · ${a.crowds} crowd(s) of ${fmtNum(a.perCity)} per city`));
+      if (a.demands) box.appendChild(el('div.war-demands', '“' + a.demands + '”'));
+      const grid = el('div', { style: 'display:grid; grid-template-columns:repeat(auto-fill, minmax(120px,1fr)); gap:2px 8px; font-size:12px;' });
+      for (const c of cities) {
+        if (a.baseCities.includes(c.id)) continue;
+        grid.appendChild(el('label', { style: 'display:flex; gap:4px; align-items:center; cursor:pointer;' },
+          el('input', { type: 'checkbox', checked: dec.policeCities.includes(c.id) ? 'checked' : undefined,
+            onchange: (e) => { dec.policeCities = e.target.checked ? [...new Set([...dec.policeCities, c.id])] : dec.policeCities.filter(id => id !== c.id); } }), c.name));
+      }
+      box.appendChild(Forms.field('Police deploy to', grid));
+      box.appendChild(Forms.field('Note to the applicant (optional)', Forms.text(dec, 'note')));
+      box.appendChild(el('div.btn-row',
+        el('button.solid-btn', { disabled: busy ? 'disabled' : undefined, onclick: async () => {
+          try { await POST('/api/gm/protest/applications/' + a.id + '/approve', dec); toast('Approved — the crowds take to the streets.'); }
+          catch (e) { toast(e.message, true); }
+        } }, '✓ Approve & start'),
+        el('button.danger-btn', { onclick: async () => {
+          try { await POST('/api/gm/protest/applications/' + a.id + '/deny', { note: dec.note }); toast('Application denied.'); }
+          catch (e) { toast(e.message, true); }
+        } }, '✕ Deny')));
+      inner.appendChild(box);
+    }
   },
 
   // GM tuning for an active protest — violence damage, strike economic impact,

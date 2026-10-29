@@ -173,6 +173,31 @@ function ownership_controlsClient(rootEntityId, targetEntityId) {
   if (rootEntityId === targetEntityId) return true;
   return ownershipSetClient(rootEntityId).has(targetEntityId);
 }
+// Phase 36 — delegated authority. S().myGrants (server filterState) holds
+// the live roster grants this operator has on entities OUTSIDE their own
+// chain; until now the desks only ever offered chain entities, so a member
+// delegated "Spend money" or "Buy/sell items" could never find what they
+// had been trusted with. Mirrors server ownership.canAct: chain first, then
+// the grant's scopes (plus its account/property narrowing).
+function grantCoversClient(entityId, scope) {
+  const g = ((S() && S().myGrants) || {})[entityId];
+  return !!g && (g.scopes.includes('all') || g.scopes.includes(scope));
+}
+// The chain plus every entity whose grant covers `scope`.
+function actsForSetClient(scope) {
+  const set = ownershipSetClient();
+  for (const id in ((S() && S().myGrants) || {})) if (grantCoversClient(id, scope)) set.add(id);
+  return set;
+}
+// May this operator move money out of account `a`? (chain, or a 'spend'
+// grant whose account list — empty = all — includes it)
+function canSpendFromClient(a, chain) {
+  if (!a) return false;
+  if (isGM() || (chain || ownershipSetClient()).has(a.ownerId)) return true;
+  if (!grantCoversClient(a.ownerId, 'spend')) return false;
+  const g = S().myGrants[a.ownerId];
+  return !g.accounts.length || g.accounts.includes(a.id);
+}
 // Shares not yet allocated to any holder — what the market maker sells from.
 // Mirrors server market.heldTotal: the X100 leveraged book also holds real
 // float shares, so it counts against the sellable float (market.js).

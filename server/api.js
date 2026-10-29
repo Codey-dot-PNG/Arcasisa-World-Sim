@@ -1185,6 +1185,15 @@ async function handle(req, res, pathname, method) {
       return json(res, 200, { ok: true, squadron: result.squadron });
     }
 
+    if (pathname === '/api/protest/army' && method === 'POST') {
+      const b = await readBody(req);
+      if (!db.protest || !db.protest.active) return bad('No protest is active.');
+      if (!cmdAccessOf(db, db.protest, u).force) return deny('Only the government’s leadership (or a role cleared to authorize force) may call out the army.');
+      const result = war.deployArmy(db, { cityId: b.cityId, count: b.count, withdraw: !!b.withdraw }, u.user.displayName);
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, result);
+    }
     if (pathname === '/api/protest/control' && method === 'POST') {
       const b = await readBody(req);
       if (!db.protest || !db.protest.active) return bad('No protest is active.');

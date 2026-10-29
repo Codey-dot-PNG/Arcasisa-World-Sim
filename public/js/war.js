@@ -2268,7 +2268,7 @@ const War = {
     const other = this.authDocs().find(d => d !== war && d.active);
     const p = war.protest || {};
     const sig = [key, live, side, this._sel.size, this._spawnArmed, this._tapOrders, airSides.join(), airReady, airAloft, !!W.warAirDock,
-      plan && plan.sqId + plan.kind + !!plan.target, this._tool, !!other, isGM() && this._gmSide, p.protestorsViolent, p.captureMode, p.govViolent, JSON.stringify(ca)].join('|');
+      plan && plan.sqId + plan.kind + !!plan.target, this._tool, protest ? this._armyDeployed(war) : 0, !!other, isGM() && this._gmSide, p.protestorsViolent, p.captureMode, p.govViolent, JSON.stringify(ca)].join('|');
     const old = document.getElementById('war-toolbar');
     if (old && old.isConnected && this._toolbarSig === sig) return;
     this._toolbarSig = sig;
@@ -2321,6 +2321,10 @@ const War = {
         row.appendChild(el('button.btn-xs', { class: lv.on ? 'solid-btn active' : (lv.danger ? 'danger-btn' : 'dash-btn'), title: lv.title,
           onclick: async () => { await lv.run(); this.renderToolbar(); } }, lv.label));
       }
+      if (ca.force) {
+        const n = this._armyDeployed(war);
+        row.appendChild(el('button.btn-xs.dash-btn', { title: 'Call out the army: battalions join the security forces', onclick: () => this._armyModal(war) }, '🪖 Army' + (n ? ` · ${n}` : '')));
+      }
     }
     if (isGM() && this._spawnArmed) row.appendChild(el('button.dash-btn.btn-xs.active', { onclick: () => { this._spawnArmed = false; this.renderToolbar(); } }, '➕ Placing — cancel'));
     if (isGM()) {
@@ -2340,6 +2344,31 @@ const War = {
     if (bar) bar.remove();
     this._toolbarSig = null;
     if (this._toolbarTimer && !(W.layer === 'war' && this.active())) { clearInterval(this._toolbarTimer); this._toolbarTimer = null; }
+  },
+  // The government calls out the army (POST /api/protest/army): pick a city
+  // and how many battalions; the troops join the security side and follow
+  // the same rules as the police (no firing on a peaceful crowd until force
+  // is authorized).
+  _armyDeployed(war) { return (war.units || []).filter(u => u.side === 'def' && u.army && !u.dead && u.strength > 0).length; },
+  _armyModal(war) {
+    const p = war.protest || {};
+    const cfgMax = Number((((S().settings || {}).war || {}).protest || {}).armyMax) || 8;
+    const have = this._armyDeployed(war);
+    const d = { cityId: (p.baseCities || [])[0] || ((S().cities || [])[0] || {}).id, count: Math.min(2, Math.max(1, cfgMax - have)) };
+    const chips = this._cityChips(S().cities || [], (cid) => cid === d.cityId ? 'police' : '', (cid) => { d.cityId = cid; });
+    openModal('CALL OUT THE ARMY', el('div',
+      el('div.protest-note', `Army battalions join the security forces in the chosen city. They draw rifles from the government's stockpiles, and fight under the same rules as the police — they won't fire on a peaceful crowd until force is authorized. ${have}/${cfgMax} battalions on the streets now.`),
+      Forms.field('Deploy to', chips),
+      Forms.field('Battalions', Forms.sliderNum(d, 'count', 1, 4, { step: 1 })),
+      p.govViolent ? null : el('div.protest-note', 'Force is not authorized yet: the troops will hold the streets but not attack.')),
+      [{ label: '🪖 Deploy', cls: 'danger-btn', onClick: async () => {
+        await POST('/api/protest/army', { cityId: d.cityId, count: d.count });
+        toast(`The army deploys to ${(cityById(d.cityId) || {}).name || 'the city'}.`);
+      } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+  },
+  async _armyWithdraw() {
+    try { const r = await POST('/api/protest/army', { withdraw: true }); toast(`${r.withdrawn} battalion${r.withdrawn === 1 ? '' : 's'} return to barracks.`); }
+    catch (e) { toast(e.message, true); }
   },
   // The protest's escalation levers this viewer holds (cmdAccess), each a
   // toggle POSTed with an optimistic flip so the button answers at once.
@@ -2560,7 +2589,7 @@ const War = {
     hud.appendChild(row('Streets', el('div.war-balance',
       el('div.war-balance-crowd', { style: `width:${(sm.crowd / tot * 100).toFixed(1)}%` }),
       el('div.war-balance-police', { style: `width:${(sm.police / tot * 100).toFixed(1)}%` }))));
-    hud.appendChild(el('div.war-hud-sub', `≈${warHeads(sm.crowd)} marching (${sm.crowdN}) · ${fmtNum(Math.round(sm.police))} police (${sm.policeN})`));
+    hud.appendChild(el('div.war-hud-sub', `≈${warHeads(sm.crowd)} marching (${sm.crowdN}) · ${fmtNum(Math.round(sm.police))} ${this._armyDeployed(war) ? 'police & troops' : 'police'} (${sm.policeN})`));
     const tone = (v, goodWhenUp) => el('span', { style: 'color:' + ((goodWhenUp ? v >= 0 : v < 0) ? 'var(--good)' : 'var(--accent)') }, this._signed(v));
     hud.appendChild(row('Opinion', sm.pol
       ? el('span', sm.party ? el('span', (sm.party.abbrev || sm.party.name) + ' support ', tone(sm.support, true), ' · ') : null, 'gov. approval ', tone(sm.approval, true))
@@ -3056,6 +3085,11 @@ const War = {
     const row = el('div.btn-row.protest-levers');
     for (const lv of this._protestLevers(war, key, ca)) {
       row.appendChild(el('button', { class: lv.on ? 'solid-btn active' : (lv.danger ? 'danger-btn' : 'dash-btn'), title: lv.title, onclick: () => lv.run() }, lv.label));
+    }
+    if (ca.force) {
+      const n = this._armyDeployed(war);
+      row.appendChild(el('button.danger-btn', { title: 'Send army battalions into the streets beside the police', onclick: () => this._armyModal(war) }, '🪖 Deploy the army'));
+      if (n) row.appendChild(el('button.dash-btn', { title: 'Send the troops back to barracks', onclick: () => this._armyWithdraw() }, `Withdraw troops (${n})`));
     }
     if (ca.attLead && !isGM()) {
       row.appendChild(el('button.dash-btn', {

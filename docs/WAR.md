@@ -1608,6 +1608,19 @@ police city.
 
 ### Violence & territory gates (engine)
 
+**The army in the streets.** Whoever holds the force lever (`cmdAccess.force`
+— the government's chain or the `authorize_force` ability, and the GM) may
+call out the army: `POST /api/protest/army { cityId, count 1–4 }` (server
+`deployArmy`) adds infantry battalions (`army: true`, side `def`,
+`settings.war.protest.armyStrength` men, default 2100) at the city, up to
+`armyMax` (8) on the streets at once; `{ withdraw: true }` sends them all back
+to barracks. They draw rifles from the government's stockpiles like any army
+unit (resupplyUnits), fight under the same gates as the police and carry the
+same dispersal multiplier. Security forces charging a crowd that never fights
+back don't lose morale doing it. Client: 🪖 Deploy the army / Withdraw troops
+in the War Room escalation section and 🪖 Army on the map toolbar (city chips
++ battalions picker).
+
 **Police vs crowds.** The security forces disperse crowds far beyond what
 their headcount alone would do: their damage to crowds is multiplied by
 `war.protest.tuning.policeMult` (default 3, `PROTEST_DEFAULTS.policeMult`,

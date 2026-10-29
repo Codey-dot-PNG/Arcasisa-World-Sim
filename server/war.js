@@ -71,6 +71,8 @@ const PROTEST_DEFAULTS = {
   refugeeRiotEvery: 4,     // riot refugee wave cadence (ticks)
   dmg: 1,                  // default violence multiplier (GM-adjustable)
   policeMult: 3,           // police dispersal power against crowds (batons, gas, riot lines) — engine stepCombat
+  armyMax: 8,              // army battalions the government may have on the streets at once (deployArmy)
+  armyStrength: 2100,      // men per battalion
   hp: 1,
   // Phase 36 — public opinion (applyProtestPolitics). Every politicsEvery
   // ticks each province's crowd presence (live protestor strength ÷
@@ -2023,6 +2025,53 @@ function startProtest(db, opts, actor) {
 // The side-toggle entry point for an ACTIVE protest. Server-enforced: the
 // client is untrusted, and `war.protest` flags are what the engine's canFight
 // gates both sides' violence on (see war-engine.js).
+// The government calls out the army: infantry battalions join the security
+// side of a protest at a city (side 'def', ordinary infantry — they draw
+// rifles from the government's stockpiles through resupplyUnits like any
+// army unit, and fight under the same gates as the police: they won't touch
+// a peaceful crowd until force is authorized). `withdraw` sends them home.
+function deployArmy(db, opts, actor) {
+  const protest = db.protest;
+  if (!protest || !protest.active) return { ok: false, error: 'No protest is active.' };
+  const cfg = protestCfg(db);
+  const isArmy = (u) => u.side === 'def' && u.army && isLive(u);
+  if (opts.withdraw) {
+    const out = protest.units.filter(isArmy);
+    if (!out.length) return { ok: false, error: 'No army units are deployed.' };
+    protest.units = protest.units.filter(u => !(u.side === 'def' && u.army));
+    engine.pushEvent(protest, 'milestone', out[0].pos.slice(), `The army withdraws ${out.length} battalion${out.length === 1 ? '' : 's'} from the streets.`);
+    store.log('gm', 'Army withdrawn from the protest', `${out.length} battalion(s) return to barracks.`, actor || 'WAR ENGINE', [protest.defenderId]);
+    SERVER_CTX.news('TROOPS PULLED FROM THE STREETS', 'The army has withdrawn its battalions from the protest districts and returned them to barracks.');
+    return { ok: true, withdrawn: out.length };
+  }
+  const city = (db.cities || []).find(c => c.id === opts.cityId && Array.isArray(c.pos));
+  if (!city) return { ok: false, error: 'Choose a city to deploy to.' };
+  const have = protest.units.filter(isArmy).length;
+  const max = Math.max(1, Math.round(Number(cfg.armyMax) || 8));
+  const n = Math.max(1, Math.min(4, Math.round(Number(opts.count) || 1), max - have));
+  if (have >= max) return { ok: false, error: `The army already has ${have} battalions on the streets (limit ${max}).` };
+  const str = engine.clamp(Number(cfg.armyStrength) || 2100, 200, 20000);
+  const wf = { grid: protest.grid };
+  protest.armySeq = protest.armySeq || 0;
+  const made = [];
+  for (let i = 0; i < n; i++) {
+    protest.armySeq++;
+    const a = (protest.armySeq * 2.39996) % (Math.PI * 2);
+    const u = {
+      id: store.uid('warunit'), side: 'def', name: `${airOrdinal(protest.armySeq)} Army Battalion (${city.name})`,
+      kind: 'infantry', pos: engine.clampToWorld(wf, [city.pos[0] + Math.cos(a) * 35, city.pos[1] + Math.sin(a) * 35]), dest: null,
+      strength: str, maxStrength: str, org: 100, speed: 3.2, atk: 1, state: 'holding', objectiveId: null,
+      nationId: protest.defenderId, army: true, spawned: true
+    };
+    protest.units.push(u);
+    made.push(u);
+  }
+  engine.pushEvent(protest, 'milestone', city.pos.slice(), `The army deploys ${n} battalion${n === 1 ? '' : 's'} to ${city.name}.`);
+  store.log('gm', 'Army deployed against the protest', `${n} battalion(s) to ${city.name}.`, actor || 'WAR ENGINE', [protest.defenderId, protest.attackerId]);
+  SERVER_CTX.news(`ARMY DEPLOYED TO ${city.name.toUpperCase()}`, `Soldiers have taken up positions in ${city.name} as the government calls out the army against the protests.`);
+  return { ok: true, units: made };
+}
+
 function setProtestControl(db, patch, actor) {
   const protest = db.protest;
   if (!protest || !protest.active) return { ok: false, error: 'No protest is active.' };
@@ -2647,4 +2696,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { deployArmy, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

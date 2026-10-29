@@ -1439,7 +1439,8 @@
       if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
       // ...and a crowd under a crackdown breaks even though it never fights back
       else if (protest && dmgToAtt > 0) a.org = clamp(a.org - ORG_DRAIN, 0, 100);
-      if (dFights) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
+      // (security forces charging a crowd that never fights back don't wear down)
+      if (dFights && (aFights || !protest)) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale'), 0, 100);
       if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
       // Garrisons used to never rout (dug in = infinitely stubborn); now a
       // garrison's morale can still fully collapse, just at a much lower

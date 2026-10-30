@@ -341,7 +341,7 @@
           const b = e.currentTarget; b.disabled = true;
           try {
             const r = await POST('/api/military/raise', { conflict: key, side, kind: d.kind, cityId: d.cityId, count: d.count });
-            toast(`${r.unitIds.length} formation${r.unitIds.length === 1 ? '' : 's'} raised — they arm on the next resupply.`);
+            toast(`${r.unitIds.length} formation${r.unitIds.length === 1 ? '' : 's'} raised and armed from stock.`);
           } catch (err) { toast(err.message, true); b.disabled = false; }
         } }, 'Raise'),
         costEl);
@@ -434,7 +434,8 @@
       if (nation.type === 'government') {
         const cities = (S().cities || []).filter(c => Array.isArray(c.pos));
         const sites = cities.map(c => ['city:' + c.id, c.name + (c.isCapital ? ' ★' : '')])
-          .concat(this.milDepots(nation.id).map(p => ['prop:' + p.id, p.name]));
+          // the military sites a war garrisons: on our own soil, not a foreign power's (server: buildGarrisonUnits)
+          .concat((S().properties || []).filter(p => p.type === 'military' && p.provinceId && provById(p.provinceId) && (entById(p.ownerId) || {}).type !== 'foreign').map(p => ['prop:' + p.id, p.name]));
         box.appendChild(el('div.mil-order', el('div.mil-order-k', 'Garrisons when war comes'),
           el('div.mil-order-d', 'How each post is held at the outbreak of war. The number of garrisons follows the population; this decides where they stand.')));
         box.appendChild(el('div.mil-posts', sites.map(([k, label]) => {

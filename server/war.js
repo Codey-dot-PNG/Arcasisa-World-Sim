@@ -676,7 +676,13 @@ function primaryWeaponSpec(u, catalog, troops, tankCapacity, shipCapacity) {
   if (u.kind === 'armored') return { list: catalog.tanks, ids: catalog.tankIds, capacity: tankCapacity, isTank: true };
   return { list: catalog.guns, ids: catalog.gunIds, capacity: troops, isTank: false };
 }
-function resupplyUnits(db, war) {
+// opts.issueOnly — the load-out when formations deploy (war/protest start, a
+// raise, a spawn, an intervention): stock is handed out at once instead of on
+// the next authoritative tick (which, at a slow conflict speed, can be many
+// minutes away — every unit sat unarmed until then), without a tick's wear,
+// ammunition or fuel burn.
+function resupplyUnits(db, war, opts) {
+  const issueOnly = !!(opts && opts.issueOnly);
   const cfg = warCfg(db);
   const fuelPerStrength = Number(cfg.fuelPerStrength) || 0.01;
   const burnFrac = Number(cfg.fuelBurnFrac) || 0;
@@ -705,6 +711,14 @@ function resupplyUnits(db, war) {
   const agg = { att: { dmg: 0, hp: 0, morale: 0, speed: 0 }, def: { dmg: 0, hp: 0, morale: 0, speed: 0 } };
   const aggW = { att: 0, def: 0 };
 
+  // Three passes. 1: each unit's attrition and fuel burn, and what it needs.
+  // 2: what each nation has in stock, against what its units need — when it
+  // can't cover everyone, the stock is SHARED OUT (units in combat first,
+  // then everyone else evenly) instead of the first units in the list
+  // taking it all and the last ones getting nothing. 3: draw and fold kits.
+  const recs = [];
+  const demand = {}; // `${nid}|${pool}` → [needInCombat, needElsewhere]
+  const want = (key, tier, n) => { const d = demand[key] || (demand[key] = [0, 0]); d[tier] += n; };
   for (const u of war.units) {
     if (!isLive(u)) continue;
     u.inv = Array.isArray(u.inv) ? u.inv : [];
@@ -727,7 +741,7 @@ function resupplyUnits(db, war) {
     const armsDrawn = !onFoot || !!(war.protest && war.protest.protestorsViolent);
     const tankSize = onFoot ? 0 : (u.strength || 0) * fuelPerStrength * fuelUseMul;
 
-    if (spec) {
+    if (spec && !issueOnly) {
       const fighting = u.state === 'fighting';
       // 1. Attrition + expenditure — casualties take their weapons with them
       //    (carry at most `capacity`), and a FIGHTING unit additionally burns
@@ -745,39 +759,73 @@ function resupplyUnits(db, war) {
 
     // 2. Fuel burn — moving or fighting eats into the tank (holding still or
     //    riding the fleet doesn't). Naval kinds burn too (they move under power).
-    if (burnFrac > 0 && u.state !== 'holding' && u.state !== 'embarked') {
+    if (!issueOnly && burnFrac > 0 && u.state !== 'holding' && u.state !== 'embarked') {
       let burn = tankSize * burnFrac;
       for (const f of fuels) { if (burn <= 0) break; burn -= invTake(u.inv, f.id, burn); }
     }
 
-    // 3. Resupply — only inside the supply corridor, only out of the unit's
-    //    own nation's stockpile. Embarked invaders load out at sea (supplied
-    //    by the fleet), so nobody hits the beach empty-handed. BEST QUALITY is
-    //    drawn first (spec.list is quality-sorted), so a unit re-arms with the
-    //    finest weapons its nation still has in stock.
+    // what it needs — only inside the supply corridor, only out of its own
+    // nation's stockpile (embarked invaders load out at sea, supplied by the
+    // fleet, so nobody hits the beach empty-handed), topped up only to the
+    // doctrine's ration of a full complement / a full tank
+    const rec = { u, spec, tankSize, armsNeed: 0, fuelNeed: 0, tier: u.state === 'fighting' ? 0 : 1 };
     if (u.supplied !== false) {
-      const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
-      const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
-      const doctrine = doctrineCache[nid] || (doctrineCache[nid] = military.doctrineOf(db, nid));
+      const nid = rec.nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
+      const doctrine = rec.doctrine = doctrineCache[nid] || (doctrineCache[nid] = military.doctrineOf(db, nid));
       if (spec && armsDrawn) {
         let carriedNow = 0;
         for (const r of u.inv) if (spec.ids.has(r.itemId)) carriedNow += (r.qty || 0);
-        // rationed: top up only to the doctrine's share of a full complement;
-        // the unit's issued model (u.issue) is drawn first
-        let need = Math.ceil(spec.capacity * (Number(doctrine.arms) || 1)) - carriedNow;
-        for (const g of drawOrder(spec.list, doctrine.issue, u.issue)) {
+        rec.armsNeed = Math.max(0, Math.ceil(spec.capacity * (Number(doctrine.arms) || 1)) - carriedNow);
+        rec.armsKey = nid + '|' + (spec.isShip ? 'ships' : spec.isTank ? 'tanks' : 'guns');
+        if (rec.armsNeed > 0) want(rec.armsKey, rec.tier, rec.armsNeed);
+      }
+      let fuelNow = 0;
+      for (const r of u.inv) if (fuelIds.has(r.itemId)) fuelNow += (r.qty || 0);
+      rec.fuelNeed = Math.max(0, Math.floor(tankSize * (Number(doctrine.fuel) || 1) - fuelNow));
+      rec.fuelKey = nid + '|fuel';
+      if (rec.fuelNeed > 0) want(rec.fuelKey, rec.tier, rec.fuelNeed);
+    }
+    recs.push(rec);
+  }
+
+  // 2. The share of its need each unit gets: everything while stock lasts;
+  //    short, the units in combat are served first and the rest split what
+  //    remains evenly.
+  const share = {};
+  for (const key in demand) {
+    const [nid, pool] = key.split('|');
+    const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
+    const list = pool === 'fuel' ? fuels : pool === 'tanks' ? tanks : pool === 'ships' ? ships : guns;
+    let have = 0;
+    for (const it of list) for (const p of pools) have += (invGet(p, it.id) || {}).qty || 0;
+    const [front, rest] = demand[key];
+    const f0 = front > 0 ? Math.min(1, have / front) : 1;
+    const left = Math.max(0, have - front * f0);
+    share[key] = [f0, rest > 0 ? Math.min(1, left / rest) : 1];
+  }
+
+  // 3. Draw — BEST QUALITY first by default (spec.list is quality-sorted;
+  //    the doctrine may spare the best, and a unit's issued model, u.issue,
+  //    comes first) — then fold each unit's packs into its kit.
+  for (const rec of recs) {
+    const { u, spec, tankSize } = rec;
+    if (rec.nid) {
+      const pools = poolCache[rec.nid] || (poolCache[rec.nid] = nationPools(db, war, rec.nid));
+      if (rec.armsNeed > 0) {
+        let need = Math.min(rec.armsNeed, Math.ceil(rec.armsNeed * share[rec.armsKey][rec.tier]));
+        for (const g of drawOrder(spec.list, rec.doctrine.issue, u.issue)) {
           if (need <= 0) break;
           const got = drawFromPools(pools, g.id, need);
           if (got > 0) { invAdd(u.inv, g.id, got); need -= got; }
         }
       }
-      let fuelNow = 0;
-      for (const r of u.inv) if (fuelIds.has(r.itemId)) fuelNow += (r.qty || 0);
-      let fuelNeed = Math.floor(tankSize * (Number(doctrine.fuel) || 1) - fuelNow);
-      for (const f of fuels) {
-        if (fuelNeed <= 0) break;
-        const got = drawFromPools(pools, f.id, fuelNeed);
-        if (got > 0) { invAdd(u.inv, f.id, got); fuelNeed -= got; }
+      if (rec.fuelNeed > 0) {
+        let fuelNeed = Math.min(rec.fuelNeed, Math.ceil(rec.fuelNeed * share[rec.fuelKey][rec.tier]));
+        for (const f of fuels) {
+          if (fuelNeed <= 0) break;
+          const got = drawFromPools(pools, f.id, fuelNeed);
+          if (got > 0) { invAdd(u.inv, f.id, got); fuelNeed -= got; }
+        }
       }
     }
 
@@ -977,8 +1025,14 @@ function buildGarrisonUnits(db, scenarioDefense, plan) {
     const w = postW('city:' + c.id);
     if (w > 0) sites.push({ kind: 'city', name: c.name, pos: c.pos, weight: Math.max(1, c.size || 1) * w, strength: sizeStrength[c.size] || sizeStrength[1] || 1300 });
   }
+  // military sites on the defender's own soil only: a foreign power's air
+  // base abroad (or one it holds inside our borders) is no post of ours —
+  // garrisons used to be stationed at every base in the world, stranded
+  // offshore, cut off from supply and never armed
+  const homeProv = new Set(db.provinces.map(pr => pr.id));
+  const foreignOwned = (p) => { const o = db.entities.find(e => e.id === p.ownerId); return !!(o && o.type === 'foreign'); };
   for (const p of db.properties) {
-    if (p.type !== 'military' || !p.pos) continue;
+    if (p.type !== 'military' || !p.pos || !homeProv.has(p.provinceId) || foreignOwned(p)) continue;
     const w = postW('prop:' + p.id);
     if (w > 0) sites.push({ kind: 'military', name: p.name, pos: p.pos, weight: 2 * w, strength: militaryStrength });
   }
@@ -1516,6 +1570,7 @@ function startWar(db, scenario) {
   store.log('event', `${attacker.name} launches an invasion`, scenario.name, 'WAR ENGINE', [attacker.id, defender.id]);
   // invading someone is the fastest way to ruin a relationship (Phase 25)
   try { sim.shiftRelations(db, attacker.id, -40, 'Launched an invasion of the Republic', 'WAR ENGINE'); } catch (e) { /* diplomacy optional */ }
+  resupplyUnits(db, db.war, { issueOnly: true });
   military.sample(db, 'start');
   return db.war;
 }
@@ -1786,6 +1841,7 @@ function spawnUnits(db, opts, actor, key) {
   store.log('gm', `GM spawned ${count} unit${count === 1 ? '' : 's'}`,
     `${kind} × ${count} for the ${side === 'att' ? 'attacker' : 'defender'} at (${Math.round(pos[0])}, ${Math.round(pos[1])})`,
     actor || 'WAR ENGINE', []);
+  resupplyUnits(db, war, { issueOnly: true });
   return { ok: true, unitIds: spawned };
 }
 
@@ -1889,6 +1945,7 @@ function joinWar(db, opts, actor) {
     `${entity.name} commits ${count} unit(s) on the side of ${sideName}.`, actor || 'WAR ENGINE', [entity.id]);
   SERVER_CTX.news(`${entity.name.toUpperCase()} ENTERS THE WAR`,
     `${entity.name} has entered the conflict on the side of ${sideName}. An expeditionary contingent is reported joining the front.`);
+  resupplyUnits(db, war, { issueOnly: true });
   return { ok: true, unitIds: spawned };
 }
 
@@ -2107,6 +2164,7 @@ function startProtest(db, opts, actor) {
     (demands ? ` Their demand: “${demands}”` : '') +
     ` The government has ordered police to the affected districts.`);
   syncAirWings(db, db.protest);
+  resupplyUnits(db, db.protest, { issueOnly: true });
   military.sample(db, 'start');
   return db.protest;
 }
@@ -2212,6 +2270,7 @@ function raiseUnits(db, opts, actor) {
   engine.pushEvent(doc, 'milestone', pos.slice(), `${nation.name} raises ${count} ${label.toLowerCase()}${count === 1 ? '' : 's'} at ${where}.`);
   store.log('event', `${nation.name} raises ${count} ${label.toLowerCase()}${count === 1 ? '' : 's'}`, `Mustered at ${where}${what ? `, equipped from a stock of ${Math.floor(have).toLocaleString('en-US')} ${what}` : ''}.`, actor || 'WAR ENGINE', [nid]);
   if (kind !== 'police') SERVER_CTX.news(`MOBILISATION: ${nation.name.toUpperCase()} RAISES NEW DIVISIONS`, `${nation.name} has mustered ${count} fresh ${label.toLowerCase()}${count === 1 ? '' : 's'} at ${where}.`);
+  resupplyUnits(db, doc, { issueOnly: true });
   return { ok: true, units: made };
 }
 // Send formations home: they leave the field and return their kit to the
@@ -2264,6 +2323,7 @@ function issueUnit(db, opts, actor) {
       if (got > 0) { home.inventory = home.inventory || []; invAdd(home.inventory, list[i].id, got); spare -= got; swapped += got; }
     }
   }
+  if (swapped) resupplyUnits(db, doc, { issueOnly: true });
   store.log('event', `${u.name} issued ${item.name}`, swapped ? `${Math.round(swapped).toLocaleString('en-US')} older weapons handed back for re-issue.` : 'Drawn first on the next resupply.', actor || 'WAR ENGINE', [military.nationOfUnit(doc, u)]);
   return { ok: true, unit: u, swapped };
 }
@@ -2308,6 +2368,7 @@ function deployArmy(db, opts, actor) {
   engine.pushEvent(protest, 'milestone', city.pos.slice(), `The army deploys ${n} battalion${n === 1 ? '' : 's'} to ${city.name}.`);
   store.log('gm', 'Army deployed against the protest', `${n} battalion(s) to ${city.name}.`, actor || 'WAR ENGINE', [protest.defenderId, protest.attackerId]);
   SERVER_CTX.news(`ARMY DEPLOYED TO ${city.name.toUpperCase()}`, `Soldiers have taken up positions in ${city.name} as the government calls out the army against the protests.`);
+  resupplyUnits(db, protest, { issueOnly: true });
   return { ok: true, units: made };
 }
 

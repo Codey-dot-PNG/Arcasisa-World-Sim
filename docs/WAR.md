@@ -53,8 +53,16 @@ comments; state fields are all additive/absent-safe):
   Republic units also eat military-property depots). Casualties destroy
   their guns, movement burns fuel (`settings.war.fuelBurnFrac` of a tank per
   call), so national arsenals deplete tick by tick and an arms factory (see
-  `prop_arc_arms`, ARC's rifle line) is war infrastructure. The shared
-  engine only CONSUMES the stored multipliers (`unitMul` in stepCombat's
+  `prop_arc_arms`, ARC's rifle line) is war infrastructure. Resupply runs in
+  three passes — each unit's wear and need, then each nation's stock against
+  its units' total need, then the draw — so a SHORTAGE is shared out (units
+  in combat first, everyone else evenly) instead of the first units in the
+  list taking everything and the last getting nothing. Formations are also
+  armed the moment they deploy (`resupplyUnits(db, doc, { issueOnly: true })`
+  at war/protest start, raise, GM spawn, intervention, army call-out — no
+  wear or fuel burn), not on the first tick, which at a slow conflict speed
+  can be minutes away. The shared engine only CONSUMES the stored
+  multipliers (`unitMul` in stepCombat's
   damage/armour/morale drain and advanceToward's step; falls back to the
   side-wide `war.equip`, now the strength-weighted mean kit kept for the War
   Room readout), so client prediction replays identically. Weapon items are
@@ -654,8 +662,10 @@ store.migrate — see docs/WORLD-DATA.md "Items".
 
 The defender roster is built by `buildGarrisonUnits` instead of the old flat
 one-garrison-per-city/military-property rule. Same SITE set (one weighted
-site per city, weight = city size; one per `type:'military'` property,
-weight 2) and the same per-unit strengths (`citySizeStrength` /
+site per city, weight = city size; one per `type:'military'` property ON
+THE DEFENDER'S OWN SOIL — in one of its provinces and not owned by a foreign
+power — weight 2; before that rule every foreign air base in the world got a
+Republic garrison, stranded abroad, cut off and never armed) and the same per-unit strengths (`citySizeStrength` /
 `militaryPropertyStrength`, unchanged) — only the COUNT now scales with
 national population: `target = round(totalPopulation / POP_PER_GARRISON)`,
 clamped between the site count (a defenceless world would be game-breaking)
@@ -834,8 +844,8 @@ come and go):
 - `raiseUnits` — infantry or armoured divisions (police detachments in a
   protest) at a city the side still holds, or for an invader at its
   `supplyAnchor`. An infantry division needs a rifle per soldier IN STOCK, an
-  armoured one a full tank complement (`tankCapacity`); they arm on the next
-  resupply. `raised: true`; at most `settings.war.raiseMax` (12) raised
+  armoured one a full tank complement (`tankCapacity`); they are armed from
+  stock at once (an issue-only resupply pass). `raised: true`; at most `settings.war.raiseMax` (12) raised
   formations alive per side.
 - `standDownUnits` — formations leave the field and `returnKit` hands their
   packs back to the nation's stockpile (nothing evaporates — the army

@@ -135,7 +135,9 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
   neatline, compass, scale bar, locator) is composited HTML over the map, never svg.
   Images that should change with the light are pre-baked once per texture on a canvas
   (shadow silhouettes, lit-window night art — `map-style.js`) and moved/faded by CSS
-  variables, never filtered per element.
+  variables, never filtered per element. The same goes for organic effects: smoke, flame
+  and fireballs are canvas-baked sprites (`map-fx.js _fxBake`) that only move, scale and
+  fade — not SVG primitives (they read as geometry) and not per-element filters.
 
 ## Data & environment
 

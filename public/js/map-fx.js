@@ -81,23 +81,11 @@
         const g = sv('radialGradient', { id }, defs);
         for (const [o, c, a] of stops) sv('stop', { offset: o, 'stop-color': c, 'stop-opacity': a }, g);
       };
-      const linear = (id, stops, attrs) => {
-        const g = sv('linearGradient', Object.assign({ id, x1: 0, y1: 0, x2: 0, y2: 1 }, attrs || {}), defs);
-        for (const [o, c, a] of stops) sv('stop', { offset: o, 'stop-color': c, 'stop-opacity': a }, g);
-      };
       radial('mfxFlash', [['0%', '#ffffff', 1], ['25%', '#fffbe6', 0.9], ['55%', '#ffe9b0', 0.4], ['100%', '#ffd27a', 0]]);
-      radial('mfxBall', [['0%', '#fffef2', 1], ['22%', '#fff1a8', 1], ['45%', '#ffb341', 0.97], ['70%', '#e2521c', 0.85], ['100%', '#7a1a0c', 0]]);
-      radial('mfxScorch', [['0%', '#1c120c', 0.85], ['38%', '#2d1b10', 0.7], ['70%', '#4a2e18', 0.35], ['100%', '#4a2e18', 0]]);
       radial('mfxGlow', [['0%', '#ffd27a', 0.95], ['40%', '#ff8a2a', 0.55], ['100%', '#ff5a14', 0]]);
-      radial('mfxSmoke', [['0%', '#5d5650', 0.75], ['55%', '#6f6862', 0.45], ['100%', '#7c756e', 0]]);
-      radial('mfxSmokeLight', [['0%', '#b9b1a6', 0.8], ['55%', '#a39b91', 0.45], ['100%', '#8f877e', 0]]);
-      radial('mfxCap', [['0%', '#ffcf7a', 0.95], ['30%', '#e88a3a', 0.9], ['62%', '#8a6a58', 0.85], ['100%', '#5c5450', 0]]);
       radial('mfxCloud', [['0%', '#ffffff', 0.85], ['60%', '#e8eef3', 0.55], ['100%', '#d5dee6', 0]]);
-      radial('mfxToxic', [['0%', '#c7e04a', 0.7], ['55%', '#8fb52e', 0.42], ['100%', '#6d8f1c', 0]]);
       radial('mfxLava', [['0%', '#fff1a8', 1], ['45%', '#ff9a2a', 0.9], ['100%', '#d2380c', 0]]);
       radial('mfxWater', [['0%', '#4f8fc0', 0.55], ['70%', '#3f7fb2', 0.45], ['100%', '#3a76a8', 0.3]]);
-      linear('mfxStem', [['0%', '#7d6f66', 0.9], ['70%', '#8a6a52', 0.92], ['100%', '#e2732c', 0.95]]);
-      linear('mfxFlame', [['0%', '#fff4b0', 0.95], ['35%', '#ffc23a', 0.95], ['70%', '#f2621c', 0.85], ['100%', '#b8240e', 0.2]], { y1: 1, y2: 0 });
     },
 
     /* ---------- one effect ---------- */
@@ -151,71 +139,250 @@
       } catch (e) { /* audio is optional */ }
     },
 
-    /* nuclear strike: flash → fireball → shockwaves → mushroom cloud, then
-       scorched ground under a slowly thinning cloud */
-    _fx_nuke(g, r, rand) {
-      sv('circle', { r: f1(r * 1.25), fill: 'url(#mfxScorch)', class: 'mfx-a mfx-fadein', style: '--d:.3s; --t:3s' }, g);
-      sv('circle', { r: f1(r * 0.55), class: 'mfx-ring-scar mfx-a mfx-fadein', style: '--d:2s; --t:4s' }, g);
-      sv('circle', { r: f1(r), class: 'mfx-ring-scar faint mfx-a mfx-fadein', style: '--d:2.5s; --t:4s' }, g);
-      for (let i = 0; i < 16; i++) {
-        const a = rand() * Math.PI * 2, d = r * (0.2 + rand() * 0.75);
-        sv('circle', { cx: f1(Math.cos(a) * d), cy: f1(Math.sin(a) * d * 0.8), r: f1(r * (0.04 + rand() * 0.05)), fill: 'url(#mfxGlow)', class: 'mfx-a mfx-fadein', style: `--d:${(3 + rand() * 3).toFixed(1)}s; --t:2s` }, g);
+    /* ---------- organic sprites ----------
+       Smoke, fire and scorched ground are never drawn as SVG primitives (they
+       read as geometry). Each is BAKED once per session on a canvas from
+       seeded fractal noise — a billowing puff lit from the upper left, a
+       turbulent fireball, flame tongues licking upward, a mushroom cap and
+       stem built from puffs and lit from beneath, burnt ground, a dust surge
+       — and used as <image> sprites that only move, scale and fade (no
+       filters in the overlay). Bakes run off the render path; until one
+       lands its sprites simply have no picture yet. */
+    _fxCv: {},
+    _fxSpr: {},
+    _fxSprite(name) {
+      let rec = this._fxSpr[name];
+      if (rec) return rec;
+      rec = this._fxSpr[name] = { url: null, done: false };
+      rec.p = new Promise((resolve) => setTimeout(() => {
+        let cv = null;
+        try { cv = this._fxCanvas(name); } catch (e) { cv = null; }
+        if (!cv || !cv.toBlob) { rec.done = true; resolve(rec); return; }
+        cv.toBlob((bl) => { rec.url = bl ? URL.createObjectURL(bl) : null; rec.done = true; resolve(rec); }, 'image/png');
+      }, 0));
+      return rec;
+    },
+    _fxCanvas(name) {
+      if (!this._fxCv[name]) this._fxCv[name] = this._fxBake(name);
+      return this._fxCv[name];
+    },
+    // seeded value-noise fBm in [0,1]
+    _fxNoise(seed) {
+      const H = (x, y) => { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(seed, 982451653)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); return ((h ^ (h >>> 16)) >>> 0) / 4294967296; };
+      const n = (x, y) => {
+        const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+        const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+        const a = H(xi, yi), b = H(xi + 1, yi), c = H(xi, yi + 1), d = H(xi + 1, yi + 1);
+        return a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+      };
+      return (x, y, oct) => { let sum = 0, amp = 0.5, fr = 1, norm = 0; for (let o = 0; o < (oct || 4); o++) { sum += amp * n(x * fr, y * fr); norm += amp; amp *= 0.5; fr *= 2.03; } return sum / norm; };
+    },
+    _fxPixels(w, h, fn) {
+      const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+      const ctx = cv.getContext('2d');
+      const img = ctx.createImageData(w, h), d = img.data;
+      for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+        const c = fn(x, y);
+        if (!c) continue;
+        const i = (y * w + x) * 4;
+        d[i] = c[0]; d[i + 1] = c[1]; d[i + 2] = c[2]; d[i + 3] = c[3];
       }
-      sv('circle', { r: f1(r * 3.2), class: 'mfx-shock mfx-a', style: '--d:.05s; --t:4.5s' }, g);
-      sv('circle', { r: f1(r * 2.4), class: 'mfx-shock thin mfx-a', style: '--d:.7s; --t:4s' }, g);
+      ctx.putImageData(img, 0, 0);
+      return cv;
+    },
+    _fxBake(name) {
+      const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+      const sstep = (e0, e1, x) => { const t = clamp((x - e0) / (e1 - e0), 0, 1); return t * t * (3 - 2 * t); };
+      const ramp = (stops, t) => { // [[t, r,g,b], …] ascending
+        if (t <= stops[0][0]) return stops[0].slice(1);
+        for (let i = 1; i < stops.length; i++) if (t <= stops[i][0]) {
+          const A = stops[i - 1], B = stops[i], k = (t - A[0]) / (B[0] - A[0]);
+          return [A[1] + (B[1] - A[1]) * k, A[2] + (B[2] - A[2]) * k, A[3] + (B[3] - A[3]) * k];
+        }
+        return stops[stops.length - 1].slice(1);
+      };
+      const m = /^(smoke|dark|dust|ash|toxic)(\d)$/.exec(name);
+      if (m) {
+        // a billowing puff, lit from the upper left
+        const base = { smoke: [138, 130, 121], dark: [74, 67, 61], dust: [196, 184, 160], ash: [92, 84, 78], toxic: [150, 178, 70] }[m[1]];
+        const N = 192, c = N / 2, R = N * 0.4, nz = this._fxNoise(7 + Number(m[2]) * 31 + m[1].length * 101);
+        return this._fxPixels(N, N, (x, y) => {
+          const dx = (x - c) / R, dy = (y - c) / R, dd = Math.hypot(dx, dy);
+          if (dd > 1.6) return null;
+          const n1 = nz(x / N * 3.3, y / N * 3.3, 4), n2 = nz(x / N * 8 + 17, y / N * 8 + 5, 3);
+          const edge = dd + (n1 - 0.5) * 0.9;
+          const a = sstep(1.05, 0.55, edge) * clamp(0.62 + (n2 - 0.5) * 0.9, 0, 1);
+          if (a <= 0.004) return null;
+          const lit = clamp(0.78 - 0.3 * (dx * 0.55 + dy * 0.8) + (n1 - 0.5) * 0.55 + (n2 - 0.5) * 0.25, 0.32, 1.25);
+          const hi = Math.max(0, lit - 1) * 0.9;
+          return [clamp(base[0] * lit + 255 * hi, 0, 255), clamp(base[1] * lit + 255 * hi, 0, 255), clamp(base[2] * lit + 240 * hi, 0, 255), a * 235];
+        });
+      }
+      if (name === 'fireball') {
+        const N = 256, c = N / 2, R = N * 0.42, nz = this._fxNoise(91);
+        const stops = [[0, 70, 18, 8], [0.18, 150, 34, 10], [0.36, 220, 82, 22], [0.55, 255, 150, 44], [0.74, 255, 214, 110], [1, 255, 250, 228]];
+        return this._fxPixels(N, N, (x, y) => {
+          const dx = (x - c) / R, dy = (y - c) / R, dd = Math.hypot(dx, dy);
+          if (dd > 1.5) return null;
+          const n1 = nz(x / N * 3, y / N * 3, 4), n2 = nz(x / N * 9 + 3, y / N * 9 + 9, 3);
+          const edge = dd + (n1 - 0.5) * 0.7;
+          const heat = clamp(1 - edge + (n2 - 0.5) * 0.45, 0, 1);
+          const a = sstep(1.08, 0.7, edge);
+          if (a <= 0.004) return null;
+          const col = ramp(stops, heat);
+          return [col[0], col[1], col[2], a * 255];
+        });
+      }
+      const fm = /^flame(\d)$/.exec(name);
+      if (fm) {
+        // a tongue of flame: widest low down, licked sideways by turbulence
+        const Wd = 96, Hd = 192, nz = this._fxNoise(300 + Number(fm[1]) * 17);
+        const stops = [[0, 120, 20, 6], [0.2, 200, 52, 14], [0.42, 245, 112, 26], [0.62, 255, 172, 50], [0.82, 255, 222, 120], [1, 255, 248, 214]];
+        return this._fxPixels(Wd, Hd, (x, y) => {
+          const v = 1 - y / Hd, u = (x - Wd / 2) / (Wd / 2);
+          const wob = (nz(u * 1.2 + 3, v * 3.2 + Number(fm[1]), 3) - 0.5) * 1.1 * Math.pow(v, 1.2);
+          const uu = u - wob;
+          const rr = v < 0.18 ? 0.8 * Math.sqrt(Math.max(0, v / 0.18)) : 0.8 * Math.pow(Math.max(0, (1 - v) / 0.82), 0.95);
+          if (rr <= 0.01) return null;
+          const inside = 1 - Math.abs(uu) / rr;
+          if (inside <= 0) return null;
+          const n2 = nz(x / Wd * 4 + 9, y / Hd * 6, 3);
+          const heat = clamp(inside * 0.95 * (1 - v * 0.55) + (n2 - 0.5) * 0.35, 0, 1);
+          const a = clamp(inside * 1.7, 0, 1) * Math.pow(clamp((1 - v) * 2.2, 0, 1), 0.6) * clamp(0.75 + (n2 - 0.5) * 0.8, 0, 1);
+          if (a <= 0.004) return null;
+          const col = ramp(stops, heat);
+          return [col[0], col[1], col[2], a * 255];
+        });
+      }
+      if (name === 'scorch') {
+        const N = 384, c = N / 2, R = N * 0.44, nz = this._fxNoise(55);
+        return this._fxPixels(N, N, (x, y) => {
+          const dx = (x - c) / R, dy = (y - c) / R, dd = Math.hypot(dx, dy);
+          if (dd > 1.5) return null;
+          const n1 = nz(x / N * 4, y / N * 4, 4), n2 = nz(x / N * 14 + 2, y / N * 14 + 7, 3);
+          const edge = dd + (n1 - 0.5) * 0.8;
+          const a = sstep(1.05, 0.35, edge) * clamp(0.7 + (n2 - 0.5) * 0.8, 0, 1) * 0.9;
+          if (a <= 0.004) return null;
+          const ash = n2 > 0.68 ? (n2 - 0.68) * 2.6 : 0;
+          return [clamp(30 + ash * 90 + n1 * 26, 0, 255), clamp(22 + ash * 84 + n1 * 18, 0, 255), clamp(16 + ash * 76 + n1 * 12, 0, 255), a * 255];
+        });
+      }
+      if (name === 'surge' || name === 'shock') {
+        // a ring of dust thrown out along the ground / the bright shock front
+        const N = 384, c = N / 2, nz = this._fxNoise(name === 'surge' ? 77 : 78);
+        const R0 = name === 'surge' ? 0.68 : 0.88, W0 = name === 'surge' ? 0.16 : 0.045;
+        const col = name === 'surge' ? [200, 186, 160] : [255, 248, 226];
+        return this._fxPixels(N, N, (x, y) => {
+          const dx = (x - c) / (N / 2), dy = (y - c) / (N / 2), dd = Math.hypot(dx, dy);
+          if (dd > 1) return null;
+          const n1 = nz(x / N * 6, y / N * 6, 4);
+          const k = (dd - R0 + (n1 - 0.5) * W0 * 1.6) / W0;
+          const a = Math.exp(-k * k) * clamp(0.55 + (n1 - 0.5) * 1.1, 0, 1);
+          if (a <= 0.004) return null;
+          const lit = clamp(0.85 - 0.18 * (dx + dy) + (n1 - 0.5) * 0.4, 0.5, 1.15);
+          return [clamp(col[0] * lit, 0, 255), clamp(col[1] * lit, 0, 255), clamp(col[2] * lit, 0, 255), a * 235];
+        });
+      }
+      if (name === 'cap' || name === 'stem') {
+        // built from baked puffs, then lit from beneath by the fire
+        const cap = name === 'cap', Wd = cap ? 512 : 160, Hd = cap ? 300 : 512;
+        const cv = document.createElement('canvas'); cv.width = Wd; cv.height = Hd;
+        const ctx = cv.getContext('2d');
+        const rnd = this.seedRand(name + ':puffs');
+        const puff = (x, y, sz) => { const t = rnd(); const src = this._fxCanvas((t < 0.4 ? 'dark' : 'smoke') + Math.floor(rnd() * 3)); ctx.drawImage(src, x - sz / 2, y - sz / 2, sz, sz); };
+        if (cap) {
+          for (let i = 0; i < 46; i++) { const a = Math.PI + rnd() * Math.PI, rr = Math.sqrt(rnd()); puff(256 + Math.cos(a) * 190 * rr, 172 + Math.sin(a) * 120 * rr, 95 + rnd() * 90); }
+          for (let i = 0; i < 12; i++) puff(66 + i * 34 + (rnd() - 0.5) * 14, 186 + (rnd() - 0.5) * 22, 90 + rnd() * 40); // the rolling skirt
+          for (let i = 0; i < 10; i++) puff(150 + rnd() * 212, 100 + rnd() * 60, 110 + rnd() * 50);
+        } else {
+          // a column that billows: broad where it leaves the ground, waisted
+          // through the middle, flaring into the cap
+          for (let y = 470; y > 40; y -= 9) { const t = (470 - y) / 430, w = 104 - 34 * Math.sin(Math.min(1, t * 1.15) * Math.PI * 0.85) + (t > 0.82 ? (t - 0.82) * 220 : 0); puff(80 + (rnd() - 0.5) * 16, y, w + rnd() * 24); }
+        }
+        ctx.globalCompositeOperation = 'source-atop';
+        const glow = ctx.createLinearGradient(0, Hd, 0, cap ? Hd * 0.3 : Hd * 0.45);
+        glow.addColorStop(0, 'rgba(255,128,40,.62)'); glow.addColorStop(0.45, 'rgba(255,160,70,.28)'); glow.addColorStop(1, 'rgba(255,170,90,0)');
+        ctx.fillStyle = glow; ctx.fillRect(0, 0, Wd, Hd);
+        if (cap) {
+          const hi = ctx.createRadialGradient(Wd * 0.38, Hd * 0.2, 10, Wd * 0.38, Hd * 0.2, Wd * 0.45);
+          hi.addColorStop(0, 'rgba(255,248,232,.32)'); hi.addColorStop(1, 'rgba(255,248,232,0)');
+          ctx.fillStyle = hi; ctx.fillRect(0, 0, Wd, Hd);
+        }
+        return cv;
+      }
+      return null;
+    },
+    // one sprite, centred on (cx, cy) — or standing on it (anchor 'b') — in
+    // its own group so its animations scale/turn about that point
+    _spr(parent, name, cx, cy, w, h, cls, style, anchor) {
+      const g = sv('g', { transform: `translate(${f1(cx)},${f1(cy)})` }, parent);
+      const img = sv('image', { x: f1(-w / 2), y: f1(anchor === 'b' ? -h : -h / 2), width: f1(w), height: f1(h), preserveAspectRatio: 'none', class: cls || null, style: style || null }, g);
+      const rec = this._fxSprite(name);
+      const set = () => { if (rec.url) img.setAttribute('href', rec.url); };
+      if (rec.done) set(); else rec.p.then(set);
+      return img;
+    },
+
+    /* nuclear strike: flash → fireball → shock front and dust surge → the
+       column climbs and the cap boils up; then burnt ground under a cloud
+       that thins and drifts downwind */
+    _fx_nuke(g, r, rand) {
+      this._spr(g, 'scorch', 0, 0, r * 2.7, r * 2.2, 'mfx-a mfx-fadein', '--d:.4s; --t:4s');
+      for (let i = 0; i < 18; i++) {
+        const a = rand() * Math.PI * 2, d = r * (0.15 + rand() * 0.7);
+        sv('circle', { cx: f1(Math.cos(a) * d), cy: f1(Math.sin(a) * d * 0.8), r: f1(r * (0.025 + rand() * 0.04)), fill: 'url(#mfxGlow)', class: 'mfx-a mfx-fadein', style: `--d:${(3 + rand() * 3).toFixed(1)}s; --t:2s` }, g);
+      }
+      // the dust surge rolls out along the ground and settles as a low haze
+      this._spr(g, 'surge', 0, 0, r * 3.4, r * 2.6, 'mfx-surge mfx-a', '--d:.3s; --t:9s');
+      this._spr(g, 'shock', 0, 0, r * 6.4, r * 5, 'mfx-shockwave mfx-a', '--d:.05s; --t:4.2s');
       sv('circle', { r: f1(r * 4), fill: 'url(#mfxFlash)', class: 'mfx-flashdisc mfx-a', style: '--d:0s; --t:1.8s' }, g);
-      // the column and its cap rise together; the cloud then thins for a minute and a half
       const H = r * 1.9;
-      const cloud = sv('g', { class: 'mfx-thin mfx-a', style: '--d:12s; --t:90s' }, g);
-      sv('path', { d: `M${f1(-r * 0.15)} 0 C${f1(-r * 0.12)} ${f1(-H * 0.4)} ${f1(-r * 0.07)} ${f1(-H * 0.75)} ${f1(-r * 0.09)} ${f1(-H)} L${f1(r * 0.09)} ${f1(-H)} C${f1(r * 0.07)} ${f1(-H * 0.75)} ${f1(r * 0.12)} ${f1(-H * 0.4)} ${f1(r * 0.15)} 0 Z`,
-        fill: 'url(#mfxStem)', class: 'mfx-stem mfx-a', style: '--d:.9s; --t:5s' }, cloud);
-      // the cap climbs from the ground (outer group) while it swells about
-      // its own centre (inner group)
+      const cloud = sv('g', { class: 'mfx-thin mfx-a', style: `--d:14s; --t:120s; --wind:${f1(r * 0.6)}px` }, g);
+      this._spr(cloud, 'stem', 0, 0, r * 0.8, H * 1.06, 'mfx-stem mfx-a', '--d:.8s; --t:5.5s', 'b');
       const cap = sv('g', { class: 'mfx-cap mfx-a', style: `--d:.6s; --t:7s; --rise:${f1(H)}px` }, cloud);
       const capAt = sv('g', { transform: `translate(0,${f1(-H)})` }, cap);
-      const capG = sv('g', { class: 'mfx-capgrow mfx-a', style: '--d:.6s; --t:7s' }, capAt);
-      sv('ellipse', { rx: f1(r * 0.95), ry: f1(r * 0.42), cy: f1(r * 0.08), fill: 'url(#mfxCap)' }, capG);
-      for (let i = 0; i < 9; i++) {
-        const a = Math.PI + (i / 8) * Math.PI, d = r * 0.55;
-        sv('circle', { cx: f1(Math.cos(a) * d), cy: f1(Math.sin(a) * d * 0.55 - r * 0.05), r: f1(r * (0.3 + rand() * 0.12)), fill: i % 3 ? 'url(#mfxSmoke)' : 'url(#mfxCap)' }, capG);
-      }
-      sv('ellipse', { rx: f1(r * 0.6), ry: f1(r * 0.3), cy: f1(-r * 0.12), fill: 'url(#mfxSmokeLight)' }, capG);
-      sv('ellipse', { cy: f1(-H * 0.55), rx: f1(r * 0.42), ry: f1(r * 0.1), class: 'mfx-condense mfx-a', style: '--d:2.2s; --t:14s' }, cloud);
-      sv('circle', { r: f1(r * 0.5), fill: 'url(#mfxBall)', class: 'mfx-ball mfx-a', style: `--d:0s; --t:9s; --rise:${f1(H)}px` }, g);
+      this._spr(capAt, 'cap', 0, 0, r * 2.3, r * 1.35, 'mfx-capgrow mfx-a', '--d:.6s; --t:7s');
+      // a condensation collar round the column, early on
+      this._spr(cloud, 'dust1', 0, -H * 0.56, r * 1.1, r * 0.34, 'mfx-collar mfx-a', '--d:2.4s; --t:16s');
+      this._spr(g, 'fireball', 0, 0, r * 1.15, r * 1.15, 'mfx-ball mfx-a', `--d:0s; --t:9s; --rise:${f1(H)}px`);
     },
     _fx_explosion(g, r, rand) {
-      sv('ellipse', { rx: f1(r * 0.75), ry: f1(r * 0.55), fill: 'url(#mfxScorch)', class: 'mfx-a mfx-fadein', style: '--d:.2s; --t:1.5s' }, g);
-      sv('ellipse', { rx: f1(r * 0.36), ry: f1(r * 0.26), class: 'mfx-crater mfx-a mfx-fadein', style: '--d:.4s; --t:1s' }, g);
-      sv('circle', { r: f1(r * 2.2), class: 'mfx-shock thin mfx-a', style: '--d:0s; --t:1.8s' }, g);
+      this._spr(g, 'scorch', 0, 0, r * 1.9, r * 1.45, 'mfx-a mfx-fadein', '--d:.2s; --t:1.5s');
+      this._spr(g, 'surge', 0, 0, r * 2.6, r * 2, 'mfx-surge mfx-a', '--d:.05s; --t:4s');
       for (let i = 0; i < 12; i++) {
         const a = rand() * Math.PI * 2, d = r * (0.9 + rand() * 1.1);
-        sv('circle', { r: f1(r * (0.03 + rand() * 0.03)), class: 'mfx-debris mfx-a', style: `--d:${(rand() * 0.15).toFixed(2)}s; --t:1.3s; --dx:${f1(Math.cos(a) * d)}px; --dy:${f1(Math.sin(a) * d)}px` }, g);
+        sv('circle', { r: f1(r * (0.025 + rand() * 0.03)), class: 'mfx-debris mfx-a', style: `--d:${(rand() * 0.15).toFixed(2)}s; --t:1.3s; --dx:${f1(Math.cos(a) * d)}px; --dy:${f1(Math.sin(a) * d)}px` }, g);
       }
-      sv('circle', { r: f1(r), fill: 'url(#mfxBall)', class: 'mfx-pop mfx-a', style: '--d:0s; --t:1.4s' }, g);
+      this._spr(g, 'fireball', 0, 0, r * 2, r * 2, 'mfx-pop mfx-a', '--d:0s; --t:1.6s');
       // smouldering: wisps for about a minute, then still
-      for (let i = 0; i < 4; i++) {
-        sv('circle', { cx: f1((rand() - 0.5) * r * 0.5), r: f1(r * 0.32), fill: 'url(#mfxSmoke)', class: 'mfx-wisp mfx-a', style: `--d:${(1 + i * 1.6).toFixed(1)}s; --t:6.5s; --n:9; --rise:${f1(r * 1.6)}px; --drift:${f1(r * 0.5)}px` }, g);
+      for (let i = 0; i < 5; i++) {
+        this._spr(g, (i % 2 ? 'dark' : 'smoke') + (i % 3), (rand() - 0.5) * r * 0.5, 0, r * 0.8, r * 0.8, 'mfx-wisp mfx-a', `--d:${(0.6 + i * 1.3).toFixed(1)}s; --t:6.5s; --n:9; --rise:${f1(r * 1.7)}px; --drift:${f1(r * 0.6)}px`);
       }
     },
     _fx_fire(g, r, rand) {
-      sv('circle', { r: f1(r * 1.1), fill: 'url(#mfxScorch)', class: 'mfx-a mfx-fadein', style: '--d:0s; --t:20s' }, g);
-      sv('ellipse', { rx: f1(r * 0.95), ry: f1(r * 0.75), fill: 'url(#mfxGlow)', class: 'mfx-pulse' }, g);
-      const n = Math.max(6, Math.min(22, Math.round(r / 8)));
+      this._spr(g, 'scorch', 0, 0, r * 2.5, r * 2, 'mfx-a mfx-fadein', '--d:0s; --t:20s');
+      sv('ellipse', { rx: f1(r * 1.05), ry: f1(r * 0.8), fill: 'url(#mfxGlow)', class: 'mfx-pulse' }, g);
+      // the burning bed the flames rise from
+      this._spr(g, 'fireball', 0, r * 0.05, r * 1.7, r * 1.05, 'mfx-pulse', 'opacity:.55');
+      const n = Math.max(10, Math.min(34, Math.round(r / 5)));
       const spots = [];
       for (let i = 0; i < n; i++) {
         const a = rand() * Math.PI * 2, d = Math.sqrt(rand()) * r * 0.78;
-        spots.push([Math.cos(a) * d, Math.sin(a) * d * 0.75]);
+        spots.push([Math.cos(a) * d, Math.sin(a) * d * 0.72]);
+      }
+      // the smoke plume rides above and behind the fire, drifting downwind
+      for (let i = 0; i < 7; i++) {
+        const [x, y] = spots[Math.floor(rand() * spots.length)];
+        this._spr(g, (i % 3 === 0 ? 'smoke' : 'dark') + (i % 3), x, y - r * 0.2, r * 0.9, r * 0.9, 'mfx-wisp loop', `--d:${(-i * 1.15).toFixed(2)}s; --t:8s; --rise:${f1(r * 2.6)}px; --drift:${f1(r * 1.1)}px`);
       }
       spots.sort((p, q) => p[1] - q[1]); // far flames first
       for (const [x, y] of spots) {
-        const h = r * (0.22 + rand() * 0.18), w = h * 0.34;
-        const fg = sv('g', { transform: `translate(${f1(x)},${f1(y)})` }, g);
-        sv('path', { d: `M${f1(-w)} 0 C${f1(-w)} ${f1(-h * 0.5)} ${f1(-w * 0.2)} ${f1(-h * 0.7)} 0 ${f1(-h)} C${f1(w * 0.2)} ${f1(-h * 0.7)} ${f1(w)} ${f1(-h * 0.5)} ${f1(w)} 0 Z`,
-          fill: 'url(#mfxFlame)', class: 'mfx-flame', style: `animation-duration:${(0.8 + rand() * 0.8).toFixed(2)}s; animation-delay:${(-rand() * 2).toFixed(2)}s` }, fg);
+        const h = r * (0.3 + rand() * 0.38), w = h * (0.5 + rand() * 0.25);
+        this._spr(g, 'flame' + Math.floor(rand() * 3), x, y, w, h, 'mfx-flame', `animation-duration:${(0.7 + rand() * 0.7).toFixed(2)}s; animation-delay:${(-rand() * 2).toFixed(2)}s`, 'b');
       }
-      for (let i = 0; i < 5; i++) {
+      for (let i = 0; i < 8; i++) {
         const [x, y] = spots[Math.floor(rand() * spots.length)];
-        sv('circle', { cx: f1(x), cy: f1(y), r: f1(r * 0.3), fill: 'url(#mfxSmoke)', class: 'mfx-wisp loop', style: `--d:${(-i * 1.5).toFixed(1)}s; --t:7.5s; --rise:${f1(r * 2.4)}px; --drift:${f1(r * 0.9)}px` }, g);
+        sv('circle', { cx: f1(x), cy: f1(y - r * 0.2), r: f1(Math.max(1.5, r * 0.018)), class: 'mfx-ember', style: `animation-delay:${(-rand() * 3).toFixed(2)}s; --dx:${f1((rand() - 0.2) * r * 0.8)}px; --h:${f1(r * (0.8 + rand() * 0.9))}px` }, g);
       }
     },
     _fx_flood(g, r, rand) {
@@ -272,8 +439,8 @@
         sv('path', { d, pathLength: 1, class: 'mfx-lava mfx-a', 'stroke-width': f1(r * 0.045), style: `--d:${(0.4 + k * 0.5).toFixed(1)}s; --t:6s` }, g);
       }
       sv('ellipse', { cy: f1(top), rx: f1(r * 0.17), ry: f1(r * 0.06), fill: 'url(#mfxLava)', class: 'mfx-pulse' }, g);
-      for (let i = 0; i < 6; i++) {
-        sv('circle', { cx: f1((rand() - 0.5) * r * 0.1), cy: f1(top), r: f1(r * 0.28), fill: 'url(#mfxSmoke)', class: 'mfx-wisp loop', style: `--d:${(-i * 1.1).toFixed(1)}s; --t:6.6s; --rise:${f1(r * 2.6)}px; --drift:${f1(r * 0.7)}px` }, g);
+      for (let i = 0; i < 7; i++) {
+        this._spr(g, 'ash' + (i % 3), (rand() - 0.5) * r * 0.1, top, r * 0.75, r * 0.75, 'mfx-wisp loop', `--d:${(-i * 0.95).toFixed(2)}s; --t:6.6s; --rise:${f1(r * 2.6)}px; --drift:${f1(r * 0.8)}px`);
       }
       for (let i = 0; i < 5; i++) {
         sv('circle', { cy: f1(top), r: f1(Math.max(2, r * 0.025)), class: 'mfx-bomb', style: `animation-delay:${(-rand() * 2.4).toFixed(2)}s; --dx:${f1((rand() - 0.5) * r * 1.1)}px; --h:${f1(r * (0.5 + rand() * 0.6))}px` }, g);
@@ -283,9 +450,9 @@
       sv('circle', { r: f1(r * 1.18), class: 'mfx-hazard' }, g);
       const cl = sv('g', { class: 'mfx-spread mfx-a', style: '--d:0s; --t:12s' }, g);
       const drift = sv('g', { class: 'mfx-breathe' }, cl);
-      for (let i = 0; i < 7; i++) {
-        const a = rand() * Math.PI * 2, d = rand() * r * 0.5;
-        sv('circle', { cx: f1(Math.cos(a) * d), cy: f1(Math.sin(a) * d * 0.8), r: f1(r * (0.45 + rand() * 0.25)), fill: 'url(#mfxToxic)' }, drift);
+      for (let i = 0; i < 9; i++) {
+        const a = rand() * Math.PI * 2, d = rand() * r * 0.55, sz = r * (0.9 + rand() * 0.5);
+        this._spr(drift, 'toxic' + (i % 3), Math.cos(a) * d, Math.sin(a) * d * 0.8, sz, sz * 0.85, null, 'opacity:.8');
       }
     },
 

@@ -739,7 +739,7 @@ const GameMap = {
     }
     const atlas = this.atlasOn();
     if (W.layer === 'ownership' || W.layer === 'plain') return atlas ? { fill: 'var(--at-land)', opacity: 1 } : { fill: 'var(--paper-deep)', opacity: 0.94 };
-    return atlas ? { fill: this.atlasProvColor(p), opacity: 1 } : { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
+    return atlas ? { fill: this.atlasProvColor(p), opacity: 0.9 } : { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
   },
 
   /* ---------- isometric building glyphs ----------
@@ -1046,7 +1046,7 @@ const GameMap = {
       // atlas: smaller, widely tracked capitals (the tracking makes up the width)
       const size = (p.labelSize || 46) * (atlas ? 0.66 : 1);
       const rot = p.labelRot ? `rotate(${p.labelRot} ${p.labelPos[0]} ${p.labelPos[1]})` : '';
-      const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': size, 'text-anchor': 'middle', transform: rot });
+      const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': size, 'text-anchor': 'middle', transform: rot, style: atlas ? 'fill:' + this.atlasProvLabel(p) : undefined });
       t.textContent = p.name.toUpperCase();
       if (W.layer === 'data') {
         const vdef = (S().variables || []).find(v => v.scope === 'province' && v.key === W.dataVar);
@@ -1321,7 +1321,7 @@ const GameMap = {
     this.renderLegend();
     // the plate's furniture (paper, neatline, rose, scale, locator) and the
     // sun's current shadow offsets
-    this.atlasChrome(atlas);
+    this.atlasChrome(this.atlasChromeOn(), atlas);
     const wrap = document.getElementById('map-wrap');
     if (wrap) { wrap._sunKey = null; this.onSun(wrap, this._dnSun || null); }
     this.applyTransform(true);

@@ -84,9 +84,6 @@ const App = {
         if (btn.dataset.mood === 'paper') document.body.removeAttribute('data-mood');
         else document.body.setAttribute('data-mood', btn.dataset.mood);
         localStorage.setItem('arcasia-mood', btn.dataset.mood);
-        // the atlas map computes its province inks per mood (pastels by day
-        // paper, deep tones in the dark moods) — re-ink it
-        if (window.GameMap && GameMap.ready && document.getElementById('map-wrap') && GameMap.atlasOn()) GameMap.render();
       });
     });
 

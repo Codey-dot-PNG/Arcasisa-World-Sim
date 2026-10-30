@@ -1274,53 +1274,57 @@ body:has(.gm-bar:not(.hidden)) .war-air-dock{bottom:92px;}
 .veh-tail{fill:#ff4b3a;}
 .map-car,.map-train{opacity:calc(1 - 0.28 * var(--dn-night,0));}
 /* ═══ Atlas map style (public/js/map-style.js) ═══
-   The default sheet as a printed atlas plate. Tokens on #map-wrap.atlas
-   (paper moods) with a night-atlas set for the dark moods; the svg carries
-   .atlas (and .at-sh while building shadows are on). The War layer never
-   wears it. Nothing here animates and nothing inside the svg filters or
-   blends — the map paint budget (docs/CONVENTIONS.md). */
+   The default sheet as a printed period map on the desk (after Suzerain):
+   warm cream paper, a muted blue-green sea, mid-tone province inks. Tokens
+   on #map-wrap.atlas; the svg carries .atlas (and .at-sh while building
+   shadows are on) on every layer, the War layer included. The sheet is
+   paper in EVERY mood — the dark moods light it with a desk lamp
+   (#atlas-paper's vignette) instead of inverting it. Nothing here animates
+   and nothing inside the svg filters or blends — the map paint budget
+   (docs/CONVENTIONS.md). */
 #map-wrap.atlas{
-  --at-sea:#a9cdd3; --at-ring:#3f7b8a; --at-land:#efe6c6; --at-land-hi:#f8f2df;
-  --at-ink:#2a251d; --at-road:#6e6454; --at-rail:#b5362a; --at-prov-label:#b03a2c; --at-sea-label:#2f6f7e;
-  --at-town:#cf4f3f; --at-grat:#2f4a52; --at-paper-o:.55;
+  --at-sea:#aec5b9; --at-ring:#4f786e; --at-land:#ebdfb6; --at-land-hi:#f4ebcd;
+  --at-ink:#3b3021; --at-road:#8a7c63; --at-rail:#b4462f; --at-prov-label:#6b3a24; --at-sea-label:#4f7872;
+  --at-town:#b35a43; --at-grat:#5a5038; --at-country-label:#5f5340; --at-paper-o:.62;
   background:var(--at-sea);
 }
-body:is([data-mood="dark"],[data-mood="red"]) #map-wrap.atlas{
-  --at-sea:#14242b; --at-ring:#6aa3b1; --at-land:#2b251b; --at-land-hi:#372f23;
-  --at-ink:#e3d7b9; --at-road:#9a8d78; --at-rail:#d9634e; --at-prov-label:#eb977d; --at-sea-label:#86bccb;
-  --at-town:#c4503f; --at-grat:#d4e4e7; --at-paper-o:.32;
-}
+/* dark moods: the same paper under a desk lamp — a dark desk round the
+   sheet's edges, a warm pool of light in the middle */
+body:is([data-mood="dark"],[data-mood="red"]) #map-wrap.atlas{--at-paper-o:.92; background:#1a130d;}
 #map-svg.atlas .map-ocean{fill:var(--at-sea);}
 #map-svg.atlas .map-frame{stroke:var(--at-ink); stroke-opacity:.3; stroke-width:2;}
 /* engraved water-lines (atlasCoast) */
 .at-ring{fill:none; stroke:var(--at-ring); stroke-width:.9px; stroke-linejoin:round;}
-.at-ring-1{stroke-opacity:.58;} .at-ring-2{stroke-opacity:.38;} .at-ring-3{stroke-opacity:.22;}
+.at-ring-1{stroke-opacity:.5;} .at-ring-2{stroke-opacity:.3;} .at-ring-3{stroke-opacity:.16;}
 /* land, frontiers, provinces */
-#map-svg.atlas .country-shape{fill:var(--at-land); stroke:var(--at-ink); stroke-opacity:.7; stroke-width:1;}
+#map-svg.atlas .country-shape{fill:var(--at-land); stroke:var(--at-ink); stroke-opacity:.35; stroke-width:1;}
 #map-svg.atlas .country-shape:hover{filter:none; fill:var(--at-land-hi);}
 #map-svg.atlas .country-shape.selected{stroke:var(--accent); stroke-width:2.4; stroke-opacity:1;}
-.at-band{fill:none; stroke-width:12px; stroke-opacity:.8; stroke-linejoin:round;}
+.at-band{fill:none; stroke-width:12px; stroke-opacity:.26; stroke-linejoin:round;}
+.at-frontier{fill:none; stroke-width:1.9px; stroke-opacity:.92; stroke-linejoin:round;}
 .at-nation{fill:var(--at-land); stroke:var(--at-ink); stroke-width:3px; stroke-linejoin:round;}
-#map-svg.atlas .prov-shape{stroke:var(--at-ink); stroke-opacity:.78; stroke-width:1.6px; stroke-dasharray:.5 4.5; stroke-linecap:round;}
+#map-svg.atlas .prov-shape{stroke:var(--at-ink); stroke-opacity:.7; stroke-width:1.5px; stroke-dasharray:.5 4.5; stroke-linecap:round;}
 #map-svg.atlas .prov-shape:hover{filter:brightness(1.04);}
 #map-svg.atlas .prov-shape.selected{stroke:var(--accent); stroke-opacity:1; stroke-dasharray:none; stroke-width:2.6;}
-.at-grat{fill:none; stroke:var(--at-grat); stroke-opacity:.15; stroke-width:.8px;}
-.at-town{fill:var(--at-town); fill-opacity:.3; stroke:var(--at-town); stroke-opacity:.75; stroke-width:1px;}
+.at-grat{fill:none; stroke:var(--at-grat); stroke-opacity:.1; stroke-width:.8px;}
+.at-town{fill:var(--at-town); fill-opacity:.24; stroke:var(--at-town); stroke-opacity:.55; stroke-width:1px;}
 /* transport */
 #map-svg.atlas .map-road{stroke:var(--at-road); stroke-opacity:.85; stroke-width:1.1px;}
 #map-svg.atlas .map-rail-base{stroke:var(--at-rail); stroke-opacity:.92; stroke-width:2.1px;}
 #map-svg.atlas .map-rail-dash{display:none;}
 /* lettering */
+/* province names: spaced capitals in their own hue, deep (inline fill —
+   GameMap.atlasProvLabel), printed straight onto the ink */
 #map-svg.atlas .prov-label{
-  font-family:var(--font-ui); font-weight:500; letter-spacing:.62em; fill:var(--at-prov-label); opacity:.9;
-  paint-order:stroke; stroke:var(--at-land-hi); stroke-opacity:.55; stroke-width:4px;
+  font-family:var(--font-ui); font-weight:600; letter-spacing:.58em; fill:var(--at-prov-label); opacity:.72;
+  stroke:none;
 }
 #map-svg.atlas .prov-stat{fill:var(--at-ink); stroke:var(--at-land-hi); stroke-opacity:.6;}
 #map-svg.atlas .map-label-country{
-  font-family:var(--font-ui); font-weight:700; text-transform:uppercase; letter-spacing:.5em;
-  fill:var(--at-land-hi); stroke:var(--at-ink); stroke-width:1.6px; paint-order:normal; opacity:.78;
+  font-family:var(--font-ui); font-weight:500; text-transform:uppercase; letter-spacing:.62em;
+  fill:var(--at-country-label); stroke:none; opacity:.5;
 }
-#map-svg.atlas .map-label-sea{font-family:var(--font-voice); font-style:italic; font-weight:400; text-transform:uppercase; letter-spacing:.62em; fill:var(--at-sea-label); opacity:.88;}
+#map-svg.atlas .map-label-sea{font-family:var(--font-voice); font-style:italic; font-weight:400; text-transform:uppercase; letter-spacing:.62em; fill:var(--at-sea-label); opacity:.8;}
 #map-svg.atlas .map-label-note{
   font-family:var(--font-ui); font-weight:500; text-transform:uppercase; letter-spacing:.3em; fill:var(--at-prov-label); opacity:.8;
   paint-order:stroke; stroke:var(--at-land-hi); stroke-opacity:.5; stroke-width:3px;
@@ -1356,18 +1360,23 @@ body:is([data-mood="dark"],[data-mood="red"]) #map-wrap.atlas{
 .at-road-lamp{fill:none; stroke:#ffd590; stroke-opacity:.75; stroke-width:1.5px; stroke-dasharray:1.5 5; stroke-linecap:round;}
 .at-spill{opacity:.6;}
 /* the plate's furniture (screen space) */
+/* paper: fibre grain, a faint warm cast, a soft fall-off of light toward the
+   edges (one composited multiply layer — never repaints with the map) */
 #atlas-paper{
   position:absolute; inset:0; z-index:2; pointer-events:none; mix-blend-mode:multiply; opacity:var(--at-paper-o); transform:translateZ(0);
   background:
-    radial-gradient(130% 100% at 50% 46%, rgba(0,0,0,0) 56%, rgba(92,66,28,.32) 100%),
-    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='260' height='260'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.8' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .45  0 0 0 0 .36  0 0 0 0 .22  0 0 0 .42 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    radial-gradient(125% 100% at 42% 38%, rgba(0,0,0,0) 50%, rgba(98,68,30,.34) 100%),
+    linear-gradient(rgba(255,232,186,.22), rgba(255,232,186,.22)),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.75' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .45  0 0 0 0 .35  0 0 0 0 .2  0 0 0 .5 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
 }
-#atlas-frame{position:absolute; inset:9px; z-index:3; pointer-events:none; border:2px solid var(--at-ink); opacity:.8;}
+body:is([data-mood="dark"],[data-mood="red"]) #atlas-paper{
+  background:
+    radial-gradient(80% 72% at 46% 42%, rgba(0,0,0,0) 30%, rgba(52,32,14,.55) 72%, rgba(18,10,4,.86) 100%),
+    linear-gradient(rgba(255,214,150,.3), rgba(255,214,150,.3)),
+    url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='300' height='300'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.75' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .45  0 0 0 0 .35  0 0 0 0 .2  0 0 0 .5 0'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+}
+#atlas-frame{position:absolute; inset:9px; z-index:3; pointer-events:none; border:2px solid var(--at-ink); opacity:.7;}
 #atlas-frame::after{content:""; position:absolute; inset:3px; border:1px solid var(--at-ink); opacity:.6;}
-#atlas-frame .at-title{
-  position:absolute; top:0; left:50%; transform:translate(-50%,-50%); padding:1px 18px; background:var(--at-land);
-  font-family:var(--font-voice); font-style:italic; font-weight:500; font-size:12px; letter-spacing:.55em; color:var(--at-ink); white-space:nowrap;
-}
 #map-compass.at-rose{top:124px; right:22px; bottom:auto; width:60px; opacity:.94; filter:drop-shadow(0 1px 1px rgba(0,0,0,.18));}
 #map-compass.at-rose svg{width:100%; height:auto; display:block;}
 #atlas-scale{position:absolute; right:24px; bottom:24px; z-index:4; pointer-events:none; line-height:0; background:var(--at-land-hi); border:1px solid var(--at-ink); padding:2px 3px 0; opacity:.92;}
@@ -1384,15 +1393,24 @@ body:is([data-mood="dark"],[data-mood="red"]) #map-wrap.atlas{
 .ati-view{fill:rgba(176,58,44,.10); stroke:#b03a2c; stroke-width:1.5px; vector-effect:non-scaling-stroke;}
 .ati-cap{position:absolute; left:6px; top:3px; font-family:var(--font-mono); font-size:7.5px; letter-spacing:.3em; text-transform:uppercase; color:var(--at-ink); opacity:.7; pointer-events:none;}
 #map-wrap.atlas #map-legend{background:var(--at-land-hi); border:1.5px solid var(--at-ink); outline:1px solid var(--at-ink); outline-offset:2px; color:var(--at-ink);}
-body:is([data-mood="dark"],[data-mood="red"]) #atlas-scale{background:rgba(22,16,11,.92);}
-body:is([data-mood="dark"],[data-mood="red"]) .sb-cap{fill:var(--wm-text);}
+/* the rose and the scale bar are printed on the paper in every mood */
+#map-compass.at-rose .rose-ring{fill:rgba(244,236,214,.72); stroke:#3b3021;}
+#map-compass.at-rose .rose-light{fill:#f4ecd6; stroke:#3b3021;}
+#map-compass.at-rose .rose-dark{fill:#3b3021; stroke:#3b3021;}
+#map-compass.at-rose .rose-n{fill:#3b3021;}
+#atlas-scale .sb-dark{fill:#3b3021;} #atlas-scale .sb-light{fill:#f4ecd6;} #atlas-scale .sb-box{stroke:#3b3021;}
+#atlas-scale :is(.sb-num, .sb-unit, .sb-cap){fill:#3b3021;}
+/* under the lamp the plate's furniture sits in the same dimmer light */
+body:is([data-mood="dark"],[data-mood="red"]) :is(#atlas-inset, #atlas-scale){filter:brightness(.8) sepia(.12);}
+/* the War layer reads the same paper: its parchment veil only tones it */
+#map-svg.atlas .war-veil-rect{fill:#efe2bd; fill-opacity:.2;}
+body:is([data-mood="dark"],[data-mood="red"]) #map-svg.atlas .war-veil-rect{fill:#120c06; fill-opacity:.3;}
 /* the GM bar floats over the map's foot: --at-foot (its overlap, measured
    by GameMap._atlasViewNow) lifts the plate's bottom furniture clear of it */
 #atlas-frame{bottom:calc(9px + var(--at-foot,0px));}
 #atlas-scale{bottom:calc(24px + var(--at-foot,0px));}
 #atlas-inset{bottom:calc(70px + var(--at-foot,0px));}
 #map-wrap.atlas #map-legend{bottom:calc(18px + var(--at-foot,0px));}
-@media (max-width:1180px){ #atlas-frame .at-title{display:none;} }
 @media (max-width:900px){ #atlas-inset{display:none;} }
 @media (max-width:640px){
   #map-compass.at-rose{top:150px; right:12px; width:42px;}
@@ -2226,13 +2244,13 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 .mfx-capgrow{animation-name:mfxGrow;}
 @keyframes mfxGrow{from{transform:scale(.15);} to{transform:scale(1);}}
 .mfx-thin{animation-name:mfxThin; animation-timing-function:linear;}
-@keyframes mfxThin{from{opacity:1;} to{opacity:.5;}}
-.mfx-condense{fill:none; stroke:#ffffff; stroke-opacity:.75; stroke-width:2px; vector-effect:non-scaling-stroke; animation-name:mfxCondense;}
-@keyframes mfxCondense{0%{transform:scale(.4); opacity:0;} 20%{opacity:.9;} 100%{transform:scale(1.7); opacity:0;}}
-.mfx-ring-scar{fill:none; stroke:#2d1b10; stroke-opacity:.5; stroke-width:1.4px; stroke-dasharray:4 6; vector-effect:non-scaling-stroke;}
-.mfx-ring-scar.faint{stroke-opacity:.28;}
+@keyframes mfxThin{from{opacity:1; transform:translate(0,0);} to{opacity:.42; transform:translate(var(--wind, 0px), 0);}}
+.mfx-collar{animation-name:mfxCollar;}
+@keyframes mfxCollar{0%{transform:scale(.4); opacity:0;} 18%{opacity:.85;} 100%{transform:scale(1.8); opacity:0;}}
+.mfx-surge{animation-name:mfxSurge; animation-timing-function:cubic-bezier(.15,.7,.3,1);}
+@keyframes mfxSurge{0%{transform:scale(.08); opacity:.95;} 35%{opacity:.85;} 100%{transform:scale(1); opacity:.32;}}
+.mfx-shockwave{animation-name:mfxShock; animation-timing-function:cubic-bezier(.2,.6,.4,1);}
 /* explosion */
-.mfx-crater{fill:#1e140d; fill-opacity:.72; stroke:#6b4a2e; stroke-opacity:.6; stroke-width:1.4px; vector-effect:non-scaling-stroke;}
 .mfx-pop{animation-name:mfxPop;}
 @keyframes mfxPop{0%{transform:scale(.1); opacity:1;} 30%{transform:scale(1); opacity:1;} 100%{transform:scale(1.15); opacity:0;}}
 .mfx-debris{fill:#2b1d14; animation-name:mfxDebris; animation-timing-function:cubic-bezier(.15,.8,.4,1);}
@@ -2240,9 +2258,11 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 .mfx-wisp{animation-name:mfxWisp; animation-timing-function:linear;}
 .mfx-wisp.loop{animation:mfxWisp var(--t, 7s) linear var(--d, 0s) infinite both;}
 @keyframes mfxWisp{0%{transform:translate(0,0) scale(.4); opacity:0;} 15%{opacity:.85;} 100%{transform:translate(var(--drift, 0px), calc(var(--rise, 100px) * -1)) scale(2.2); opacity:0;}}
-/* fire */
-.mfx-flame{animation:mfxFlicker 1.2s ease-in-out infinite alternate;}
-@keyframes mfxFlicker{0%{transform:scale(1, .76); opacity:.82;} 50%{transform:scale(.9, 1.08); opacity:1;} 100%{transform:scale(1.06, .9); opacity:.92;}}
+/* fire: baked flame tongues stretching and leaning, embers rising */
+.mfx-flame{animation:mfxFlicker 1.1s ease-in-out infinite alternate;}
+@keyframes mfxFlicker{0%{transform:scale(1, .8) skewX(-4deg); opacity:.85;} 35%{transform:scale(.88, 1.1) skewX(3deg); opacity:1;} 70%{transform:scale(1.05, .92) skewX(-2deg); opacity:.9;} 100%{transform:scale(.94, 1.04) skewX(5deg); opacity:1;}}
+.mfx-ember{fill:#ffb347; animation:mfxEmber 2.8s ease-out infinite;}
+@keyframes mfxEmber{0%{transform:translate(0,0); opacity:0;} 10%{opacity:1;} 100%{transform:translate(var(--dx), calc(var(--h) * -1)); opacity:0;}}
 .mfx-pulse{animation:mfxPulse 2.6s ease-in-out infinite alternate;}
 @keyframes mfxPulse{from{opacity:.6;} to{opacity:.95;}}
 /* flood */

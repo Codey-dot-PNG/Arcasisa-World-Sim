@@ -1932,8 +1932,8 @@ heartbeat goes through `War.refreshLayer → _paint`, which PATCHES the existing
 Two hosts:
 
 - **In `#map-svg`** (`map.warLayer`, rebuilt with each full map render):
-  - `war-veil` — a parchment wash over the base map on the ⚔ War layer, so the overlay reads
-    like a staff map (ambient traffic is off on the War layer; the map legend hides).
+  - `war-veil` — a parchment wash over the base map on the ⚔ War layer (a light tone over the
+    atlas sheet), so the overlay reads like a staff map (ambient traffic is off on the War layer; the map legend hides).
   - `war-ground` — occupied ground and the **front line**, rebuilt only when the captured-cell
     set changes (`_groundKey` fingerprint) and at most every `WAR_GROUND_MIN_MS` (1.5s — each
     rebuild repaints the whole base map; a timer catches the last change up). A protest's
@@ -1989,7 +1989,11 @@ leg. Move arrows' tails track the tween (`_arrowAnim`).
 
 ### The map sheet (`public/js/war-map.js`)
 
-The War layer reads as a staff officer's map sheet. Scale is world data:
+The War layer reads as a staff officer's map sheet. Under the atlas map style (the default,
+`settings.ambience.mapStyle`) it is drawn on the same printed sheet as every other layer —
+paper, province inks, coast lines (`public/js/map-style.js`) — with the war's own furniture
+(frame, rose, scale bar) in place of the atlas plate's, and the `war-veil` thinned to a light
+tone. Scale is world data:
 `settings.map.kmPerPx` (2.17 — Arcasia's ~1.81M px² of land at Brazil's
 8.5M km²; seeded by `store.migrate` only when missing). Distances below are
 km at that scale; times are real seconds at the conflict's current speed.

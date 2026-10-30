@@ -1,20 +1,26 @@
 'use strict';
 /* Atlas map style — loaded after map.js and folded into GameMap.
 
-   The default map reads as a plate from a printed atlas:
-     · cream land on a pale sea whose coasts carry engraved WATER-LINES (three
-       hairlines following the shore at growing distances, fading outward);
-     · foreign powers outlined by a coloured RIBBON just inside their frontier
-       (their own colour when it has a real hue, else a stable atlas ink);
-     · the Republic's provinces in pastel inks of their own colours, parted by
-       dotted lines, the nation edged with one solid line;
+   The default map reads as a printed period map lying on the desk (after
+   Suzerain's sheets and old atlas plates):
+     · warm cream paper on a muted blue-green sea whose coasts carry engraved
+       WATER-LINES (three hairlines following the shore, fading outward);
+     · foreign powers left as paper, each frontier drawn in its own ink with a
+       soft band of the same ink just inside (their own colour when it has a
+       real hue, else a stable period ink);
+     · the Republic's provinces in mid-tone printing inks of their own colours
+       (amber, sage, terracotta — never pastel), parted by dotted lines, the
+       nation edged with one solid line, names in widely spaced capitals of
+       the same hue, deep;
      · towns as red built-up areas taking in their own buildings; red
-       railways, fine grey roads; widely spaced lettering — hollow capitals
-       for countries, teal italics for seas, red capitals for provinces;
-     · a conic graticule (meridians converging north, parallels as arcs);
-     · the plate's furniture in SCREEN space (#atlas-*): paper grain and
-       vignette, a double neatline with the world's name, a compass rose, a
-       scale bar and a locator inset (click/drag it to move the map).
+       railways, fine grey roads; hollow capitals for countries, muted teal
+       italics for seas;
+     · a faint conic graticule (meridians converging north);
+     · the plate's furniture in SCREEN space (#atlas-*): paper grain, warm
+       light and vignette, a double neatline, a compass rose, a scale bar
+       and a locator inset (click/drag it to move the map).
+   The sheet stays paper in every mood: the dark moods light it with a desk
+   lamp (darker surround, warm pool) instead of inverting its colours.
 
    Light rides the same sheet. Building SHADOWS are pre-rendered silhouettes
    offset away from the sun — long at dawn and dusk, short at noon, swinging
@@ -25,13 +31,14 @@
 
    GM switch: settings.ambience.mapStyle ('atlas' default | 'classic') and
    settings.ambience.shadows (default on) — GM Studio › World › Settings &
-   Time. The War layer always keeps its own sheet (war-map.js).
+   Time. The War layer draws on the same sheet but keeps its own furniture
+   (frame with grid references, rose, scale bar — war-map.js).
 
    PERFORMANCE (docs/CONVENTIONS.md "map paint budget"): everything here is
    static per render — no animations, no filters and no blend modes inside
    the map svg. Shadow silhouettes and night variants are baked ONCE per
    building texture per session on a canvas (blob URLs) and moved/faded by
-   CSS variables; the coast is one combined path stroked a few times; the
+   CSS variables; the coast's water-lines are computed once per coastline; the
    screen-space furniture is composited HTML that never repaints with the
    map. */
 (function () {
@@ -68,8 +75,9 @@
     };
     return '#' + f(0) + f(8) + f(4);
   }
-  // frontier ribbons for powers whose own colour is a grey: printed-atlas inks
-  const BAND_INKS = ['#e0832f', '#78a83c', '#8a6aa8', '#b8543f', '#3b8fa5', '#cf9f2a', '#5a78c2', '#c25f8a', '#5f9a74', '#a8743c'];
+  // frontier inks for powers whose own colour is a grey — the muted greens,
+  // oranges and rose of a printed 1960s sheet, not poster colours
+  const BAND_INKS = ['#c9782f', '#5f9446', '#8a6f9e', '#b2553f', '#4a8a8f', '#c29a36', '#5d79a6', '#bf6f86', '#6f8f5c', '#9a7444'];
 
   // a round number of km ≥ target (1, 2, 5 × 10ⁿ)
   function niceKm(target) {
@@ -85,31 +93,40 @@
       const a = ((((S() || {}).settings) || {}).ambience) || {};
       return a.mapStyle === 'classic' ? 'classic' : 'atlas';
     },
-    atlasOn() { return !!S() && this.atlasStyle() === 'atlas' && W.layer !== 'war'; },
+    // the sheet itself — every layer, the War layer included
+    atlasOn() { return !!S() && this.atlasStyle() === 'atlas'; },
+    // the plate's screen furniture (paper, neatline, rose, scale, locator) —
+    // the War layer brings its own frame, rose and scale bar (war-map.js)
+    atlasChromeOn() { return this.atlasOn() && W.layer !== 'war'; },
     shadowsOn() {
       const a = ((((S() || {}).settings) || {}).ambience) || {};
       return this.atlasOn() && a.shadows !== false;
     },
-    darkMood() { const m = document.body && document.body.dataset.mood; return m === 'dark' || m === 'red'; },
 
-    /* ---------- inks ---------- */
-    // a province's own colour as a printed pastel (or a deep night-atlas tone)
+    /* ---------- inks ----------
+       The sheet is printed paper in every mood (the dark moods light it with a
+       desk lamp instead of inverting it — style.css). Province inks are the
+       province's own hue as a mid-tone printing ink: warm, moderately
+       saturated, never pastel — the amber/sage/terracotta of a period map. */
     atlasProvColor(p) {
       const rgb = rgbOf(p && p.color);
-      const dark = this.darkMood();
-      if (!rgb) return dark ? '#3a3226' : '#e9dfbf';
+      if (!rgb) return '#d9c99a';
+      const [h, s, l] = toHsl(rgb);
+      return hslHex(h, Math.min(0.54, Math.max(0.12, s * 0.85 + 0.05)), Math.min(0.67, Math.max(0.52, 0.58 + (l - 0.45) * 0.3)));
+    },
+    // its lettering: the same hue, deep (spaced capitals over the fill)
+    atlasProvLabel(p) {
+      const rgb = rgbOf(p && p.color);
+      if (!rgb) return '#5a4630';
       const [h, s] = toHsl(rgb);
-      return dark
-        ? hslHex(h, Math.min(0.42, Math.max(0.1, s * 0.85)), 0.29)
-        : hslHex(h, Math.min(0.6, Math.max(0.12, s * 1.15)), 0.79);
+      return hslHex(h, Math.min(0.55, Math.max(0.15, s * 0.8 + 0.12)), 0.27);
     },
     countryInk(c) {
       const ent = c && c.entityId && typeof entById === 'function' ? entById(c.entityId) : null;
       const rgb = rgbOf(ent && ent.color);
-      const dark = this.darkMood();
       if (rgb) {
         const [h, s, l] = toHsl(rgb);
-        if (s >= 0.28 && l > 0.18 && l < 0.86) return hslHex(h, Math.min(0.72, s), dark ? 0.56 : 0.5);
+        if (s >= 0.28 && l > 0.18 && l < 0.86) return hslHex(h, Math.min(0.55, s), 0.46);
       }
       const list = (((S() || {}).settings || {}).map || {}).countries || [];
       const i = Math.max(0, list.findIndex(x => x.id === (c && c.id)));
@@ -275,8 +292,10 @@
         const id = 'atc-' + String(it.c.id).replace(/[^\w-]/g, '_');
         const clip = sv('clipPath', { id }, defs);
         const cp = sv('path', { d: it.d, 'clip-rule': 'evenodd' }, clip);
-        const band = sv('path', { d: it.d, class: 'at-band', stroke: this.countryInk(it.c), 'clip-path': `url(#${id})`, 'vector-effect': 'non-scaling-stroke' }, g);
-        reg(it.key, cp); reg(it.key, band);
+        const ink = this.countryInk(it.c);
+        const band = sv('path', { d: it.d, class: 'at-band', stroke: ink, 'clip-path': `url(#${id})`, 'vector-effect': 'non-scaling-stroke' }, g);
+        const line = sv('path', { d: it.d, class: 'at-frontier', stroke: ink, 'vector-effect': 'non-scaling-stroke' }, g);
+        reg(it.key, cp); reg(it.key, band); reg(it.key, line);
       }
     },
 
@@ -514,11 +533,13 @@
     },
 
     /* ---------- the plate's furniture (screen space) ---------- */
-    atlasChrome(on) {
+    // on: the furniture; sheet: the atlas inks (their tokens hang off
+    // #map-wrap.atlas, so the War layer keeps the class without the furniture)
+    atlasChrome(on, sheet) {
       const wrap = document.getElementById('map-wrap');
       if (!wrap) return;
       this._atlasLive = !!on;
-      wrap.classList.toggle('atlas', !!on);
+      wrap.classList.toggle('atlas', !!(sheet === undefined ? on : sheet));
       if (!on) {
         for (const id of ['atlas-paper', 'atlas-frame', 'atlas-scale', 'atlas-inset']) { const n = document.getElementById(id); if (n) n.remove(); }
         this._compassRose(false);
@@ -526,8 +547,7 @@
       }
       if (!document.getElementById('atlas-paper')) wrap.appendChild(el('div#atlas-paper'));
       let frame = document.getElementById('atlas-frame');
-      if (!frame) { frame = el('div#atlas-frame', el('div.at-title')); wrap.appendChild(frame); }
-      frame.firstChild.textContent = String((S().settings || {}).worldName || '').toUpperCase();
+      if (!frame) { frame = el('div#atlas-frame'); wrap.appendChild(frame); }
       if (!document.getElementById('atlas-scale')) wrap.appendChild(el('div#atlas-scale'));
       this._inset(wrap);
       this._compassRose(true);
@@ -559,7 +579,7 @@
       if (window.innerWidth <= 640) { const n = document.getElementById('atlas-inset'); if (n) n.remove(); return; }
       const map = S().settings.map || {};
       const key = JSON.stringify([(map.countries || []).map(c => [c.id, (c.shape || '').length]),
-        (S().provinces || []).map(p => [p.id, (p.shape || '').length, p.color]), this.darkMood()]);
+        (S().provinces || []).map(p => [p.id, (p.shape || '').length, p.color])]);
       let box = document.getElementById('atlas-inset');
       if (box && box._key === key) return;
       if (!box) {

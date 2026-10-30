@@ -1834,7 +1834,7 @@ only the levers you hold, phone-sized targets):
   active; 400 for an unknown scenario id or a scenario referencing missing
   entities.
 - `POST /api/gm/war/control { paused?, speed?, conflict? }` — GM-only;
-  `speed` is any multiplier, clamped to [0.05, 8] (`clampSpeed`). New wars and
+  `speed` is any positive multiplier up to 8 — no lower limit (`clampSpeed`). New wars and
   protests start at `settings.war.defaultSpeed` (default **1×** — a tick every
   2s; 0.5× is a tick every 4s). The War Room's GM row sets it with a
   slider (log-spaced stops, a "tick every Ns" readout). At slow speeds units glide
@@ -2073,7 +2073,7 @@ move/attack, right-drag route, Ctrl-drag line-up, Shift-drag box select, Esc cle
 A situation report per conflict: status chip, tick/elapsed/speed and **Open the battle map
 →**; the operator's authority line; a balance-of-forces bar; a stat strip (losses per side,
 civilian dead, refugees, cities fallen/in unrest); the GM row (Pause, a speed
-slider 0.05×–8× plus an exact number box, End) with tuning / spawn / intervention / treaty folds; objectives as a checklist
+slider 0.01×–8× plus an exact number box for any slower speed, End) with tuning / spawn / intervention / treaty folds; objectives as a checklist
 (the next one tagged, ◎ jumps the battle map there); province control bars; the five latest
 notable reports (captures/landings ahead of rout chatter, ◎ to locate) with the full log
 folded; **Order of battle** (every unit: side, type + echelon, strength %, morale, state,

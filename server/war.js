@@ -90,9 +90,15 @@ const PROTEST_DEFAULTS = {
 const MAX_PROTEST_UNITS = 300;
 // The conflict clock: a speed multiplier on tickMs (2000ms at 1×). New wars
 // and protests start at settings.war.defaultSpeed — 1× by default; the GM's
-// slider moves it anywhere in [SPEED_MIN, SPEED_MAX].
-const SPEED_MIN = 0.05, SPEED_MAX = 8;
-function clampSpeed(v) { return Math.round(engine.clamp(Number(v) || 1, SPEED_MIN, SPEED_MAX) * 100) / 100; }
+// GM can set any positive speed up to SPEED_MAX — there is no lower limit
+// beyond "greater than zero" (SPEED_MIN only keeps the tick interval finite;
+// at 1e-6 a tick comes every ~23 days). Kept to 4 significant figures.
+const SPEED_MIN = 1e-6, SPEED_MAX = 8;
+function clampSpeed(v) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return 1;
+  return Number(Math.min(SPEED_MAX, Math.max(SPEED_MIN, n)).toPrecision(4));
+}
 function defaultSpeed(db) {
   const v = Number((((db.settings || {}).war || {}).defaultSpeed));
   return Number.isFinite(v) && v > 0 ? clampSpeed(v) : 1;

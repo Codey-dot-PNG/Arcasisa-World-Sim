@@ -71,8 +71,8 @@ const WAR_HIT_FX_MS = 450;
 // used purely for the client's morale-bar/info-card color, not gameplay.
 const WAR_ROUT_ORG = 25;
 // The GM's speed slider stops (server/war.js clamps to [0.5, 8]).
-const WAR_SPEEDS = [0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
-function warSpeedLabel(v) { return String(Math.round((Number(v) || 1) * 100) / 100) + '×'; }
+const WAR_SPEEDS = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
+function warSpeedLabel(v) { const n = Number(v) || 1; return String(n >= 0.01 ? Math.round(n * 1000) / 1000 : Number(n.toPrecision(2))) + '×'; }
 const WAR_GROUND_MIN_MS = 1500; // see renderGround
 const MAX_PROTEST_UNITS_CLIENT = 300; // server/war.js MAX_PROTEST_UNITS
 // Protest unit glyphs (see War._symbol): a crowd pill holding three figures,
@@ -3320,16 +3320,19 @@ const War = {
     inner.appendChild(box);
   },
 
-  // The conflict clock as a slider (log-spaced stops 0.05×–8×) plus a number
-  // box for any exact value in that range: the label follows the thumb, the
-  // POST goes on release / on commit of the box (the server clamps).
+  // The conflict clock as a slider (log-spaced stops 0.01×–8×) plus a number
+  // box for any exact positive value up to 8× — as slow as the GM likes: the
+  // label follows the thumb, the POST goes on release / on commit of the box.
   _speedSlider(war, key) {
     const cur = Number(war.speed) || 1;
     let idx = 0;
     WAR_SPEEDS.forEach((v, i) => { if (Math.abs(Math.log(v / cur)) < Math.abs(Math.log(WAR_SPEEDS[idx] / cur))) idx = i; });
     const tickMs = war.tickMs || 2000;
-    const per = (v) => { const ms = Math.max(200, tickMs / v); return ms >= 1000 ? Math.round(ms / 100) / 10 + 's' : ms + 'ms'; };
-    const lo = WAR_SPEEDS[0], hi = WAR_SPEEDS[WAR_SPEEDS.length - 1];
+    const per = (v) => {
+      const ms = Math.max(200, tickMs / v), s = ms / 1000;
+      return s >= 86400 ? Math.round(s / 8640) / 10 + ' days' : s >= 3600 ? Math.round(s / 360) / 10 + 'h' : s >= 60 ? Math.round(s / 6) / 10 + ' min' : s >= 1 ? Math.round(s * 10) / 10 + 's' : Math.round(ms) + 'ms';
+    };
+    const hi = WAR_SPEEDS[WAR_SPEEDS.length - 1];
     const label = el('span.war-speed-label', warSpeedLabel(cur), el('span.war-speed-per', ` · a tick every ${per(cur)}`));
     const show = (v) => { label.firstChild.textContent = warSpeedLabel(v); label.lastChild.textContent = ` · a tick every ${per(v)}`; };
     const send = async (v) => {
@@ -3340,9 +3343,11 @@ const War = {
     const input = el('input.war-speed-range', { type: 'range', min: 0, max: WAR_SPEEDS.length - 1, step: 1, value: idx, title: 'Conflict speed',
       oninput: (e) => { const v = WAR_SPEEDS[+e.target.value]; show(v); box.value = v; },
       onchange: (e) => send(WAR_SPEEDS[+e.target.value]) });
-    box = el('input.war-speed-num', { type: 'number', min: lo, max: hi, step: 0.05, value: cur, title: `Exact speed (${lo}–${hi}×)`,
+    box = el('input.war-speed-num', { type: 'number', min: 0, max: hi, step: 'any', value: cur, title: `Exact speed — any positive value up to ${hi}×`,
       onchange: (e) => {
-        const v = Math.round(Math.min(hi, Math.max(lo, Number(e.target.value) || 1)) * 100) / 100;
+        const n = Number(e.target.value);
+        if (!(n > 0)) { e.target.value = cur; return toast('Speed must be above 0 — use Pause to stop the clock.', true); }
+        const v = Number(Math.min(hi, n).toPrecision(4));
         e.target.value = v; show(v);
         let j = 0; WAR_SPEEDS.forEach((s, i) => { if (Math.abs(Math.log(s / v)) < Math.abs(Math.log(WAR_SPEEDS[j] / v))) j = i; });
         input.value = j;

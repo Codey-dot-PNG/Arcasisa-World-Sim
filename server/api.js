@@ -472,7 +472,6 @@ function filterState(u) {
   const milOps = hasAbility(u, 'command_military') || hasAbility(u, 'command_police');
   const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId)) || grantHas(ownerId, 'trade') ||
     ((foodOps || milOps) && ownerId === govId);
-  const military = (p.mapLayers || []).includes('military');
 
   const entities = db.entities.map(e => {
     const out = { ...e };
@@ -503,8 +502,10 @@ function filterState(u) {
     return out;
   });
 
+  // Every facility is public — government buildings, forts, bases and
+  // airfields included (a city's barracks are no secret). What a site
+  // STORES is not: its inventory follows its owner's visibility (seeInv).
   const properties = db.properties
-    .filter(pr => military || pr.type !== 'military')
     .map(pr => {
       const out = { ...pr };
       if (!seeInv(pr.ownerId)) delete out.inventory;

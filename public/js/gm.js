@@ -2578,7 +2578,8 @@ const GM = {
     main.appendChild(Views.secLabel('Map Layers'));
     const layerGrid = el('div.perm-grid');
     d.perms.mapLayers = d.perms.mapLayers || [];
-    for (const [lid, llabel] of [['political', 'Political'], ['data', 'Data layers'], ['ownership', 'Ownership'], ['military', 'Military sites']]) {
+    // (military sites used to be a layer clearance — every facility is public now)
+    for (const [lid, llabel] of [['political', 'Political'], ['data', 'Data layers'], ['ownership', 'Ownership']]) {
       layerGrid.appendChild(el('label',
         el('input', { type: 'checkbox', checked: d.perms.mapLayers.includes(lid), onchange: (e) => { d.perms.mapLayers = e.target.checked ? [...new Set([...d.perms.mapLayers, lid])] : d.perms.mapLayers.filter(x => x !== lid); } }),
         llabel));

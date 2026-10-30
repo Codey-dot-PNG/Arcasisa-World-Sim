@@ -151,7 +151,9 @@ EXCEED `maxEmployees` (the cap) — over-staffing raises output linearly (capped
 while doubling accident risk per extra 100% of capacity on the payroll. Only the GM may
 change `maxEmployees` (GM Studio property editors, or `PATCH /api/property/:id/controls`
 with `maxEmployees`).
-`type: 'military'` sites are hidden from operators without the `military` map layer.
+Every property is visible to every operator — government and `type: 'military'` sites
+included (the old `military` map-layer clearance no longer hides anything); a site's
+`inventory` still follows its owner's inventory visibility.
 
 War-related notes (Phase 27): `prop_arc_arms` (ARC Arms Works, `type:'military'`) is seeded
 in the Republic and produces the M38 rifle plus a slow M36 "Griz" tank line (fractional

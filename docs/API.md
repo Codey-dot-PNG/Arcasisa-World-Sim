@@ -131,7 +131,8 @@ The single place the world is narrowed per operator. Key rules:
   company `vars/shareholders` stripped
   without `companyFinancials` (unless it's your company).
 - Provinces: without `statistics`, only `vars.population`, no demographics.
-- Properties: `type === 'military'` requires the `military` map layer.
+- Properties: all visible to everyone (government and military sites included); a site's
+  `inventory` is stripped unless its owner's inventory is visible.
 - News: non-`manageNews` sees published only.
 - Timeline: GM sees all; players see (a) every entry they are the `actor` of (matched by
   display name, with or without the `GM ` prefix — the cloud timeline table has no user-id

@@ -76,6 +76,8 @@ server/buildings.js    map building texture assignment per property kind
 server/geometry.js     point-in-polygon province lookup for map placement
 server/mapdata.js      map document (labels/roads/rails/countries); applyMap() self-heal
 server/territory.js    border-painter saves: found province/country, apply painted shapes, re-home places
+server/peace.js        player peace negotiations: offers, revisions, acceptance (reparations, holdings, borders)
+server/military.js     nations' armed forces: arsenal totals, militaryLog record, standing orders (plan/doctrine)
 server/map-geometry.js AUTO-GENERATED from the master SVG — do not edit (tools/build-mapdata.js)
 server/supabase.js     minimal PostgREST/Realtime client (plain fetch)
 public/js/*            client modules — see docs/FRONTEND.md

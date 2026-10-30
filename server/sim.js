@@ -2155,6 +2155,7 @@ function advanceTurn(steps, actor) {
     // lottery draws (Phase 12) — lazy require avoids a sim↔casino cycle
     try { require('./casino').drawDueLotteries(db, actor || 'ENGINE'); } catch (e) { /* casino optional */ }
     recordHistory(weekIndex(newMs) !== weekIndex(oldMs));
+    try { require('./military').sample(db, 'turn'); } catch (e) { /* the arms record is optional */ }
     // archive the closing turn's executed trades, then open a fresh order
     // book — unless the tradeReset cadence has been rerolling it hourly all
     // turn, in which case only the flow accounting resets here (Part 3c).

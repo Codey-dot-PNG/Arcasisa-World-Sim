@@ -100,6 +100,7 @@ function migrate(world) {
   need('markers', []);                    // Phase 1.4 — event markers
   need('mapFx', []);                      // GM map effects (nuke, fire, flood…) — visual only
   need('peaceOffers', []);                // peace negotiations — server/peace.js
+  need('militaryLog', []);                // nations' arsenal record — server/military.js
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
   need('tradeContracts', []);             // Phase 4.3 — ongoing trade contracts

@@ -2796,6 +2796,13 @@ const War = {
   renderPanel(inner) {
     inner.appendChild(el('div.doc-title', 'War Room'));
     const docs = this.authDocs();
+    // two desks: the situation reports below, and the armed forces
+    // (war-military.js — arsenal, readiness, deployment, standing orders)
+    if (this.renderWarTabs && this.renderWarTabs(inner) === 'military') {
+      if (docs.some(d => d.active) && window.WarEngine) this._ensureRealtime();
+      this.renderMilitary(inner);
+      return;
+    }
     if (!docs.length) {
       inner.appendChild(el('div.doc-sub', 'No conflict is currently active.'));
       if (isGM()) {
@@ -3217,14 +3224,19 @@ const War = {
     let startButton;
     const update = () => {
       const crowds = d.baseCities.length * (Number(d.crowds) || 1);
-      const posts = d.policeCities.length * 2;
+      // no police picked: the government's standing posts take the streets
+      // (its deployment plan — War Room › Military)
+      const standing = (((S().entities || []).find(e => e.type === 'government') || {}).militaryPlan || {}).police || {};
+      const standingIds = (standing.cities || []).filter(id => !d.baseCities.includes(id));
+      const posts = d.policeCities.length ? d.policeCities.length * 2 : standingIds.length * (standing.per || 2);
       const count = crowds + posts;
       const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
       clear(plan);
       plan.appendChild(el('span', d.baseCities.length
         ? `${n(crowds, 'crowd', 'crowds')} · ≈${warHeads(crowds * (Number(d.perCity) || 0))} people in ${n(d.baseCities.length, 'city', 'cities')}`
         : 'Tap at least one city for a rally.'));
-      plan.appendChild(el('span', d.policeCities.length ? ` · ${n(posts, 'police detachment', 'police detachments')} in ${n(d.policeCities.length, 'city', 'cities')}` : ' · no police posted'));
+      plan.appendChild(el('span', d.policeCities.length ? ` · ${n(posts, 'police detachment', 'police detachments')} in ${n(d.policeCities.length, 'city', 'cities')}`
+        : standingIds.length ? ` · police take their standing posts: ${n(posts, 'detachment', 'detachments')} in ${n(standingIds.length, 'city', 'cities')}` : ' · no police posted'));
       plan.appendChild(el('span', { class: count > maxUnits ? 'over' : '' }, ` · ${count}/${maxUnits} units`));
       if (startButton) startButton.disabled = !d.baseCities.length || count > maxUnits;
     };

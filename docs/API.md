@@ -102,6 +102,8 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `POST territory/country` | `{name, fill?, entityId?}` → a map country (+ a new `foreign` entity unless `entityId` links an existing one without territory) and its `lbl_<id>` label |
 | `PUT territory` | border-painter save `{regions:[{kind:'province'\|'country', id, shape, labelPos?}], remove:[{kind,id}]}` — shapes validated (M/L/H/V/Z path data, ≤400K chars); freezes `map.land` on first use; dissolves removed regions (country labels too); re-homes a city/property only when the province containing it changed (now-foreign ground → `provinceId: null`); logged as "Borders redrawn" |
 | `POST\|PATCH\|DELETE coll/:coll(/:id)` | generic CRUD for `entities, provinces, cities, properties, items, events, variables, roles, accounts, markers` — with cascade deletes, geometry-based province placement, deed/cert/texture sync hooks |
+| *(player)* `POST /api/military/plan` | `{entityId, plan:{doctrine?, posts?, armourAt?, fleetAt?, police?}}` — a nation's standing orders (docs/WAR.md "Armed forces"); `milAccessOf`: GM, the nation's chain, `command_military` for a government (`command_police`: `police` only) |
+| *(player)* `POST /api/military/raise` · `/standdown` · `/issue` | field orders in a live conflict: `{conflict, side (GM), kind, cityId, count 1–4}` / `{conflict, side (GM), unitIds}` / `{conflict, unitId, itemId|null}`. Raise/stand down: the side's leadership (`attLead`/`defAll`); issue: any commander of the unit |
 | *(player)* `POST /api/war/peace/offer` · `POST /api/war/peace/:id/revise\|accept\|reject\|withdraw` · `GET /api/war/peace/land` | peace negotiations (docs/WAR.md "Peace negotiations"): a side speaks through `cmdAccess.negotiate` (the GM passes `side`); `accept` carries `rev`; offers ship in `state.peaceOffers`, holdings in `state.peaceHeld` |
 | `POST war/start` · `POST war/control` · `POST war/end` · `POST war/tuning` · `GET war/scenarios` · `POST war/scenarios/custom` · `POST war/spawn` · `POST war/join` · `POST war/treaty` | war desk — see docs/WAR.md. Control/end/tuning/spawn accept `conflict: 'war'\|'protest'` (default `war`) |
 | `POST protest/start` | `{name?, organizerId, baseCities:[cityIds], policeCities:[cityIds], crowds?, perCity?}` — 409 while a protest is active |
@@ -123,7 +125,10 @@ The single place the world is narrowed per operator. Key rules:
   `/api/market/buy|sell|transfer`, tender bids) authorises via `canAct(…, 'trade')`, with
   cash the entity pays counted against the grant's spend cap.
 - Accounts/transactions: `perms.accounts` all/own; txns filtered to visible accounts (last 400).
-- Inventories stripped unless `perms.inventories` allows; company `vars/shareholders` stripped
+- Inventories stripped unless `perms.inventories` allows (plus the government's for the
+  `distribute_food`, `command_military` and `command_police` abilities — they operate from
+  that stockpile); `entity.militaryPlan` and the `militaryLog` rows follow the same rule;
+  company `vars/shareholders` stripped
   without `companyFinancials` (unless it's your company).
 - Provinces: without `statistics`, only `vars.population`, no demographics.
 - Properties: `type === 'military'` requires the `military` map layer.

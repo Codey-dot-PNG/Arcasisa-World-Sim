@@ -11,6 +11,7 @@ const casino = require('./casino');
 const geometry = require('./geometry');
 const territory = require('./territory');
 const peace = require('./peace');
+const forces = require('./military');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -347,6 +348,20 @@ function cmdAccessOf(db, war, u) {
     negotiate: attLead ? 'att' : defChain ? 'def' : null
   };
 }
+// Who runs a nation's armed forces (War Room › Military): the GM, the
+// nation's ownership chain, and for a government the command_military
+// ability; a command_police holder runs only the government's police posts.
+// Returns null, 'all' or the list of plan parts the operator may change.
+function milAccessOf(db, u, nid) {
+  if (u.role.perms.gm) return 'all';
+  const me = u.user.entityId;
+  if (me && nid && ownership.controls(me, nid)) return 'all';
+  const ent = db.entities.find(e => e.id === nid);
+  if (!ent || ent.type !== 'government') return null;
+  if (hasAbility(u, 'command_military')) return 'all';
+  if (hasAbility(u, 'command_police')) return ['police'];
+  return null;
+}
 // One conflict doc (war or protest) as `u` sees it: the GM gets the raw doc,
 // everyone else the redacted fog-of-war view; both carry cmdAccess (the GM's
 // used to be missing, so the War Room never drew the GM's protest toggles).
@@ -452,13 +467,16 @@ function filterState(u) {
   // national stockpile they release from.
   const govId = (db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government') || {}).id;
   const foodOps = hasAbility(u, 'distribute_food');
+  // likewise the armed forces' operators (a general, a police chief) see the
+  // government arsenal and depots they command from (War Room › Military)
+  const milOps = hasAbility(u, 'command_military') || hasAbility(u, 'command_police');
   const seeInv = (ownerId) => p.inventories === 'all' || (p.inventories === 'own' && controlled.has(ownerId)) || grantHas(ownerId, 'trade') ||
-    (foodOps && ownerId === govId);
+    ((foodOps || milOps) && ownerId === govId);
   const military = (p.mapLayers || []).includes('military');
 
   const entities = db.entities.map(e => {
     const out = { ...e };
-    if (!seeInv(e.id)) delete out.inventory;
+    if (!seeInv(e.id)) { delete out.inventory; delete out.militaryPlan; }
     if (e.type === 'company' && !p.companyFinancials && e.id !== own && e.ownerId !== own && e.ceoId !== own) {
       delete out.vars; delete out.shareholders; delete out.sharesOutstanding; delete out.x100;
     }
@@ -546,6 +564,12 @@ function filterState(u) {
     // on the table (and what each occupier holds), only the sides answer
     peaceOffers: peace.publicOffers(db),
     peaceHeld: peace.heldView(db),
+    // Armed forces (War Room › Military): the arsenal record of every nation
+    // whose stock this operator may see, and which of them they run
+    militaryLog: forces.logView(db, seeInv, 160),
+    milCommand: Object.fromEntries(db.entities
+      .filter(e => e.type === 'government' || e.type === 'foreign' || ownership.controls(own, e.id))
+      .map(e => [e.id, milAccessOf(db, u, e.id)]).filter(([, a]) => a)),
     // Share prices are public market information — everyone gets them so the
     // Exchange price-history graphs work for citizens. National statistics
     // (GDP, money supply, …) stay gated on the statistics clearance.
@@ -705,7 +729,7 @@ async function ledgerPage(u, query) {
 // Office widget catalogue (Phase 36) — the client's Office.TYPES mirrors these
 // keys (public/js/office.js); unknown types are dropped on save.
 const OFFICE_TYPES = ['accounts', 'portfolio', 'quotes', 'inventory', 'news', 'trades', 'polling',
-  'parliament', 'food', 'conflict', 'notes', 'clock', 'province', 'dossier', 'ledger', 'holdings'];
+  'parliament', 'food', 'conflict', 'notes', 'clock', 'province', 'dossier', 'ledger', 'holdings', 'military'];
 const OFFICE_STYLES = ['ledger', 'card', 'dark', 'telegram', 'accent'];
 const OFFICE_MAX_WIDGETS = 24;
 
@@ -1154,6 +1178,51 @@ async function handle(req, res, pathname, method) {
       // per-tick broadcasts (docs/WAR.md "Milestone-only broadcasts").
       store.save();
       return json(res, 200, { ok: true });
+    }
+    // ---- the Military desk (War Room › Military; server/military.js) ----
+    // The nation's standing orders: deployment plan + supply doctrine.
+    if (pathname === '/api/military/plan' && method === 'POST') {
+      const b = await readBody(req);
+      const ent = db.entities.find(e => e.id === b.entityId);
+      if (!ent) return bad('Unknown nation.');
+      const acc = milAccessOf(db, u, ent.id);
+      if (!acc) return deny('You do not run that nation’s armed forces.');
+      const { changed } = forces.applyPlan(db, ent, b.plan, acc === 'all' ? null : acc);
+      if (!changed.length) return bad('Nothing to change.');
+      store.log('event', `${ent.name} revises its standing military orders`, changed.join(', '), u.user.displayName, [ent.id]);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, plan: ent.militaryPlan });
+    }
+    // Field orders in a live conflict: raise formations, stand them down,
+    // issue a weapon model. Raising and standing down are the side's
+    // leadership (attLead / defAll — a chain, a command ability, the GM);
+    // issuing is any commander of the unit (a grantee within its grant).
+    if (pathname.startsWith('/api/military/') && ['raise', 'standdown', 'issue'].includes(pathname.slice(14)) && method === 'POST') {
+      const b = await readBody(req);
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is active.');
+      const ca = cmdAccessOf(db, doc, u);
+      const verb = pathname.slice(14);
+      let result;
+      if (verb === 'issue') {
+        const unit = (doc.units || []).find(x => x.id === b.unitId);
+        if (!unit) return bad('Unknown formation.');
+        if (!(unit.side === 'att' ? ca.att : ca.def)) return deny('You do not command that formation.');
+        const full = unit.side === 'att' ? ca.attLead : ca.defAll;
+        const controllerId = unit.side === 'def' ? doc.defenderId : ((doc.kind === 'protest' && doc.protest && doc.protest.organizerId) || doc.attackerId);
+        if (!full && !ownership.canAct(db, u.user.entityId, controllerId, 'command_units', { unitId: unit.id })) return deny('Your command grant does not cover that formation.');
+        result = war.issueUnit(db, { conflict: key, unitId: unit.id, itemId: b.itemId || null }, u.user.displayName);
+      } else {
+        const side = u.role.perms.gm ? (b.side === 'att' ? 'att' : 'def') : ca.attLead ? 'att' : ca.defAll ? 'def' : null;
+        if (!side) return deny('Only a side’s leadership may raise or stand down formations.');
+        result = verb === 'raise'
+          ? war.raiseUnits(db, { conflict: key, side, kind: b.kind, cityId: b.cityId, count: b.count }, u.user.displayName)
+          : war.standDownUnits(db, { conflict: key, unitIds: b.unitIds }, side, u.user.displayName);
+      }
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, ...(result.units ? { unitIds: result.units.map(x => x.id) } : {}), stoodDown: result.stoodDown, busy: result.busy, swapped: result.swapped });
     }
     // ---- peace negotiations (server/peace.js) ----
     // A side speaks through whoever controls its entity (cmdAccess.negotiate);

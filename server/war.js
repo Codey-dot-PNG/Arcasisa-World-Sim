@@ -24,6 +24,7 @@ const sim = require('./sim');
 const engine = require('./war-engine');
 const warAI = require('./war-ai'); // command-hierarchy schema helpers (initialCommand) — the AI itself runs inside engine ticks
 const geometry = require('./geometry');
+const military = require('./military');
 
 // ---------- occupation devastation (Phase 22) ----------
 // AUTHORITY-ONLY, like ctx.onAirstrike: everything here mutates the world
@@ -691,6 +692,14 @@ function resupplyUnits(db, war) {
   const fuelSpeedOf = {};
   for (const f of fuels) fuelSpeedOf[f.id] = Number(f.meta.weapon.speed) || 0;
   const poolCache = {};
+  // each nation's supply doctrine (server/military.js): the draw order and
+  // how full its units are topped up with arms and fuel
+  const doctrineCache = {};
+  const drawOrder = (list, issue, pref) => {
+    const base = issue === 'conserve' ? list.slice().reverse() : list;
+    const p = pref ? base.find(g => g.id === pref) : null;
+    return p ? [p].concat(base.filter(g => g !== p)) : base;
+  };
   // strength-weighted side means, kept as war.equip for the War Room arsenal
   // readout and as the engine's fallback for any kit-less legacy unit
   const agg = { att: { dmg: 0, hp: 0, morale: 0, speed: 0 }, def: { dmg: 0, hp: 0, morale: 0, speed: 0 } };
@@ -749,11 +758,14 @@ function resupplyUnits(db, war) {
     if (u.supplied !== false) {
       const nid = u.nationId || (u.side === 'att' ? war.attackerId : war.defenderId);
       const pools = poolCache[nid] || (poolCache[nid] = nationPools(db, war, nid));
+      const doctrine = doctrineCache[nid] || (doctrineCache[nid] = military.doctrineOf(db, nid));
       if (spec && armsDrawn) {
         let carriedNow = 0;
         for (const r of u.inv) if (spec.ids.has(r.itemId)) carriedNow += (r.qty || 0);
-        let need = spec.capacity - carriedNow;
-        for (const g of spec.list) {
+        // rationed: top up only to the doctrine's share of a full complement;
+        // the unit's issued model (u.issue) is drawn first
+        let need = Math.ceil(spec.capacity * (Number(doctrine.arms) || 1)) - carriedNow;
+        for (const g of drawOrder(spec.list, doctrine.issue, u.issue)) {
           if (need <= 0) break;
           const got = drawFromPools(pools, g.id, need);
           if (got > 0) { invAdd(u.inv, g.id, got); need -= got; }
@@ -761,7 +773,7 @@ function resupplyUnits(db, war) {
       }
       let fuelNow = 0;
       for (const r of u.inv) if (fuelIds.has(r.itemId)) fuelNow += (r.qty || 0);
-      let fuelNeed = Math.floor(tankSize - fuelNow);
+      let fuelNeed = Math.floor(tankSize * (Number(doctrine.fuel) || 1) - fuelNow);
       for (const f of fuels) {
         if (fuelNeed <= 0) break;
         const got = drawFromPools(pools, f.id, fuelNeed);
@@ -951,18 +963,24 @@ function distributeByWeight(count, sites) {
 // at 1. Per-unit strength is UNCHANGED (still sizeStrength[size] /
 // militaryPropertyStrength exactly as before); population growth adds MORE
 // garrisons of the same strength at busier sites, not stronger ones.
-function buildGarrisonUnits(db, scenarioDefense) {
+function buildGarrisonUnits(db, scenarioDefense, plan) {
   const def = scenarioDefense || {};
+  // the defender's deployment plan (server/military.js): a weight per post —
+  // 0 leaves it unmanned, 2 reinforced, 3 a fortress; absent = 1
+  const posts = (plan && plan.posts) || {};
+  const postW = (key) => (Object.prototype.hasOwnProperty.call(posts, key) ? Number(posts[key]) : 1);
   const sizeStrength = def.citySizeStrength || { 1: 1300, 2: 2200, 3: 3800 };
   const militaryStrength = def.militaryPropertyStrength || 2600;
   const sites = [];
   for (const c of db.cities) {
     if (!c.pos) continue;
-    sites.push({ kind: 'city', name: c.name, pos: c.pos, weight: Math.max(1, c.size || 1), strength: sizeStrength[c.size] || sizeStrength[1] || 1300 });
+    const w = postW('city:' + c.id);
+    if (w > 0) sites.push({ kind: 'city', name: c.name, pos: c.pos, weight: Math.max(1, c.size || 1) * w, strength: sizeStrength[c.size] || sizeStrength[1] || 1300 });
   }
   for (const p of db.properties) {
     if (p.type !== 'military' || !p.pos) continue;
-    sites.push({ kind: 'military', name: p.name, pos: p.pos, weight: 2, strength: militaryStrength });
+    const w = postW('prop:' + p.id);
+    if (w > 0) sites.push({ kind: 'military', name: p.name, pos: p.pos, weight: 2 * w, strength: militaryStrength });
   }
   if (!sites.length) return [];
   const pop = totalPopulation(db);
@@ -1098,6 +1116,12 @@ function findPortPos(db, grid, capitalPos) {
 function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
   const capital = db.cities.find(c => c.id === 'city_lachevan') || db.cities.find(c => c.isCapital && c.pos) || db.cities.find(c => c.pos);
   const capitalPos = capital ? capital.pos : [war.grid.cols * war.grid.cell / 2, war.grid.rows * war.grid.cell / 2];
+  // the defender's deployment plan picks where its armour musters and which
+  // port its fleet sails from (default: the capital / the principal port)
+  const plan = military.planOf(defender);
+  const planCity = (id) => (id && db.cities.find(c => c.id === id && Array.isArray(c.pos))) || null;
+  const armourPos = (planCity(plan.armourAt) || {}).pos || capitalPos;
+  const fleetCity = planCity(plan.fleetAt);
   const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
   const armDef = unitDefaults.armored || { strength: 2800, speed: 4.6, atk: 1.25 };
   const cfg = warCfg(db);
@@ -1121,7 +1145,7 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
   const bestTankName = tanks.length ? tanks.slice().sort((a, b) => tankQuality(b.item.meta.weapon) - tankQuality(a.item.meta.weapon))[0].item.name : 'Armour';
   for (let i = 0; i < numArmoured; i++) {
     const s = Math.round(armDef.strength * hpMod);
-    const spawnPos = engine.clampToWorld(war, [capitalPos[0] + rand(-45, 45), capitalPos[1] + rand(-45, 45)]);
+    const spawnPos = engine.clampToWorld(war, [armourPos[0] + rand(-45, 45), armourPos[1] + rand(-45, 45)]);
     war.units.push({
       id: store.uid('warunit'), side: 'def',
       // Name armour after its best hull type like squadrons do (bestTankName
@@ -1175,7 +1199,7 @@ function deployArsenalUnits(db, war, defender, attacker, stage, landStart) {
     }
   };
   // Defender fleet musters in the harbour water nearest its principal port.
-  deployFleet(defender, 'def', findPortPos(db, war.grid, capitalPos), 40);
+  deployFleet(defender, 'def', fleetCity ? (nearestHarbourWater(war.grid, fleetCity.pos) || findPortPos(db, war.grid, capitalPos)) : findPortPos(db, war.grid, capitalPos), 40);
   // Attacker fleet sails with the invasion force (feature: the invader's
   // fleet actually shows up — before this only the defender's arsenal was
   // walked, so a naval power like Valksland invaded with no fleet at all):
@@ -1390,7 +1414,7 @@ function startWar(db, scenario) {
   // Defender garrisons: population-scaled (Task 4) across the same site set
   // as before — one weighted site per city (by size) and one per
   // type:'military' property — see buildGarrisonUnits above.
-  for (const gu of buildGarrisonUnits(db, scenario.defense)) units.push(gu);
+  for (const gu of buildGarrisonUnits(db, scenario.defense, military.planOf(defender))) units.push(gu);
 
   const attackerTotal = units.filter(u => u.side === 'att').reduce((s, u) => s + u.strength, 0);
 
@@ -1492,6 +1516,7 @@ function startWar(db, scenario) {
   store.log('event', `${attacker.name} launches an invasion`, scenario.name, 'WAR ENGINE', [attacker.id, defender.id]);
   // invading someone is the fastest way to ruin a relationship (Phase 25)
   try { sim.shiftRelations(db, attacker.id, -40, 'Launched an invasion of the Republic', 'WAR ENGINE'); } catch (e) { /* diplomacy optional */ }
+  military.sample(db, 'start');
   return db.war;
 }
 
@@ -1557,6 +1582,7 @@ function endWar(db, actor, reason, key, opts) {
   settleHoldings(db, war.kind === 'protest' ? 'protest' : 'war', war.kind === 'protest' ? 'none' : 'all');
   closeTalks(db, war.kind === 'protest' ? 'protest' : 'war');
   demobilizeUnits(db, war, actor);
+  military.sample(db, 'end');
   store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   if (war.kind === 'protest') {
     summarizeProtestPolitics(db, war, actor);
@@ -1977,6 +2003,7 @@ function setWarTuning(db, patch, actor) {
 // defender units on their first order) garrison the chosen police cities.
 // `protest.protest` carries the political state (violence toggles, capture
 // mode) and the GM-tunable riot/economy numbers (protest.protest.tuning).
+function policeStrength(c) { return engine.clamp(Math.round(600 * Math.max(1, c.size || 1)), 400, 6000); }
 function startProtest(db, opts, actor) {
   const name = (typeof opts.name === 'string' && opts.name.trim().slice(0, 60)) || 'Popular unrest';
   if (db.protest && db.protest.active) throw new Error('A protest is already underway');
@@ -1986,11 +2013,16 @@ function startProtest(db, opts, actor) {
   if (!defender) throw new Error('Unknown defender entity.');
   const cityOf = (id) => db.cities.find(c => c.id === id);
   const baseIds = Array.isArray(opts.baseCities) ? [...new Set(opts.baseCities.filter(id => !!cityOf(id)))] : [];
-  const policeIds = (Array.isArray(opts.policeCities) ? [...new Set(opts.policeCities.filter(id => !!cityOf(id)))] : []).filter(id => !baseIds.includes(id));
+  // no police cities named: the government's standing police posts
+  // (its deployment plan — server/military.js) take the streets
+  const policePlan = military.planOf(defender).police;
+  const named = Array.isArray(opts.policeCities) && opts.policeCities.length ? opts.policeCities : policePlan.cities;
+  const policeIds = [...new Set((named || []).filter(id => !!cityOf(id)))].filter(id => !baseIds.includes(id));
+  const policePer = engine.clamp(Math.round(Number(opts.policePer) || policePlan.per || 2), 1, military.POLICE_PER_MAX);
   if (!baseIds.length) throw new Error('At least one base city is required.');
   const crowdCount = engine.clamp(Math.round(Number(opts.crowds) || 2), 1, 6);
   const perCity = engine.clamp(Number(opts.perCity) || 2000, 500, 20000);
-  const deploymentSize = baseIds.length * crowdCount + policeIds.length * 2;
+  const deploymentSize = baseIds.length * crowdCount + policeIds.length * policePer;
   if (deploymentSize > MAX_PROTEST_UNITS) {
     throw new Error(`Protest deployment is ${deploymentSize} units; the limit is ${MAX_PROTEST_UNITS}. Reduce the cities or crowds per city.`);
   }
@@ -2014,12 +2046,12 @@ function startProtest(db, opts, actor) {
       });
     }
   }
-  // Police detachments: two per selected city, strength scaled with city size
-  // (the capital rates more than a township).
+  // Police detachments: two per selected city (or the plan's number),
+  // strength scaled with city size (the capital rates more than a township).
   for (const cid of policeIds) {
     const c = cityOf(cid);
-    const st = engine.clamp(Math.round(600 * Math.max(1, c.size || 1)), 400, 6000);
-    for (let k = 0; k < 2; k++) {
+    const st = policeStrength(c);
+    for (let k = 0; k < policePer; k++) {
       n++;
       units.push({
         id: store.uid('warunit'), side: 'def', name: `Police — ${c.name} ${toRoman(k + 1)}`,
@@ -2075,6 +2107,7 @@ function startProtest(db, opts, actor) {
     (demands ? ` Their demand: “${demands}”` : '') +
     ` The government has ordered police to the affected districts.`);
   syncAirWings(db, db.protest);
+  military.sample(db, 'start');
   return db.protest;
 }
 
@@ -2086,6 +2119,155 @@ function startProtest(db, opts, actor) {
 // rifles from the government's stockpiles through resupplyUnits like any
 // army unit, and fight under the same gates as the police: they won't touch
 // a peaceful crowd until force is authorized). `withdraw` sends them home.
+// ---------- field orders from the Military desk (War Room › Military) ----------
+// A unit leaving the field hands its packs back to its nation's stockpile —
+// rifles, tanks, hulls and fuel never evaporate.
+function returnKit(db, doc, u) {
+  if (!Array.isArray(u.inv) || !u.inv.length) return 0;
+  const nation = db.entities.find(x => x.id === military.nationOfUnit(doc, u));
+  let n = 0;
+  if (nation) {
+    nation.inventory = nation.inventory || [];
+    for (const r of u.inv) if (r && r.qty > 0) { invAdd(nation.inventory, r.itemId, r.qty); n += r.qty; }
+  }
+  u.inv = [];
+  return n;
+}
+// The primary weapon kind a unit draws (tanks for armour, hulls for a
+// squadron, small arms for everyone else; boats carry none).
+function primaryKindOf(u) {
+  return u.kind === 'armored' ? 'tank' : u.kind === 'warship' ? 'warship' : u.kind === 'boat' ? null : 'smallarms';
+}
+const RAISE_KINDS = { war: ['infantry', 'armored'], protest: ['police'] };
+// Raise fresh formations for a side from its nation's stockpile: an infantry
+// division needs a rifle for every soldier in stock, an armoured one a full
+// complement of tanks (they draw them on the next resupply). The defence
+// musters at one of its cities that it still holds; an invader's
+// reinforcements come ashore at its supply anchor. In a protest the
+// government raises police detachments (the army has its own lever —
+// deployArmy).
+function raiseUnits(db, opts, actor) {
+  const key = opts.conflict === 'protest' ? 'protest' : 'war';
+  const doc = key === 'protest' ? db.protest : db.war;
+  if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
+  const side = opts.side === 'att' ? 'att' : 'def';
+  const kind = String(opts.kind || '');
+  if (!RAISE_KINDS[key].includes(kind)) return { ok: false, error: 'You cannot raise that kind of formation here.' };
+  if (key === 'protest' && side !== 'def') return { ok: false, error: 'Only the government raises police.' };
+  const nid = military.nationOfUnit(doc, { side });
+  const nation = db.entities.find(e => e.id === nid);
+  if (!nation) return { ok: false, error: 'That side has no nation behind it.' };
+  const cfg = warCfg(db);
+  const count = engine.clamp(Math.round(Number(opts.count) || 1), 1, 4);
+  const raisedLive = doc.units.filter(u => isLive(u) && u.raised && u.side === side).length;
+  const maxRaised = Math.max(1, Math.round(Number(cfg.raiseMax) || 12));
+  if (raisedLive + count > maxRaised) return { ok: false, error: `At most ${maxRaised} raised formations can be in the field at once (${raisedLive} already are).` };
+  if (key === 'protest' && doc.units.filter(isLive).length + count > MAX_PROTEST_UNITS) return { ok: false, error: `A protest is limited to ${MAX_PROTEST_UNITS} live units.` };
+  // where they muster
+  let pos, where;
+  if (side === 'def') {
+    const city = (db.cities || []).find(c => c.id === opts.cityId && Array.isArray(c.pos));
+    if (!city) return { ok: false, error: 'Choose a city to muster in.' };
+    const cs = (doc.grid || {}).cell || 48;
+    const cell = (doc.cells || {})[`${Math.floor(city.pos[0] / cs)},${Math.floor(city.pos[1] / cs)}`];
+    if (key === 'war' && cell && cell.o === 'att') return { ok: false, error: `${city.name} is in enemy hands.` };
+    pos = city.pos; where = city.name;
+  } else {
+    if (!Array.isArray(doc.supplyAnchor)) return { ok: false, error: 'The invasion has no beachhead to land reinforcements at.' };
+    pos = doc.supplyAnchor; where = 'the beachhead';
+  }
+  const unitDefaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
+  const hpMod = (doc.mods && doc.mods.hp) || 1;
+  const catalog = weaponCatalog(db);
+  const pools = nationPools(db, doc, nid);
+  const inStock = (list) => list.reduce((t, it) => t + pools.reduce((q, pool) => q + ((invGet(pool, it.id) || {}).qty || 0), 0), 0);
+  let base, need = 0, have = 0, what = '';
+  if (kind === 'police') {
+    const city = (db.cities || []).find(c => c.id === opts.cityId);
+    base = { strength: policeStrength(city), speed: 0, atk: 1 };
+  } else if (kind === 'armored') {
+    base = unitDefaults.armored || { strength: 2800, speed: 4.6, atk: 1.25 };
+    need = count * Math.max(1, Number(cfg.tankCapacity) || 25); have = inStock(catalog.tanks); what = 'tanks';
+  } else {
+    base = unitDefaults.infantry || { strength: 2100, speed: 3.2, atk: 1 };
+    need = count * Math.round(base.strength * hpMod); have = inStock(catalog.guns); what = 'rifles';
+  }
+  if (need > 0 && have < need) return { ok: false, error: `Not enough ${what} in stock to equip ${count === 1 ? 'that formation' : 'those formations'}: ${Math.floor(have).toLocaleString('en-US')} of ${need.toLocaleString('en-US')}.` };
+  doc.raiseSeq = doc.raiseSeq || 0;
+  const label = kind === 'police' ? 'Police Detachment' : kind === 'armored' ? 'Armoured Division' : 'Infantry Division';
+  const made = [];
+  for (let i = 0; i < count; i++) {
+    doc.raiseSeq++;
+    const a = (doc.raiseSeq * 2.39996) % (Math.PI * 2);
+    const st = Math.round(base.strength * (kind === 'police' ? 1 : hpMod));
+    const u = {
+      id: store.uid('warunit'), side, name: `${airOrdinal(doc.raiseSeq)} ${label} (${where})`,
+      kind, pos: engine.clampToWorld(doc, [pos[0] + Math.cos(a) * 30, pos[1] + Math.sin(a) * 30]), dest: null,
+      strength: st, maxStrength: st, org: 100, speed: base.speed, atk: base.atk || 1, state: 'holding', objectiveId: null,
+      nationId: nid, inv: [], raised: true, spawned: true, garrison: kind === 'police'
+    };
+    doc.units.push(u);
+    made.push(u);
+  }
+  engine.pushEvent(doc, 'milestone', pos.slice(), `${nation.name} raises ${count} ${label.toLowerCase()}${count === 1 ? '' : 's'} at ${where}.`);
+  store.log('event', `${nation.name} raises ${count} ${label.toLowerCase()}${count === 1 ? '' : 's'}`, `Mustered at ${where}${what ? `, equipped from a stock of ${Math.floor(have).toLocaleString('en-US')} ${what}` : ''}.`, actor || 'WAR ENGINE', [nid]);
+  if (kind !== 'police') SERVER_CTX.news(`MOBILISATION: ${nation.name.toUpperCase()} RAISES NEW DIVISIONS`, `${nation.name} has mustered ${count} fresh ${label.toLowerCase()}${count === 1 ? '' : 's'} at ${where}.`);
+  return { ok: true, units: made };
+}
+// Send formations home: they leave the field and return their kit to the
+// stockpile. A unit under fire, at sea or still embarked can't disengage.
+function standDownUnits(db, opts, side, actor) {
+  const key = opts.conflict === 'protest' ? 'protest' : 'war';
+  const doc = key === 'protest' ? db.protest : db.war;
+  if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
+  const ids = new Set((Array.isArray(opts.unitIds) ? opts.unitIds : []).slice(0, 64));
+  const picked = doc.units.filter(u => ids.has(u.id) && isLive(u) && u.side === side);
+  if (!picked.length) return { ok: false, error: 'No formations of yours were picked.' };
+  const busy = picked.filter(u => u.state === 'fighting' || u.state === 'embarked' || u.state === 'transport');
+  const go = picked.filter(u => !busy.includes(u));
+  if (!go.length) return { ok: false, error: 'Those formations are engaged or at sea — they cannot stand down now.' };
+  let items = 0;
+  for (const u of go) items += returnKit(db, doc, u);
+  const gone = new Set(go.map(u => u.id));
+  doc.units = doc.units.filter(u => !gone.has(u.id));
+  const nation = db.entities.find(e => e.id === military.nationOfUnit(doc, { side }));
+  engine.pushEvent(doc, 'milestone', go[0].pos.slice(), `${go.length} formation${go.length === 1 ? '' : 's'} stand${go.length === 1 ? 's' : ''} down and return${go.length === 1 ? 's' : ''} to barracks.`);
+  store.log('event', `${nation ? nation.name : 'A side'} stands down ${go.length} formation${go.length === 1 ? '' : 's'}`,
+    `${go.map(u => u.name).slice(0, 6).join(', ')}${go.length > 6 ? '…' : ''} — ${Math.round(items).toLocaleString('en-US')} item(s) back to the stockpile.`, actor || 'WAR ENGINE', nation ? [nation.id] : []);
+  return { ok: true, stoodDown: go.length, busy: busy.length };
+}
+// Issue a unit a weapon model: resupply draws it first from now on, and a
+// unit inside its supply lines hands back other models of that kind (worst
+// first, as many as the stock can replace) so it re-arms on the next pass.
+function issueUnit(db, opts, actor) {
+  const key = opts.conflict === 'protest' ? 'protest' : 'war';
+  const doc = key === 'protest' ? db.protest : db.war;
+  if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
+  const u = doc.units.find(x => x.id === opts.unitId && isLive(x));
+  if (!u) return { ok: false, error: 'Unknown formation.' };
+  const kind = primaryKindOf(u);
+  if (!kind) return { ok: false, error: 'This formation carries no weapons of its own.' };
+  if (!opts.itemId) { delete u.issue; return { ok: true, unit: u }; }
+  const item = db.items.find(i => i.id === opts.itemId);
+  if (!item || military.armsKind(item) !== kind) return { ok: false, error: `${u.name} cannot use that.` };
+  u.issue = item.id;
+  let swapped = 0;
+  if (u.supplied !== false) {
+    const pools = nationPools(db, doc, military.nationOfUnit(doc, u));
+    let spare = pools.reduce((q, pool) => q + ((invGet(pool, item.id) || {}).qty || 0), 0);
+    const cat = weaponCatalog(db);
+    const list = kind === 'tank' ? cat.tanks : kind === 'warship' ? cat.ships : cat.guns;
+    const home = db.entities.find(x => x.id === military.nationOfUnit(doc, u));
+    for (let i = list.length - 1; i >= 0 && spare > 0 && home; i--) {
+      if (list[i].id === item.id) continue;
+      const got = invTake(u.inv || [], list[i].id, spare);
+      if (got > 0) { home.inventory = home.inventory || []; invAdd(home.inventory, list[i].id, got); spare -= got; swapped += got; }
+    }
+  }
+  store.log('event', `${u.name} issued ${item.name}`, swapped ? `${Math.round(swapped).toLocaleString('en-US')} older weapons handed back for re-issue.` : 'Drawn first on the next resupply.', actor || 'WAR ENGINE', [military.nationOfUnit(doc, u)]);
+  return { ok: true, unit: u, swapped };
+}
+
 function deployArmy(db, opts, actor) {
   const protest = db.protest;
   if (!protest || !protest.active) return { ok: false, error: 'No protest is active.' };
@@ -2094,6 +2276,7 @@ function deployArmy(db, opts, actor) {
   if (opts.withdraw) {
     const out = protest.units.filter(isArmy);
     if (!out.length) return { ok: false, error: 'No army units are deployed.' };
+    for (const u of out) returnKit(db, protest, u);
     protest.units = protest.units.filter(u => !(u.side === 'def' && u.army));
     engine.pushEvent(protest, 'milestone', out[0].pos.slice(), `The army withdraws ${out.length} battalion${out.length === 1 ? '' : 's'} from the streets.`);
     store.log('gm', 'Army withdrawn from the protest', `${out.length} battalion(s) return to barracks.`, actor || 'WAR ENGINE', [protest.defenderId]);
@@ -2712,6 +2895,7 @@ function tickConflict(db, key, force) {
     settleRefugees(db, key === 'protest');
     if (doc.kind !== 'protest') logAiNotes(db, doc);
     applyOccupationTransfers(db, key);
+    military.afterTick(db, doc, key);
   }
   // The engine ends conflicts itself (annihilation, total conquest, protest
   // dispersal) without going through endWar — catch that here so the
@@ -2720,6 +2904,7 @@ function tickConflict(db, key, force) {
     demobilizeUnits(db, doc, 'WAR ENGINE');
     settleHoldings(db, key, doc.kind === 'protest' ? 'none' : 'all');
     closeTalks(db, key);
+    military.sample(db, 'end');
     if (doc.kind === 'protest') { summarizeProtestPolitics(db, doc, 'WAR ENGINE'); endStrikes(db); }
   }
   return ticked;
@@ -2761,4 +2946,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { heldProperties, settleHoldings, SERVER_CTX, deployArmy, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { heldProperties, settleHoldings, SERVER_CTX, deployArmy, raiseUnits, standDownUnits, issueUnit, policeStrength, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

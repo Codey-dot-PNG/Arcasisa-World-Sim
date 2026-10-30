@@ -27,6 +27,7 @@ mode). `store.get()` returns it; everything mutates it in place.
   election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
+  militaryLog: [ ... ],    // nations' arsenal record — { at, turn, why, n:{ entityId: [arms, tanks, ships, aircraft, fuel, men] } } (docs/WAR.md "Armed forces")
   peaceOffers: [ ... ],    // peace negotiations — { id:'peace_…', conflict, talks (startedAt), side, status, rev, terms, … } (docs/WAR.md "Peace negotiations")
   mapFx: [ ... ],          // GM map effects — { id:'fx_…', kind, pos:[x,y], r, at, label } (visual only, see below)
   protestApplications: [ ... ], // Phase 36 — player petitions to start a protest (see below)
@@ -101,6 +102,12 @@ world doc so it survives serverless restarts and rides turns (`sim.advanceTurn` 
 
 When the count finishes, `db.election` becomes `null` and a record is appended to
 `db.elections` (`live: true`, national seat totals, province results).
+
+**Standing military orders:** `entity.militaryPlan = { doctrine: { issue:'best'|'conserve',
+arms, fuel }, posts: { 'city:<id>'|'prop:<id>': 0..3 }, armourAt, fleetAt, police: { cities,
+per } }` — absent means the defaults; set from War Room › Military (`POST
+/api/military/plan`) and read at war/protest start and in every resupply pass (docs/WAR.md
+"Armed forces"). Shipped only with the entity's inventory.
 
 **Foreign-power extras (Phase 27):** `meta.military = { navy, army ('none'|'weak'|'medium'|
 'strong'), size ('tiny'|'small'|'medium'|'big'), focus ('size'|'quality'), alliance (e.g.

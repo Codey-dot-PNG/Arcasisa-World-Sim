@@ -163,6 +163,30 @@ const Office = {
         }
         body.appendChild(el('div.btn-row', el('button.dash-btn.btn-xs', { onclick: () => App.go('war') }, 'War Room →')));
       } },
+    military: { label: 'Armed Forces', icon: '✠', desc: 'A nation’s arsenal and forces in the field, with the record over time.', size: [2, 's'], settings: 'nation',
+      avail: () => !!(window.War && War.milNations && War.milNations().length),
+      render(body, w) {
+        const list = window.War && War.milNations ? War.milNations() : [];
+        if (!list.length) return Office.empty(body, 'No arsenal is on file with you.');
+        const n = list.find(x => x.id === (w.opts && w.opts.entityId)) || list[0];
+        const t = War.milTotals(n.id);
+        body.appendChild(el('div', { style: 'font-size:12.5px; margin-bottom:4px;' }, el('b', n.name),
+          el('span', { style: 'color:var(--ink-faint); font-family:var(--font-mono); font-size:10px;' }, War.milAccess(n.id) ? '  · your forces' : '  · on file')));
+        const rows = (S().militaryLog || []).filter(r => r.n[n.id]);
+        const cell = (label, v, col) => el('div.ow-mil-cell', el('div.k', label), el('div.v', v),
+          rows.length >= 2 ? Views.miniSpark(rows.map(r => r.n[n.id][col]), 70, 16) : null);
+        body.appendChild(el('div.ow-mil-grid',
+          cell('Soldiers', fmtCompact(t.men), 5), cell('Rifles', fmtCompact(t.all('smallarms')), 0), cell('Tanks', fmtCompact(t.all('tank')), 1),
+          cell('Ships', fmtCompact(t.all('warship')), 2), cell('Aircraft', fmtCompact(t.all('aircraft')), 3), cell('Fuel', fmtCompact(t.all('fuel')), 4)));
+        const fronts = War.milLiveDocs().filter(d => (d.units || []).some(u => War.milNationOf(d, u) === n.id && !u.dead && u.strength > 0));
+        for (const d of fronts) {
+          const us = d.units.filter(u => War.milNationOf(d, u) === n.id && !u.dead && u.strength > 0);
+          const cut = us.filter(u => u.supplied === false).length;
+          body.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:4px;' },
+            (d.kind === 'protest' ? '⚒ ' : '⚔ ') + `${d.name}: ${us.length} formation${us.length === 1 ? '' : 's'} in the field${cut ? ` · ${cut} cut off` : ''}`));
+        }
+        body.appendChild(el('div.btn-row', el('button.dash-btn.btn-xs', { onclick: () => { W.warTab = 'military'; W.milNation = n.id; App.go('war'); } }, 'Military desk →')));
+      } },
     notes: { label: 'Notepad', icon: '✎', desc: 'Private notes — only you see them.', size: [1, 'm'],
       render(body, w) {
         const t = el('textarea.text-input.ow-notes', { placeholder: 'Plans, deals, reminders…' });
@@ -479,6 +503,7 @@ const Office = {
     const opts = Object.assign({}, w.opts);
     if (T.settings === 'province') box.appendChild(Forms.field('Province', Forms.sel(opts, 'provinceId', S().provinces.map(p => [p.id, p.name]))));
     if (T.settings === 'entity') box.appendChild(Forms.field('File', Forms.sel(opts, 'entityId', Forms.entOptions())));
+    if (T.settings === 'nation' && window.War && War.milNations) box.appendChild(Forms.field('Nation', Forms.sel(opts, 'entityId', War.milNations().map(e => [e.id, e.name]))));
     if (T.settings === 'companies') {
       opts.companies = Array.isArray(opts.companies) ? opts.companies.slice() : [];
       const row = el('div.chip-row');

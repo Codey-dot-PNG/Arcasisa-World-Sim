@@ -788,6 +788,71 @@ HUD's Peace row, toasts) and the border painter's peace mode (borders.js
 `startPeace` — docs/FRONTEND.md). The GM's one-shot treaty desk
 (`POST /api/gm/war/treaty`, below) remains.
 
+## Armed forces — `server/military.js` (War Room › Military)
+
+The war engine fights with units; this layer answers what a defence ministry
+asks about a NATION, and holds the orders it gives. Generic: a "nation" is any
+entity (a government, a foreign power, a movement fighting in a protest).
+
+**The arsenal** (`military.totals`, mirrored client-side by `War.milTotals`):
+every weapon item (`meta.weapon.kind` — smallarms/tank/warship/aircraft/fuel)
+the nation holds, by where it sits — its own inventory, its military
+depots (`type:'military'` properties it owns), the packs (`u.inv`) of its live
+units in either conflict (`u.nationId`, else the side's principal).
+
+**The record** — `db.militaryLog`, one row per turn (`sim.advanceTurn`) plus a
+row every 30 ticks of a running conflict and at its start/end:
+`{ at, turn, why, n: { [entityId]: [arms, tanks, ships, aircraft, fuel, men] } }`;
+turn rows (cap 120) and conflict rows (cap 150) keep separate budgets. Each
+conflict doc also carries a public `series` of `[tick, attStrength,
+defStrength, attLosses, defLosses]` every 10 ticks (cap 160; when full the
+older half is thinned to every other point). Both gates compare against the
+last sampled tick (`doc._seriesTick/_milTick`) — at speed a single call
+advances several ticks, so a `tick % n` gate skipped samples.
+
+**Standing orders** — `entity.militaryPlan` (`military.applyPlan` validates;
+absent = the defaults):
+
+- `doctrine: { issue: 'best'|'conserve', arms, fuel }` — read by
+  `resupplyUnits` for every unit of that nation: the draw order (finest
+  first, or spare the best and issue the oldest), and how full a unit is
+  topped up with arms (`ceil(capacity × arms)`) and fuel (`tankSize × fuel`),
+  each one of 25/50/75/100%. A ration limits top-ups; it never confiscates.
+- `posts: { 'city:<id>'|'prop:<id>': 0..3 }` — the defender's garrison sites
+  at `startWar` (`buildGarrisonUnits(db, defense, plan)`): 0 leaves a post
+  unmanned, 2 reinforced, 3 a fortress — a multiplier on the site's weight;
+  the garrison COUNT still follows the population.
+- `armourAt` / `fleetAt` — city ids where the defender's armour musters and
+  whose harbour water its fleet sails from (`deployArsenalUnits`; default the
+  capital / the principal port).
+- `police: { cities, per }` — a protest started with no police cities named
+  (`startProtest`) posts `per` detachments (1–4) in each of these.
+
+**Field orders** (`server/war.js`, authority-only; the engine just sees units
+come and go):
+
+- `raiseUnits` — infantry or armoured divisions (police detachments in a
+  protest) at a city the side still holds, or for an invader at its
+  `supplyAnchor`. An infantry division needs a rifle per soldier IN STOCK, an
+  armoured one a full tank complement (`tankCapacity`); they arm on the next
+  resupply. `raised: true`; at most `settings.war.raiseMax` (12) raised
+  formations alive per side.
+- `standDownUnits` — formations leave the field and `returnKit` hands their
+  packs back to the nation's stockpile (nothing evaporates — the army
+  withdrawal of a protest now returns its rifles too). Not while fighting,
+  embarked or at sea.
+- `issueUnit` — `u.issue` = a weapon model of the unit's primary kind:
+  resupply draws it first; a supplied unit hands back other models of that
+  kind (worst first, as many as the stock can replace) to re-arm with it.
+
+**Who:** `milAccessOf` (api.js) — the GM, the nation's ownership chain, and
+for a government the `command_military` ability ('all'); `command_police`
+alone runs only `police`. Shipped as `state.milCommand`. Raise / stand down
+need the side's leadership (`attLead` / `defAll`); issuing any commander of
+the unit (a grantee within its grant). The arsenal, the plan and the log ship
+only to whoever may see that entity's inventory (`seeInv`, which now covers
+the government for `command_military`/`command_police` holders).
+
 ## Alliance-aware wars — auto-join (Phase 27)
 
 Foreign powers carry an authored military profile at
@@ -2111,6 +2176,9 @@ Input gestures are unchanged otherwise (see "Interactive War layer" above): righ
 move/attack, right-drag route, Ctrl-drag line-up, Shift-drag box select, Esc clears.
 
 ### War Room panel (`War.renderPanel`, view `war`)
+
+Two tabs (`W.warTab`): **Situation** (below) and **Military** (`war-military.js` —
+see "Armed forces" above and docs/FRONTEND.md).
 
 A situation report per conflict: status chip, tick/elapsed/speed and **Open the battle map
 →**; the operator's authority line; a balance-of-forces bar; a stat strip (losses per side,

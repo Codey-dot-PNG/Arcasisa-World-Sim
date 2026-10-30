@@ -118,6 +118,8 @@ const Charts = {
       if (yMin === yMax) { yMin -= 1; yMax += 1; }
       const headroom = (yMax - yMin) * 0.1;
       yMin -= headroom; yMax += headroom;
+      // a floor alone (counts can't go negative) still auto-scales the top
+      if (fixedMin !== undefined && yMin < fixedMin) yMin = fixedMin;
     }
 
     const xCount = Math.max(...lines.map(l => l.points.length), 1);

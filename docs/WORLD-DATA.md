@@ -27,6 +27,7 @@ mode). `store.get()` returns it; everything mutates it in place.
   election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
+  mapFx: [ ... ],          // GM map effects — { id:'fx_…', kind, pos:[x,y], r, at, label } (visual only, see below)
   protestApplications: [ ... ], // Phase 36 — player petitions to start a protest (see below)
   history: [ ... ],        // per-turn time-series for charts (cap 1000)
   roles: [ ... ],          // permission templates
@@ -42,7 +43,7 @@ mode). `store.get()` returns it; everything mutates it in place.
 Prefixes matter — `sim.findEnt/findProv/findItem` resolve loose references by trying them:
 `ent_` (company/gov/bank), `per_` (person), `party_`, `for_` (foreign power), `org_`,
 `prov_`, `city_`, `prop_`, `item_`, `acct_`, `user_`, `ev_`, `elec_`, `trade_`, `txn_`,
-`tl_`, `news_`, `mark_`, `var_`, `trk_` (music), `venue_`, `paper_`. Role ids are bare
+`tl_`, `news_`, `mark_`, `fx_` (map effects), `var_`, `trk_` (music), `venue_`, `paper_`. Role ids are bare
 (`gamemaster`, `citizen`, `president`, …). New ids via `store.uid(prefix)`.
 
 **Well-known ids the engine relies on:** `ent_gov` (the government; falls back to
@@ -259,6 +260,14 @@ hale, keller, odek, grazi, orn, krenn, voss, falk).
 - **Phase 36 (permissions & protests, no schema bump):** `_abilitiesSeeded` (role
   abilities), `protestApplications: []`, the `settings.war.protest` opinion/application
   defaults, and a heal of users whose persona was stored as the literal `'__null__'`.
+- **Atlas map & map effects (no schema bump):** `settings.ambience.mapStyle`
+  (`'atlas'` default | `'classic'`) and `settings.ambience.shadows` (default `true`) —
+  how every client draws the map (GM Studio › World › Settings & Time; client-only, the
+  engine never reads them). `mapFx: []` — GM-staged disasters drawn on the map: `kind` ∈
+  `nuke, explosion, fire, flood, quake, storm, eruption, toxic`, `pos` on the master grid,
+  `r` radius in map units (15–900), `at` the start time (ms) every client animates from,
+  optional `label` (≤60 chars). Purely visual: nothing in the simulation reads them; cap
+  40. Public in `filterState` (everyone sees the same map).
 - **War map & air force (no schema bump):** `settings.map.kmPerPx` (2.17, only when
   missing). Optional GM knobs `settings.war.air = { squadronSize, fuelPerPlane }`
   (defaults 4 / 10) and `settings.war.defaultSpeed` (1). `_airbasesSeeded` — one

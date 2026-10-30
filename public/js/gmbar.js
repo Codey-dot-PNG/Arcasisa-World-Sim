@@ -40,7 +40,8 @@ const GMBar = {
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.partySupportModal(); } }, 'Party Support…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.electionModal(); } }, 'Instant Election…'),
       el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); W.gmTab = 'election'; App.go('gm'); App.renderView(); } }, 'Election Commission…'),
-      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.announcementModal(); } }, 'Announcement…')
+      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); this.announcementModal(); } }, 'Announcement…'),
+      el('div.gmbar-menu-item', { onclick: () => { this.closeMenu(); W.fxPanel = true; if (W.view !== 'map') App.go('map'); else GameMap.toggleFxPanel(true); } }, 'Disasters & Map Effects…')
     );
 
     this.root = el('div#gm-bar.gm-bar.hidden',

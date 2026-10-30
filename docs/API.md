@@ -93,7 +93,8 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `GET snapshots` · `POST rollback` `{turn}` | |
 | `GET export` · `POST import` | full world JSON archive |
 | `POST reset` | reseed |
-| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns), `war.protest` (Phase 36 protest rules — opinion knobs, `applications` switch, new-protest defaults; merged & clamped) |
+| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns), `ambience` (`traffic`; `mapStyle: 'atlas'\|'classic'`, `shadows`), `war.protest` (Phase 36 protest rules — opinion knobs, `applications` switch, new-protest defaults; merged & clamped) |
+| `POST mapfx` · `DELETE mapfx/:id` · `POST mapfx/clear` | GM map effects — stage `{kind, pos:[x,y], r?, label?}` (`nuke, explosion, fire, flood, quake, storm, eruption, toxic`; r clamped 15–900; at most 40 on the map), remove one, or clear all. Visual only (`state.mapFx`, public); logged GM-only as type `map` |
 | `POST users` · `PATCH users/:id` | Phase 36: an unknown `roleId`/`entityId` is a 400 (it used to be stored and silently fall back to Citizen); the editor's `'__null__'` persona means none |
 | `POST users` · `PATCH\|DELETE users/:id` | user CRUD; calls `sim.syncPresidency` |
 | `GET map/land` | the pristine land outline (`settings.map.land`, or every current region shape before the first border edit) — border-painter tooling; `filterState` strips `map.land` from every payload |

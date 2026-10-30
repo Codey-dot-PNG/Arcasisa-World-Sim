@@ -71,6 +71,12 @@ const SFX = {
   },
 
   /* ---------- vocabulary ---------- */
+  // map disasters (map-fx.js): a detonation — low thump plus a rolling roar
+  boom(big) {
+    this.noise(big ? 3.4 : 1.3, { filter: 'lowpass', freq: big ? 900 : 1500, sweep: 45, q: 0.7, gain: big ? 0.5 : 0.32, attack: 0.008 });
+    this.tone(big ? 48 : 72, big ? 2.6 : 0.9, { type: 'sine', slide: 26, gain: big ? 0.32 : 0.2, attack: 0.01 });
+  },
+  rumble() { this.noise(2.6, { filter: 'lowpass', freq: 160, sweep: 60, q: 0.9, gain: 0.4, attack: 0.25 }); },
   click() { this.noise(0.03, { freq: 2600, q: 3, gain: 0.07 }); },                    // generic UI press
   chip() {                                                                            // chip lands on the felt
     this.noise(0.035, { freq: 1800, q: 4, gain: 0.1 });

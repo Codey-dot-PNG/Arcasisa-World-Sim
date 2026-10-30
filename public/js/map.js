@@ -18,7 +18,20 @@ const GameMap = {
   mount(container) {
     clear(container);
     const wrap = el('div#map-wrap');
+    // Day/night must be IN PLACE before the new wrap's first style pass.
+    // The grades transition their opacity (dusk slides in over seconds), so a
+    // wrap born at the CSS default (--dn-night:0) and handed the real value a
+    // moment later faded from daylight to night again on every visit to the
+    // map tab. Seed the last known factors now, then snap (no transitions)
+    // for the first frames while the fresh clock reading lands.
+    wrap.classList.add('dn-snap');
+    if (this._dn) {
+      this.applyDayNight(wrap, this._dn.night, this._dn.warm, this._dn.lights);
+      if (this._dn.phase) wrap.dataset.dayphase = this._dn.phase;
+    }
     container.appendChild(wrap);
+    if (window.App && App.renderWorldClock) App.renderWorldClock();
+    requestAnimationFrame(() => requestAnimationFrame(() => wrap.classList.remove('dn-snap')));
 
     this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     this.svg.setAttribute('id', 'map-svg');
@@ -41,7 +54,7 @@ const GameMap = {
     wrap.appendChild(this.overSvg);
 
     // Night lighting lives INSIDE this svg now (see buildNightLayer in
-    // render()): a multiply grade rect + a screen-blended city-glow group,
+    // render()): a translucent night-grade rect + the city-glow group,
     // sandwiched between the roads and the traffic so buildings, labels and
     // markers stay ABOVE the glows — crisp silhouettes against the light,
     // never washed out by it. Gradients for it are (re)created per render.
@@ -87,8 +100,6 @@ const GameMap = {
      18:00), which yields three smooth 0..1 factors written to #map-wrap as
      CSS custom properties once per clock tick (1s):
 
-       --dn-night   darkness — drives the indigo multiply grade (::after)
-       --dn-warm    golden hour — drives the amber multiply grade (::before)
        --dn-night   darkness — drives the in-svg night grade + the wrap's
                     indigo mood tint (::after)
        --dn-warm    golden hour — drives the amber multiply grade (::before)
@@ -97,7 +108,9 @@ const GameMap = {
 
     The layers' opacity transitions then interpolate between ticks for free,
     so dawn and dusk slide through over ~2½ world-hours instead of snapping.
-    data-dayphase (night/dawn/day/dusk) is kept as a styling/debug hook. */
+    data-dayphase (night/dawn/day/dusk) is kept as a styling/debug hook. The
+    last reading is cached (_dn) so a freshly mounted map starts at the
+    current light instead of fading in from noon (see mount). */
   setDayNight(worldMs) {
     const wrap = document.getElementById('map-wrap');
     if (!wrap) return;
@@ -107,7 +120,10 @@ const GameMap = {
     // paused. Treat null/undefined/non-numbers uniformly as "no world time".
     if (!enabled || worldMs == null || !Number.isFinite(Number(worldMs))) {
       delete wrap.dataset.dayphase;
+      this._dn = { night: 0, warm: 0, lights: 0, phase: null };
+      this._dnSun = null;
       this.applyDayNight(wrap, 0, 0, 0);
+      if (this.onSun) this.onSun(wrap, null);
       return;
     }
     const d = new Date(Number(worldMs));
@@ -127,14 +143,20 @@ const GameMap = {
     let lights = Math.min(1, Math.max(0, (0.72 - daylight) / 0.55));
     // GM Studio lights tool: preview the glow even in broad daylight so the
     // editor isn't placing blobs blind — lift darkness just enough for the
-    // screen-blended halos to register on the map.
+    // halos to register on the map.
     if (window.MapEdit && MapEdit.active && MapEdit.mode === 'lights') {
       night = Math.max(night, 0.42); warm = Math.min(warm, 0.15); lights = Math.max(lights, 0.85);
     }
-    wrap.dataset.dayphase = daylight <= 0.04 ? 'night'
+    const phase = daylight <= 0.04 ? 'night'
       : daylight >= 0.96 ? 'day'
       : m < 720 ? 'dawn' : 'dusk';
+    wrap.dataset.dayphase = phase;
+    this._dn = { night, warm, lights, phase };
     this.applyDayNight(wrap, night, warm, lights);
+    // the sun's position (minutes of day + daylight) for the atlas style's
+    // building shadows and sunlight (map-style.js)
+    this._dnSun = { m, daylight, night };
+    if (this.onSun) this.onSun(wrap, this._dnSun);
   },
   applyDayNight(wrap, night, warm, lights) {
     // Just write the three factors; all grading is opacity/blend based
@@ -142,9 +164,17 @@ const GameMap = {
     // A filter on #map-svg itself was tried and removed: it forced the whole
     // map svg through a filter surface that every moving/highlighted element
     // then invalidated, at enormous compositor cost.
-    wrap.style.setProperty('--dn-night', (Number(night) || 0).toFixed(3));
-    wrap.style.setProperty('--dn-warm', (Number(warm) || 0).toFixed(3));
-    wrap.style.setProperty('--dn-lights', (Number(lights) || 0).toFixed(3));
+    const f = (v) => (Number(v) || 0).toFixed(3);
+    wrap.style.setProperty('--dn-night', f(night));
+    wrap.style.setProperty('--dn-warm', f(warm));
+    wrap.style.setProperty('--dn-lights', f(lights));
+    // data-dn marks "any grade at all": by day (or with the cycle off) the
+    // blend layers — the in-svg night grade and glows, the wrap's multiply
+    // grades, the vehicles' lamps — are display:none instead of merely
+    // transparent, so the browser stops compositing invisible blend groups
+    // under every pan frame (style.css "night: in-svg grade").
+    const on = night > 0.002 || warm > 0.002 || lights > 0.002;
+    if (on) wrap.dataset.dn = '1'; else delete wrap.dataset.dn;
   },
 
   /* ---------- pan & zoom ---------- */
@@ -231,7 +261,7 @@ const GameMap = {
         this.view.y += sp.y - this.pinch.prevSp.y;
         this.pinch.prevDist = dist;
         this.pinch.prevSp = sp;
-        this.applyTransform();
+        this.scheduleTransform();
         return;
       }
       if (!this.drag || e.pointerId !== this.drag.pid) return;
@@ -249,7 +279,7 @@ const GameMap = {
       const dy = (e.clientY - this.drag.sy) / ctm.d;
       this.view.x = this.drag.ox + dx;
       this.view.y = this.drag.oy + dy;
-      this.applyTransform();
+      this.scheduleTransform();
     });
     // End the drag from a WINDOW-level capture listener: children clickable
     // elements call stopPropagation() in their own pointerup, which would stop
@@ -317,7 +347,7 @@ const GameMap = {
       this.view.x = sp.x - (sp.x - this.view.x) * (k2 / this.view.k);
       this.view.y = sp.y - (sp.y - this.view.y) * (k2 / this.view.k);
       this.view.k = k2;
-      this.applyTransform();
+      this.scheduleTransform();
     }, { passive: false });
     svg.addEventListener('dblclick', (e) => {
       e.preventDefault();
@@ -350,26 +380,37 @@ const GameMap = {
     };
     requestAnimationFrame(anim);
   },
-  applyTransform() {
+  // Pointer/wheel input lands far more often than the screen refreshes (a
+  // trackpad fires several wheel events per frame, a 120 Hz mouse two moves)
+  // and every transform write repaints the whole map svg — so input only
+  // updates this.view and asks for ONE write on the next frame.
+  scheduleTransform() {
+    if (this._xfRaf) return;
+    this._xfRaf = requestAnimationFrame(() => { this._xfRaf = null; this.applyTransform(); });
+  },
+  applyTransform(force) {
     if (!this.world) return;
     const t = `translate(${this.view.x},${this.view.y}) scale(${this.view.k})`;
     this.world.setAttribute('transform', t);
     if (this.overWorld) this.overWorld.setAttribute('transform', t);
-    this.updateMarkerScale();
+    // counter-scaled markers depend on the zoom only — a pure pan leaves
+    // every one of them as it was, so skip the walk (and its attribute
+    // writes) unless k moved or a render/highlight asks for it
+    if (force || this.view.k !== this._scaledK) { this._scaledK = this.view.k; this.updateMarkerScale(); }
     // the war map's printed frame (margins, scale bar) follows the view
     if (W.layer === 'war' && window.War && War.onViewChange) War.onViewChange();
+    if (this.onView) this.onView();
   },
 
   /* ---------- night: in-svg grade + city lights ----------
      The night pipeline is two siblings inside #map-svg's world group,
      inserted between the roads and the traffic (see render()):
 
-       .night-grade  a full-bleed rect, multiply-blended, that darkens and
-                     blue-shifts the terrain/roads beneath it
-       .night-glows  the city lights proper, screen-blended ONTO the graded
-                     terrain as one composited group — so overlapping halos
-                     don't double-brighten, and lamps are never darkened by
-                     their own night
+       .night-grade  a full-bleed rect of translucent deep blue that darkens
+                     and blue-shifts the terrain/roads beneath it
+       .night-glows  the city lights proper, warm gradients laid ONTO the
+                     graded terrain — lamps are never darkened by their own
+                     night (plain alpha, no blend modes: see style.css)
 
      Everything painted later in the world group (traffic with their beams,
      buildings, city dots, labels, markers) sits ABOVE both, which is the
@@ -406,10 +447,11 @@ const GameMap = {
     grad('lightSpeckWarm', [['0%', '#fff3d0', '0.95'], ['45%', '#ffd98a', '0.55'], ['100%', '#ffb46e', '0']]);
     grad('lightSpeckSodium', [['0%', '#ffcf9a', '0.95'], ['45%', '#ffb46e', '0.50'], ['100%', '#ff9d4a', '0']]);
     grad('lightSpeckCool', [['0%', '#fffbe8', '0.90'], ['50%', '#ffe9c8', '0.45'], ['100%', '#ffdf9e', '0']]);
-    // the night grade itself: moonlit indigo, brighter over the island,
-    // falling to deep navy at the rim (a vignette, not a uniform dim)
+    // the night grade itself: moonlit blue, lighter over the island, falling
+    // to deep navy at the rim (a vignette, not a uniform dim). Plain alpha —
+    // see style.css "night: in-svg grade" for why it no longer multiplies.
     grad('nightGradeGrad', [
-      ['0%', '#7184cd', '0.80'], ['48%', '#48589e', '0.90'], ['100%', '#242f66', '0.97'],
+      ['0%', '#14204a', '0.50'], ['48%', '#0d173c', '0.60'], ['100%', '#060b24', '0.76'],
     ], { gradientUnits: 'userSpaceOnUse', cx: this.VIEW.w / 2, cy: this.VIEW.h / 2, r: Math.max(this.VIEW.w, this.VIEW.h) * 0.68 });
     // vehicle headlight beam: bright at the lamp, fading down the cone
     grad('carBeamGrad', [
@@ -426,11 +468,8 @@ const GameMap = {
     }, this.nightLayer);
     this.lightsWorld = document.createElementNS(NS, 'g');
     this.lightsWorld.setAttribute('class', 'night-glows');
-    // ONE animated element for the whole city-glow field: a slow ambient
-    // breath on this inner group. Animating individual lamps used to force
-    // the screen-blended group to re-composite over the whole map every
-    // frame — hundreds of animations was ruinous; one group-level opacity
-    // oscillation gives the same "alive" feel at compositor cost.
+    // the lamps themselves; nothing in here animates (an animated opacity
+    // inside the map svg repaints the whole map every frame — style.css)
     this.lightsInner = document.createElementNS(NS, 'g');
     this.lightsInner.setAttribute('class', 'night-breathe');
     this.lightsWorld.appendChild(this.lightsInner);
@@ -451,11 +490,9 @@ const GameMap = {
      the light's id, so clusters render identically for every operator and on
      every rebuild.
 
-     PERFORMANCE: nothing inside the glow field is individually animated any
-     more. Hundreds of per-lamp CSS keyframes used to force the screen-blended
-     group to re-composite across the whole map every frame; ambient motion is
-     now a single opacity oscillation on the .night-breathe wrapper (see
-     buildNightLayer), which composites as one layer. */
+     PERFORMANCE: nothing inside the glow field animates. Per-lamp keyframes
+     (and later a single group-level "breath") forced the screen-blended group
+     to re-composite across the whole map every frame, all night long. */
   seedRand(str) {
     let h = 2166136261;
     for (let i = 0; i < String(str).length; i++) { h ^= String(str).charCodeAt(i); h = Math.imul(h, 16777619); }
@@ -639,6 +676,12 @@ const GameMap = {
         // animating nodes that were no longer in any document.
         if (!this.trafficLayer || !this.trafficLayer.isConnected) { this.trafficFrame = null; return; }
         this.trafficFrame = requestAnimationFrame(tick);
+        // Every vehicle step invalidates the map svg beneath it. Slow
+        // ambient traffic reads just as smooth at ~30 fps, which halves that
+        // standing repaint; and nothing is moved while the map itself is
+        // being dragged/zoomed (that frame repaints everything anyway).
+        if (now - (this._trafficAt || 0) < 31 || this._xfRaf) return;
+        this._trafficAt = now;
         for (const u of this.trafficUnits) {
           const phase = (now + u.phase) % u.cycle;
           const visibleMs = u.fadeMs + u.fadeOutMs + u.fadeMs;
@@ -694,8 +737,9 @@ const GameMap = {
       const t = max > min ? ((Number(p.vars[W.dataVar]) || 0) - min) / (max - min) : 0.5;
       return { fill: 'rgb(122,35,24)', opacity: 0.14 + t * 0.62 };
     }
-    if (W.layer === 'ownership' || W.layer === 'plain') return { fill: 'var(--paper-deep)', opacity: 0.94 };
-    return { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
+    const atlas = this.atlasOn();
+    if (W.layer === 'ownership' || W.layer === 'plain') return atlas ? { fill: 'var(--at-land)', opacity: 1 } : { fill: 'var(--paper-deep)', opacity: 0.94 };
+    return atlas ? { fill: this.atlasProvColor(p), opacity: 1 } : { fill: p.color || 'var(--paper-deep)', opacity: 0.9 };
   },
 
   /* ---------- isometric building glyphs ----------
@@ -865,10 +909,18 @@ const GameMap = {
       node.appendChild(t);
     };
 
+    // The atlas style (map-style.js) re-inks the same geometry as a printed
+    // atlas plate; 'classic' keeps the original look. Never on the War layer.
+    const atlas = this.atlasOn();
+    this.svg.classList.toggle('atlas', atlas);
+    this.svg.classList.toggle('at-sh', atlas && this.shadowsOn());
+
     // ocean, graticule and the map boundary frame
     mk('rect', { x: -8000, y: -8000, width: this.VIEW.w + 16000, height: this.VIEW.h + 16000, class: 'map-ocean' });
-    for (let x = 0; x <= this.VIEW.w; x += 320) mk('line', { x1: x, y1: -1400, x2: x, y2: this.VIEW.h + 1400, class: 'graticule' });
-    for (let y = -1280; y <= this.VIEW.h + 1280; y += 320) mk('line', { x1: -1400, y1: y, x2: this.VIEW.w + 1400, y2: y, class: 'graticule' });
+    if (!atlas) {
+      for (let x = 0; x <= this.VIEW.w; x += 320) mk('line', { x1: x, y1: -1400, x2: x, y2: this.VIEW.h + 1400, class: 'graticule' });
+      for (let y = -1280; y <= this.VIEW.h + 1280; y += 320) mk('line', { x1: -1400, y1: y, x2: this.VIEW.w + 1400, y2: y, class: 'graticule' });
+    }
     mk('rect', { x: 0, y: 0, width: this.VIEW.w, height: this.VIEW.h, class: 'map-frame' });
 
     // Region outlines: while the GM border painter holds unsaved work its
@@ -878,12 +930,27 @@ const GameMap = {
     const shapeOf = (kind, id, base) => { const o = painting ? Borders.shapeFor(kind, id) : undefined; return o === undefined ? base : o; };
     this.regionNodes = {};
     const regionNode = (key, node) => { (this.regionNodes[key] = this.regionNodes[key] || []).push(node); };
+    // every province's outline as path data (legacy polygon provinces too)
+    const provD = (p) => {
+      const sh = shapeOf('province', p.id, p.shape);
+      if (sh) return sh;
+      return (sh === p.shape && p.path && p.path.length > 2) ? 'M' + p.path.map(q => q.join(' ')).join(' L') + ' Z' : '';
+    };
+    if (atlas) {
+      // the coast's water-lines run around ALL land, before any land is drawn
+      const all = (map.countries || []).map(c => shapeOf('country', c.id, c.shape) || '')
+        .concat(S().provinces.map(provD)).filter(Boolean);
+      this.atlasCoast(this.world, all);
+    }
 
     // foreign powers — international borders in their shades of grey
+    // (atlas: cream land, each power ribboned in its own ink)
     this.countryNodes = {};
+    const bandItems = [];
     for (const c of (map.countries || [])) {
       const cShape = shapeOf('country', c.id, c.shape);
       if (!cShape) continue;
+      if (atlas) bandItems.push({ c, d: cShape, key: 'c:' + c.id });
       const node = mk('path', { d: cShape, 'fill-rule': 'evenodd', class: 'country-shape', fill: c.fill || '#a8a196', 'vector-effect': 'non-scaling-stroke' });
       node.addEventListener('pointerup', (e) => {
         if (W.layer === 'war') return; // war layer: clicks are battlefield input, not dossier lookups — bubble to the svg (deselect)
@@ -897,8 +964,12 @@ const GameMap = {
       if (c.entityId) this.countryNodes[c.entityId] = node;
     }
 
-    // island drop shadow, then the provinces themselves
-    for (const p of S().provinces) {
+    if (atlas) this.atlasBands(this.world, bandItems, regionNode);
+
+    // island drop shadow, then the provinces themselves (atlas: no drop
+    // shadow — a printed plate is flat — but the nation's own outline)
+    if (atlas) this.atlasNation(this.world, S().provinces.map(provD).filter(Boolean).join(' '));
+    else for (const p of S().provinces) {
       const pShape = shapeOf('province', p.id, p.shape);
       if (pShape) regionNode('p:' + p.id, mk('path', { d: pShape, 'fill-rule': 'evenodd', fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' }));
       else if (p.path && p.path.length > 2 && pShape === p.shape) mk('polygon', { points: ptsStr(p.path), fill: 'rgba(24,26,30,0.3)', transform: 'translate(9,12)' });
@@ -920,6 +991,9 @@ const GameMap = {
       title(poly, p.name);
       this.provNodes[p.id] = poly;
     }
+
+    // atlas: the graticule rides over the land; towns' built-up areas
+    if (atlas) { this.atlasGraticule(this.world); this.atlasUrban(this.world, S().provinces.map(provD).filter(Boolean).join(' ')); }
 
     // transport — roads, then railways (casing + sleeper dashes)
     for (const r of (map.roads || [])) {
@@ -969,7 +1043,8 @@ const GameMap = {
     // province names (+ data value when the data layer is active)
     for (const p of S().provinces) {
       if (!p.labelPos || shapeOf('province', p.id, p.shape) === '') continue;
-      const size = p.labelSize || 46;
+      // atlas: smaller, widely tracked capitals (the tracking makes up the width)
+      const size = (p.labelSize || 46) * (atlas ? 0.66 : 1);
       const rot = p.labelRot ? `rotate(${p.labelRot} ${p.labelPos[0]} ${p.labelPos[1]})` : '';
       const t = mk('text', { x: p.labelPos[0], y: p.labelPos[1], class: 'prov-label', 'font-size': size, 'text-anchor': 'middle', transform: rot });
       t.textContent = p.name.toUpperCase();
@@ -979,6 +1054,9 @@ const GameMap = {
         st.textContent = fmtVal(p.vars[W.dataVar], vdef ? vdef.format : 'number');
       }
     }
+
+    // atlas: every building's sun shadow, in one layer under all buildings
+    if (atlas) this.atlasShadows(this.world);
 
     // property markers (counter-scaled)
     this.markerLayer = document.createElementNS(NS, 'g');
@@ -1065,6 +1143,8 @@ const GameMap = {
       iso.classList.add('iso-hidden');
       if (W.selection && W.selection.kind === 'property' && W.selection.id === pr.id) iso.classList.add('selected');
       g.appendChild(iso);
+      // atlas: after dark the block sinks into shadow and lights its windows
+      if (atlas && pr.texture) g.appendChild(this.atlasNightArt(pr.texture));
       // Ownership layer: the PNG building art carries no owner colour, so a
       // second copy of the same art is stamped over it, reduced to a solid
       // silhouette in the owner's colour (feFlood ∩ SourceAlpha) at partial
@@ -1131,6 +1211,7 @@ const GameMap = {
       if (!c.pos) continue;
       const g = document.createElementNS(NS, 'g');
       g.setAttribute('data-city', c.id);
+      if (c.isCapital) g.setAttribute('class', 'is-cap');
       g.setAttribute('data-x', c.pos[0]); g.setAttribute('data-y', c.pos[1]);
       const r = c.size === 3 ? 14.7 : c.size === 2 ? 11.5 : 8.6;
       const dot = document.createElementNS(NS, 'circle');
@@ -1150,12 +1231,20 @@ const GameMap = {
         ring.setAttribute('r', r + 8.3);
         ring.setAttribute('class', 'city-ring');
         g.appendChild(ring);
+        if (atlas) { // the atlas capital: a star in a ring
+          const st = document.createElementNS(NS, 'path');
+          const pts = [];
+          for (let i = 0; i < 10; i++) { const a = -Math.PI / 2 + i * Math.PI / 5, rr = i % 2 ? r * 0.42 : r * 0.95; pts.push((Math.cos(a) * rr).toFixed(1) + ' ' + (Math.sin(a) * rr).toFixed(1)); }
+          st.setAttribute('d', 'M' + pts.join(' L') + ' Z');
+          st.setAttribute('class', 'city-star');
+          g.appendChild(st);
+        }
       }
       const lbl = document.createElementNS(NS, 'text');
-      lbl.setAttribute('class', 'city-label');
+      lbl.setAttribute('class', 'city-label city-s' + (c.size || 1) + (c.isCapital ? ' city-cap' : ''));
       lbl.setAttribute('x', r + 13);
       lbl.setAttribute('y', 9.6);
-      lbl.textContent = (c.isCapital ? '★ ' : '') + c.name;
+      lbl.textContent = (c.isCapital && !atlas ? '★ ' : '') + c.name;
       g.appendChild(lbl);
       this.cityLayer.appendChild(g);
     }
@@ -1214,9 +1303,13 @@ const GameMap = {
     // above cities/markers so the front line is never hidden underneath them
     this.warLayer = null;
     if (window.War) War.renderMapLayer(this, mk, NS);
+    // GM map effects (nuclear strikes, fires, floods… — map-fx.js), in the
+    // overlay svg under the war's marks; kept across renders by effect id
+    this.renderFx();
 
-    // night city-lights overlay (separate svg — see mount())
+    // night city-lights (+ the atlas's roads, towns and works)
     this.buildLights(map);
+    if (atlas) this.atlasLights(map);
 
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;
@@ -1226,7 +1319,12 @@ const GameMap = {
 
     this.renderLayerBar();
     this.renderLegend();
-    this.applyTransform();
+    // the plate's furniture (paper, neatline, rose, scale, locator) and the
+    // sun's current shadow offsets
+    this.atlasChrome(atlas);
+    const wrap = document.getElementById('map-wrap');
+    if (wrap) { wrap._sunKey = null; this.onSun(wrap, this._dnSun || null); }
+    this.applyTransform(true);
   },
 
   // One <filter> per owner colour, created lazily inside the marker layer
@@ -1280,6 +1378,9 @@ const GameMap = {
         // at every zoom level (no counter-scaling), and the texture is always
         // shown — the flat square is never used for them.
         if (g.getAttribute('data-textured') === '1') {
+          // constant at every zoom — styled once per render, then left alone
+          if (g._texSet) continue;
+          g._texSet = true;
           g.setAttribute('transform', `translate(${x},${y}) scale(${this.TEX_SCALE})`);
           const rect = g.querySelector('.prop-marker');
           const glyph = g.querySelector('.prop-glyph');
@@ -1386,6 +1487,13 @@ const GameMap = {
       bar.appendChild(el('button.chip', { onclick: () => this.setPlacing(null) }, 'cancel'));
     }
     if (window.MapEdit) MapEdit.toolbar(bar);
+    // GM: stage disasters and effects on the map (map-fx.js) — visual only
+    if (isGM() && !this.editing()) {
+      const n = ((S() && S().mapFx) || []).length;
+      bar.appendChild(el('button.chip', { class: W.fxPanel ? 'active' : '', title: 'Stage a nuclear strike, fire, flood… on the map (visual only)', onclick: () => this.toggleFxPanel() },
+        '☢ Disasters' + (n ? ' · ' + n : '')));
+    }
+    this.renderFxPanel();
   },
 
   setPlacing(p) { W.placing = p; this.renderLayerBar(); },
@@ -1435,15 +1543,18 @@ const GameMap = {
       const total = S().properties.length;
       lg.appendChild(el('div', { style: 'margin-top:6px; color:var(--ink-faint);' }, total + ' properties · click a name for its file'));
     } else {
+      // the key wears the same inks as the sheet (atlas pastels / ribbons)
+      const atlas = this.atlasOn();
       lg.appendChild(el('div.lg-title', S().settings.worldName.toUpperCase()));
       for (const p of S().provinces) {
-        lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + (p.color || '#ccc') }), el('span', p.name)));
+        lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + (atlas ? this.atlasProvColor(p) : (p.color || '#ccc')) }), el('span', p.name)));
       }
       const countries = (S().settings.map || {}).countries || [];
       if (countries.length) {
         lg.appendChild(el('div.lg-title', { style: 'margin-top:8px;' }, 'FOREIGN POWERS'));
         for (const c of countries) {
-          lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: 'background:' + c.fill }), el('span', c.name)));
+          const sw = atlas ? 'background:var(--at-land); box-shadow:inset 0 0 0 3px ' + this.countryInk(c) : 'background:' + c.fill;
+          lg.appendChild(el('div.lg-row', el('span.lg-swatch', { style: sw }), el('span', c.name)));
         }
       }
       lg.appendChild(el('div', { style: 'margin-top:6px; color:var(--ink-faint);' }, 'zoom in for properties · ★ capital'));

@@ -116,12 +116,26 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
   tween, an infinite CSS animation — even an opacity pulse on a group) makes the browser
   repaint the whole map, provinces, patterns and clip paths included; on a phone that was
   the difference between ~17fps and 60fps. So: no infinite CSS animations inside the map
-  svg (gate ambient ones on when they're visible, e.g. `.night-breathe` only at
-  dusk/night/dawn); per-frame movers belong in the transparent overlay svg
+  svg (the night glow's old ambient "breath" was removed for this); per-frame movers
+  belong in the transparent overlay svg
   (`GameMap.overSvg/overWorld`, same viewBox + pan/zoom transform — the war's units,
   arrows and strike FX live there); rAF loops write attributes only when a value changed.
   Things that must live in the map svg but change often (the war's occupied ground) are
   rate-limited (`WAR_GROUND_MIN_MS`), not rebuilt on every tick.
+  Also inside `#map-svg`: **no `mix-blend-mode` and no `filter`** on anything big or
+  numerous — a blend/filter group is re-rendered offscreen on every pan frame (the night
+  grade used to multiply and the glows screen: night panning ran at half the day rate;
+  they are plain alpha now). By day the whole night layer is `display:none` (`data-dn`
+  on `#map-wrap`), not merely transparent. **No wide strokes over long paths** either:
+  the atlas coast first stacked 20–70px strokes along every shore and halved the frame
+  rate; its water-lines are now offset contours computed once (`_coastRings`) and drawn
+  as hairlines. Pan/zoom input only updates `GameMap.view` and asks for one transform
+  write per frame (`scheduleTransform`); counter-scaled markers are only walked when the
+  zoom changed. Static decoration that doesn't need to move with the map (paper grain,
+  neatline, compass, scale bar, locator) is composited HTML over the map, never svg.
+  Images that should change with the light are pre-baked once per texture on a canvas
+  (shadow silhouettes, lit-window night art — `map-style.js`) and moved/faded by CSS
+  variables, never filtered per element.
 
 ## Data & environment
 

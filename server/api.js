@@ -535,6 +535,9 @@ function filterState(u) {
     cities: db.cities,
     items: db.items,
     markers: db.markers || [],
+    // GM map effects — nuclear strikes, fires, floods… drawn on everyone's
+    // map; purely visual (they touch no population, property or money)
+    mapFx: db.mapFx || [],
     // Share prices are public market information — everyone gets them so the
     // Exchange price-history graphs work for citizens. National statistics
     // (GDP, money supply, …) stay gated on the statistics clearance.
@@ -596,6 +599,21 @@ function filterState(u) {
     roles: p.gm ? db.roles : db.roles.map(r => ({ id: r.id, name: r.name })),
     users: p.gm ? db.users.map(x => ({ id: x.id, username: x.username, displayName: x.displayName, roleId: x.roleId, entityId: x.entityId, newspaperId: x.newspaperId || null, lastLogin: x.lastLogin })) : undefined
   };
+}
+
+// GM map effects (POST /api/gm/mapfx) — kind → its name in the record
+const MAP_FX_KINDS = {
+  nuke: 'Nuclear strike', explosion: 'Explosion', fire: 'Fire', flood: 'Flood',
+  quake: 'Earthquake', storm: 'Hurricane', eruption: 'Volcanic eruption', toxic: 'Toxic cloud'
+};
+function nearestCityName(db, pos) {
+  let best = null, bd = Infinity;
+  for (const c of db.cities || []) {
+    if (!Array.isArray(c.pos)) continue;
+    const d = Math.hypot(c.pos[0] - pos[0], c.pos[1] - pos[1]);
+    if (d < bd) { bd = d; best = c; }
+  }
+  return best && bd < 400 ? best.name : '';
 }
 
 // ---------- GM collection CRUD -------------------------------------------
@@ -2857,6 +2875,43 @@ async function handle(req, res, pathname, method) {
           return json(res, 200, { value: sim.evalExpr(String(b.expr || ''), { vars }) });
         } catch (e) { return json(res, 200, { error: e.message }); }
       }
+      // Map effects (GM): stage a disaster on the map — a nuclear strike, an
+      // explosion, a fire, a flood, an earthquake, a hurricane, an eruption
+      // or a toxic cloud. PURELY VISUAL and reversible: an effect is a
+      // drawing every client animates from its start time; nothing in the
+      // simulation reads it. Remove one, or clear them all, at any time.
+      if (pathname === '/api/gm/mapfx' && method === 'POST') {
+        const b = await readBody(req);
+        const kind = String(b.kind || '');
+        if (!MAP_FX_KINDS[kind]) return bad('Unknown effect.');
+        const pos = Array.isArray(b.pos) ? b.pos.map(Number) : null;
+        if (!pos || pos.length !== 2 || !pos.every(n => Number.isFinite(n) && n > -4000 && n < 8000)) return bad('Pick a spot on the map.');
+        db.mapFx = db.mapFx || [];
+        if (db.mapFx.length >= 40) return bad('Forty effects are already on the map — remove some first.');
+        const r = Math.max(15, Math.min(900, Number(b.r) || 80));
+        const fx = { id: store.uid('fx'), kind, pos: pos.map(n => Math.round(n)), r: Math.round(r), at: Date.now(), label: String(b.label || '').trim().slice(0, 60) || null };
+        db.mapFx.push(fx);
+        const near = nearestCityName(db, fx.pos);
+        store.log('map', `${MAP_FX_KINDS[kind]} staged${near ? ' near ' + near : ''}${fx.label ? ' — “' + fx.label + '”' : ''}`, 'Map effect (visual only — no one is harmed).', actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true, fx });
+      }
+      if (pathname === '/api/gm/mapfx/clear' && method === 'POST') {
+        const n = (db.mapFx || []).length;
+        db.mapFx = [];
+        if (n) store.log('map', `Map effects cleared (${n})`, '', actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true, removed: n });
+      }
+      const fxDel = pathname.match(/^\/api\/gm\/mapfx\/([\w-]+)$/);
+      if (fxDel && method === 'DELETE') {
+        const fx = (db.mapFx || []).find(f => f.id === fxDel[1]);
+        if (!fx) return bad('That effect is already gone.');
+        db.mapFx = db.mapFx.filter(f => f.id !== fx.id);
+        store.log('map', `${MAP_FX_KINDS[fx.kind] || 'Map effect'} removed${fx.label ? ' — “' + fx.label + '”' : ''}`, '', actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true });
+      }
       if (pathname === '/api/gm/mint' && method === 'POST') {
         const b = await readBody(req);
         const acct = db.accounts.find(a => a.id === b.accountId);
@@ -3114,6 +3169,10 @@ async function handle(req, res, pathname, method) {
         }
         if (b.ambience) {
           s.ambience = s.ambience || {};
+          // map presentation: the atlas plate (default) or the classic sheet,
+          // and whether buildings cast sun shadows (client-only rendering)
+          if (b.ambience.mapStyle !== undefined) s.ambience.mapStyle = b.ambience.mapStyle === 'classic' ? 'classic' : 'atlas';
+          if (b.ambience.shadows !== undefined) s.ambience.shadows = !!b.ambience.shadows;
           if (b.ambience.traffic) {
             const tr = s.ambience.traffic = s.ambience.traffic || {};
             for (const k of ['enabled', 'presence', 'speed', 'size', 'fadeOutSeconds', 'fadeDurationSeconds']) {

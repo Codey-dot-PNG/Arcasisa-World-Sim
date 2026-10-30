@@ -864,6 +864,8 @@ const GM = {
       clockTime,
       autoEnabled: s.time.auto.enabled, autoSeconds: s.time.auto.seconds,
       autoMode: s.time.auto.mode || 'interval', autoAt: s.time.auto.at || '08:00',
+      mapStyle: ((s.ambience || {}).mapStyle) === 'classic' ? 'classic' : 'atlas',
+      mapShadows: ((s.ambience || {}).shadows) !== false,
       trafficEnabled: traffic.enabled !== false, trafficPresence: traffic.presence === undefined ? 55 : traffic.presence,
       trafficSpeed: traffic.speed || 1, trafficSize: traffic.size || 1,
       trafficFadeOut: traffic.fadeOutSeconds || 8, trafficFadeDuration: traffic.fadeDurationSeconds || 1.5,
@@ -911,6 +913,12 @@ const GM = {
       this.field('Real seconds per turn (interval mode)', this.num(d, 'autoSeconds')),
       this.field('Advance at (clock mode, HH:MM)', this.text(d, 'autoAt'))));
 
+    main.appendChild(Views.secLabel('Map Style & Lighting'));
+    main.appendChild(el('div.form-grid',
+      this.field('Map style', this.sel(d, 'mapStyle', [['atlas', 'Atlas — printed plate, sun shadows, lit windows'], ['classic', 'Classic — the original sheet']]),
+        'Applies to every player\u2019s map (the War layer keeps its own sheet). Switch back to Classic at any time.')));
+    main.appendChild(this.check(d, 'mapShadows', 'Atlas: buildings cast shadows that follow the sun'));
+
     main.appendChild(Views.secLabel('Ambient Traffic'));
     main.appendChild(this.check(d, 'trafficEnabled', 'Show ambient cars and trains on roads and railways'));
     main.appendChild(el('div.form-grid',
@@ -937,7 +945,7 @@ const GM = {
               clock: { enabled: !!d.clockEnabled, minutesPerRealMinute: Number(d.clockSpeed) || 59.5, currentTime: d._clockEdited ? d.clockTime : undefined },
               auto: { enabled: !!d.autoEnabled, mode: d.autoMode, at: d.autoAt, seconds: Number(d.autoSeconds) || 3600 }
             },
-            ambience: { traffic: {
+            ambience: { mapStyle: d.mapStyle === 'classic' ? 'classic' : 'atlas', shadows: !!d.mapShadows, traffic: {
               enabled: !!d.trafficEnabled, presence: Number(d.trafficPresence) || 0,
               speed: Number(d.trafficSpeed) || 1, size: Number(d.trafficSize) || 1,
               fadeOutSeconds: Number(d.trafficFadeOut) || 8, fadeDurationSeconds: Number(d.trafficFadeDuration) || 1.5

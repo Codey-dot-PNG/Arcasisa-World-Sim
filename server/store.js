@@ -98,6 +98,7 @@ function migrate(world) {
   let changed = false;
   const need = (key, def) => { if (world[key] === undefined) { world[key] = def; changed = true; } };
   need('markers', []);                    // Phase 1.4 — event markers
+  need('mapFx', []);                      // GM map effects (nuke, fire, flood…) — visual only
   need('history', []);                    // Phase 7.1 — time-series for charts
   need('trades', []);                     // Phase 4.3 — negotiated trade offers
   need('tradeContracts', []);             // Phase 4.3 — ongoing trade contracts
@@ -135,6 +136,10 @@ function migrate(world) {
     const defaults = { enabled: true, presence: 55, speed: 1, size: 1, fadeOutSeconds: 8, fadeDurationSeconds: 1.5 };
     for (const k of Object.keys(defaults)) if (tr[k] === undefined) { tr[k] = defaults[k]; changed = true; }
   }
+  // Map presentation (atlas overhaul): the printed-atlas plate is the default
+  // look, 'classic' the original sheet; building sun shadows on by default.
+  if (world.settings.ambience.mapStyle === undefined) { world.settings.ambience.mapStyle = 'atlas'; changed = true; }
+  if (world.settings.ambience.shadows === undefined) { world.settings.ambience.shadows = true; changed = true; }
   // Phase 30 — wall-clock world time. The anchor makes the clock continue
   // while no browser is open; request/cron ticks only materialise due turns.
   if (world.settings && world.settings.time) {

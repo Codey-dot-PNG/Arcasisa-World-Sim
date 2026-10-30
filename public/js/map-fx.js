@@ -11,11 +11,16 @@
 
    Every effect plays out from its own start time `at`: each animation's
    delay is offset by the effect's age (--age, negative), so a player who
-   opens the map ten seconds after a detonation sees the mushroom cloud
-   already climbing, and one who arrives an hour later sees the aftermath —
-   scorched ground, the dissipating cloud — never a replay. Whoever is
-   watching at the moment of a strike also gets the flash, the shake and the
-   boom.
+   opens the map a minute after a detonation sees the mushroom cloud
+   already thinning, and one who arrives an hour later sees the aftermath —
+   scorched ground, the dissipating cloud — never a replay. Ages run on the
+   SERVER's clock (state.settings.time.clock.serverNowMs), not the
+   viewer's, which may be off by minutes. Whoever is watching when a strike
+   lands sees the whole show from the top — whenever their sync delivers it
+   (the GM gets it in the reply to the click; everyone else a realtime ping
+   and a refetch later) — with the flash, the shake and the boom. A show
+   waits for its smoke and fire sprites to bake before it starts, so its
+   short opening phases never play out invisibly.
 
    PERFORMANCE: effects live in the transparent overlay svg (#war-overlay,
    under the war's own marks), never in the map svg, so their motion repaints
@@ -59,6 +64,12 @@
         this._fxNodes = new Map();
         this._fxDefs(L);
       }
+      // the server's clock, as of the state on screen
+      if (this._fxStateRef !== S()) {
+        this._fxStateRef = S();
+        const sn = Number((((S().settings || {}).time || {}).clock || {}).serverNowMs);
+        if (Number.isFinite(sn) && sn > 0) this._fxSkew = sn - Date.now();
+      }
       const list = S().mapFx || [];
       const seen = new Set();
       for (const fx of list) {
@@ -67,13 +78,40 @@
         const key = [fx.kind, fx.r, fx.pos.join(','), fx.at, fx.label || ''].join('|');
         const old = this._fxNodes.get(fx.id);
         if (old && old.key === key) continue;
-        if (old) old.node.remove();
+        if (old) { old.node.remove(); this._fxBorn.delete(fx.id); }
         const node = this._fxBuild(fx);
-        L.appendChild(node);
-        this._fxNodes.set(fx.id, { node, key });
+        const rec = { node, key };
+        this._fxNodes.set(fx.id, rec);
+        this._fxSight(fx);
+        const start = () => {
+          if (this._fxNodes.get(fx.id) !== rec || this.fxLayer !== L) return; // replaced or removed meanwhile
+          const age = this._fxAge(fx);
+          node.style.setProperty('--age', (-age).toFixed(2) + 's');
+          L.appendChild(node);
+          if (age < 3) this._fxArrive(fx);
+        };
+        if (node._pending && node._pending.length) Promise.all(node._pending).then(start);
+        else start();
       }
-      for (const [id, rec] of this._fxNodes) if (!seen.has(id)) { rec.node.remove(); this._fxNodes.delete(id); }
+      for (const [id, rec] of this._fxNodes) if (!seen.has(id)) { rec.node.remove(); this._fxNodes.delete(id); this._fxBorn.delete(id); }
+      this._fxPrimed = true;
       if (W.fxPanel) this.renderFxPanel();
+    },
+    // seconds into the show, decided on first sight: an effect that turns up
+    // while this viewer is watching (or within a few seconds of its strike)
+    // starts from the top once its sprites are ready; one that was already
+    // there plays on from its real age. Later rebuilds keep the same start,
+    // so nothing restarts.
+    _fxBorn: new Map(),
+    _fxSight(fx) {
+      if (this._fxBorn.has(fx.id)) return;
+      const age = Math.max(0, (Date.now() + (this._fxSkew || 0) - Number(fx.at || 0)) / 1000);
+      this._fxBorn.set(fx.id, age < 4 || (this._fxPrimed && age < 60) ? 'fresh' : Date.now() - age * 1000);
+    },
+    _fxAge(fx) {
+      let born = this._fxBorn.get(fx.id);
+      if (typeof born !== 'number') this._fxBorn.set(fx.id, born = Date.now());
+      return Math.max(0, (Date.now() - born) / 1000);
     },
     _fxDefs(L) {
       const defs = sv('defs', {}, L);
@@ -91,12 +129,13 @@
     /* ---------- one effect ---------- */
     _fxBuild(fx) {
       const r = Math.max(10, Number(fx.r) || 80);
-      const age = Math.max(0, (Date.now() - Number(fx.at || 0)) / 1000);
       const g = sv('g', {
         class: 'mfx mfx-' + fx.kind, 'data-fx': fx.id,
         transform: `translate(${f1(fx.pos[0])},${f1(fx.pos[1])})`,
-        style: `--age:${(-age).toFixed(2)}s; --r:${f1(r)}`,
+        style: `--r:${f1(r)}`,
       });
+      // sprites still baking: renderFx starts the show once they land
+      g._pending = [];
       const rand = this.seedRand('fx:' + fx.id);
       const build = this['_fx_' + fx.kind];
       if (build) build.call(this, g, r, rand);
@@ -104,7 +143,6 @@
         const t = sv('text', { y: f1(r * 1.32 + 12), 'text-anchor': 'middle', class: 'mfx-label', 'font-size': f1(Math.max(15, Math.min(48, r * 0.17))) }, g);
         t.textContent = fx.label;
       }
-      if (age < 3) this._fxArrive(fx);
       return g;
     },
     // a strike seen live: the flash across the map, the shake, the boom
@@ -319,7 +357,13 @@
       const img = sv('image', { x: f1(-w / 2), y: f1(anchor === 'b' ? -h : -h / 2), width: f1(w), height: f1(h), preserveAspectRatio: 'none', class: cls || null, style: style || null }, g);
       const rec = this._fxSprite(name);
       const set = () => { if (rec.url) img.setAttribute('href', rec.url); };
-      if (rec.done) set(); else rec.p.then(set);
+      if (rec.done) set();
+      else {
+        const p = rec.p.then(set);
+        let root = parent;
+        while (root && !root._pending && root.parentNode) root = root.parentNode;
+        if (root && root._pending) root._pending.push(p);
+      }
       return img;
     },
 

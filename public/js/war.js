@@ -2490,7 +2490,7 @@ const War = {
     const lastEv = [...evs].reverse().find(e => e.kind !== 'battle') || evs[evs.length - 1];
     const sig = [war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, fmtCompact(attStr), fmtCompact(defStr), attN, defN, control.join(), next && next.id, lastEv && lastEv.t,
       fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), fmtCompact(st.civilianDeaths || 0), (war.result || {}).winner, war.totalWar,
-      this.airHudText ? this.airHudText(war) : ''].join('|');
+      this.airHudText ? this.airHudText(war) : '', this.peaceSig ? this.peaceSig(war) : ''].join('|');
     const old = document.getElementById('war-hud');
     const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : protest ? ((war.protest || {}).protestorsViolent ? 'VIOLENT' : 'PEACEFUL') : war.totalWar ? 'TOTAL WAR' : 'LIVE') + ' · T' + war.tick + (war.speed !== 1 ? ' · ' + warSpeedLabel(war.speed) : '');
     if (old && old.isConnected && this._hudSig === sig) {
@@ -2521,6 +2521,7 @@ const War = {
     if (!protest) hud.appendChild(row('Next', next ? `${next.priority}. ${this.objLabel(next)} — ${this.objTarget(next)}` : (war.result ? '—' : 'all objectives achieved')));
     const airText = this.airHudText && this.airHudText(war);
     if (airText) hud.appendChild(row('Air', airText));
+    if (this._peaceHudRow) this._peaceHudRow(hud, war, row);
     if (war.result) hud.appendChild(row('Result', (war.result.reason || 'ended')));
     if (lastEv) {
       const ago = Math.max(0, Math.round((Date.now() - lastEv.t) / 1000));
@@ -2566,7 +2567,8 @@ const War = {
     const sig = ['protest', war.startedAt, war.speed, war.paused, war.active, open, W.warLegend, posture, p.captureMode,
       warHeads(sm.crowd), warHeads(sm.police), sm.crowdN, sm.policeN, sm.control.join(), lastEv && lastEv.t,
       Math.round(sm.support * 10), Math.round(sm.approval * 10), sm.strikes.length, Math.round(sm.maxCut * 100), sm.unrest.join(),
-      fmtCompact(st.civilianDeaths || 0), fmtCompact(st.refugees || 0), fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), (war.result || {}).winner].join('|');
+      fmtCompact(st.civilianDeaths || 0), fmtCompact(st.refugees || 0), fmtCompact(st.attLosses || 0), fmtCompact(st.defLosses || 0), (war.result || {}).winner,
+      this.peaceSig ? this.peaceSig(war) : ''].join('|');
     const old = document.getElementById('war-hud');
     const statusText = () => (war.result ? 'ENDED' : war.paused ? 'PAUSED' : P.status) + ' · T' + war.tick + (war.speed !== 1 ? ' · ' + warSpeedLabel(war.speed) : '');
     if (old && old.isConnected && this._hudSig === sig) {
@@ -2609,6 +2611,7 @@ const War = {
         st.refugees ? `${fmtCompact(st.refugees)} fled` : null,
         hurt > 0 ? `crowds −${fmtCompact(st.attLosses || 0)} · police −${fmtCompact(st.defLosses || 0)}` : null].filter(Boolean).join(' · ')));
     }
+    if (this._peaceHudRow) this._peaceHudRow(hud, war, row);
     if (war.result) hud.appendChild(row('Result', (war.result.reason || 'ended')));
     if (lastEv) {
       const ago = Math.max(0, Math.round((Date.now() - lastEv.t) / 1000));
@@ -2878,6 +2881,7 @@ const War = {
     ]));
 
     if (isGM()) this.renderControls(inner, war, key);
+    if (this.renderPeaceTable) this.renderPeaceTable(inner, war, key);
 
     // objectives as a checklist, the next one called out
     if ((war.objectives || []).length) {
@@ -3007,6 +3011,7 @@ const War = {
     if (war.active) this._postureGrid(inner, war, key);
     else if (war.result && war.result.reason) inner.appendChild(el('div.protest-outcome', war.result.reason + '.'));
     if (isGM()) this.renderControls(inner, war, key);
+    if (this.renderPeaceTable) this.renderPeaceTable(inner, war, key);
 
     // the streets
     inner.appendChild(Views.secLabel('The streets'));

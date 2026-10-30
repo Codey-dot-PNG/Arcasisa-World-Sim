@@ -21,7 +21,16 @@
 
    Nothing here mutates state locally except the preview overrides
    (Borders.shapeFor), which GameMap.render consults so a sync arriving
-   mid-session can't wipe unsaved work. */
+   mid-session can't wipe unsaved work.
+
+   PEACE MODE (startPeace — war-peace.js): the same brush for the two sides
+   of a war or protest drawing the border clause of a peace offer, open to
+   any negotiator (not the GM's editor). Only the two sides' own regions are
+   loaded and the brush only moves land the two sides hold between them —
+   a third country's ground never changes hands. A protest may carve out a
+   NEW state (the virtual region 'c:__new', drawn from nothing). "Attach to
+   the offer" hands the traced shapes back; nothing is saved here — the
+   border applies only if the other side accepts the deal (server/peace.js). */
 
 const Borders = {
   CELL: 4, GW: 960, GH: 540,
@@ -41,15 +50,23 @@ const Borders = {
   stroke: null,
   _change: null, _changed: new Set(), _raf: 0,
   panelOpen: true,
+  peace: null,             // peace-mode session (startPeace) — null for the GM's editor
 
+  // the painter is live: the GM's map editor in Borders mode, or a peace draw
+  isOn() { return !!this.peace || !!(window.MapEdit && MapEdit.active && MapEdit.mode === 'borders'); },
   key(kind, id) { return (kind === 'province' ? 'p:' : 'c:') + id; },
   regionInfo(key) {
+    if (this.peace && this.peace.virtual && key === this.peace.virtual.key) {
+      const v = this.peace.virtual;
+      return { kind: 'new', id: 'new', name: v.name, color: v.color, shape: '', obj: null };
+    }
     const id = key.slice(2);
     if (key[0] === 'p') { const p = provById(id); return p ? { kind: 'province', id, name: p.name, color: p.color || '#8a8a6a', shape: p.shape, obj: p } : null; }
     const c = ((S().settings.map || {}).countries || []).find(x => x.id === id);
     return c ? { kind: 'country', id, name: c.name, color: c.fill || '#a8a196', shape: c.shape, obj: c } : null;
   },
   allKeys() {
+    if (this.peace) return this.peace.keys.slice();
     return [...S().provinces.map(p => 'p:' + p.id), ...((S().settings.map || {}).countries || []).map(c => 'c:' + c.id)];
   },
   dirty() { return this.touched.size > 0 || this.removed.size > 0; },
@@ -96,7 +113,7 @@ const Borders = {
     if (this.loading) return this.loading;
     this.loading = (async () => {
       toast('Preparing the territory map…');
-      const { land } = await GET('/api/gm/map/land');
+      const { land } = await GET(this.peace ? '/api/war/peace/land' : '/api/gm/map/land');
       this.land = this.raster(land || []).field;
       this.regions = []; this.byKey = {};
       for (const k of this.allKeys()) this.addRegion(k);
@@ -186,6 +203,8 @@ const Borders = {
         if (d2 >= r2) continue;
         const i = y * GW + x;
         if (!land[i]) continue; // open sea is nobody's — the coastline is fixed
+        // peace: only ground the two sides hold between them changes hands
+        if (this.peace) { let held = 0; for (const R of this.regions) held += R.field[i]; if (held < 32768) continue; }
         const q = 1 - d2 / r2;
         let a = this.strength * q * q;
         if (org) a *= (1 - org) + org * 1.7 * this.noise((x + 0.5) * CELL, (y + 0.5) * CELL);
@@ -409,7 +428,7 @@ const Borders = {
     if (this._svg !== gm.svg) {
       this._svg = gm.svg;
       gm.svg.addEventListener('pointermove', (ev) => {
-        if (!(MapEdit.active && MapEdit.mode === 'borders')) return;
+        if (!this.isOn()) return;
         this.moveCursor(GameMap.clientToWorld(ev.clientX, ev.clientY));
       });
       gm.svg.addEventListener('pointerleave', () => { if (this._cursor) this._cursor.setAttribute('display', 'none'); });
@@ -418,7 +437,7 @@ const Borders = {
       this._keysBound = true;
       const typing = () => { const a = document.activeElement; return a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName); };
       window.addEventListener('keydown', (ev) => {
-        if (!(MapEdit.active && MapEdit.mode === 'borders') || typing()) return;
+        if (!this.isOn() || typing()) return;
         if (ev.code === 'Space') { this.spaceHeld = true; document.body.classList.add('brush-panning'); ev.preventDefault(); }
         if ((ev.ctrlKey || ev.metaKey) && ev.key.toLowerCase() === 'z') { ev.preventDefault(); this.undo(); }
         if (ev.key === '[') { this.radius = Math.max(15, Math.round(this.radius / 1.2)); this.moveCursor(this._lastPt); this.renderPanel(); }
@@ -563,9 +582,10 @@ const Borders = {
     const wrap = document.getElementById('map-wrap');
     if (!wrap) return;
     let panel = document.getElementById('border-panel');
-    if (!(MapEdit.active && MapEdit.mode === 'borders')) { if (panel) panel.remove(); return; }
+    if (!this.isOn()) { if (panel) panel.remove(); return; }
     if (!panel) { panel = el('div#border-panel'); wrap.appendChild(panel); }
     clear(panel);
+    if (this.peace) return this.renderPeacePanel(wrap, panel);
     // sit just below the (possibly wrapped) layer/editor toolbar
     const bar = document.getElementById('map-layerbar');
     if (bar && window.innerWidth > 640) panel.style.top = (bar.offsetTop + bar.offsetHeight + 8) + 'px';
@@ -626,4 +646,98 @@ const Borders = {
       el('button.solid-btn.btn-xs', { onclick: () => this.save(), disabled: this.dirty() ? undefined : 'disabled' }, 'Save borders')));
   }
 };
+
+/* ---------- peace mode (war-peace.js) ---------- */
+Object.assign(Borders, {
+  // opts: { keys, sideOf:{key→'att'|'def'}, sideName(side), virtual?:{key,name,color},
+  //         initial:[{kind,id,shape}], prefer:'att'|'def', onDone(regions), onCancel() }
+  async startPeace(opts) {
+    if (window.MapEdit && MapEdit.active) MapEdit.toggle(false);
+    this.reset();
+    this.peace = Object.assign({ prevLayer: W.layer }, opts);
+    if (W.layer === 'war') W.layer = 'political';
+    W.peacePreview = null;
+    if (W.view !== 'map') App.go('map'); else GameMap.render();
+    await this.open();
+    if (!this.peace) return;
+    // continue a draft: its traced shapes become the starting fields
+    for (const r of (opts.initial || [])) {
+      const k = r.kind === 'new' ? (opts.virtual && opts.virtual.key) : (r.kind === 'province' ? 'p:' : 'c:') + r.id;
+      const R = k && this.byKey[k];
+      if (!R) continue;
+      const ras = this.raster([r.shape || '']);
+      R.field = ras.field; R.bbox = ras.bbox;
+      this.overrides[k] = r.shape || '';
+      this.touched.add(k);
+    }
+    const mine = this.regions.find(R => opts.sideOf[R.key] === opts.prefer && R.key !== (opts.virtual || {}).key) || this.regions[0];
+    this.target = opts.virtual && opts.prefer === 'att' ? opts.virtual.key : mine ? mine.key : null;
+    GameMap.render();
+    this.renderPanel();
+  },
+  // the drawn clause: every touched region's traced shape
+  peaceRegions() {
+    const v = this.peace && this.peace.virtual;
+    const out = [];
+    for (const k of this.touched) {
+      const R = this.byKey[k];
+      if (!R) continue;
+      const shape = Object.prototype.hasOwnProperty.call(this.overrides, k) ? this.overrides[k] : '';
+      const kind = v && k === v.key ? 'new' : k[0] === 'p' ? 'province' : 'country';
+      if (kind === 'new' && !shape) continue;
+      const r = { kind, id: kind === 'new' ? 'new' : k.slice(2), shape: shape || '' };
+      if (Array.isArray(R.label)) r.labelPos = R.label.map(n => Math.round(n));
+      out.push(r);
+    }
+    return out;
+  },
+  endPeace(done) {
+    const pz = this.peace;
+    if (!pz) return;
+    const regions = done ? this.peaceRegions() : null;
+    this.peace = null;
+    this.reset();
+    W.layer = pz.prevLayer && pz.prevLayer !== 'war' ? pz.prevLayer : W.layer;
+    const panel = document.getElementById('border-panel');
+    if (panel) panel.remove();
+    if (GameMap.svg) GameMap.svg.classList.remove('brush-mode');
+    if (done) pz.onDone(regions); else if (pz.onCancel) pz.onCancel();
+  },
+  renderPeacePanel(wrap, panel) {
+    const pz = this.peace;
+    const bar = document.getElementById('map-layerbar');
+    if (bar && window.innerWidth > 640) panel.style.top = (bar.offsetTop + bar.offsetHeight + 8) + 'px';
+    panel.classList.remove('collapsed');
+    panel.appendChild(el('div.bp-head',
+      el('span.bp-title', '🕊 Peace map'),
+      el('span.bp-status', !this.ready ? 'loading…' : this.touched.size ? `${this.touched.size} region(s) redrawn` : 'no change yet')));
+    if (!this.ready) { panel.appendChild(el('div.ow-empty', 'Preparing the map…')); return; }
+    const slider = (label, key, min, max, step, fmt) => {
+      const out = el('span.bp-val', fmt(this[key]));
+      const input = el('input', { type: 'range', min, max, step, value: this[key], oninput: (e) => { this[key] = Number(e.target.value); out.textContent = fmt(this[key]); if (key === 'radius') this.moveCursor(this._lastPt); } });
+      return el('label.bp-slider', el('span', label), input, out);
+    };
+    panel.appendChild(el('div.chip-row.bp-tools',
+      el('button.chip', { class: this.tool === 'brush' ? 'active' : '', onclick: () => this.setTool('brush') }, '🖌 Push borders'),
+      el('button.chip', { class: this.tool === 'pan' ? 'active' : '', onclick: () => this.setTool('pan') }, '✋ Pan')));
+    panel.appendChild(slider('Brush', 'radius', 15, 400, 5, v => Math.round(v)));
+    panel.appendChild(slider('Push', 'strength', 0.05, 1, 0.05, v => Math.round(v * 100) + '%'));
+    panel.appendChild(el('div.bp-hint', 'Pick who gains the land, then drag across the border. Only the two sides’ own territory can change. Space = pan · [ ] = size · Ctrl+Z = undo'));
+    const rows = this.regions.map(R => {
+      const info = this.regionInfo(R.key);
+      if (!info) return null;
+      const side = pz.sideOf[R.key];
+      return el('div.bp-row', { class: this.target === R.key ? 'active' : '', onclick: () => { this.target = R.key; this.moveCursor(this._lastPt); this.renderPanel(); } },
+        el('span.bp-swatch', { style: 'background:' + info.color }),
+        el('span.bp-name', info.name + (info.kind === 'new' ? ' (new state)' : '') + (this.touched.has(R.key) ? ' •' : '')),
+        el('span.bp-side', pz.sideName ? pz.sideName(side) : side));
+    });
+    panel.appendChild(el('div.mono-label.bp-group', 'Who gains the land'));
+    panel.appendChild(el('div.bp-list', rows));
+    panel.appendChild(el('div.btn-row.bp-foot',
+      el('button.dash-btn.btn-xs', { onclick: () => this.undo(), disabled: this.undoStack.length ? undefined : 'disabled' }, '↶ Undo'),
+      el('button.dash-btn.btn-xs', { onclick: () => this.endPeace(false) }, 'Cancel'),
+      el('button.solid-btn.btn-xs', { onclick: () => this.endPeace(true) }, 'Attach to the offer')));
+  }
+});
 window.Borders = Borders; // map.js / mapedit.js feature-detect the painter via window

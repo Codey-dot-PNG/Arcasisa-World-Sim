@@ -2346,3 +2346,38 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 @media (max-width:640px){
   #fx-panel{left:6px; right:6px; width:auto; top:auto; bottom:6px; max-height:52%;}
 }
+
+/* ═══ The peace table (public/js/war-peace.js) ═══ */
+.peace-table{display:flex; flex-direction:column; gap:10px;}
+.peace-who{font-size:12px; color:var(--ink-soft);}
+.peace-empty{font-size:12px; color:var(--ink-faint);}
+.peace-offer{border:1px solid var(--rule-strong); background:var(--paper-deep); padding:10px 12px;}
+.peace-offer.st-open{border-color:var(--accent); box-shadow:inset 3px 0 0 var(--accent);}
+.peace-offer.st-accepted{box-shadow:inset 3px 0 0 var(--good);}
+.peace-offer:is(.st-rejected,.st-withdrawn,.st-superseded,.st-void){opacity:.62;}
+.peace-offer-head{display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 12px;}
+.peace-offer-from{font-family:var(--font-voice); font-weight:600; font-size:14px;}
+.peace-arrow{color:var(--ink-faint); font-weight:400;}
+.peace-offer-status{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--accent);}
+.peace-offer.st-accepted .peace-offer-status{color:var(--good);}
+.peace-offer-meta{font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint); margin-left:auto;}
+.peace-terms{margin:8px 0 0; padding-left:18px; font-size:13px; line-height:1.55;}
+.peace-note{margin-top:6px; font-family:var(--font-voice); font-style:italic; font-size:13.5px; color:var(--ink-soft);}
+.peace-response{margin-top:6px; font-size:12px; color:var(--bad);}
+.peace-acts{margin-top:10px;}
+.peace-warn{font-size:12px; color:var(--bad);}
+.peace-composer{border:1px dashed var(--rule-strong); padding:12px; display:flex; flex-direction:column; gap:8px; background:var(--paper);}
+.peace-composer-title{font-family:var(--font-mono); font-size:10px; letter-spacing:.18em; text-transform:uppercase; color:var(--ink-faint);}
+.peace-row{display:grid; grid-template-columns:1fr 1fr; gap:12px;}
+.peace-sub{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-soft); margin-top:6px;}
+.peace-held{display:flex; flex-direction:column; gap:3px; max-height:180px; overflow:auto;}
+.peace-held-row{display:flex; align-items:center; gap:8px; font-size:12.5px; cursor:pointer;}
+.peace-held-from{margin-left:auto; font-family:var(--font-mono); font-size:9.5px; color:var(--ink-faint);}
+.peace-borders{display:flex; flex-wrap:wrap; align-items:center; gap:8px; font-size:12.5px;}
+@media (max-width:640px){ .peace-row{grid-template-columns:1fr;} .peace-offer-meta{margin-left:0;} }
+/* a proposed border on the map (review) and the new state while drawing */
+.peace-prev-shape{fill-opacity:.38; stroke:#8b2318 !important; stroke-width:2.5px; stroke-dasharray:9 5; stroke-linejoin:round;}
+.peace-prev-shape.peace-prev-new{fill-opacity:.62; stroke-width:3.5px; stroke-dasharray:none;}
+.peace-prev-label{font-family:var(--font-ui); font-weight:700; font-size:40px; letter-spacing:.3em; text-transform:uppercase; fill:#3b3021; opacity:.75; paint-order:stroke; stroke:rgba(244,235,205,.85); stroke-width:6px;}
+.peace-new{fill-opacity:.75; stroke:#3b3021; stroke-width:1.4px;}
+.bp-side{margin-left:auto; font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); text-transform:uppercase; letter-spacing:.08em;}

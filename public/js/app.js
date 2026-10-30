@@ -390,6 +390,8 @@ const App = {
       if (typeof Music !== 'undefined') Music.apply();
       // Phase 25 QoL — toast timeline entries touching the player's own chain
       if (typeof Notify !== 'undefined') Notify.check();
+      // peace offers addressed to me / answers to mine (war-peace.js)
+      if (window.War && War.peaceWatch) War.peaceWatch();
       if (saved) restoreScroll(saved);
       lastRenderedView = W.view;
     } finally {

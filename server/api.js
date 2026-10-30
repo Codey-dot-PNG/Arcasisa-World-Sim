@@ -10,6 +10,7 @@ const buildings = require('./buildings');
 const casino = require('./casino');
 const geometry = require('./geometry');
 const territory = require('./territory');
+const peace = require('./peace');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -324,7 +325,7 @@ function hasAbility(u, key) {
 // with an MP's clearance used to be able to order the police to charge their
 // own rally). The GM holds every lever.
 function cmdAccessOf(db, war, u) {
-  if (u.role.perms.gm) return { att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true };
+  if (u.role.perms.gm) return { att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true, negotiate: 'both' };
   const me = u.user.entityId;
   const protest = !!(war && war.kind === 'protest');
   const attackerId = war ? (protest && war.protest && war.protest.organizerId) || war.attackerId : null;
@@ -340,7 +341,10 @@ function cmdAccessOf(db, war, u) {
     defAll: defChain || defAbility,
     force: protest && !att && (defChain || hasAbility(u, 'authorize_force')),
     air: !att && (defChain || hasAbility(u, 'order_airstrikes')),
-    concede: protest && defChain
+    concede: protest && defChain,
+    // who may make and answer peace offers for a side: whoever controls its
+    // entity (the invader / the organizer; the defender — the government)
+    negotiate: attLead ? 'att' : defChain ? 'def' : null
   };
 }
 // One conflict doc (war or protest) as `u` sees it: the GM gets the raw doc,
@@ -538,6 +542,10 @@ function filterState(u) {
     // GM map effects — nuclear strikes, fires, floods… drawn on everyone's
     // map; purely visual (they touch no population, property or money)
     mapFx: db.mapFx || [],
+    // Peace negotiations — public diplomacy: every operator sees the offers
+    // on the table (and what each occupier holds), only the sides answer
+    peaceOffers: peace.publicOffers(db),
+    peaceHeld: peace.heldView(db),
     // Share prices are public market information — everyone gets them so the
     // Exchange price-history graphs work for citizens. National statistics
     // (GDP, money supply, …) stay gated on the statistics clearance.
@@ -1146,6 +1154,53 @@ async function handle(req, res, pathname, method) {
       // per-tick broadcasts (docs/WAR.md "Milestone-only broadcasts").
       store.save();
       return json(res, 200, { ok: true });
+    }
+    // ---- peace negotiations (server/peace.js) ----
+    // A side speaks through whoever controls its entity (cmdAccess.negotiate);
+    // the GM may speak for either (b.side). Every step broadcasts, so the
+    // other side's War Room updates live.
+    const peaceSide = (doc, b) => {
+      const ca = cmdAccessOf(db, doc, u);
+      if (ca.negotiate === 'both') return b.side === 'att' || b.side === 'def' ? b.side : null;
+      return ca.negotiate || null;
+    };
+    if (pathname === '/api/war/peace/land' && method === 'GET') {
+      // the pristine coastline, for drawing a peace map (the painter clips to it)
+      return json(res, 200, { land: territory.landOf(db) });
+    }
+    if (pathname === '/api/war/peace/offer' && method === 'POST') {
+      const b = await readBody(req, 4e6);
+      const key = b.conflict === 'protest' ? 'protest' : 'war';
+      const doc = key === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('No conflict is underway.');
+      const side = peaceSide(doc, b);
+      if (!side) return deny('Only the leadership of a side may offer peace.');
+      let offer;
+      try { offer = peace.propose(db, key, side, b.terms, u.user.displayName); } catch (e) { return bad(e.message); }
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, offer });
+    }
+    const peaceAct = pathname.match(/^\/api\/war\/peace\/([\w-]+)\/(revise|accept|reject|withdraw)$/);
+    if (peaceAct && method === 'POST') {
+      const b = await readBody(req, 4e6);
+      const o = (db.peaceOffers || []).find(x => x.id === peaceAct[1]);
+      if (!o) return bad('No such peace offer.');
+      const doc = o.conflict === 'protest' ? db.protest : db.war;
+      if (!doc || !doc.active) return bad('That conflict is over.');
+      const ca = cmdAccessOf(db, doc, u);
+      // the GM answers for whichever side the action belongs to
+      const side = ca.negotiate === 'both'
+        ? (peaceAct[2] === 'revise' || peaceAct[2] === 'withdraw' ? o.side : (o.side === 'att' ? 'def' : 'att'))
+        : ca.negotiate;
+      if (!side) return deny('Only the leadership of a side may answer peace offers.');
+      let r;
+      try {
+        if (peaceAct[2] === 'revise') r = peace.revise(db, o.id, side, b.terms, u.user.displayName);
+        else if (peaceAct[2] === 'accept') r = peace.accept(db, o.id, side, b.rev, u.user.displayName);
+        else r = peace.decide(db, o.id, side, peaceAct[2] === 'withdraw' ? 'withdraw' : 'reject', b.note, u.user.displayName);
+      } catch (e) { return bad(e.message); }
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, result: r });
     }
     // The air force (squadrons — docs/WAR.md "Air force"). A side's air arm
     // answers to whoever may fly it: the defence's to `cmdAccess.air`, an

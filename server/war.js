@@ -476,51 +476,102 @@ function endStrikes(db) {
 
 // ---------- occupation ownership (Task 2: occupation transfers property) ----------
 // AUTHORITY-ONLY, like applyDevastation — property ownership lives outside
-// db.war, so a predicting client never runs this. Throttled (every
+// the conflict doc, so a predicting client never runs this. Throttled (every
 // OCCUPATION_CHECK_TICKS ticks) since it walks every property in the world;
 // combined with the deed choke point (deeds.transfer) this is what makes an
-// occupied factory/farm/depot change hands mid-war and stay changed after the
-// war ends — the "companies losing these properties" devastation another
-// agent tied profits to.
+// occupied factory/farm/depot change hands mid-conflict.
+//   · war — ground the invader holds passes to the attacker;
+//   · protest — districts the crowds have SEIZED pass to the organizer, for
+//     the duration of the protest.
+// The owner before the occupation is stashed on the property (one key per
+// conflict kind — both can run at once) and the property goes back to them
+// when the ground is retaken. How a conflict ends decides the rest
+// (settleHoldings): a peace deal names which holdings the occupier keeps; a
+// war that ends without one leaves them where they are (the spoils of war),
+// a protest that ends without one hands everything back.
 const OCCUPATION_CHECK_TICKS = 5;
-function applyOccupationTransfers(db) {
-  const war = db.war;
+const HOLD_KEY = { war: '_preWarOwnerId', protest: '_preProtestOwnerId' };
+function occupierOf(doc) {
+  return doc.kind === 'protest' ? ((doc.protest || {}).organizerId || doc.attackerId) : doc.attackerId;
+}
+function applyOccupationTransfers(db, key) {
+  key = key === 'protest' ? 'protest' : 'war';
+  const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || !war.grid) return;
   if (war.tick % OCCUPATION_CHECK_TICKS !== 0) return;
+  const occupier = occupierOf(war);
+  if (!occupier || !db.entities.some(e => e.id === occupier)) return;
+  const stash = HOLD_KEY[key];
   const deedsMod = require('./deeds');
   const cs = war.grid.cell;
   let seized = 0, restored = 0;
   for (const prop of db.properties) {
     if (!prop.pos) continue;
-    const key = engine.cellKey(Math.floor(prop.pos[0] / cs), Math.floor(prop.pos[1] / cs));
-    const cell = war.cells[key];
+    const cellKey = engine.cellKey(Math.floor(prop.pos[0] / cs), Math.floor(prop.pos[1] / cs));
+    const cell = war.cells[cellKey];
     const attHeld = !!(cell && cell.o === 'att');
     prop.vars = prop.vars || {};
-    const wasStashed = Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId');
+    const wasStashed = Object.prototype.hasOwnProperty.call(prop.vars, stash);
     if (attHeld) {
-      if (prop.ownerId !== war.attackerId) {
-        if (!wasStashed) prop.vars._preWarOwnerId = prop.ownerId;
-        try { deedsMod.transfer(prop.id, prop.ownerId, war.attackerId, 'WAR ENGINE'); seized++; }
+      if (prop.ownerId !== occupier && prop.ownerId) {
+        if (!wasStashed) prop.vars[stash] = prop.ownerId;
+        try { deedsMod.transfer(prop.id, prop.ownerId, occupier, 'WAR ENGINE'); seized++; }
         catch (e) { /* unowned/malformed deed — skip, keep the stash for a later retry */ }
       }
     } else if (wasStashed) {
-      // Recaptured — no longer attacker-held. Restore to the pre-occupation
+      // Recaptured — no longer occupier-held. Restore to the pre-occupation
       // owner and clear the stash so a later re-occupation stashes fresh.
-      const orig = prop.vars._preWarOwnerId;
-      if (orig && prop.ownerId !== orig) {
-        try { deedsMod.transfer(prop.id, prop.ownerId, orig, 'WAR ENGINE'); restored++; delete prop.vars._preWarOwnerId; }
-        catch (e) { /* leave the stash in place — try again next sweep */ }
-      } else {
-        delete prop.vars._preWarOwnerId;
-      }
+      if (restoreHolding(db, prop, stash)) restored++;
     }
   }
   if (seized || restored) {
-    store.log('event', 'Occupation changes property ownership',
-      `${seized} propert${seized === 1 ? 'y' : 'ies'} seized by the occupying force` +
+    const who = key === 'protest' ? 'the protest movement' : 'the occupying force';
+    store.log('event', key === 'protest' ? 'Seized districts change property control' : 'Occupation changes property ownership',
+      `${seized} propert${seized === 1 ? 'y' : 'ies'} taken over by ${who}` +
       (restored ? `, ${restored} restored to their former owner${restored === 1 ? '' : 's'}` : '') + '.',
-      'WAR ENGINE', []);
+      'WAR ENGINE', [occupier]);
   }
+}
+// give one held property back to its stashed owner; true when it moved
+function restoreHolding(db, prop, stash) {
+  const orig = prop.vars && prop.vars[stash];
+  if (orig && prop.ownerId !== orig && db.entities.some(e => e.id === orig)) {
+    try { require('./deeds').transfer(prop.id, prop.ownerId, orig, 'WAR ENGINE'); delete prop.vars[stash]; return true; }
+    catch (e) { return false; /* leave the stash — a later sweep / settlement retries */ }
+  }
+  delete prop.vars[stash];
+  return false;
+}
+// What the occupier of conflict `key` holds right now:
+// [{ propId, name, kind, heldBy, formerOwnerId }]
+function heldProperties(db, key) {
+  const stash = HOLD_KEY[key === 'protest' ? 'protest' : 'war'];
+  const out = [];
+  for (const p of db.properties || []) {
+    if (!p.vars || !Object.prototype.hasOwnProperty.call(p.vars, stash)) continue;
+    out.push({ propId: p.id, name: p.name, kind: p.kind, heldBy: p.ownerId, formerOwnerId: p.vars[stash] });
+  }
+  return out;
+}
+// A conflict that ends with offers still on the peace table (server/peace.js)
+// takes them off it: they can no longer be accepted.
+function closeTalks(db, key) {
+  for (const o of db.peaceOffers || []) {
+    if (o.status === 'open' && o.conflict === key) { o.status = 'void'; o.decidedAt = Date.now(); }
+  }
+}
+// Settle a conflict's holdings: `keep` is 'all', 'none' or a list of
+// property ids the occupier keeps for good; everything else goes back.
+function settleHoldings(db, key, keep) {
+  const stash = HOLD_KEY[key === 'protest' ? 'protest' : 'war'];
+  const keepSet = Array.isArray(keep) ? new Set(keep) : null;
+  let kept = 0, returned = 0;
+  for (const p of db.properties || []) {
+    if (!p.vars || !Object.prototype.hasOwnProperty.call(p.vars, stash)) continue;
+    const k = keep === 'all' || (keepSet && keepSet.has(p.id));
+    if (k) { delete p.vars[stash]; kept++; } else if (restoreHolding(db, p, stash)) returned++;
+  }
+  return { kept, returned };
 }
 
 // ---------- equipment & resupply (Phase 26: per-unit kit) ----------
@@ -1499,14 +1550,12 @@ function endWar(db, actor, reason, key, opts) {
     }
     war.refugees = [];
   }
-  // Occupation ownership bookkeeping belongs only to the invasion war. A
-  // protest can end while that war is still active; clearing its stash here
-  // would prevent the active war from restoring property on recapture.
-  if (war.kind !== 'protest') {
-    for (const prop of (db.properties || [])) {
-      if (prop.vars && Object.prototype.hasOwnProperty.call(prop.vars, '_preWarOwnerId')) delete prop.vars._preWarOwnerId;
-    }
-  }
+  // Holdings still unsettled (no peace deal settled them first —
+  // settleHoldings): a war's occupier keeps what it took, a protest's
+  // movement hands its seized properties back. Each kind touches only its
+  // own stash — the other conflict may still be running.
+  settleHoldings(db, war.kind === 'protest' ? 'protest' : 'war', war.kind === 'protest' ? 'none' : 'all');
+  closeTalks(db, war.kind === 'protest' ? 'protest' : 'war');
   demobilizeUnits(db, war, actor);
   store.log('event', war.kind === 'protest' ? 'Protest ended' : 'War ended', reason || 'By order of the Gamemaster', actor || 'WAR ENGINE', []);
   if (war.kind === 'protest') {
@@ -2661,13 +2710,16 @@ function tickConflict(db, key, force) {
     resupplyUnits(db, doc);
     applyDevastation(db, key);
     settleRefugees(db, key === 'protest');
-    if (doc.kind !== 'protest') { logAiNotes(db, doc); applyOccupationTransfers(db); }
+    if (doc.kind !== 'protest') logAiNotes(db, doc);
+    applyOccupationTransfers(db, key);
   }
   // The engine ends conflicts itself (annihilation, total conquest, protest
   // dispersal) without going through endWar — catch that here so the
   // survivors still demobilise.
   if (ticked && doc && !doc.active) {
     demobilizeUnits(db, doc, 'WAR ENGINE');
+    settleHoldings(db, key, doc.kind === 'protest' ? 'none' : 'all');
+    closeTalks(db, key);
     if (doc.kind === 'protest') { summarizeProtestPolitics(db, doc, 'WAR ENGINE'); endStrikes(db); }
   }
   return ticked;
@@ -2709,4 +2761,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { deployArmy, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { heldProperties, settleHoldings, SERVER_CTX, deployArmy, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

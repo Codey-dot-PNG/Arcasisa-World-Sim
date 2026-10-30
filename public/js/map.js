@@ -217,7 +217,8 @@ const GameMap = {
       if (W.layer === 'war' && window.War && War.onMapPointerDown(e)) { return; }
       // GM border painter: a left drag pushes borders instead of panning
       // (Space, the ✋ Pan tool or a second finger still pan/pinch)
-      if (this.editing() && MapEdit.mode === 'borders' && window.Borders && Borders.pointerDown(e)) return;
+      // (also a negotiator's peace-map draw — Borders.peace)
+      if (window.Borders && Borders.isOn() && Borders.pointerDown(e)) return;
       // The right button never pans — and must not leave stale drag
       // bookkeeping behind when War didn't consume it (no war doc, other
       // layer, …); the context-menu suppression above only covers 'war'.
@@ -926,7 +927,7 @@ const GameMap = {
     // Region outlines: while the GM border painter holds unsaved work its
     // live traces override the stored shapes (so a sync can't wipe them);
     // regionNodes lets the painter update paths in place mid-stroke.
-    const painting = editing && MapEdit.mode === 'borders' && window.Borders;
+    const painting = !!(window.Borders && Borders.isOn());
     const shapeOf = (kind, id, base) => { const o = painting ? Borders.shapeFor(kind, id) : undefined; return o === undefined ? base : o; };
     this.regionNodes = {};
     const regionNode = (key, node) => { (this.regionNodes[key] = this.regionNodes[key] || []).push(node); };
@@ -965,6 +966,11 @@ const GameMap = {
     }
 
     if (atlas) this.atlasBands(this.world, bandItems, regionNode);
+    // peace map: a movement's new state, drawn from nothing (Borders peace mode)
+    if (painting && Borders.peace && Borders.peace.virtual) {
+      const v = Borders.peace.virtual;
+      regionNode(v.key, mk('path', { d: Borders.overrides[v.key] || 'M0 0', 'fill-rule': 'evenodd', class: 'country-shape peace-new', fill: v.color, 'vector-effect': 'non-scaling-stroke' }));
+    }
 
     // island drop shadow, then the provinces themselves (atlas: no drop
     // shadow — a printed plate is flat — but the nation's own outline)
@@ -991,6 +997,9 @@ const GameMap = {
       title(poly, p.name);
       this.provNodes[p.id] = poly;
     }
+
+    // a peace offer's proposed borders, for review (war-peace.js)
+    if (W.peacePreview && this.renderPeacePreview) this.renderPeacePreview();
 
     // atlas: the graticule rides over the land; towns' built-up areas
     if (atlas) { this.atlasGraticule(this.world); this.atlasUrban(this.world, S().provinces.map(provD).filter(Boolean).join(' ')); }
@@ -1314,6 +1323,7 @@ const GameMap = {
     // GM pen-tool overlay (vertex handles, in-progress lines)
     this.editLayer = null;
     if (editing) MapEdit.renderOverlay(this);
+    else if (painting && Borders.peace) { const layer = mk('g', { class: 'peace-draw-overlay' }); Borders.overlay(this, layer); Borders.renderPanel(); }
     this.svg.classList.toggle('brush-mode', !!painting && Borders.tool === 'brush');
     this.svg.classList.toggle('war-mode', W.layer === 'war');
 
@@ -1487,6 +1497,12 @@ const GameMap = {
       bar.appendChild(el('button.chip', { onclick: () => this.setPlacing(null) }, 'cancel'));
     }
     if (window.MapEdit) MapEdit.toolbar(bar);
+    // previewing a peace offer's borders: say so, and a way out
+    if (W.peacePreview) {
+      bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '🕊 Proposed borders'));
+      bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; this.render(); } }, '✕ Close preview'));
+      bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; App.go('war'); } }, 'Back to the War Room'));
+    }
     // GM: stage disasters and effects on the map (map-fx.js) — visual only
     if (isGM() && !this.editing()) {
       const n = ((S() && S().mapFx) || []).length;

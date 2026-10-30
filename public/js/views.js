@@ -1031,6 +1031,9 @@ const Views = {
     // The Office is rebuilt on every sync like any view — except while the
     // operator is dragging a widget or typing in one (Office.busy).
     if (W.view === 'office' && typeof Office !== 'undefined' && Office.busy() && container.querySelector('.office-grid')) return;
+    // …and the War Room while a peace offer is being typed (war-peace.js;
+    // it redraws on blur, so the other side's live updates still land)
+    if (W.view === 'war' && window.War && War.peaceBusy && War.peaceBusy()) { War._peaceSkipped = true; return; }
     // Every sync (turn tick, another player's action) rebuilds this view from
     // scratch, which used to snap the reader back to the top of the page.
     // Carry the previous scroll offset across the rebuild instead.

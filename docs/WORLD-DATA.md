@@ -27,6 +27,7 @@ mode). `store.get()` returns it; everything mutates it in place.
   election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
+  peaceOffers: [ ... ],    // peace negotiations — { id:'peace_…', conflict, talks (startedAt), side, status, rev, terms, … } (docs/WAR.md "Peace negotiations")
   mapFx: [ ... ],          // GM map effects — { id:'fx_…', kind, pos:[x,y], r, at, label } (visual only, see below)
   protestApplications: [ ... ], // Phase 36 — player petitions to start a protest (see below)
   history: [ ... ],        // per-turn time-series for charts (cap 1000)
@@ -154,8 +155,9 @@ position (live worlds are on the 3840×2160 master grid — never hardcode seed-
 in migrate). `prop_shipyards` (Kradon Shipyards) switches from a flat cash office to a
 goods producer of the Kradon-class warship at `perTurn: 0.02` (~1 hull every 50 turns;
 `world._kradonShipyardWarship`). During a war, `vars._preWarOwnerId` stashes a property's
-pre-occupation owner while the occupier holds it — see docs/WAR.md "Occupation property
-transfers"; `endWar` clears the stash, ownership stays wherever the war left it.
+pre-occupation owner while the occupier holds it (`vars._preProtestOwnerId` for a
+protest's seized districts) — see docs/WAR.md "Occupation property transfers": a peace
+deal settles them; otherwise a war's occupier keeps them and a protest returns them.
 
 ## Items
 

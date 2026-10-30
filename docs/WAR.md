@@ -719,12 +719,17 @@ into neutral soil; Phase 27 stops orders and routes from ever AIMING there:
   friendly unit onto neutral ground (the candidate position is checked, with
   the usual "already standing in neutral soil, let it move" exception).
 
-## Occupation property transfers (Phase 27)
+## Occupation property transfers (Phase 27; protests and peace deals since)
 
 AUTHORITY-ONLY, like `applyDevastation` — property ownership lives outside
-`db.war`, so a predicting client never runs it. `applyOccupationTransfers`
-(server/war.js) runs after every real tick, throttled to every
-`OCCUPATION_CHECK_TICKS` (5) ticks since it walks every property:
+the conflict doc, so a predicting client never runs it.
+`applyOccupationTransfers(db, key)` (server/war.js) runs after every real
+tick of EITHER conflict, throttled to every `OCCUPATION_CHECK_TICKS` (5)
+ticks since it walks every property. The occupier is the war's attacker, or
+the protest's organizer — districts the crowds have SEIZED put the property
+in them under the movement for the duration of the protest. Each kind keeps
+its own stash (`_preWarOwnerId` / `_preProtestOwnerId`) since both can run
+at once:
 
 - A property whose grid cell is attacker-held (`war.cells[key].o === 'att'`)
   and not already attacker-owned is transferred to the attacker through the
@@ -736,15 +741,52 @@ AUTHORITY-ONLY, like `applyDevastation` — property ownership lives outside
   for a retry on a later sweep.
 - A stashed property whose cell is no longer attacker-held (recaptured) is
   restored to the pre-war owner and the stash cleared.
-- **Post-war**: `endWar` deletes every `_preWarOwnerId` stash WITHOUT
-  touching `ownerId` — whatever the occupier holds at the ceasefire stays
-  theirs permanently (a future war re-stashes fresh owners instead of
-  reaching back through this one). This is the mechanism that makes "a
-  company stripped of its factories by war" real — the economy side
-  (zero-property overhead bleed) is documented in docs/SIMULATION.md.
+- **At the end** — `settleHoldings(db, key, keep)` (`'all'`, `'none'` or a
+  list of property ids the occupier keeps): a **peace deal** names it (the
+  holdings clause, below); without one, a **war** leaves whatever the
+  occupier holds at the ceasefire with it (stash cleared, `ownerId` kept —
+  "a company stripped of its factories by war", economy side in
+  docs/SIMULATION.md) and a **protest** hands every seized property back.
+  The engine's own endings (annihilation, dispersal) settle the same way.
+  `heldProperties(db, key)` lists the current holdings (`state.peaceHeld`).
 
 Each sweep that changed anything logs one timeline entry ("Occupation
 changes property ownership — N seized, M restored").
+
+## Peace negotiations — `server/peace.js` (players, both conflicts)
+
+Either side of a war or a protest can put terms on the table
+(`db.peaceOffers`, public in `state.peaceOffers`); the other side accepts,
+rejects (with a reply) or counters with its own offer; the proposer revises
+(`rev` +1) or withdraws. A side speaks through whoever controls its entity —
+`cmdAccess.negotiate`: the invader / the protest's organizer → `'att'`, the
+defender (the government — the president) → `'def'`; the GM `'both'`, and
+the GM answers for a side no player runs (an AI invader). A new offer from a
+side supersedes its open one; acceptance voids the rest, and so does the conflict ending any
+other way (`war.closeTalks` — GM end, engine end, a concession from the levers).
+
+Terms (`peace.cleanTerms`, re-validated on acceptance): `reparations
+{amount, payer}`; `holdings {mode:'keep'|'return'|'some', keep}` over the
+occupier's holdings; `borders {regions:[{kind,id,shape,labelPos}],
+newState?}` — only the two sides' own regions (the Republic's provinces for
+the government side, a side's map countries; a protest may also found a
+`'new'` state, created on acceptance as a foreign entity + map country, its
+name label sized to its land); a
+province drawn to nothing is dissolved; `concede` (protest — the government
+accepts the demands: `concludeProtest('concede')`); `note`.
+
+**Accepting** (`peace.accept`, carrying the `rev` the reader saw — terms
+revised under them are refused) checks the payer can pay and that a
+dissolving clause isn't blocked by the other conflict or an election, then:
+reparations → holdings → the conflict ends ("Peace agreed", `result.peaceOfferId`,
+`result.terms`) → borders (`territory.applyTerritory`, cities/properties
+re-homed). Routes: `POST /api/war/peace/offer`, `POST
+/api/war/peace/:id/{revise|accept|reject|withdraw}`, `GET
+/api/war/peace/land` (the pristine coastline for the peace map). Every step
+broadcasts. Client: `public/js/war-peace.js` (the War Room's peace table, the
+HUD's Peace row, toasts) and the border painter's peace mode (borders.js
+`startPeace` — docs/FRONTEND.md). The GM's one-shot treaty desk
+(`POST /api/gm/war/treaty`, below) remains.
 
 ## Alliance-aware wars — auto-join (Phase 27)
 

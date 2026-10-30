@@ -696,6 +696,8 @@ body:has(.gm-bar:not(.hidden)) .war-toolbar{ bottom:78px; }
 .war-gm-row{align-items:center; gap:6px; padding:6px 8px; border:1px dashed var(--rule-strong); margin:4px 0 10px;}
 .war-speed{display:inline-flex; align-items:center; gap:8px; flex-wrap:wrap; margin:0 4px;}
 .war-speed-range{width:150px; accent-color:var(--accent);}
+.war-speed-num{width:62px; font-family:var(--font-mono); font-size:11px; padding:3px 4px; background:var(--paper); color:var(--ink); border:1px solid var(--rule-strong);}
+.war-speed-x{font-family:var(--font-mono); font-size:11px; color:var(--ink-faint); margin-left:-4px;}
 .war-speed-label{font-family:var(--font-mono); font-size:11px; font-weight:700; letter-spacing:.04em; min-width:44px;}
 .war-speed-per{font-weight:400; color:var(--ink-faint); font-size:10px;}
 /* protests: posture colours (peaceful olive, riot red, crackdown navy, clashes deep red) */

@@ -91,7 +91,7 @@ const MAX_PROTEST_UNITS = 300;
 // The conflict clock: a speed multiplier on tickMs (2000ms at 1×). New wars
 // and protests start at settings.war.defaultSpeed — 1× by default; the GM's
 // slider moves it anywhere in [SPEED_MIN, SPEED_MAX].
-const SPEED_MIN = 0.5, SPEED_MAX = 8;
+const SPEED_MIN = 0.05, SPEED_MAX = 8;
 function clampSpeed(v) { return Math.round(engine.clamp(Number(v) || 1, SPEED_MIN, SPEED_MAX) * 100) / 100; }
 function defaultSpeed(db) {
   const v = Number((((db.settings || {}).war || {}).defaultSpeed));
@@ -2640,8 +2640,7 @@ function tickConflict(db, key, force) {
   if (!doc || !doc.active) return false;
   const wat = conflictDoc(db, key);
   ensureWarGrid(wat);
-  // a conflict still on a speed below today's minimum (the old 0.05×
-  // default) moves to the default
+  // a conflict with no usable speed (missing, zero, junk) runs at the default
   if (!(Number(doc.speed) >= SPEED_MIN)) doc.speed = defaultSpeed(db);
   const freshAir = !doc.air;
   syncAirWings(db, doc);

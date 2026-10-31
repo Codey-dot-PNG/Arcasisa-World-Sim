@@ -231,7 +231,19 @@ const War = {
     if (!doc) return 'def';
     const ca = doc.cmdAccess || {};
     if (isGM()) return this._gmSide === 'att' ? 'att' : 'def';
-    return ca.att ? 'att' : (ca.def ? 'def' : null);
+    if (ca.att) return 'att';
+    if (ca.def) return 'def';
+    // whoever runs an intervening power commands its troops on its side
+    const run = (ca.factions || []).find(id => doc.factions && doc.factions[id]);
+    return run ? doc.factions[run].side : null;
+  },
+  // in a multi-way conflict: may this operator order this unit? (the server
+  // re-checks — api.js mayCommandUnit)
+  _mayOrderUnit(doc, u) {
+    if (!doc.factions || isGM()) return true;
+    const f = this.facOfUnit(doc, u);
+    const ownCamp = f === this.facPrincipal(doc, u.side) || ((doc.allies && doc.allies[u.side]) || []).includes(f);
+    return ownCamp ? !!(doc.cmdAccess || {})[u.side] : ((doc.cmdAccess || {}).factions || []).includes(f);
   },
   // The caller's full cmdAccess for a doc (Phase 36: att/attLead/def/force/
   // air/concede — see api.js cmdAccessOf). The server ships it on every
@@ -256,6 +268,7 @@ const War = {
     if (ca.force) can.push('authorize force');
     if (ca.air) can.push('order airstrikes' + (protest ? ' once force is authorized' : ''));
     if (ca.concede) can.push('concede to the demands');
+    for (const id of (ca.factions || [])) can.push(`command ${entName(id)}’s forces and set its stance`);
     if (!can.length) return 'You are observing — your role holds no command in this conflict.';
     return 'Your authority: you may ' + can.join(', ') + '.';
   },
@@ -1218,6 +1231,7 @@ const War = {
       const c = war.cells[k];
       for (let i = 0; i < k.length; i++) h = (h * 31 + k.charCodeAt(i)) | 0;
       h = (h * 7 + (c.o === 'att' ? 1 : 2)) | 0;
+      if (c.f) for (let i = 0; i < c.f.length; i++) h = (h * 31 + c.f.charCodeAt(i)) | 0;
     }
     return [war.startedAt, Object.keys(war.cells || {}).length, h, (war.craters || []).length, (S().provinces || []).length, W.layer === 'war'].join(':');
   },
@@ -1247,8 +1261,9 @@ const War = {
     if (!g || !g.cols || !g.rows) return;
     const protest = war.kind === 'protest';
     const field = this._controlField(war, 'att');
-    if (!field) return;
-    const attD = this._loopsToPath(this._contours(field, g.cols, g.rows), g.cell);
+    const facIds = war.factions ? [...new Set(Object.values(war.cells || {}).map(c => c.f).filter(Boolean))] : [];
+    if (!field && !facIds.length) return;
+    const attD = field ? this._loopsToPath(this._contours(field, g.cols, g.rows), g.cell) : '';
     // clip targets: the Republic's provinces, and the belligerents' homelands
     const provShapes = (S().provinces || []).map(p => p.shape || (p.path ? 'M' + p.path.map(q => q.join(' ')).join(' L') + ' Z' : '')).filter(Boolean);
     const enemyIds = new Set(protest ? [] : Object.values(g.enemyCells || {}));
@@ -1270,6 +1285,15 @@ const War = {
       const defField = this._controlField(war, 'def');
       const defD = defField && this._loopsToPath(this._contours(defField, g.cols, g.rows), g.cell);
       if (defD) add('path', { d: defD, 'fill-rule': 'evenodd', 'clip-path': clip('war-clip-enemy-' + key, enemyShapes), fill: 'url(#war-hatch-def)', class: 'war-occupied' });
+    }
+    // multi-way: each intervening power's ground in its own colour, edged
+    for (const fid of facIds) {
+      const ff = this._factionField(war, fid);
+      const fd = ff && this._loopsToPath(this._contours(ff, g.cols, g.rows), g.cell);
+      if (!fd) continue;
+      const col = this.facColor ? this.facColor(war, fid) : '#3f7a3a';
+      add('path', { d: fd, 'fill-rule': 'evenodd', 'clip-path': clipAll, class: 'war-occupied war-occupied-fac', style: `fill:${col}` });
+      add('path', { d: fd, 'clip-path': clipAll, class: 'war-front war-front-fac', style: `stroke:${col}`, 'vector-effect': 'non-scaling-stroke' });
     }
     // the front line: a heavy line with "teeth" (short bars) along it
     if (attD) {
@@ -1338,6 +1362,8 @@ const War = {
     if (!protest) for (const k in (g.enemyCells || {})) set(k, att);
     let any = false;
     for (const k in (war.cells || {})) {
+      // an intervening power's ground is its own (drawn by _factionField)
+      if (war.cells[k].f) { set(k, 0); continue; }
       const o = war.cells[k].o;
       if (o === 'att' || o === 'def') { set(k, o === side ? 1 : 0); if (o === side) any = true; }
     }
@@ -1346,6 +1372,34 @@ const War = {
     if (!any && side === 'def') return null;
     if (side === 'att' && !any && (protest || !Object.keys(g.enemyCells || {}).length)) return null;
     // multi-source BFS: unknown cells copy the nearest known value
+    const q = new Int32Array(N); let qh = 0, qt = 0;
+    for (let i = 0; i < N; i++) if (f[i] >= 0) q[qt++] = i;
+    while (qh < qt) {
+      const i = q[qh++], x = i % W_, y = (i / W_) | 0, v = f[i];
+      if (x > 0 && f[i - 1] < 0) { f[i - 1] = v; q[qt++] = i - 1; }
+      if (x < W_ - 1 && f[i + 1] < 0) { f[i + 1] = v; q[qt++] = i + 1; }
+      if (y > 0 && f[i - W_] < 0) { f[i - W_] = v; q[qt++] = i - W_; }
+      if (y < H_ - 1 && f[i + W_] < 0) { f[i + W_] = v; q[qt++] = i + W_; }
+    }
+    for (let i = 0; i < N; i++) if (f[i] < 0) f[i] = 0;
+    return f;
+  },
+  // 1 where an intervening power `fid` holds the ground, 0 on every other
+  // land cell; sea and neutral soil take the nearest land cell's value.
+  _factionField(war, fid) {
+    const g = war.grid;
+    const W_ = g.cols, H_ = g.rows, N = W_ * H_;
+    const f = new Float32Array(N).fill(-1);
+    const idx = (cx, cy) => (cx >= 0 && cy >= 0 && cx < W_ && cy < H_) ? cy * W_ + cx : -1;
+    for (const pid in (g.provinceCells || {})) for (const c of g.provinceCells[pid]) { const i = idx(c[0], c[1]); if (i >= 0) f[i] = 0; }
+    for (const k in (g.enemyCells || {})) { const p = k.indexOf(','); const i = idx(+k.slice(0, p), +k.slice(p + 1)); if (i >= 0) f[i] = 0; }
+    let any = false;
+    for (const k in (war.cells || {})) {
+      if (war.cells[k].f !== fid) continue;
+      const p = k.indexOf(','); const i = idx(+k.slice(0, p), +k.slice(p + 1));
+      if (i >= 0) { f[i] = 1; any = true; }
+    }
+    if (!any) return null;
     const q = new Int32Array(N); let qh = 0, qt = 0;
     for (let i = 0; i < N; i++) if (f[i] >= 0) q[qt++] = i;
     while (qh < qt) {
@@ -1862,8 +1916,10 @@ const War = {
       if (rec.g.parentNode !== D.units) D.units.appendChild(rec.g);
       const v = rec.v;
       rec.unitId = u.id;
-      rec.own = isActiveDoc && canCommand && !isDead && u.side === cmdSide;
-      rec.enemy = isActiveDoc && !isDead && u.side !== cmdSide;
+      rec.own = isActiveDoc && canCommand && !isDead && u.side === cmdSide && (!war.factions || this._mayOrderUnit(war, u));
+      rec.enemy = isActiveDoc && !isDead && (war.factions && window.WarEngine
+        ? WarEngine.facHostile(war, this._cmdFaction(war, cmdSide), this.facOfUnit(war, u))
+        : u.side !== cmdSide);
       // shape: kind/state-dependent frame + symbol (or the organiser's flag)
       const flag = !isDead && flagOf(u);
       const civil = (u.kind === 'protestor' || u.kind === 'police') && u.state !== 'transport';
@@ -1921,8 +1977,16 @@ const War = {
         (isDead ? ' wu-dead' : '') + (this._sel.has(u.id) && isActiveDoc ? ' wu-sel' : '') +
         (rec.own ? ' wu-cmd' : '') + (rec.enemy ? ' wu-inspect' + (this._sel.size ? ' wu-attackable' : '') : '') +
         (u.nationId && !civil ? ' wu-ally' : '') + (fighting ? ' wu-fight' : '') + (u.state === 'routed' ? ' wu-routed' : '') +
-        (!isDead && u.supplied === false ? ' wu-cutoff' : '') + (this._inspect === u.id && isActiveDoc ? ' wu-inspected' : '');
+        (!isDead && u.supplied === false ? ' wu-cutoff' : '') + (this._inspect === u.id && isActiveDoc ? ' wu-inspected' : '') +
+        (war.factions && this.isIntervener(war, this.facOfUnit(war, u)) ? ' wu-fac' : '');
       if (v.cls !== cls) { v.cls = cls; rec.g.setAttribute('class', cls); }
+      // an intervening power's troops wear its colour
+      const facCol = war.factions && this.isIntervener(war, this.facOfUnit(war, u)) ? this.facColor(war, this.facOfUnit(war, u)) : '';
+      if (v.facCol !== facCol) {
+        v.facCol = facCol;
+        if (facCol) { rec.g.style.setProperty('--fac', facCol); rec.g.style.setProperty('--fac-fill', this.facTint(facCol, 0.38)); }
+        else { rec.g.style.removeProperty('--fac'); rec.g.style.removeProperty('--fac-fill'); }
+      }
       // bars
       const pct = isDead ? 0 : Math.max(0, Math.min(1, u.strength / (u.maxStrength || u.strength || 1)));
       const hpW = Math.round(pct * 34 * 2) / 2;
@@ -2889,6 +2953,7 @@ const War = {
 
     if (isGM()) this.renderControls(inner, war, key);
     if (this.renderPeaceTable) this.renderPeaceTable(inner, war, key);
+    if (this.renderFactions) this.renderFactions(inner, war, key);
 
     // objectives as a checklist, the next one called out
     if ((war.objectives || []).length) {
@@ -3019,6 +3084,7 @@ const War = {
     else if (war.result && war.result.reason) inner.appendChild(el('div.protest-outcome', war.result.reason + '.'));
     if (isGM()) this.renderControls(inner, war, key);
     if (this.renderPeaceTable) this.renderPeaceTable(inner, war, key);
+    if (this.renderFactions) this.renderFactions(inner, war, key);
 
     // the streets
     inner.appendChild(Views.secLabel('The streets'));
@@ -3306,37 +3372,6 @@ const War = {
     inner.appendChild(box);
   },
 
-  // Foreign intervention (Feature: nation joins an ongoing war) — a plain
-  // nation/side picker; the actual spawn/allies bookkeeping is all
-  // server-side in war.joinWar.
-  renderIntervention(inner, war) {
-    inner.appendChild(Views.secLabel('Foreign Intervention'));
-    const allies = war.allies || { att: [], def: [] };
-    const excluded = new Set([war.attackerId, war.defenderId, ...(allies.att || []), ...(allies.def || [])]);
-    const options = (S().entities || []).filter(e => e.type === 'foreign' && !excluded.has(e.id)).map(e => [e.id, e.name]);
-    if (!options.length) {
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'No further foreign powers are available to intervene.'));
-      return;
-    }
-    if (!this._joinDraft || !options.some(o => o[0] === this._joinDraft.entityId)) {
-      this._joinDraft = { entityId: options[0][0], side: (this._joinDraft && this._joinDraft.side) || 'att' };
-    }
-    const d = this._joinDraft;
-    const box = el('div');
-    box.appendChild(Forms.field('Nation', Forms.sel(d, 'entityId', options)));
-    box.appendChild(Forms.field('Side', el('div.btn-row',
-      el('button.dash-btn', { class: d.side === 'att' ? 'active' : '', onclick: () => { d.side = 'att'; this._reRenderPanel(); } }, 'Join Attacker'),
-      el('button.dash-btn', { class: d.side === 'def' ? 'active' : '', onclick: () => { d.side = 'def'; this._reRenderPanel(); } }, 'Join Defender')
-    )));
-    box.appendChild(el('div.btn-row', el('button.solid-btn', {
-      onclick: async () => {
-        try { await POST('/api/gm/war/join', { entityId: d.entityId, side: d.side }); toast('Intervention ordered.'); }
-        catch (e) { toast(e.message, true); }
-      }
-    }, '🤝 Join War')));
-    inner.appendChild(box);
-  },
-
   // The conflict clock as a slider (log-spaced stops 0.01×–8×) plus a number
   // box for any exact positive value up to 8× — as slow as the GM likes: the
   // label follows the thumb, the POST goes on release / on commit of the box.
@@ -3397,7 +3432,6 @@ const War = {
       this._fold(inner, protest ? 'wrProtestTune' : 'wrWarTune', protest ? 'Protest Tuning' : 'Global Tuning',
         (b) => protest ? this.renderProtestTuning(b, war, key) : this.renderTuning(b, war));
       this._fold(inner, 'wrSpawn_' + key, 'Spawn Units', (b) => this.renderSpawner(b, war, key));
-      if (!protest) this._fold(inner, 'wrJoin', 'Foreign Intervention', (b) => this.renderIntervention(b, war));
     }
     if (!protest) {
       this._fold(inner, 'wrTreaty', 'Peace Treaty', (b) => this.renderTreaty(b, war));

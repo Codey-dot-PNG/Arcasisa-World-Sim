@@ -12,6 +12,7 @@ const geometry = require('./geometry');
 const territory = require('./territory');
 const peace = require('./peace');
 const forces = require('./military');
+const warEngine = require('./war-engine');
 const sb = require('./supabase');
 const { seed, hashPassword } = require('./seed');
 const mapdata = require('./mapdata');
@@ -325,8 +326,26 @@ function hasAbility(u, key) {
 // also command, authorize force against, or bomb it (an opposition leader
 // with an MP's clearance used to be able to order the police to charge their
 // own rally). The GM holds every lever.
+// The intervening powers in a multi-way conflict this operator runs (their
+// ownership chain); the GM runs them all.
+function myFactionsOf(war, u) {
+  if (!war || !war.factions) return [];
+  return Object.keys(war.factions).filter(id => !war.factions[id].principal && (u.role.perms.gm || (u.user.entityId && ownership.controls(u.user.entityId, id))));
+}
+// May `u` give orders to this unit? An intervening power's troops answer to
+// whoever runs that power (and the GM); everyone else's to their side's
+// commanders, as before.
+function mayCommandUnit(war, unit, ca, u) {
+  if (u.role.perms.gm) return true;
+  if (war.factions) {
+    const f = warEngine.facOf(war, unit);
+    const ownCamp = f === warEngine.principalOf(war, unit.side) || ((war.allies && war.allies[unit.side]) || []).indexOf(f) >= 0;
+    if (!ownCamp) return myFactionsOf(war, u).indexOf(f) >= 0;
+  }
+  return unit.side === 'att' ? !!ca.att : !!ca.def;
+}
 function cmdAccessOf(db, war, u) {
-  if (u.role.perms.gm) return { att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true, negotiate: 'both' };
+  if (u.role.perms.gm) return { att: true, attLead: true, def: true, defAll: true, force: true, air: true, concede: true, negotiate: 'both', factions: myFactionsOf(war, u), intervene: true };
   const me = u.user.entityId;
   const protest = !!(war && war.kind === 'protest');
   const attackerId = war ? (protest && war.protest && war.protest.organizerId) || war.attackerId : null;
@@ -345,7 +364,9 @@ function cmdAccessOf(db, war, u) {
     concede: protest && defChain,
     // who may make and answer peace offers for a side: whoever controls its
     // entity (the invader / the organizer; the defender — the government)
-    negotiate: attLead ? 'att' : defChain ? 'def' : null
+    negotiate: attLead ? 'att' : defChain ? 'def' : null,
+    // multi-way: the intervening powers this operator runs
+    factions: myFactionsOf(war, u)
   };
 }
 // Who runs a nation's armed forces (War Room › Military): the GM, the
@@ -1140,7 +1161,9 @@ async function handle(req, res, pathname, method) {
       // (a party leader commands their party's protest); the defence needs
       // the defender's chain or the conflict's command ability.
       const ca = cmdAccessOf(db, doc, u);
-      const side = b.side === 'att' ? (ca.att ? 'att' : null) : (ca.def ? 'def' : null);
+      // whoever runs an intervening power commands its troops on its side
+      const runsOn = (sd) => (ca.factions || []).some(id => doc.factions && doc.factions[id] && doc.factions[id].side === sd);
+      const side = b.side === 'att' ? (ca.att || runsOn('att') ? 'att' : null) : (ca.def || runsOn('def') ? 'def' : null);
       if (!side) return deny('You cannot command that side of the conflict.');
       if (!Array.isArray(b.orders) || b.orders.length > 64) return bad('Invalid orders.');
       const inBounds = (p) => Array.isArray(p) && p.length === 2 &&
@@ -1166,7 +1189,11 @@ async function handle(req, res, pathname, method) {
         : ((doc.kind === 'protest' && doc.protest && doc.protest.organizerId) || doc.attackerId);
       const fullAccess = side === 'att' ? ca.attLead : ca.defAll;
       let finalOrders = orders;
-      if (!fullAccess && controllerId) {
+      if (doc.factions && !u.role.perms.gm) {
+        finalOrders = orders.filter(o => { const un = doc.units.find(x => x.id === o.unitId); return un && mayCommandUnit(doc, un, ca, u); });
+        if (!finalOrders.length) return deny('Those troops answer to another power.');
+      }
+      if (!fullAccess && controllerId && !(doc.factions && !ca[side])) {
         finalOrders = orders.filter(o => ownership.canAct(db, u.user.entityId, controllerId, 'command_units', { unitId: o.unitId }));
         if (!finalOrders.length) return deny('Your command grant does not cover those units.');
       }
@@ -1179,6 +1206,33 @@ async function handle(req, res, pathname, method) {
       // per-tick broadcasts (docs/WAR.md "Milestone-only broadcasts").
       store.save();
       return json(res, 200, { ok: true });
+    }
+    // ---- multi-way conflicts: interventions (server/war.js intervene…) ----
+    // A nation enters a running war or protest as a party of its own; the GM
+    // or whoever runs that nation decides whom it fights alongside and
+    // against, whose ground it seizes, and when it pulls out. Every step
+    // broadcasts — the map and War Rooms redraw for everyone.
+    if (pathname.startsWith('/api/war/factions/') && method === 'POST') {
+      const b = await readBody(req);
+      const verb = pathname.slice('/api/war/factions/'.length);
+      const runs = (id) => u.role.perms.gm || !!(u.user.entityId && id && ownership.controls(u.user.entityId, id));
+      let result;
+      if (verb === 'intervene') {
+        if (!runs(b.entityId)) return deny('Only the GM or whoever runs that nation can send its forces in.');
+        result = war.intervene(db, b, u.user.displayName);
+      } else if (verb === 'stance') {
+        if (!runs(b.from)) return deny('Only the GM or whoever runs that party can change its stance.');
+        result = war.setStance(db, b, u.user.displayName);
+      } else if (verb === 'policy') {
+        if (!runs(b.entityId)) return deny('Only the GM or whoever runs that party can change its course.');
+        result = war.setFactionPolicy(db, b, u.user.displayName);
+      } else if (verb === 'withdraw') {
+        if (!runs(b.entityId)) return deny('Only the GM or whoever runs that party can pull it out.');
+        result = war.withdrawFaction(db, b, u.user.displayName);
+      } else return bad('Unknown action.');
+      if (!result.ok) return bad(result.error);
+      store.save(); broadcast('sync');
+      return json(res, 200, result);
     }
     // ---- the Military desk (War Room › Military; server/military.js) ----
     // The nation's standing orders: deployment plan + supply doctrine.
@@ -1209,7 +1263,7 @@ async function handle(req, res, pathname, method) {
       if (verb === 'issue') {
         const unit = (doc.units || []).find(x => x.id === b.unitId);
         if (!unit) return bad('Unknown formation.');
-        if (!(unit.side === 'att' ? ca.att : ca.def)) return deny('You do not command that formation.');
+        if (!mayCommandUnit(doc, unit, ca, u)) return deny('You do not command that formation.');
         const full = unit.side === 'att' ? ca.attLead : ca.defAll;
         const controllerId = unit.side === 'def' ? doc.defenderId : ((doc.kind === 'protest' && doc.protest && doc.protest.organizerId) || doc.attackerId);
         if (!full && !ownership.canAct(db, u.user.entityId, controllerId, 'command_units', { unitId: unit.id })) return deny('Your command grant does not cover that formation.');

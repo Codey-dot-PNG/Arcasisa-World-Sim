@@ -499,24 +499,36 @@ function applyOccupationTransfers(db, key) {
   key = key === 'protest' ? 'protest' : 'war';
   const war = key === 'protest' ? db.protest : db.war;
   if (!war || !war.active || !war.grid) return;
-  if (war.tick % OCCUPATION_CHECK_TICKS !== 0) return;
+  // (a call can run several ticks at speed — gate on the last check, not a modulo)
+  if (war.tick - (war._occTick || 0) < OCCUPATION_CHECK_TICKS) return;
+  war._occTick = war.tick;
   const occupier = occupierOf(war);
   if (!occupier || !db.entities.some(e => e.id === occupier)) return;
   const stash = HOLD_KEY[key];
   const deedsMod = require('./deeds');
   const cs = war.grid.cell;
+  // multi-way: a property goes to whichever party holds its ground
+  // (engine.cellHolder) — protesters, an intervening army, then another —
+  // and back to its owner when the defender retakes it. The stash keeps the
+  // ORIGINAL owner through any number of hands.
+  const multi = !!war.factions;
+  const owners = multi ? engine.homeOwners(db, war) : null;
+  const known = new Set(db.entities.map(e => e.id));
   let seized = 0, restored = 0;
+  const takers = {};
   for (const prop of db.properties) {
     if (!prop.pos) continue;
     const cellKey = engine.cellKey(Math.floor(prop.pos[0] / cs), Math.floor(prop.pos[1] / cs));
     const cell = war.cells[cellKey];
-    const attHeld = !!(cell && cell.o === 'att');
+    let holder = null;
+    if (multi) { const h = engine.cellHolder(war, cellKey, owners); if (h !== war.defenderId && known.has(h)) holder = h; }
+    else if (cell && cell.o === 'att') holder = occupier;
     prop.vars = prop.vars || {};
     const wasStashed = Object.prototype.hasOwnProperty.call(prop.vars, stash);
-    if (attHeld) {
-      if (prop.ownerId !== occupier && prop.ownerId) {
+    if (holder) {
+      if (prop.ownerId !== holder && prop.ownerId) {
         if (!wasStashed) prop.vars[stash] = prop.ownerId;
-        try { deedsMod.transfer(prop.id, prop.ownerId, occupier, 'WAR ENGINE'); seized++; }
+        try { deedsMod.transfer(prop.id, prop.ownerId, holder, 'WAR ENGINE'); seized++; takers[holder] = (takers[holder] || 0) + 1; }
         catch (e) { /* unowned/malformed deed — skip, keep the stash for a later retry */ }
       }
     } else if (wasStashed) {
@@ -526,11 +538,13 @@ function applyOccupationTransfers(db, key) {
     }
   }
   if (seized || restored) {
-    const who = key === 'protest' ? 'the protest movement' : 'the occupying force';
+    const named = Object.keys(takers);
+    const who = multi && named.length ? named.map(id => (db.entities.find(e => e.id === id) || {}).name || id).join(', ')
+      : key === 'protest' ? 'the protest movement' : 'the occupying force';
     store.log('event', key === 'protest' ? 'Seized districts change property control' : 'Occupation changes property ownership',
       `${seized} propert${seized === 1 ? 'y' : 'ies'} taken over by ${who}` +
       (restored ? `, ${restored} restored to their former owner${restored === 1 ? '' : 's'}` : '') + '.',
-      'WAR ENGINE', [occupier]);
+      'WAR ENGINE', multi && named.length ? named : [occupier]);
   }
 }
 // give one held property back to its stashed owner; true when it moved
@@ -1955,6 +1969,169 @@ function joinWar(db, opts, actor) {
 // migrate()) are mutual (e.g. for_valksland.allies includes for_qinal AND
 // for_qinal.allies includes for_valksland), but reading either direction
 // keeps this correct even for a hand-edited, one-sided allies array.
+// ---------- multi-way conflicts: interventions (engine "factions") ----------
+// Any nation can enter a running war OR protest as a party of its own and
+// say whom it fights alongside and whom it fights against (engine
+// war.factions — see war-engine.js "factions"). It brings its own
+// contingent, armed from its own arsenal and fed by its own supply train;
+// it seizes ground (and the buildings on it) from its enemies — or, with
+// seize 'all', from anyone, allies included; a field commander of its own
+// runs it unless a player takes over (ai: false). Stances change mid-war
+// (setStance), and a party can pull out (withdrawFaction).
+const INTERVENE_MAX_INF = 8, INTERVENE_MAX_ARM = 4;
+function docFor(db, conflict) { return conflict === 'protest' ? db.protest : db.war; }
+function partyName(db, id) { return (db.entities.find(e => e.id === id) || {}).name || id; }
+// Turn a two-sided conflict into a multi-way one: the two principals (and
+// any sworn allies already in) become factions on their sides.
+function ensureFactions(doc) {
+  if (doc.factions) return doc.factions;
+  const F = {};
+  F[engine.principalOf(doc, 'att')] = { side: 'att', principal: true, stance: {}, seize: 'enemies' };
+  F[doc.defenderId] = { side: 'def', principal: true, stance: {}, seize: 'enemies' };
+  for (const side of ['att', 'def']) {
+    for (const id of (doc.allies && doc.allies[side]) || []) if (!F[id]) F[id] = { side, sworn: true, stance: {}, seize: 'enemies' };
+  }
+  doc.factions = F;
+  return F;
+}
+function partiesOf(doc) {
+  const ids = [engine.principalOf(doc, 'att'), doc.defenderId];
+  for (const id of Object.keys(doc.factions || {})) if (ids.indexOf(id) < 0) ids.push(id);
+  return ids;
+}
+function intervene(db, opts, actor) {
+  const key = opts.conflict === 'protest' ? 'protest' : 'war';
+  const doc = docFor(db, key);
+  if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
+  const ent = db.entities.find(e => e.id === opts.entityId);
+  if (!ent) return { ok: false, error: 'Unknown nation.' };
+  const parties = partiesOf(doc);
+  const sworn = ((doc.allies && doc.allies.att) || []).concat((doc.allies && doc.allies.def) || []);
+  if (parties.indexOf(ent.id) >= 0 || sworn.indexOf(ent.id) >= 0) return { ok: false, error: `${ent.name} is already in this conflict.` };
+  const allies = [...new Set((opts.allies || []).filter(id => parties.indexOf(id) >= 0))];
+  const enemies = [...new Set((opts.enemies || []).filter(id => parties.indexOf(id) >= 0 && allies.indexOf(id) < 0))];
+  if (!allies.length && !enemies.length) return { ok: false, error: 'Choose whom it fights alongside or against.' };
+  const attP = engine.principalOf(doc, 'att'), defP = doc.defenderId;
+  // its camp: the defender's if it stands with the defender (or only
+  // against the attacker), the attacking camp otherwise
+  const side = allies.indexOf(defP) >= 0 || (enemies.indexOf(defP) < 0 && enemies.indexOf(attP) >= 0) ? 'def' : 'att';
+  // where it comes in: a city of the theatre, or its own homeland's nearest
+  // point to the capital
+  let pos = null, where = '';
+  if (opts.entry === 'homeland') {
+    const cid = engine.countryIdForEntity(db, ent.id);
+    if (!cid || !doc.grid || !doc.grid.countryCells || !(doc.grid.countryCells[cid] || []).length) return { ok: false, error: `${ent.name} has no homeland on the map — bring it in at a city.` };
+    pos = joinEntryPoint(db, doc, 'def', ent.id); where = 'its own border';
+  } else {
+    const city = (db.cities || []).find(c => c.id === opts.cityId && Array.isArray(c.pos)) || (db.cities || []).find(c => c.isCapital && Array.isArray(c.pos));
+    if (!city) return { ok: false, error: 'Choose a city to land in.' };
+    pos = city.pos; where = city.name;
+  }
+  const inf = engine.clamp(Math.round(Number(opts.infantry) || 0), 0, INTERVENE_MAX_INF);
+  const arm = engine.clamp(Math.round(Number(opts.armour) || 0), 0, INTERVENE_MAX_ARM);
+  if (!inf && !arm) return { ok: false, error: 'Send at least one formation.' };
+  if (key === 'protest' && doc.units.filter(isLive).length + inf + arm > MAX_PROTEST_UNITS) return { ok: false, error: `A protest is limited to ${MAX_PROTEST_UNITS} live units.` };
+  const F = ensureFactions(doc);
+  F[ent.id] = { side, stance: {}, seize: opts.seize === 'all' ? 'all' : 'enemies', ai: opts.ai !== false, joinedTick: doc.tick, joinedAt: new Date().toISOString(), entry: [Math.round(pos[0]), Math.round(pos[1])] };
+  for (const a of allies) { F[ent.id].stance[a] = 'ally'; if (F[a] && F[a].stance[ent.id] === undefined) F[a].stance[ent.id] = 'ally'; }
+  for (const e of enemies) F[ent.id].stance[e] = 'enemy';
+  const defaults = (require('./war-scenarios').UNIT_DEFAULTS) || {};
+  const hpMod = (doc.mods && doc.mods.hp) || 1;
+  doc.interveneSeq = doc.interveneSeq || 0;
+  const made = [];
+  const add = (kind, label) => {
+    const d = defaults[kind] || { strength: 2000, speed: 3.2, atk: 1 };
+    doc.interveneSeq++;
+    const a = (doc.interveneSeq * 2.39996) % (Math.PI * 2), r = 22 + (doc.interveneSeq % 4) * 9;
+    const st = Math.round(d.strength * hpMod);
+    const u = {
+      id: store.uid('warunit'), side, name: `${ent.name} ${airOrdinal(made.length + 1)} ${label}`,
+      kind, pos: engine.clampToWorld(doc, [pos[0] + Math.cos(a) * r, pos[1] + Math.sin(a) * r]), dest: null,
+      strength: st, maxStrength: st, org: 100, speed: d.speed, atk: d.atk || 1, state: 'holding', objectiveId: null,
+      fac: ent.id, nationId: ent.id, inv: [], spawned: true, intervened: true
+    };
+    doc.units.push(u);
+    made.push(u);
+  };
+  for (let i = 0; i < inf; i++) add('infantry', 'Intervention Brigade');
+  for (let i = 0; i < arm; i++) add('armored', 'Armoured Brigade');
+  resupplyUnits(db, doc, { issueOnly: true });
+  const names = (ids) => ids.map(id => partyName(db, id)).join(', ');
+  const stanceText = [allies.length ? `alongside ${names(allies)}` : '', enemies.length ? `against ${names(enemies)}` : ''].filter(Boolean).join(' and ');
+  engine.pushEvent(doc, 'milestone', pos.slice(), `${ent.name} intervenes ${stanceText}: ${made.length} formation${made.length === 1 ? '' : 's'} at ${where}.`);
+  store.log('event', `${ent.name} intervenes in ${doc.name}`, `${made.length} formation(s) at ${where}, ${stanceText}${F[ent.id].seize === 'all' ? '; it seizes ground from anyone, allies included' : ''}.`, actor || 'WAR ENGINE', [ent.id].concat(allies, enemies));
+  SERVER_CTX.news(`${ent.name.toUpperCase()} INTERVENES IN ${String(doc.name).toUpperCase()}`,
+    `${ent.name} has sent ${made.length} formation${made.length === 1 ? '' : 's'} into ${where}, fighting ${stanceText}.`);
+  return { ok: true, faction: F[ent.id], unitIds: made.map(u => u.id) };
+}
+// A sworn ally (war.allies, run by the war AI) that turns on its own camp
+// leaves the alliance: the faction commander takes its troops over.
+function unswear(doc, id, side) {
+  if (doc.allies && Array.isArray(doc.allies[side])) doc.allies[side] = doc.allies[side].filter(x => x !== id);
+  const nations = doc.command && doc.command[side] && doc.command[side].nations;
+  if (nations && nations[id]) delete nations[id];
+  if (doc.factions && doc.factions[id]) { delete doc.factions[id].sworn; doc.factions[id].ai = true; }
+}
+function setStance(db, opts, actor) {
+  const doc = docFor(db, opts.conflict);
+  if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
+  if (!doc.factions) return { ok: false, error: 'No other power has entered this conflict.' };
+  const F = doc.factions;
+  const from = opts.from, to = opts.to, stance = opts.stance === 'ally' ? 'ally' : opts.stance === 'enemy' ? 'enemy' : null;
+  if (!F[from] || !F[to] || from === to || !stance) return { ok: false, error: 'Pick two parties and a stance.' };
+  const attP = engine.principalOf(doc, 'att');
+  if ((from === attP && to === doc.defenderId) || (from === doc.defenderId && to === attP)) return { ok: false, error: 'The two sides of the conflict settle their differences at the peace table.' };
+  if (F[from].stance[to] === stance) return { ok: false, error: 'That is already the stance.' };
+  F[from].stance[to] = stance;
+  const turns = stance === 'enemy';
+  // a sworn ally turning on its own side's principal leaves the alliance
+  for (const id of [from, to]) {
+    const f = F[id];
+    if (f && f.sworn && engine.facHostile(doc, id, engine.principalOf(doc, f.side))) unswear(doc, id, f.side);
+  }
+  const a = partyName(db, from), b = partyName(db, to);
+  const at = (doc.units.find(u => isLive(u) && engine.facOf(doc, u) === from) || doc.units.find(u => isLive(u)) || { pos: [1920, 1080] }).pos.slice();
+  engine.pushEvent(doc, 'milestone', at, turns ? `${a} turns on ${b}.` : `${a} stands with ${b}.`);
+  store.log('event', turns ? `${a} turns on ${b}` : `${a} stands with ${b}`, doc.name, actor || 'WAR ENGINE', [from, to]);
+  SERVER_CTX.news(turns ? `${a.toUpperCase()} TURNS ON ${b.toUpperCase()}` : `${a.toUpperCase()} SIDES WITH ${b.toUpperCase()}`,
+    turns ? `${a} has declared ${b} an enemy in ${doc.name}. Their forces are now at war.` : `${a} has declared itself on the side of ${b} in ${doc.name}.`);
+  return { ok: true, factions: F };
+}
+function setFactionPolicy(db, opts, actor) {
+  const doc = docFor(db, opts.conflict);
+  if (!doc || !doc.active || !doc.factions || !doc.factions[opts.entityId]) return { ok: false, error: 'Unknown party.' };
+  const f = doc.factions[opts.entityId];
+  const changed = [];
+  if (opts.seize !== undefined) { f.seize = opts.seize === 'all' ? 'all' : 'enemies'; changed.push(f.seize === 'all' ? 'seizes ground from anyone' : 'seizes ground from its enemies only'); }
+  if (opts.ai !== undefined && !f.principal && !f.sworn) { f.ai = !!opts.ai; changed.push(f.ai ? 'its field commander takes over' : 'its troops await orders'); }
+  if (!changed.length) return { ok: false, error: 'Nothing to change.' };
+  store.log('event', `${partyName(db, opts.entityId)} changes course`, `${doc.name}: ${changed.join('; ')}.`, actor || 'WAR ENGINE', [opts.entityId]);
+  return { ok: true, faction: f };
+}
+// Pull a party out: its troops go home with their kit, the ground it holds
+// returns to whoever's land it is, and the buildings on it follow on the
+// next occupation sweep.
+function withdrawFaction(db, opts, actor) {
+  const key = opts.conflict === 'protest' ? 'protest' : 'war';
+  const doc = docFor(db, key);
+  if (!doc || !doc.active || !doc.factions || !doc.factions[opts.entityId]) return { ok: false, error: 'Unknown party.' };
+  const id = opts.entityId, f = doc.factions[id];
+  if (f.principal) return { ok: false, error: 'A principal side ends its part at the peace table.' };
+  let n = 0, items = 0;
+  for (const u of doc.units) if (isLive(u) && engine.facOf(doc, u) === id) { items += returnKit(db, doc, u); n++; }
+  doc.units = doc.units.filter(u => !(engine.facOf(doc, u) === id && isLive(u)));
+  for (const k of Object.keys(doc.cells)) if (doc.cells[k].f === id) delete doc.cells[k];
+  if (f.sworn) unswear(doc, id, f.side);
+  delete doc.factions[id];
+  for (const other of Object.values(doc.factions)) if (other.stance) delete other.stance[id];
+  doc._occTick = doc.tick - OCCUPATION_CHECK_TICKS; // the buildings it held go back on the next sweep
+  const name = partyName(db, id);
+  engine.pushEvent(doc, 'milestone', (doc.units.find(u => isLive(u)) || { pos: [1920, 1080] }).pos.slice(), `${name} withdraws from ${doc.name}.`);
+  store.log('event', `${name} withdraws from ${doc.name}`, `${n} formation(s) go home; ${Math.round(items).toLocaleString('en-US')} item(s) back to its stockpile; the ground it held is given up.`, actor || 'WAR ENGINE', [id]);
+  SERVER_CTX.news(`${name.toUpperCase()} PULLS OUT OF ${String(doc.name).toUpperCase()}`, `${name} has withdrawn its forces from ${doc.name}.`);
+  return { ok: true, withdrawn: n };
+}
+
 function alliedWith(entities, aId, bId) {
   const a = (entities || []).find(e => e.id === aId);
   const b = (entities || []).find(e => e.id === bId);
@@ -2280,7 +2457,10 @@ function standDownUnits(db, opts, side, actor) {
   const doc = key === 'protest' ? db.protest : db.war;
   if (!doc || !doc.active) return { ok: false, error: 'No conflict is active.' };
   const ids = new Set((Array.isArray(opts.unitIds) ? opts.unitIds : []).slice(0, 64));
-  const picked = doc.units.filter(u => ids.has(u.id) && isLive(u) && u.side === side);
+  // (in a multi-way conflict, only the side's own and its sworn allies' —
+  // an intervening power's troops go home when it withdraws)
+  const ownCamp = (u) => { if (!doc.factions) return true; const f = engine.facOf(doc, u); return f === engine.principalOf(doc, side) || ((doc.allies && doc.allies[side]) || []).indexOf(f) >= 0; };
+  const picked = doc.units.filter(u => ids.has(u.id) && isLive(u) && u.side === side && ownCamp(u));
   if (!picked.length) return { ok: false, error: 'No formations of yours were picked.' };
   const busy = picked.filter(u => u.state === 'fighting' || u.state === 'embarked' || u.state === 'transport');
   const go = picked.filter(u => !busy.includes(u));
@@ -3007,4 +3187,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { heldProperties, settleHoldings, SERVER_CTX, deployArmy, raiseUnits, standDownUnits, issueUnit, policeStrength, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { intervene, setStance, setFactionPolicy, withdrawFaction, ensureFactions, heldProperties, settleHoldings, SERVER_CTX, deployArmy, raiseUnits, standDownUnits, issueUnit, policeStrength, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

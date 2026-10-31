@@ -409,6 +409,12 @@
   function belligerentKey(db, war) {
     const attIds = [war.attackerId].concat((war.allies && war.allies.att) || []);
     const defIds = ((war.allies && war.allies.def) || []).slice();
+    // every intervening power's homeland is part of the war too (its own
+    // side's: open ground; the attacking camp's: capturable)
+    for (const f in (war.factions || {})) {
+      if (f === war.defenderId || attIds.indexOf(f) >= 0 || defIds.indexOf(f) >= 0) continue;
+      (war.factions[f].side === 'att' ? attIds : defIds).push(f);
+    }
     const collect = (ids) => {
       const s = [];
       for (const id of ids) for (const c of countryIdsForEntity(db, id)) if (s.indexOf(c) < 0) s.push(c);
@@ -1120,7 +1126,7 @@
   function nearestLiveEnemy(war, u) {
     let nearest = null, nd = Infinity;
     for (const e of war.units) {
-      if (e.side === u.side || !isLive(e)) continue;
+      if (!isLive(e) || !hostile(war, u, e)) continue;
       const d = dist(u.pos, e.pos);
       if (d < nd) { nd = d; nearest = e; }
     }
@@ -1137,7 +1143,7 @@
   function retreatTarget(war, u) {
     let sx = 0, sy = 0, w = 0;
     for (const f of war.units) {
-      if (f === u || f.side !== u.side || !isLive(f)) continue;
+      if (f === u || (war.factions ? facOf(war, f) !== facOf(war, u) : f.side !== u.side) || !isLive(f)) continue;
       if (f.state === 'routed' || f.state === 'embarked') continue;
       const s = f.strength || 1;
       sx += f.pos[0] * s; sy += f.pos[1] * s; w += s;
@@ -1304,7 +1310,7 @@
       if (a.garrison && !a.dest) continue;
       for (let j = i + 1; j < live.length; j++) {
         const b = live[j];
-        if (a.side !== b.side) continue;
+        if (hostile(war, a, b)) continue;
         if (b.garrison && !b.dest) continue;
         const dx = b.pos[0] - a.pos[0], dy = b.pos[1] - a.pos[1];
         const d = Math.hypot(dx, dy);
@@ -1375,6 +1381,70 @@
   // cannot initiate/deal damage in a fight — see stepTransportState and the
   // "boat kind" doc above. Warships never appear here at all (they fight
   // exclusively via stepWarshipFire's ranged pass below).
+  // ---------- factions: multi-way conflicts ----------
+  // A conflict is two-sided (att vs def) until a third power intervenes
+  // (server war.js intervene). Then `war.factions` lists every party —
+  //   { [entityId]: { side, stance: { [entityId]: 'ally'|'enemy' },
+  //                   seize: 'enemies'|'all', ai, principal? } }
+  // — and every unit fights for its FACTION (u.fac, else u.nationId, else
+  // its side's principal). Whether two parties fight is their STANCE, and it
+  // takes only one: either one calling the other 'enemy' means war; a party
+  // with nothing stated treats its own side as friends and the other as
+  // foes. `side` stays the camp whose machinery a party uses (commands,
+  // supply, the loss columns). Ground belongs to a faction too (a captured
+  // cell's `f`, else its side's principal), and `seize` says whose ground a
+  // party takes: its enemies' only, or anyone's — allies' included.
+  // Without war.factions every helper below reduces to the classic
+  // att-vs-def answer, so a two-sided conflict plays exactly as before.
+  function principalOf(war, side) {
+    return side === 'att' ? ((war.kind === 'protest' && war.protest && war.protest.organizerId) || war.attackerId) : war.defenderId;
+  }
+  function facOf(war, u) { return u.fac || u.nationId || principalOf(war, u.side); }
+  function facSide(war, f) {
+    const F = war.factions && war.factions[f];
+    if (F && F.side) return F.side;
+    return f === principalOf(war, 'att') || ((war.allies && war.allies.att) || []).indexOf(f) >= 0 ? 'att' : 'def';
+  }
+  function facStance(war, a, b) {
+    const F = war.factions && war.factions[a];
+    return F && F.stance ? F.stance[b] : undefined;
+  }
+  function facHostile(war, a, b) {
+    if (a === b) return false;
+    if (war.factions) {
+      const s1 = facStance(war, a, b), s2 = facStance(war, b, a);
+      if (s1 === 'enemy' || s2 === 'enemy') return true;
+      if (s1 === 'ally' || s2 === 'ally') return false;
+    }
+    return facSide(war, a) !== facSide(war, b);
+  }
+  function hostile(war, a, b) {
+    if (!war.factions) return a.side !== b.side;
+    return facHostile(war, facOf(war, a), facOf(war, b));
+  }
+  // may faction `f` plant its flag on ground `holder` holds?
+  function facSeizes(war, f, holder) {
+    if (!holder || f === holder) return false;
+    if (facHostile(war, f, holder)) return true;
+    const F = war.factions && war.factions[f];
+    return !!(F && F.seize === 'all');
+  }
+  // Can `a` deal damage to `b` right now: canFight, with a protest's
+  // escalation ladder read per PAIR once other powers are in it — the crowds
+  // strike only once they turn violent and the government's men strike the
+  // crowds only once force is authorized (or the crowds turned violent),
+  // but anyone fights back against an intervening army.
+  function canFightVs(war, a, b) {
+    if (!war.factions) return canFight(war, a);
+    if (a.state === 'transport') return false;
+    if (a.kind === 'boat' && !isWaterAt(war, a.pos)) return false;
+    if (war.kind === 'protest' && war.protest) {
+      const org = principalOf(war, 'att'), fa = facOf(war, a), fb = facOf(war, b);
+      if (fa === org && !war.protest.protestorsViolent) return false;
+      if (fa === war.defenderId && fb === org && !war.protest.protestorsViolent && !war.protest.govViolent) return false;
+    }
+    return true;
+  }
   function canFight(war, u) {
     if (u.state === 'transport') return false;
     if (u.kind === 'boat' && !isWaterAt(war, u.pos)) return false;
@@ -1387,6 +1457,66 @@
       if (u.side === 'def' && !war.protest.protestorsViolent && !war.protest.govViolent) return false;
     }
     return true;
+  }
+  // One engagement between `a` (who closed in) and `d`: both sides' damage,
+  // morale, routs and deaths. The attacker-vs-defender pass and, in a
+  // multi-way conflict, the pass between hostile parties of the same side
+  // both resolve through here.
+  function clash(war, a, d, rng, dmgMod) {
+    // Transport ships & Boats feature: a transport-state land unit (or a
+    // beached boat) cannot DEAL damage but can still be damaged — each
+    // side's dealt-damage term is independently zeroed by canFight, and
+    // neither combatant's state is stomped to 'fighting' if it can't fight
+    // (so a transport ship keeps rendering as a transport ship even while
+    // under fire).
+    const aFights = canFightVs(war, a, d), dFights = canFightVs(war, d, a);
+    if (aFights) a.state = 'fighting';
+    if (d.state !== 'routed' && dFights) d.state = 'fighting';
+    const defStationary = d.garrison && !d.dest;
+    const defBonus = defStationary ? 1.35 : 1;
+    // Equipment (Phase 26, per-unit): the guns THIS unit carries raise the
+    // damage it deals; the victim's own kit absorbs some of what lands
+    // (hp); better small arms also slow morale drain (a unit that can
+    // shoot back holds longer).
+    const dmgToDef = aFights ? K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp') : 0;
+    // In a protest the security forces DISPERSE crowds — batons, gas, riot
+    // lines — far beyond what their headcount alone would do to a mass of
+    // people (war.protest.tuning.policeMult, default ×3).
+    const protest = war.kind === 'protest';
+    const policeMult = protest && (!war.factions || a.kind === 'protestor') ? (Number(((war.protest || {}).tuning || {}).policeMult) || 3) : 1;
+    const dmgToAtt = dFights ? K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * policeMult * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp') : 0;
+    d.strength = Math.max(0, round1(d.strength - dmgToDef));
+    a.strength = Math.max(0, round1(a.strength - dmgToAtt));
+    war.stats[d.side === 'att' ? 'attLosses' : 'defLosses'] += dmgToDef; war.stats[a.side === 'att' ? 'attLosses' : 'defLosses'] += dmgToAtt;
+    if (war.factions) facLoss(war, a, dmgToAtt), facLoss(war, d, dmgToDef);
+    // a unit taking fire doesn't heal it straight back this tick (a crowd
+    // that isn't fighting back is never flagged 'fighting')
+    if (dmgToAtt > 0) a.engagedUntil = Math.max(a.engagedUntil || -1, war.tick);
+    if (dmgToDef > 0) d.engagedUntil = Math.max(d.engagedUntil || -1, war.tick);
+    if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
+    // ...and a crowd under a crackdown breaks even though it never fights back
+    else if (protest && dmgToAtt > 0) a.org = clamp(a.org - ORG_DRAIN, 0, 100);
+    // (security forces charging a crowd that never fights back don't wear
+    // down; soldiers facing a crowd hold far longer than police —
+    // war.protest.tuning.armyResolve, default ×4)
+    const resolve = protest && d.army ? armyResolve(war) : 1;
+    if (dFights && (aFights || !protest)) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale') / resolve, 0, 100);
+    if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
+    // Garrisons used to never rout (dug in = infinitely stubborn); now a
+    // garrison's morale can still fully collapse, just at a much lower
+    // threshold (GARRISON_ROUT_ORG) than a field unit's ROUT_ORG — a
+    // garrison keeps fighting well past the point a mobile unit would break,
+    // but total organisational collapse still routs it.
+    const dRoutOrg = (d.garrison || (protest && d.army)) ? GARRISON_ROUT_ORG : ROUT_ORG;
+    if (d.org < dRoutOrg && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
+    if (a.strength <= 0) killUnit(war, a);
+    if (d.strength <= 0) killUnit(war, d);
+  }
+  function facLoss(war, u, dmg) {
+    if (!(dmg > 0)) return;
+    const L = war.stats.facLosses || (war.stats.facLosses = {});
+    const f = facOf(war, u);
+    L[f] = round1((L[f] || 0) + dmg);
   }
   function stepCombat(db, war, ctx, rng) {
     const atts = war.units.filter(u => u.side === 'att' && isLive(u) && u.state !== 'embarked' && u.kind !== 'warship');
@@ -1403,58 +1533,35 @@
       // and targeting the corpse both wasted this attacker's whole tick and
       // re-ran the rout/kill bookkeeping on a dead unit (duplicate
       // "destroyed" events, a corpse flipped back to state 'routed').
-      for (const d of defs) { if (!isLive(d)) continue; const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
+      for (const d of defs) { if (!isLive(d) || (war.factions && !hostile(war, a, d))) continue; const dd = dist(a.pos, d.pos); if (dd < nd) { nd = dd; nearest = d; } }
       if (!nearest || nd > COMBAT_RANGE) { if (a.state !== 'routed' && a.state !== 'transport' && !engaged(war, a)) a.state = a.dest ? 'moving' : 'holding'; continue; }
       const d = nearest;
       anyFight = true;
-      // Transport ships & Boats feature: a transport-state land unit (or a
-      // beached boat) cannot DEAL damage but can still be damaged — each
-      // side's dealt-damage term is independently zeroed by canFight, and
-      // neither combatant's state is stomped to 'fighting' if it can't fight
-      // (so a transport ship keeps rendering as a transport ship even while
-      // under fire).
-      const aFights = canFight(war, a), dFights = canFight(war, d);
-      if (aFights) a.state = 'fighting';
-      if (d.state !== 'routed' && dFights) d.state = 'fighting';
-      const defStationary = d.garrison && !d.dest;
-      const defBonus = defStationary ? 1.35 : 1;
-      // Equipment (Phase 26, per-unit): the guns THIS unit carries raise the
-      // damage it deals; the victim's own kit absorbs some of what lands
-      // (hp); better small arms also slow morale drain (a unit that can
-      // shoot back holds longer).
-      const dmgToDef = aFights ? K_COMBAT * a.strength * (0.7 + 0.6 * rng()) * (a.atk || 1) * dmgMod * unitMul(war, a, 'dmg') / unitMul(war, d, 'hp') : 0;
-      // In a protest the security forces DISPERSE crowds — batons, gas, riot
-      // lines — far beyond what their headcount alone would do to a mass of
-      // people (war.protest.tuning.policeMult, default ×3).
-      const protest = war.kind === 'protest';
-      const policeMult = protest ? (Number(((war.protest || {}).tuning || {}).policeMult) || 3) : 1;
-      const dmgToAtt = dFights ? K_COMBAT * d.strength * (0.7 + 0.6 * rng()) * defBonus * dmgMod * policeMult * unitMul(war, d, 'dmg') / unitMul(war, a, 'hp') : 0;
-      d.strength = Math.max(0, round1(d.strength - dmgToDef));
-      a.strength = Math.max(0, round1(a.strength - dmgToAtt));
-      war.stats.defLosses += dmgToDef; war.stats.attLosses += dmgToAtt;
-      // a unit taking fire doesn't heal it straight back this tick (a crowd
-      // that isn't fighting back is never flagged 'fighting')
-      if (dmgToAtt > 0) a.engagedUntil = Math.max(a.engagedUntil || -1, war.tick);
-      if (dmgToDef > 0) d.engagedUntil = Math.max(d.engagedUntil || -1, war.tick);
-      if (aFights) a.org = clamp(a.org - ORG_DRAIN / unitMul(war, a, 'morale'), 0, 100);
-      // ...and a crowd under a crackdown breaks even though it never fights back
-      else if (protest && dmgToAtt > 0) a.org = clamp(a.org - ORG_DRAIN, 0, 100);
-      // (security forces charging a crowd that never fights back don't wear
-      // down; soldiers facing a crowd hold far longer than police —
-      // war.protest.tuning.armyResolve, default ×4)
-      const resolve = protest && d.army ? armyResolve(war) : 1;
-      if (dFights && (aFights || !protest)) d.org = clamp(d.org - ORG_DRAIN * 0.7 / unitMul(war, d, 'morale') / resolve, 0, 100);
-      if (a.org < ROUT_ORG && a.state !== 'routed') { a.state = 'routed'; pushEvent(war, 'battle', a.pos.slice(), `${a.name} breaks and routs.`); }
-      // Garrisons used to never rout (dug in = infinitely stubborn); now a
-      // garrison's morale can still fully collapse, just at a much lower
-      // threshold (GARRISON_ROUT_ORG) than a field unit's ROUT_ORG — a
-      // garrison keeps fighting well past the point a mobile unit would break,
-      // but total organisational collapse still routs it.
-      const dRoutOrg = (d.garrison || (protest && d.army)) ? GARRISON_ROUT_ORG : ROUT_ORG;
-      if (d.org < dRoutOrg && d.state !== 'routed') { d.state = 'routed'; pushEvent(war, 'battle', d.pos.slice(), `${d.name} breaks and routs.`); }
-      if (a.strength <= 0) killUnit(war, a);
-      if (d.strength <= 0) killUnit(war, d);
+      clash(war, a, d, rng, dmgMod);
       engagedDefs.add(d.id);
+    }
+    // Multi-way: hostile parties on the SAME side fight too — an intervener
+    // at war with everyone, or one that turned on its own camp. Each pair
+    // meets once a tick, whoever's nearer closing in.
+    if (war.factions) {
+      const all = war.units.filter(u => isLive(u) && u.state !== 'embarked' && u.kind !== 'warship');
+      const met = new Set();
+      for (const a of all) {
+        if (!isLive(a)) continue;
+        let nearest = null, nd = Infinity;
+        for (const b of all) {
+          if (b === a || b.side !== a.side || !isLive(b) || !hostile(war, a, b)) continue;
+          const dd = dist(a.pos, b.pos);
+          if (dd < nd) { nd = dd; nearest = b; }
+        }
+        if (!nearest || nd > COMBAT_RANGE) continue;
+        const pk = a.id < nearest.id ? a.id + '|' + nearest.id : nearest.id + '|' + a.id;
+        if (met.has(pk)) continue;
+        met.add(pk);
+        anyFight = true;
+        clash(war, a, nearest, rng, dmgMod);
+        engagedDefs.add(a.id); engagedDefs.add(nearest.id);
+      }
     }
     // Defenders whose state says 'fighting' but who had no attacker in range
     // this tick stand down. Attackers get the same reset inline in the loop
@@ -1490,7 +1597,7 @@
     for (const w of warships) {
       let nearest = null, nd = Infinity;
       for (const e of war.units) {
-        if (e.side === w.side || !isLive(e) || e.state === 'embarked') continue;
+        if (!hostile(war, w, e) || !isLive(e) || e.state === 'embarked') continue;
         if (e.kind === 'boat' && !isWaterAt(war, e.pos) && e.state !== 'transport') continue; // a beached boat isn't a naval target
         const d = dist(w.pos, e.pos);
         if (d < nd) { nd = d; nearest = e; }
@@ -1835,7 +1942,7 @@
           const d = dist(e.pos, sq.pos);
           if (d < td) { td = d; threat = e; }
         };
-        for (const e of sqs) consider(e, e.side !== sq.side);
+        for (const e of sqs) consider(e, hostile(war, e, sq));
         for (const e of oSqs) consider(e, crossHostileSq(war, sq, O, e));
         sq.engaging = threat ? threat.id : null;
         if (threat) airStep(sq, threat.pos);
@@ -1863,7 +1970,7 @@
       if (a.planes <= 0 || !airborne(a)) continue;
       for (let j = i + 1; j < sqs.length; j++) {
         const b = sqs[j];
-        if (b.side === a.side || b.planes <= 0 || !airborne(b) || a.planes <= 0) continue;
+        if (!hostile(war, a, b) || b.planes <= 0 || !airborne(b) || a.planes <= 0) continue;
         if (dist(a.pos, b.pos) > AIR_COMBAT_R) continue;
         const pA = AIR_KILL_P * role(a) * (a.q || 1) / (b.q || 1);
         const pB = AIR_KILL_P * role(b) * (b.q || 1) / (a.q || 1);
@@ -1911,7 +2018,7 @@
     for (const sq of sqs) {
       if (sq.planes <= 0 || !airborne(sq)) continue;
       for (const u of war.units) {
-        if (u.side === sq.side || !isLive(u) || u.state === 'embarked') continue;
+        if (!hostile(war, sq, u) || !isLive(u) || u.state === 'embarked') continue;
         if (dist(u.pos, sq.pos) > AIR_AA_R) continue;
         const p = AIR_AA_P * clamp((u.strength || 0) / 2000, 0.3, 1.5) * (u.kind === 'warship' ? 3 : 1);
         if (rng() < p) {
@@ -1985,7 +2092,64 @@
   }
 
   // ---------- territory fracture ----------
+  // Multi-way ground: every land cell has a HOLDER faction — a captured
+  // cell's `f` (else its side's principal), an enemy-homeland cell its
+  // owner's, everything else the defender's. A unit takes the cells round it
+  // from any holder its faction may seize (facSeizes); the defender taking
+  // back its own soil clears the cell, a principal attacker writes the
+  // classic { o:'att' }, an intervener { o: its side, f: itself }. In a
+  // protest the crowds still plant flags only in capture mode; the
+  // government and the interveners take ground regardless.
+  function homeOwners(db, war) {
+    const out = {};
+    for (const f in war.factions) for (const cid of countryIdsForEntity(db, f)) if (!out[cid]) out[cid] = f;
+    return out;
+  }
+  function cellHolder(war, key, owners) {
+    const c = war.cells[key];
+    if (c) return c.f || (c.o === 'att' ? principalOf(war, 'att') : war.defenderId);
+    const home = war.grid.enemyCells && war.grid.enemyCells[key];
+    if (home) return owners[home] || principalOf(war, 'att');
+    return war.defenderId;
+  }
+  function stepFactionTerritory(db, war) {
+    const cs = war.grid.cell;
+    const attP = principalOf(war, 'att'), defP = war.defenderId;
+    const crowdsCapture = war.kind !== 'protest' || !!(war.protest && war.protest.captureMode);
+    const owners = homeOwners(db, war);
+    const land = war.grid.landCells;
+    const enemy = war.grid.enemyCells || {};
+    for (const u of war.units) {
+      if (!isLive(u) || u.state === 'embarked' || u.state === 'transport' || NAVAL_KINDS[u.kind]) continue;
+      const f = facOf(war, u);
+      if (f === attP && !crowdsCapture) continue;
+      const cx0 = Math.floor(u.pos[0] / cs), cy0 = Math.floor(u.pos[1] / cs);
+      for (let dx = -2; dx <= 2; dx++) {
+        for (let dy = -2; dy <= 2; dy++) {
+          const cx = cx0 + dx, cy = cy0 + dy;
+          if (cx < 0 || cy < 0 || cx >= war.grid.cols || cy >= war.grid.rows) continue;
+          const centerX = (cx + 0.5) * cs, centerY = (cy + 0.5) * cs;
+          if (Math.hypot(centerX - u.pos[0], centerY - u.pos[1]) / cs > CONTROL_RADIUS_CELLS) continue;
+          const key = cellKey(cx, cy);
+          if (land && !land[key]) continue;
+          const holder = cellHolder(war, key, owners);
+          if (!facSeizes(war, f, holder)) continue;
+          const home = enemy[key];
+          if (home) {
+            if (owners[home] === f || (!owners[home] && f === attP)) delete war.cells[key]; // a homeland retaken
+            else war.cells[key] = f === defP ? { o: 'def', c: home } : { o: facSide(war, f), f, c: home };
+            continue;
+          }
+          if (f === defP) { delete war.cells[key]; continue; }
+          const pid = provinceAt(db.provinces, [centerX, centerY]);
+          if (!pid) continue; // foreign or neutral soil — not part of this conflict's ground
+          war.cells[key] = f === attP ? { o: 'att', p: 1, pid } : { o: facSide(war, f), f, p: 1, pid };
+        }
+      }
+    }
+  }
   function stepTerritory(db, war) {
+    if (war.factions) return stepFactionTerritory(db, war);
     // Protests (Phase 31) only fracture territory in capture mode (the
     // protestor-side "Capture territory" toggle) — otherwise the crowd
     // occupies the square but no flag sticks to it.
@@ -2084,9 +2248,13 @@
     let attSupply = null;
     const anchorCell = attackerSupplyAnchorCell(war);
     if (anchorCell) {
+      // multi-way: ground held by the attacker or any party not at war
+      // with it carries attacker supply
+      const attP = principalOf(war, 'att');
+      const attOwn = war.factions ? (c) => { const h = c.f || (c.o === 'att' ? attP : war.defenderId); return h === attP || !facHostile(war, attP, h); } : (c) => c.o === 'att';
       const attHeld = (k) => {
         const c = war.cells[k];
-        if (c) return c.o === 'att';
+        if (c) return attOwn(c);
         return !!(war.grid.enemyCells && war.grid.enemyCells[k]);
       };
       const seeds = [cellKey(anchorCell[0], anchorCell[1])];
@@ -2112,12 +2280,12 @@
       if (war.grid.enemyCells) {
         for (const key in war.grid.enemyCells) {
           const c = war.cells[key];
-          if (!c || c.o !== 'def') seeds.push(key);
+          if (!c || (war.factions ? attOwn(c) : c.o !== 'def')) seeds.push(key);
         }
       }
       if (isNaval && war.grid.landCells) {
         for (const key in war.cells) {
-          if (war.cells[key].o !== 'att') continue;
+          if (!attOwn(war.cells[key])) continue;
           const comma = key.indexOf(',');
           const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
           const coastal =
@@ -2132,7 +2300,7 @@
       // landing before any beach cell is formally captured.
       for (const key in war.cells) {
         const c = war.cells[key];
-        if (c.o !== 'att') continue;
+        if (!attOwn(c)) continue;
         const comma = key.indexOf(',');
         const cx = Number(key.slice(0, comma)), cy = Number(key.slice(comma + 1));
         if (Math.max(Math.abs(cx - anchorCell[0]), Math.abs(cy - anchorCell[1])) <= 2) seeds.push(key);
@@ -2155,8 +2323,15 @@
       // Symmetric to attHeld above (Phase 26): enemy-homeland cells the
       // defence has captured (o:'def') carry defender supply too, so an
       // invading defender column stays supplied through the ground it took.
-      const defHeld = (k) => (landCells.has(k) && (!war.cells[k] || war.cells[k].o !== 'att')) ||
-        (!!war.cells[k] && war.cells[k].o === 'def');
+      const defHeld = war.factions
+        ? (k) => {
+          const c = war.cells[k];
+          if (!c) return landCells.has(k);
+          const h = c.f || (c.o === 'att' ? principalOf(war, 'att') : war.defenderId);
+          return (landCells.has(k) || c.o === 'def') && (h === war.defenderId || !facHostile(war, war.defenderId, h));
+        }
+        : (k) => (landCells.has(k) && (!war.cells[k] || war.cells[k].o !== 'att')) ||
+          (!!war.cells[k] && war.cells[k].o === 'def');
       const capCell = cellKey(Math.floor(capital.pos[0] / cs), Math.floor(capital.pos[1] / cs));
       defSupply = floodFillCells([capCell], defHeld);
     }
@@ -2182,7 +2357,10 @@
       // boat gets no such grace.
       if (NAVAL_KINDS[u.kind] && navalWaterAt(war, u.pos)) { u.supplied = true; continue; }
       const cx = Math.floor(u.pos[0] / cs), cy = Math.floor(u.pos[1] / cs);
-      if (u.side === 'att') {
+      // an intervening power brings its own supply train
+      const ownTrain = war.factions && facOf(war, u) !== principalOf(war, u.side) && ((war.allies && war.allies[u.side]) || []).indexOf(facOf(war, u)) < 0;
+      if (ownTrain) u.supplied = true;
+      else if (u.side === 'att') {
         // Membership in attSupply already implies att-held (seeds and every
         // expansion step require it), so no separate war.cells check needed.
         u.supplied = anchorCell ? suppliedNear(attSupply, cx, cy) : true; // legacy war doc with no anchor at all — see attackerSupplyAnchorCell
@@ -2239,7 +2417,7 @@
     const enemyCounts = {};
     for (const key in war.cells) {
       const c = war.cells[key];
-      if (c.o === 'att' && c.pid) counts[c.pid] = (counts[c.pid] || 0) + 1;
+      if (c.pid && (c.o === 'att' || (c.f && c.f !== war.defenderId))) counts[c.pid] = (counts[c.pid] || 0) + 1;
       else if (c.o === 'def' && c.c) enemyCounts[c.c] = (enemyCounts[c.c] || 0) + 1; // defender-occupied attacker homeland (Phase 22)
     }
     const out = {};
@@ -2248,6 +2426,23 @@
       out[pid] = total ? Math.round((counts[pid] || 0) / total * 100) : 0;
     }
     war.stats.provinceControl = out;
+    // multi-way: each occupier's share of each province
+    if (war.factions) {
+      const attP = principalOf(war, 'att'), fc = {};
+      for (const key in war.cells) {
+        const c = war.cells[key];
+        if (!c.pid) continue;
+        const f = c.f || (c.o === 'att' ? attP : null);
+        if (!f) continue;
+        const row = fc[f] || (fc[f] = {});
+        row[c.pid] = (row[c.pid] || 0) + 1;
+      }
+      for (const f in fc) for (const pid in fc[f]) {
+        const total = war.grid.provinceLandCells[pid] || 0;
+        fc[f][pid] = total ? Math.round(fc[f][pid] / total * 1000) / 10 : 0;
+      }
+      war.stats.factionControl = fc;
+    }
     // % of each ATT-side homeland the defence has overrun — additive: absent
     // for wars whose grid predates countryLandCells.
     const enemyOut = {};
@@ -2298,7 +2493,8 @@
     // calls it off (a protest can never formally "win"; a concession is a GM
     // end). Capture mode still records cells but cannot end the protest.
     if (war.kind === 'protest') {
-      const attAlive = war.units.some(u => u.side === 'att' && isLive(u));
+      const org = principalOf(war, 'att');
+      const attAlive = war.units.some(u => isLive(u) && (war.factions ? facOf(war, u) === org : u.side === 'att'));
       if (!attAlive) {
         war.active = false;
         war.result = { winner: 'def', endedAt: new Date().toISOString(), reason: 'Protests dispersed' };
@@ -2382,7 +2578,7 @@
         // invalid attackId drops the whole order silently (same pattern as
         // every other malformed-order case in this function).
         const target = war.units.find(x => x.id === o.attackId);
-        if (!target || !isLive(target) || target.side === u.side) continue;
+        if (!target || !isLive(target) || !hostile(war, u, target)) continue;
         clearDest(u);
         u.attackId = target.id;
         if (u.state !== 'routed') u.state = 'moving';
@@ -2434,6 +2630,7 @@
       WarAI.run(api, db, war, ctx, rng);
       if (!war.active) return true; // AI declared a defeat this tick
     }
+    stepFactionAI(db, war);
     stepMovement(db, war, ctx, rng);
     stepTransportState(war);
     stepCombat(db, war, ctx, rng);
@@ -2447,6 +2644,53 @@
     stepObjectives(db, war, ctx);
     checkVictory(db, war, ctx);
     return true;
+  }
+
+  // ---------- an intervening power's field commander ----------
+  // A party the war AI doesn't run (an intervener that isn't a sworn ally of
+  // its side's principal — and every intervener in a protest, which has no
+  // war AI) gets a plain one, every FACTION_AI_EVERY ticks: each formation
+  // not under a player's recent order keeps after a live enemy it is
+  // chasing, else strikes the nearest enemy within FACTION_AGGRO, else
+  // marches on the nearest city whose ground its faction may seize. Off when
+  // the faction's `ai` is false (a player commands it). Deterministic:
+  // factions in insertion order, units in war.units order, no randomness.
+  const FACTION_AI_EVERY = 4, FACTION_AGGRO = 520;
+  function stepFactionAI(db, war) {
+    if (!war.factions || war.tick % FACTION_AI_EVERY) return;
+    const run = new Set([principalOf(war, 'att'), war.defenderId].concat((war.allies && war.allies.att) || [], (war.allies && war.allies.def) || []));
+    const cs = war.grid.cell;
+    const owners = homeOwners(db, war);
+    const cities = (db.cities || []).filter(c => Array.isArray(c.pos));
+    for (const f in war.factions) {
+      if (run.has(f) || war.factions[f].ai === false) continue;
+      let k = 0;
+      for (const u of war.units) {
+        if (!isLive(u) || facOf(war, u) !== f) continue;
+        k++;
+        if (u.state === 'embarked' || u.state === 'routed' || NAVAL_KINDS[u.kind]) continue;
+        if (u.orderedBy === 'player' && (u.playerHoldUntil || 0) > war.tick) continue;
+        if (u.attackId) {
+          const t = war.units.find(x => x.id === u.attackId);
+          if (t && isLive(t) && hostile(war, u, t)) continue;
+        }
+        let best = null, bd = FACTION_AGGRO;
+        for (const e of war.units) {
+          if (!isLive(e) || e.state === 'embarked' || e.kind === 'warship' || !hostile(war, u, e)) continue;
+          const d = dist(u.pos, e.pos);
+          if (d < bd) { bd = d; best = e; }
+        }
+        if (best) { clearDest(u); u.attackId = best.id; if (u.state !== 'fighting') u.state = 'moving'; continue; }
+        const seizable = (c) => facSeizes(war, f, cellHolder(war, cellKey(Math.floor(c.pos[0] / cs), Math.floor(c.pos[1] / cs)), owners));
+        if (u.dest && u.aiCity) { const c = cities.find(x => x.id === u.aiCity); if (c && seizable(c)) continue; }
+        let goal = null, gd = Infinity;
+        for (const c of cities) { if (!seizable(c)) continue; const d = dist(u.pos, c.pos); if (d < gd) { gd = d; goal = c; } }
+        if (goal) {
+          u.aiCity = goal.id;
+          setDest(db, u, [goal.pos[0] + ((k * 37) % 61) - 30, goal.pos[1] + ((k * 53) % 61) - 30], u.speed);
+        } else if (u.dest && u.aiCity) { clearDest(u); u.aiCity = null; u.state = 'holding'; }
+      }
+    }
   }
 
   // ---------- wall-clock gate (shared by the server heartbeat and client prediction) ----------
@@ -2498,7 +2742,9 @@
     transportFingerprint, getTransportGraph, computePath, setDest, setManualPath, clearDest,
     // sim (note/primaryObjective are consumed by war-ai.js — the whole api
     // bundle is what warTick injects into WarAI.run as its helper set)
-    pushEvent, note, primaryObjective, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick
+    pushEvent, note, primaryObjective, killUnit, pruneCorpses, applyOrders, warTick, maybeWarTick,
+    // factions (multi-way conflicts)
+    principalOf, facOf, facSide, facHostile, hostile, facSeizes, cellHolder, homeOwners
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else global.WarEngine = api;

@@ -27,6 +27,9 @@ mode). `store.get()` returns it; everything mutates it in place.
   election: null | { ... }, // LIVE election doc (Phase 33) — see "Live election doc" below
   trades: [ ... ],         // negotiated trade offers (open/accepted/declined/cancelled)
   markers: [ ... ],        // GM map markers
+  // (a conflict doc — war / protest — may also carry `factions` once a third
+  //  power intervenes: { [entityId]: { side, stance, seize, ai, … } }; its
+  //  units carry `fac`, its captured cells `f`; docs/WAR.md "Multi-way conflicts")
   militaryLog: [ ... ],    // nations' arsenal record — { at, turn, why, n:{ entityId: [arms, tanks, ships, aircraft, fuel, men] } } (docs/WAR.md "Armed forces")
   peaceOffers: [ ... ],    // peace negotiations — { id:'peace_…', conflict, talks (startedAt), side, status, rev, terms, … } (docs/WAR.md "Peace negotiations")
   mapFx: [ ... ],          // GM map effects — { id:'fx_…', kind, pos:[x,y], r, at, label } (visual only, see below)

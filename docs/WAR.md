@@ -987,10 +987,100 @@ actor)`. Since Phase 27 the same pathway is also driven automatically at
   entered the conflict on the side of \<attacker/defender name\>*") — the
   same mechanism war milestones already use (all war reports are drafts).
 
-**UI** (`public/js/war.js`'s `renderIntervention`, War Room GM section): a
-nation select (every `foreign` entity not already the attacker, defender, or
-a listed ally — hidden entirely once none remain), a side toggle, and a Join
-button that POSTs `/api/gm/war/join`.
+`joinWar` remains the pathway for alliance auto-join at `startWar` (and
+`POST /api/gm/war/join`); the War Room's intervention UI now goes through
+the multi-way `intervene` below — wars and protests alike.
+
+## Multi-way conflicts — factions (`war.factions`)
+
+Any nation can enter a running war OR protest as a party of its own and
+choose whom it fights alongside and whom it fights against — e.g. Valksland
+into a protest alongside the government and against the movement, then
+Del' Casia against all three. Absent `war.factions` the conflict is the
+classic two-sided one and every engine path below reduces to it exactly (a
+replay of the same war and protest on the pre-factions engine and this one
+matched bit for bit over 400 ticks).
+
+**State** (`doc.factions`, created by the first intervention —
+`war.ensureFactions` seeds the two principals and any sworn `war.allies`):
+`{ [entityId]: { side, stance: { [entityId]: 'ally'|'enemy' }, seize:
+'enemies'|'all', ai, principal?, sworn?, joinedTick, entry } }`. A unit's
+faction is `u.fac`, else `u.nationId`, else its side's principal
+(`engine.facOf`). `side` is the CAMP whose machinery a party uses (command,
+supply column, loss column): the defender's if it stands with the defender
+(or only against the attacker), the attacking camp otherwise.
+
+**Hostility** (`engine.facHostile`): unilateral — either party calling the
+other `'enemy'` means war; an explicit `'ally'` (with no `'enemy'` either
+way) means peace; nothing stated falls back to the camps (own camp friends,
+other camp foes). Every unit-vs-unit question in the engine goes through
+`hostile(war, a, b)` — nearest enemy, chase, warship fire, air combat and
+ground fire, attack-order validation, friendly separation. Combat keeps the
+attacker-vs-defender pass (each attacker closes on its nearest HOSTILE
+defender) and adds a pass between hostile units of the SAME side (each pair
+once a tick); both resolve through `clash(war, a, d, rng, dmgMod)` — the
+old loop body, unchanged. `canFightVs` reads a protest's ladder per pair:
+crowds strike only once violent, the government's men strike crowds only
+once force is authorized (or the crowd turned violent) — but anyone fights
+an intervening army. `stats.facLosses[entityId]` keeps each party's losses.
+
+**Ground** (`stepFactionTerritory`): every land cell has a holder
+(`engine.cellHolder`: a captured cell's `f`, else its side's principal; an
+enemy-homeland cell its owner's; everything else the defender's). A unit
+takes the cells round it from any holder its faction may seize
+(`facSeizes`: hostile, or `seize: 'all'` — allies' ground too). Written as
+`{ o: side, f: entityId, p:1, pid }` for an intervener (classic `{o:'att'}`
+for the attacking principal, a cleared cell for the defender). In a protest
+the crowds still plant flags only in capture mode; the government and the
+interveners take ground regardless. `stats.provinceControl` counts ground
+held by anyone but the defender (refugee waves, devastation read it);
+`stats.factionControl[f][pid]` is each occupier's share. Buildings follow
+the ground (`applyOccupationTransfers`): a property passes to whichever
+party holds its cell — protesters, an intervener, then another — keeping the
+ORIGINAL owner in the stash, and goes back when the defender retakes it.
+
+**Supply**: the principals' corridors pass through ground held by anyone
+not at war with them; an intervener brings its own train (always supplied).
+**Zones**: every faction's homeland joins the belligerent set
+(`belligerentKey`) — open ground for the defending camp's, capturable for
+the attacking camp's. **Protest end**: when the MOVEMENT's own crowds are
+gone (`facOf === organizer`), whoever else is still in the streets.
+
+**Field commander** (`stepFactionAI`, every 4 ticks, deterministic): a party
+the war AI doesn't run (not a principal or sworn ally — in a protest, every
+intervener) with `ai !== false`: each formation not under a player's recent
+order keeps after a live enemy it's chasing, else strikes the nearest enemy
+within 520px, else marches on the nearest city whose ground its faction may
+seize. Off, its troops wait for orders.
+
+**Server** (`server/war.js`): `intervene(db, {conflict, entityId, allies,
+enemies, seize, ai, infantry 0–8, armour 0–4, entry 'city'|'homeland',
+cityId})` — the contingent lands at a city (or its own border), armed from
+the nation's arsenal at once; `setStance({conflict, from, to, stance})` — the
+two principals can't make peace this way (the peace table does that); a
+sworn ally turning on its own camp leaves the alliance (`unswear`: out of
+`war.allies`, its war-AI command dropped, the field commander takes over);
+`setFactionPolicy({conflict, entityId, seize?, ai?})`;
+`withdrawFaction({conflict, entityId})` — troops home with their kit, its
+ground given up, its buildings back on the next sweep. Every step logs,
+drafts news and broadcasts. **Who**: the GM, or whoever runs that nation
+(ownership chain); a principal's stance by its own command (the president
+for the government, the movement's leadership). Troops answer only to their
+own power (`api.mayCommandUnit`): the president commands the government's
+forces, not Valksland's; `cmdAccess.factions` lists the interveners a
+viewer runs. A side's leadership can't stand down an intervener's troops.
+
+**Client** (`public/js/war-factions.js`): the War Room's "Parties to the
+conflict" (each party's colour, camp, troops, ground, losses; stance chips
+its own command can flip; seize rule, field commander, Withdraw) and "+ Send
+a nation in"; the map draws interveners' markers (`.wu-fac`, `--fac`) and
+ground (`_factionField` → `.war-occupied-fac` + a dashed edge) in their own
+map colour (`facColor`).
+
+**Not yet**: interveners take no part in peace offers (they withdraw or stay
+until the conflict ends — a war's settlement lets every occupier keep its
+holdings, a protest's hands everything back); they fly no air wing; and
+fighting ACROSS a war and a protest still reads the two docs' camps.
 
 ## The commander hierarchy — `server/war-ai.js`
 

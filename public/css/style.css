@@ -2424,3 +2424,27 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 .ow-mil-cell .k{font-family:var(--font-mono); font-size:8.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-faint);}
 .ow-mil-cell .v{font-family:var(--font-voice); font-size:17px;}
 .ow-mil-cell svg{display:block; margin-top:2px;}
+
+/* ---------- multi-way conflicts: the parties (war-factions.js) ---------- */
+.wu-fac .wu-frame{fill:var(--fac-fill); stroke:var(--fac); stroke-width:2.3;}
+.wu-fac .wu-sym{stroke:var(--fac);}
+.wu-fac.wu-fight .wu-frame{stroke:#b0251a; stroke-width:2.6;}
+.wu-fac.wu-cutoff .wu-frame{stroke:#c47f12;}
+.war-occupied-fac{fill-opacity:.24; stroke:none;}
+.war-front-fac{fill:none; stroke-width:2.2; stroke-opacity:.85; stroke-dasharray:7 3;}
+.fac-list{display:flex; flex-direction:column; gap:8px; margin:6px 0 10px;}
+.fac-row{border:1px solid var(--rule); border-left:5px solid var(--fac); background:var(--paper-deep); padding:8px 12px;}
+.fac-head{display:flex; flex-wrap:wrap; align-items:baseline; gap:6px 10px;}
+.fac-swatch{display:inline-block; width:10px; height:10px; background:var(--fac); border-radius:2px; align-self:center;}
+.fac-role{font-family:var(--font-mono); font-size:9.5px; letter-spacing:.12em; text-transform:uppercase; color:var(--ink-faint);}
+.fac-stats{margin-left:auto; font-family:var(--font-mono); font-size:10.5px; color:var(--ink-soft);}
+.fac-stances, .fac-controls{display:flex; flex-wrap:wrap; align-items:center; gap:5px; margin-top:6px;}
+.fac-stances .mono-label{margin-right:4px;}
+.fac-dot{display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; vertical-align:middle;}
+.chip.fac-stance.fac-enemy{border-color:#9a3324; color:#9a3324;}
+.chip.fac-stance.fac-ally{border-color:#3f6a3a; color:#3f6a3a;}
+.chip.fac-stance[disabled]{opacity:.8; cursor:default;}
+.fac-meta{font-size:11.5px; color:var(--ink-faint);}
+.fac-form{display:flex; flex-direction:column; gap:10px; padding:6px 0;}
+.fac-form select{font-size:12px; background:var(--paper); border:1px solid var(--rule); color:var(--ink); padding:3px 6px;}
+.fac-inline{display:flex; gap:8px; flex-wrap:wrap;}

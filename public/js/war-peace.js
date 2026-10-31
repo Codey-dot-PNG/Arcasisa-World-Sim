@@ -18,7 +18,16 @@
      · a message.
    Accepting an offer applies it and ends the conflict. Acceptance carries the
    revision the reader saw, so terms revised under them are never accepted
-   blind. */
+   blind.
+
+   DEALS (multi-way conflicts — once a nation has intervened): any party may
+   strike a deal with any other, whichever side either is on (server
+   peace.js kind:'pact'). The composer then asks who you speak for and with
+   whom; between the two original sides it is the peace offer above, any
+   other pair gets the deal terms — peace between the two, a joint war
+   against others, money, goods, one handing its ground to the other, one
+   withdrawing, borders between their own lands, a message. A deal binds only
+   its two parties; the conflict goes on. */
 (function () {
   const NS = 'http://www.w3.org/2000/svg';
   const other = (s) => (s === 'att' ? 'def' : 'att');
@@ -36,6 +45,45 @@
       return (S().peaceOffers || []).filter(o => o.conflict === key && o.talks === war.startedAt);
     },
     peaceHeld(key) { return ((S().peaceHeld || {})[key]) || []; },
+    // every party to the conflict (the two sides, then any interveners)
+    peaceParties(war) {
+      const s = this.peaceSides(war);
+      const ids = [s.att && s.att.id, s.def && s.def.id].filter(Boolean);
+      for (const id of Object.keys(war.factions || {})) if (!ids.includes(id)) ids.push(id);
+      return ids;
+    },
+    // the parties this viewer may speak for in deals
+    peaceVoices(war) {
+      if (isGM()) return this.peaceParties(war);
+      const ca = war.cmdAccess || {}, s = this.peaceSides(war), out = [];
+      if (ca.negotiate === 'att' && s.att) out.push(s.att.id);
+      if (ca.negotiate === 'def' && s.def) out.push(s.def.id);
+      for (const id of ca.factions || []) if (!out.includes(id)) out.push(id);
+      return out;
+    },
+    _isPrincipalPair(war, a, b) {
+      const s = this.peaceSides(war);
+      const att = s.att && s.att.id, def = s.def && s.def.id;
+      return (a === att && b === def) || (a === def && b === att);
+    },
+    // mirror of server peace.describePact
+    dealTermsText(t, from, to) {
+      t = t || {};
+      const n = (id) => entName(id);
+      const other = (id) => (id === from ? to : from);
+      const out = [];
+      if (t.peace) out.push(`${n(from)} and ${n(to)} stop fighting each other`);
+      if (t.against && t.against.length) out.push(`together against ${t.against.map(n).join(', ')}`);
+      if (t.reparations) out.push(`${n(t.reparations.payer)} pays ${fmtMoney(t.reparations.amount)} to ${n(other(t.reparations.payer))}`);
+      for (const g of t.goods || []) out.push(`${n(g.from)} hands ${fmtNum(g.qty)} × ${(itemById(g.itemId) || {}).name || g.itemId} to ${n(other(g.from))}`);
+      if (t.ground) out.push(`${n(t.ground.from)} hands the ground it holds to ${n(t.ground.to)}`);
+      if (t.withdraw) out.push(`${n(t.withdraw)} withdraws from the conflict`);
+      if (t.borders && t.borders.regions && t.borders.regions.length) {
+        out.push('redrawn borders: ' + t.borders.regions.map(r => r.kind === 'province' ? ((provById(r.id) || {}).name || r.id)
+          : ((((S().settings.map || {}).countries || []).find(c => c.id === r.id) || {}).name || r.id)).join(', '));
+      }
+      return out;
+    },
     // the regions each side may redraw (mirror of server peace.regionSides)
     peaceRegionKeys(war, key) {
       const sides = this.peaceSides(war);
@@ -101,6 +149,17 @@
       this._peaceSeen = now;
       if (!seen) return; // first look: no fanfare for what was already there
       for (const o of offers) {
+        if (o.kind === 'pact') {
+          if (seen[o.id] === now[o.id]) continue;
+          const doc = o.conflict === 'protest' ? S().protest : S().war;
+          if (!doc || doc.startedAt !== o.talks) continue;
+          const voices = this.peaceVoices(doc);
+          if (o.status === 'open' && voices.includes(o.to) && !isGM()) toast(`🕊 ${entName(o.from)} ${seen[o.id] ? 'revised its' : 'offers'} a deal to ${entName(o.to)} — see the War Room.`);
+          else if (voices.includes(o.from) && !isGM() && o.status === 'accepted') toast(`🕊 ${entName(o.to)} accepted your deal.`);
+          else if (voices.includes(o.from) && !isGM() && o.status === 'rejected') toast(`🕊 ${entName(o.to)} rejected your deal${o.response ? ' — “' + o.response + '”' : ''}.`, true);
+          else if (o.status === 'accepted' && seen[o.id]) toast(`🕊 Deal struck: ${entName(o.from)} and ${entName(o.to)}.`);
+          continue;
+        }
         const me = mine(o);
         if (!me || seen[o.id] === now[o.id]) continue;
         const doc = o.conflict === 'protest' ? S().protest : S().war;
@@ -122,7 +181,7 @@
       const open = this.peaceOffers(war, key).filter(o => o.status === 'open');
       if (!open.length) return;
       const o = open[open.length - 1];
-      hud.appendChild(row('Peace', el('span', `${this.peaceSideName(war, o.side)} has terms on the table `,
+      hud.appendChild(row('Peace', el('span', `${o.kind === 'pact' ? entName(o.from) : this.peaceSideName(war, o.side)} has terms on the table `,
         el('button.dash-btn.btn-xs', { onclick: (e) => { e.stopPropagation(); W.warRoomPeace = key; App.go('war'); } }, 'Review'))));
     },
 
@@ -132,20 +191,26 @@
       if (!war.active && !offers.length) return;
       const ca = this.access(war);
       const neg = isGM() ? 'both' : ca.negotiate || null;
+      const multi = !!war.factions;
+      const voices = multi ? this.peaceVoices(war) : [];
       const box = el('div.peace-table');
       inner.appendChild(Views.secLabel('🕊 Peace table'));
       inner.appendChild(box);
       const sides = this.peaceSides(war);
-      const who = neg === 'both' ? 'You may speak for either side (GM).'
-        : neg ? `You speak for ${this.peaceSideName(war, neg)}.`
-          : `Negotiations are between ${sides.att ? sides.att.name : 'the attacker'} and ${sides.def ? sides.def.name : 'the defender'}.`;
+      const who = neg === 'both' ? (multi ? 'You may speak for any party (GM).' : 'You may speak for either side (GM).')
+        : voices.length ? `You speak for ${voices.map(id => entName(id)).join(' and ')}. Any party may strike a deal with any other.`
+          : neg ? `You speak for ${this.peaceSideName(war, neg)}.`
+            : multi ? 'Every party to the conflict may strike deals with any other.'
+              : `Negotiations are between ${sides.att ? sides.att.name : 'the attacker'} and ${sides.def ? sides.def.name : 'the defender'}.`;
       box.appendChild(el('div.peace-who', who));
       if (!offers.length) box.appendChild(el('div.peace-empty', 'No terms on the table yet.'));
-      for (const o of offers.slice(0, 8)) box.appendChild(this._peaceCard(war, key, o, neg));
+      for (const o of offers.slice(0, 10)) box.appendChild(o.kind === 'pact' ? this._dealCard(war, key, o, voices) : this._peaceCard(war, key, o, neg));
       const draft = this._peaceDraft[key];
-      if (war.active && neg) {
-        if (draft) box.appendChild(this._peaceComposer(war, key, draft, neg));
-        else box.appendChild(el('div.btn-row', el('button.solid-btn.btn-xs', { onclick: () => this._peaceOpen(war, key, neg) }, '🕊 Propose terms…')));
+      if (war.active && (neg || voices.length)) {
+        if (draft) box.appendChild(draft.deal ? this._dealComposer(war, key, draft) : this._peaceComposer(war, key, draft, neg));
+        else box.appendChild(el('div.btn-row', el('button.solid-btn.btn-xs', {
+          onclick: () => multi ? this._dealOpen(war, key, voices[0], this.peaceParties(war).find(id => id !== voices[0])) : this._peaceOpen(war, key, neg)
+        }, multi ? '🕊 Propose terms or a deal…' : '🕊 Propose terms…')));
       }
       if (W.warRoomPeace === key) { W.warRoomPeace = null; setTimeout(() => box.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60); }
     },
@@ -225,7 +290,11 @@
       const sides = this.peaceSides(war);
       const blur = () => this._peaceBlur();
       box.appendChild(el('div.peace-composer-title', d.editing ? 'Revise your terms' : 'Your terms'));
-      if (neg === 'both') {
+      if (war.factions && !d.editing) {
+        const s = this.peaceSides(war);
+        box.appendChild(this._partyPicker(war, key, { from: (s[d.side] || {}).id, to: (s[other(d.side)] || {}).id }));
+        box.appendChild(el('div.peace-sub', 'Between the two sides: accepted, this ends the conflict.'));
+      } else if (neg === 'both') {
         box.appendChild(Forms.field('Speaking for', el('select.text-input', { onchange: (e) => { d.side = e.target.value; App.renderView(); }, onblur: blur },
           ['att', 'def'].map(s => el('option', { value: s, selected: d.side === s ? 'selected' : undefined }, this.peaceSideName(war, s))))));
       }
@@ -307,6 +376,197 @@
           W.warRoomPeace = key;
           App.go('war');
         },
+        onCancel: () => { W.warRoomPeace = key; App.go('war'); }
+      });
+    },
+
+    /* ---------- deals between any two parties (multi-way) ---------- */
+    // "Speaking for … With …": picking the two original sides switches to
+    // the peace offer, any other pair to a deal
+    _partyPicker(war, key, cur) {
+      const voices = this.peaceVoices(war), parties = this.peaceParties(war);
+      const pick = (from, to) => {
+        if (from === to) to = parties.find(id => id !== from);
+        if (this._isPrincipalPair(war, from, to)) {
+          const s = this.peaceSides(war);
+          this._peaceOpen(war, key, s.def && s.def.id === from ? 'def' : 'att');
+        } else this._dealOpen(war, key, from, to);
+      };
+      return el('div.peace-row',
+        Forms.field('Speaking for', el('select.text-input', { onchange: (e) => pick(e.target.value, cur.to), onblur: () => this._peaceBlur() },
+          voices.map(id => el('option', { value: id, selected: id === cur.from ? 'selected' : undefined }, entName(id))))),
+        Forms.field('With', el('select.text-input', { onchange: (e) => pick(cur.from, e.target.value), onblur: () => this._peaceBlur() },
+          parties.filter(id => id !== cur.from).map(id => el('option', { value: id, selected: id === cur.to ? 'selected' : undefined }, entName(id))))));
+    },
+    _dealOpen(war, key, from, to, offer, counter) {
+      const t = (offer && offer.terms) || {};
+      const borders = t.borders && (t.borders.regions || []).every(r => r.shape !== '…') ? JSON.parse(JSON.stringify(t.borders)) : null;
+      this._peaceDraft[key] = {
+        deal: true, from, to,
+        editing: offer && !counter ? offer.id : null,
+        peace: offer ? !!t.peace : true,
+        against: new Set(t.against || []),
+        repAmount: t.reparations ? t.reparations.amount : '',
+        repPayer: t.reparations ? t.reparations.payer : from,
+        goods: (t.goods || []).map(g => ({ itemId: g.itemId, qty: g.qty, from: g.from })),
+        ground: t.ground ? t.ground.from : '',
+        withdraw: t.withdraw || '',
+        borders,
+        note: counter ? '' : (t.note || '')
+      };
+      App.renderView();
+    },
+    // mirror of server peace.pactRegionOwners
+    _dealRegionOwners(war, a, b) {
+      const out = {};
+      const gov = [a, b].find(id => id === war.defenderId && ((entById(id) || {}).type === 'government' || id === 'ent_gov'));
+      if (gov) for (const p of S().provinces) out['p:' + p.id] = gov;
+      for (const c of ((S().settings.map || {}).countries || [])) if (c.entityId === a || c.entityId === b) out['c:' + c.id] = c.entityId;
+      return out;
+    },
+    _dealCard(war, key, o, voices) {
+      const isGm = isGM();
+      const mineToAnswer = o.status === 'open' && (isGm || voices.includes(o.to));
+      const mineToRevise = o.status === 'open' && (isGm || voices.includes(o.from));
+      const statusLabel = { open: 'on the table', accepted: 'accepted — deal struck', rejected: 'rejected', withdrawn: 'withdrawn', superseded: 'replaced', void: 'void' }[o.status] || o.status;
+      const terms = this.dealTermsText(o.terms, o.from, o.to);
+      const card = el('div.peace-offer.peace-deal', { class: 'st-' + o.status },
+        el('div.peace-offer-head',
+          el('span.peace-offer-from', entName(o.from), el('span.peace-arrow', ' → '), entName(o.to)),
+          el('span.peace-offer-status', 'deal · ' + statusLabel),
+          el('span.peace-offer-meta', (o.rev > 1 ? `rev ${o.rev} · ` : '') + ago(o.updatedAt) + (o.by ? ' · ' + o.by : ''))),
+        terms.length ? el('ul.peace-terms', terms.map(t => el('li', t))) : null,
+        o.terms && o.terms.note ? el('div.peace-note', '“' + o.terms.note + '”') : null,
+        o.response ? el('div.peace-response', 'Reply: “' + o.response + '”') : null);
+      const acts = el('div.btn-row.peace-acts');
+      const hasMap = o.status === 'open' && o.terms && o.terms.borders && (o.terms.borders.regions || []).some(r => r.shape && r.shape !== '…');
+      if (hasMap) acts.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this.peacePreview(o) }, '◎ See the borders on the map'));
+      if (mineToAnswer) {
+        acts.appendChild(el('button.solid-btn.btn-xs', { onclick: () => this._dealAccept(war, key, o) }, 'Accept the deal'));
+        acts.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._dealOpen(war, key, o.to, o.from, o, true) }, 'Counter-offer…'));
+        acts.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._peaceReject(o) }, 'Reject'));
+      }
+      if (mineToRevise) {
+        acts.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._dealOpen(war, key, o.from, o.to, o) }, 'Revise…'));
+        acts.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._peaceAct(o, 'withdraw', {}) }, 'Withdraw'));
+      }
+      if (acts.childNodes.length) card.appendChild(acts);
+      return card;
+    },
+    _dealAccept(war, key, o) {
+      const terms = this.dealTermsText(o.terms, o.from, o.to);
+      openModal('STRIKE THE DEAL', el('div',
+        el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, `Accept ${entName(o.from)}’s deal with ${entName(o.to)}? It binds only the two of you — ${o.conflictName} goes on.`),
+        terms.length ? el('ul.peace-terms', terms.map(t => el('li', t))) : el('p', 'An understanding, nothing more.'),
+        o.terms && o.terms.borders ? el('p.peace-warn', 'The border clause redraws the map the moment you accept.') : null),
+        [{ label: 'Accept the deal', cls: 'danger-btn', onClick: async () => {
+          await POST('/api/war/peace/' + encodeURIComponent(o.id) + '/accept', { rev: o.rev });
+          toast('🕊 Deal struck.');
+          if (W.peacePreview && W.peacePreview.offerId === o.id) W.peacePreview = null;
+        } }, { label: 'Not yet', cls: 'dash-btn', onClick: () => {} }]);
+    },
+    _dealComposer(war, key, d) {
+      const box = el('div.peace-composer.deal-composer');
+      const blur = () => this._peaceBlur();
+      const re = () => App.renderView();
+      const pair = [d.from, d.to];
+      const n = (id) => entName(id);
+      box.appendChild(el('div.peace-composer-title', d.editing ? 'Revise your deal' : 'A deal'));
+      if (!d.editing) box.appendChild(this._partyPicker(war, key, d));
+      else box.appendChild(el('div.peace-sub', `${n(d.from)} → ${n(d.to)}`));
+      box.appendChild(el('div.peace-sub', `It binds only ${n(d.from)} and ${n(d.to)} — the conflict goes on.`));
+      // peace / joint war
+      box.appendChild(Forms.check(d, 'peace', `${n(d.from)} and ${n(d.to)} stop fighting each other`));
+      const others = this.peaceParties(war).filter(id => !pair.includes(id));
+      if (others.length) {
+        box.appendChild(el('div.peace-sub', 'Together against'));
+        box.appendChild(el('div.chip-row', others.map(id => el('button.chip.chip-xs', { class: d.against.has(id) ? 'active' : '',
+          onclick: () => { if (d.against.has(id)) d.against.delete(id); else d.against.add(id); re(); } }, n(id)))));
+      }
+      // money
+      box.appendChild(el('div.peace-row',
+        Forms.field('Money (' + CUR() + ')', el('input.text-input', { type: 'number', min: '0', step: '1000', value: d.repAmount, placeholder: 'none', oninput: (e) => { d.repAmount = e.target.value; }, onblur: blur })),
+        Forms.field('Paid by', el('select.text-input', { onchange: (e) => { d.repPayer = e.target.value; }, onblur: blur },
+          pair.map(id => el('option', { value: id, selected: d.repPayer === id ? 'selected' : undefined }, n(id)))))));
+      // goods
+      box.appendChild(el('div.peace-sub', 'Goods'));
+      const tradable = (S().items || []).filter(it => !(it.meta && (it.meta.companyId || it.meta.propertyId)));
+      const holds = (id, itemId) => { const e = entById(id); const r = e && Array.isArray(e.inventory) ? e.inventory.find(x => x.itemId === itemId) : null; return e && Array.isArray(e.inventory) ? (r ? r.qty : 0) : null; };
+      d.goods.forEach((g, i) => {
+        const h = holds(g.from, g.itemId);
+        box.appendChild(el('div.peace-row.deal-goods',
+          el('select.text-input', { onchange: (e) => { g.from = e.target.value; re(); }, onblur: blur }, pair.map(id => el('option', { value: id, selected: g.from === id ? 'selected' : undefined }, n(id) + ' gives'))),
+          el('input.text-input', { type: 'number', min: '1', step: '1', value: g.qty, style: 'max-width:120px;', oninput: (e) => { g.qty = e.target.value; }, onblur: blur }),
+          el('select.text-input', { onchange: (e) => { g.itemId = e.target.value; re(); }, onblur: blur },
+            tradable.map(it => el('option', { value: it.id, selected: g.itemId === it.id ? 'selected' : undefined }, it.name))),
+          el('span.peace-held-from', h === null ? '' : `holds ${fmtNum(Math.floor(h))}`),
+          el('button.dash-btn.btn-xs', { onclick: () => { d.goods.splice(i, 1); re(); } }, '✕')));
+      });
+      if (d.goods.length < 12) box.appendChild(el('div.btn-row', el('button.dash-btn.btn-xs', { onclick: () => {
+        const weapon = tradable.find(it => it.meta && it.meta.weapon) || tradable[0];
+        d.goods.push({ itemId: weapon ? weapon.id : '', qty: 1000, from: d.from }); re();
+      } }, '+ Goods')));
+      // ground and withdrawal
+      const canGive = pair.filter(id => id !== war.defenderId);
+      box.appendChild(el('div.peace-row',
+        Forms.field('Ground', el('select.text-input', { onchange: (e) => { d.ground = e.target.value; }, onblur: blur },
+          el('option', { value: '' }, 'stays as it is'),
+          canGive.map(id => el('option', { value: id, selected: d.ground === id ? 'selected' : undefined }, `${n(id)} hands its ground to ${n(pair.find(x => x !== id))}`)))),
+        Forms.field('Withdrawal', el('select.text-input', { onchange: (e) => { d.withdraw = e.target.value; }, onblur: blur },
+          el('option', { value: '' }, 'nobody leaves'),
+          pair.filter(id => war.factions && war.factions[id] && !war.factions[id].principal).map(id => el('option', { value: id, selected: d.withdraw === id ? 'selected' : undefined }, `${n(id)} withdraws`))))));
+      // borders between their own lands
+      const owners = this._dealRegionOwners(war, d.from, d.to);
+      if (Object.keys(owners).length) {
+        box.appendChild(el('div.peace-sub', 'Borders'));
+        const nb = d.borders ? d.borders.regions.length : 0;
+        box.appendChild(el('div.peace-borders',
+          el('span', nb ? `${nb} region${nb === 1 ? '' : 's'} redrawn` : 'No change to the map'),
+          el('button.dash-btn.btn-xs', { onclick: () => this.dealDraw(war, key) }, nb ? '✎ Edit the border' : '✎ Draw new borders'),
+          nb ? el('button.dash-btn.btn-xs', { onclick: () => this.peacePreview({ id: '__draft_' + key, terms: { borders: d.borders } }) }, '◎ Preview') : null,
+          nb ? el('button.dash-btn.btn-xs', { onclick: () => { d.borders = null; re(); } }, 'Clear') : null));
+      }
+      const note = el('textarea.text-input', { placeholder: 'A message (optional)', maxlength: '800', oninput: (e) => { d.note = e.target.value; }, onblur: blur });
+      note.value = d.note || '';
+      box.appendChild(Forms.field('Message', note));
+      box.appendChild(el('div.btn-row',
+        el('button.solid-btn.btn-xs', { onclick: () => this._dealSend(war, key, d) }, d.editing ? 'Send the revision' : 'Put the deal on the table'),
+        el('button.dash-btn.btn-xs', { onclick: () => { delete this._peaceDraft[key]; re(); } }, 'Cancel')));
+      return box;
+    },
+    _dealTerms(d) {
+      const t = {};
+      if (d.peace) t.peace = true;
+      if (d.against.size) t.against = [...d.against];
+      if (Number(d.repAmount) > 0) t.reparations = { amount: Number(d.repAmount), payer: d.repPayer };
+      const goods = d.goods.filter(g => g.itemId && Number(g.qty) > 0).map(g => ({ itemId: g.itemId, qty: Math.floor(Number(g.qty)), from: g.from }));
+      if (goods.length) t.goods = goods;
+      if (d.ground) t.ground = { from: d.ground, to: d.ground === d.from ? d.to : d.from };
+      if (d.withdraw) t.withdraw = d.withdraw;
+      if (d.borders && d.borders.regions.length) t.borders = { regions: d.borders.regions };
+      if (d.note && d.note.trim()) t.note = d.note.trim();
+      return t;
+    },
+    async _dealSend(war, key, d) {
+      const terms = this._dealTerms(d);
+      try {
+        if (d.editing) await POST('/api/war/peace/' + encodeURIComponent(d.editing) + '/revise', { terms });
+        else await POST('/api/war/peace/offer', { conflict: key, from: d.from, to: d.to, terms });
+        delete this._peaceDraft[key];
+        toast(d.editing ? '🕊 Revision sent.' : `🕊 Your deal is on the table for ${entName(d.to)}.`);
+        App.renderView();
+      } catch (e) { toast(e.message, true); }
+    },
+    dealDraw(war, key) {
+      const d = this._peaceDraft[key];
+      if (!d || !window.Borders) return;
+      const owners = this._dealRegionOwners(war, d.from, d.to);
+      const keys = Object.keys(owners);
+      if (!keys.length) return toast('Neither party holds territory on the map to redraw.', true);
+      Borders.startPeace({
+        keys, sideOf: owners, sideName: (id) => entName(id), virtual: null,
+        initial: d.borders ? d.borders.regions : [], prefer: d.from,
+        onDone: (regions) => { d.borders = regions.length ? { regions: regions.filter(r => r.shape) } : null; W.warRoomPeace = key; App.go('war'); },
         onCancel: () => { W.warRoomPeace = key; App.go('war'); }
       });
     },

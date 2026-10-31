@@ -1320,6 +1320,16 @@ async function handle(req, res, pathname, method) {
       if (ca.negotiate === 'both') return b.side === 'att' || b.side === 'def' ? b.side : null;
       return ca.negotiate || null;
     };
+    // Multi-way conflicts: who may speak for a PARTY in a deal — the GM for
+    // any; a side's leadership for its principal; whoever runs an
+    // intervening power for that power.
+    const speaksFor = (doc, id) => {
+      const ca = cmdAccessOf(db, doc, u);
+      if (ca.negotiate === 'both') return true;
+      if (id === warEngine.principalOf(doc, 'att')) return ca.negotiate === 'att';
+      if (id === doc.defenderId) return ca.negotiate === 'def';
+      return (ca.factions || []).indexOf(id) >= 0;
+    };
     if (pathname === '/api/war/peace/land' && method === 'GET') {
       // the pristine coastline, for drawing a peace map (the painter clips to it)
       return json(res, 200, { land: territory.landOf(db) });
@@ -1329,9 +1339,22 @@ async function handle(req, res, pathname, method) {
       const key = b.conflict === 'protest' ? 'protest' : 'war';
       const doc = key === 'protest' ? db.protest : db.war;
       if (!doc || !doc.active) return bad('No conflict is underway.');
+      let offer;
+      if (b.to) {
+        // a deal between two parties of a multi-way conflict — any party
+        // with any other, whichever side each is on (the two principals'
+        // deal is the peace offer, which ends the conflict)
+        if (!b.from || !speaksFor(doc, b.from)) return deny('You do not speak for that party.');
+        try {
+          offer = peace.isPrincipalPair(doc, b.from, b.to)
+            ? peace.propose(db, key, b.from === doc.defenderId ? 'def' : 'att', b.terms, u.user.displayName)
+            : peace.proposePact(db, key, b.from, b.to, b.terms, u.user.displayName);
+        } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true, offer });
+      }
       const side = peaceSide(doc, b);
       if (!side) return deny('Only the leadership of a side may offer peace.');
-      let offer;
       try { offer = peace.propose(db, key, side, b.terms, u.user.displayName); } catch (e) { return bad(e.message); }
       store.save(); broadcast('sync');
       return json(res, 200, { ok: true, offer });
@@ -1343,6 +1366,19 @@ async function handle(req, res, pathname, method) {
       if (!o) return bad('No such peace offer.');
       const doc = o.conflict === 'protest' ? db.protest : db.war;
       if (!doc || !doc.active) return bad('That conflict is over.');
+      if (o.kind === 'pact') {
+        // a deal: its proposer revises or withdraws it, the other party answers
+        const party = peaceAct[2] === 'revise' || peaceAct[2] === 'withdraw' ? o.from : o.to;
+        if (!speaksFor(doc, party)) return deny(`Only ${(db.entities.find(e => e.id === party) || {}).name || 'that party'} can do that.`);
+        let r;
+        try {
+          if (peaceAct[2] === 'revise') r = peace.revisePact(db, o, b.terms, u.user.displayName);
+          else if (peaceAct[2] === 'accept') r = peace.acceptPact(db, o, b.rev, u.user.displayName);
+          else r = peace.decide(db, o.id, party, peaceAct[2] === 'withdraw' ? 'withdraw' : 'reject', b.note, u.user.displayName);
+        } catch (e) { return bad(e.message); }
+        store.save(); broadcast('sync');
+        return json(res, 200, { ok: true, result: r });
+      }
       const ca = cmdAccessOf(db, doc, u);
       // the GM answers for whichever side the action belongs to
       const side = ca.negotiate === 'both'

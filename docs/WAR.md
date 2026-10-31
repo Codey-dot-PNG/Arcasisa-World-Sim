@@ -798,6 +798,32 @@ HUD's Peace row, toasts) and the border painter's peace mode (borders.js
 `startPeace` — docs/FRONTEND.md). The GM's one-shot treaty desk
 (`POST /api/gm/war/treaty`, below) remains.
 
+**Deals between any two parties** (multi-way conflicts — kind `'pact'`,
+`from`/`to` entity ids, same `db.peaceOffers` list). Once a third power has
+intervened (`doc.factions`), ANY party may strike a deal with ANY other,
+whichever side either is on — an intervener with the movement it was sent to
+crush, two interveners, the government with an intervener. Between the two
+principals it is still the peace offer above (which ends the conflict);
+every other deal binds only its two parties and the conflict goes on. Terms,
+any mix (`cleanPactTerms`): `peace` (both stances 'ally'), `against`
+(both declare these parties enemies — a joint war; never a stance between
+the two principals), `reparations {amount, payer}`, `goods [{itemId, qty,
+from}]` (anything they hold, not deeds or certificates), `ground {from, to}`
+(every cell one holds passes to the other — `war.handOverGround`; the
+buildings follow on the next sweep; the defender cedes its own soil with a
+border clause instead), `withdraw` (an intervener leaves —
+`war.withdrawFaction`), `borders` (the two parties' own lands; a region
+can't be erased mid-conflict), `note`. Acceptance checks money and goods
+first, then applies everything at once (`acceptPact`) and supersedes any
+other open deal between the two. **Who speaks**: the GM for any party; a
+side's leadership for its principal; whoever runs an intervening power for
+that power (api.js `speaksFor`); the proposer revises/withdraws, the other
+party accepts/rejects. Routes: `POST /api/war/peace/offer {conflict, from,
+to, terms}` (with `to` — a deal, or the peace offer when the pair is the two
+principals), then the same `/api/war/peace/:id/…`. Client: the peace
+table's composer asks "Speaking for … With …" and switches between the peace
+offer and the deal terms; deal cards carry "deal ·" and Accept the deal.
+
 ## Armed forces — `server/military.js` (War Room › Military)
 
 The war engine fights with units; this layer answers what a defence ministry
@@ -1077,10 +1103,10 @@ a nation in"; the map draws interveners' markers (`.wu-fac`, `--fac`) and
 ground (`_factionField` → `.war-occupied-fac` + a dashed edge) in their own
 map colour (`facColor`).
 
-**Not yet**: interveners take no part in peace offers (they withdraw or stay
-until the conflict ends — a war's settlement lets every occupier keep its
-holdings, a protest's hands everything back); they fly no air wing; and
-fighting ACROSS a war and a protest still reads the two docs' camps.
+**Deals** (`server/peace.js` kind `'pact'`, below): once a nation has
+intervened, any party may strike a deal with any other, whichever side
+either is on. **Not yet**: interveners fly no air wing; and fighting ACROSS
+a war and a protest still reads the two docs' camps.
 
 ## The commander hierarchy — `server/war-ai.js`
 

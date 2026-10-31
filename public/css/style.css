@@ -2478,3 +2478,10 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 @keyframes pinSpawn{0%{transform:translateY(-70px) scale(.7); opacity:0;} 60%{transform:translateY(3px) scale(1.04,.95); opacity:1;} 100%{transform:none;}}
 body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:none !important;}
 @media (prefers-reduced-motion: reduce){ .map-pin .mp-body, .map-pin .mp-shadow{transition:none;} .map-pin.dropped .mp-body, .map-pin.spawned .mp-body{animation:none;} }
+
+/* deals between any two parties (war-peace.js) */
+.peace-offer.peace-deal{border-left-style:dashed;}
+.peace-deal .peace-offer-status{letter-spacing:.1em;}
+.deal-goods{display:flex; flex-wrap:wrap; align-items:center; gap:6px;}
+.deal-goods select.text-input{max-width:240px;}
+.deal-composer .chip-row{margin:4px 0 8px;}

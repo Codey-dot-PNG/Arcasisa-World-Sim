@@ -27,6 +27,27 @@
 // Accepting an offer applies it in one step: reparations, holdings, the
 // conflict ends ("Peace agreed"), then the borders — validated BEFORE
 // anything moves, so a deal that can't apply changes nothing.
+//
+// DEALS (multi-way conflicts — kind:'pact', from/to entity ids). Once a third
+// power has intervened (doc.factions), ANY party may strike a deal with ANY
+// other, whichever side either is on: an intervener with the movement it was
+// sent to crush, two interveners with each other, the government with an
+// intervener. A deal between the two principals is the peace offer above
+// (it ends the conflict); every other deal binds only its two parties, and
+// the conflict goes on. Terms (any mix, at least one):
+//   peace     true — they stop fighting each other (both stances 'ally')
+//   against   [entityId] — a joint war: both declare these parties enemies
+//   reparations { amount, payer: entityId } — money from one to the other
+//   goods     [{ itemId, qty, from: entityId }] — anything they hold
+//             (weapons, fuel, food… — not deeds or share certificates)
+//   ground    { from, to } — every cell one holds passes to the other (the
+//             buildings on it follow); the defender's own soil is ceded by
+//             a border clause instead
+//   withdraw  entityId — that party (an intervener) leaves the conflict
+//   borders   { regions } — redrawn map between the two parties' own lands
+//             (the Republic's provinces if the government is one; each
+//             party's map country); a region can't be erased mid-conflict
+//   note      free text
 const store = require('./store');
 const sim = require('./sim');
 const war = require('./war');
@@ -215,11 +236,13 @@ function revise(db, id, side, raw, actor) {
 function decide(db, id, side, verdict, note, actor) {
   const o = findOffer(db, id);
   if (o.status !== 'open') throw new Error('That offer is no longer on the table.');
+  // (a deal's `side` here is the party id speaking — the route checked it)
+  const proposer = o.kind === 'pact' ? o.from : o.side, answerer = o.kind === 'pact' ? o.to : otherSide(o.side);
   if (verdict === 'withdraw') {
-    if (side !== o.side) throw new Error('Only the side that made an offer can withdraw it.');
+    if (side !== proposer) throw new Error('Only the party that made an offer can withdraw it.');
     o.status = 'withdrawn';
   } else {
-    if (side !== otherSide(o.side)) throw new Error('Only the other side can answer this offer.');
+    if (side !== answerer) throw new Error('Only the other party can answer this offer.');
     o.status = 'rejected';
     const r = String(note || '').trim().slice(0, 400);
     if (r) o.response = r;
@@ -290,4 +313,188 @@ function accept(db, id, side, rev, actor) {
   return { offer: o, applied: summary };
 }
 
-module.exports = { propose, revise, decide, accept, publicOffers, heldView, regionSides, describeTerms };
+// ---------- deals between any two parties (multi-way conflicts) ----------
+const MAX_GOODS = 12;
+function partyName(db, id) { return (db.entities.find(e => e.id === id) || {}).name || id; }
+function isPrincipalPair(doc, a, b) {
+  const attP = war.partiesOf(doc)[0], defP = doc.defenderId;
+  return (a === attP && b === defP) || (a === defP && b === attP);
+}
+function partyOf(doc, id) { return war.partiesOf(doc).indexOf(id) >= 0; }
+// region key → owning party, for a deal between `a` and `b`
+function pactRegionOwners(db, doc, a, b) {
+  const out = {};
+  const gov = [a, b].find(id => id === doc.defenderId && isGov(db.entities.find(e => e.id === id)));
+  if (gov) for (const p of db.provinces || []) out['p:' + p.id] = gov;
+  for (const c of ((db.settings.map || {}).countries || [])) if (c.entityId === a || c.entityId === b) out['c:' + c.id] = c.entityId;
+  return out;
+}
+function cleanPactTerms(db, key, doc, from, to, raw) {
+  raw = raw || {};
+  const pair = [from, to];
+  const t = {};
+  if (raw.peace) t.peace = true;
+  if (Array.isArray(raw.against)) {
+    const against = [...new Set(raw.against.filter(id => partyOf(doc, id) && pair.indexOf(id) < 0))];
+    if (against.length) t.against = against;
+  }
+  const rep = raw.reparations;
+  if (rep && Number(rep.amount) > 0) {
+    if (pair.indexOf(rep.payer) < 0) throw new Error('One of the two parties pays the reparations.');
+    t.reparations = { amount: Math.min(1e13, Math.round(Number(rep.amount) * 100) / 100), payer: rep.payer };
+  }
+  if (Array.isArray(raw.goods) && raw.goods.length) {
+    if (raw.goods.length > MAX_GOODS) throw new Error(`At most ${MAX_GOODS} lines of goods in one deal.`);
+    const goods = [];
+    for (const g of raw.goods) {
+      const item = db.items.find(i => i.id === (g && g.itemId));
+      const qty = Math.floor(Number(g && g.qty));
+      if (!item || !(qty > 0)) continue;
+      if (pair.indexOf(g.from) < 0) throw new Error('Goods change hands between the two parties only.');
+      if (item.meta && (item.meta.companyId || item.meta.propertyId)) throw new Error('Deeds and share certificates are ownership records — they change hands on the market, not in a deal.');
+      goods.push({ itemId: item.id, qty, from: g.from });
+    }
+    if (goods.length) t.goods = goods;
+  }
+  if (raw.ground && raw.ground.from) {
+    const g = raw.ground;
+    if (pair.indexOf(g.from) < 0 || pair.indexOf(g.to) < 0 || g.from === g.to) throw new Error('Ground passes between the two parties only.');
+    if (g.from === doc.defenderId) throw new Error(`${partyName(db, g.from)} cedes its own soil with a border clause, not a ground clause.`);
+    t.ground = { from: g.from, to: g.to };
+  }
+  if (raw.withdraw) {
+    if (pair.indexOf(raw.withdraw) < 0) throw new Error('Only one of the two parties can agree to withdraw.');
+    const f = (doc.factions || {})[raw.withdraw];
+    if (!f || f.principal) throw new Error(`${partyName(db, raw.withdraw)} is a principal side — it leaves at the peace table.`);
+    t.withdraw = raw.withdraw;
+  }
+  const b = raw.borders;
+  if (b && Array.isArray(b.regions) && b.regions.length) {
+    if (b.regions.length > MAX_REGIONS) throw new Error('Too many regions in the border clause.');
+    const owners = pactRegionOwners(db, doc, from, to);
+    const seen = new Set();
+    const regions = [];
+    for (const r of b.regions) {
+      if (!r || !['province', 'country'].includes(r.kind)) throw new Error('Malformed border clause.');
+      const rk = (r.kind === 'province' ? 'p:' : 'c:') + r.id;
+      if (!owners[rk]) throw new Error('A deal may only redraw the two parties’ own territory.');
+      if (seen.has(rk)) throw new Error('A region appears twice in the border clause.');
+      seen.add(rk);
+      const shape = typeof r.shape === 'string' ? r.shape : '';
+      if (!shape) throw new Error('A deal struck mid-conflict can move a border but not erase a region.');
+      if (!territory.validShape(shape)) throw new Error('Malformed border in the clause.');
+      const out = { kind: r.kind, id: String(r.id), shape };
+      if (Array.isArray(r.labelPos) && r.labelPos.length === 2 && r.labelPos.every(Number.isFinite)) out.labelPos = r.labelPos.map(v => Math.round(v));
+      regions.push(out);
+    }
+    if (regions.length) t.borders = { regions };
+  }
+  const note = String(raw.note || '').trim().slice(0, 800);
+  if (note) t.note = note;
+  if (!t.peace && !t.against && !t.reparations && !t.goods && !t.ground && !t.withdraw && !t.borders && !t.note) throw new Error('A deal needs at least one term (or a message).');
+  return t;
+}
+function describePact(db, t, from, to) {
+  const n = (id) => partyName(db, id);
+  const other = (id) => (id === from ? to : from);
+  const out = [];
+  if (t.peace) out.push(`${n(from)} and ${n(to)} stop fighting each other`);
+  if (t.against) out.push(`together against ${t.against.map(n).join(', ')}`);
+  if (t.reparations) out.push(`${n(t.reparations.payer)} pays ${db.settings.currency || ''}${Number(t.reparations.amount).toLocaleString('en-US')} to ${n(other(t.reparations.payer))}`);
+  for (const g of t.goods || []) out.push(`${n(g.from)} hands ${g.qty.toLocaleString('en-US')} × ${(db.items.find(i => i.id === g.itemId) || {}).name || g.itemId} to ${n(other(g.from))}`);
+  if (t.ground) out.push(`${n(t.ground.from)} hands the ground it holds to ${n(t.ground.to)}`);
+  if (t.withdraw) out.push(`${n(t.withdraw)} withdraws from the conflict`);
+  if (t.borders) {
+    const names = t.borders.regions.map(r => r.kind === 'province' ? ((db.provinces.find(p => p.id === r.id) || {}).name || r.id)
+      : ((((db.settings.map || {}).countries || []).find(c => c.id === r.id) || {}).name || r.id));
+    out.push('new borders for ' + names.join(', '));
+  }
+  return out;
+}
+function proposePact(db, key, from, to, raw, actor) {
+  key = key === 'protest' ? 'protest' : 'war';
+  const doc = liveDoc(db, key);
+  if (!doc.factions) throw new Error('Deals between parties open once another power has entered the conflict.');
+  if (!partyOf(doc, from) || !partyOf(doc, to) || from === to) throw new Error('Pick two parties to the conflict.');
+  if (isPrincipalPair(doc, from, to)) throw new Error('The two sides make peace at the peace table.');
+  const terms = cleanPactTerms(db, key, doc, from, to, raw);
+  db.peaceOffers = Array.isArray(db.peaceOffers) ? db.peaceOffers : [];
+  for (const o of db.peaceOffers) {
+    if (o.status === 'open' && o.kind === 'pact' && o.conflict === key && o.talks === doc.startedAt && o.from === from && o.to === to) { o.status = 'superseded'; o.decidedAt = Date.now(); }
+  }
+  const offer = {
+    id: store.uid('peace'), kind: 'pact', conflict: key, talks: doc.startedAt, conflictName: doc.name || (key === 'protest' ? 'the protest' : 'the war'),
+    from, to, byEntityId: from, toEntityId: to, by: actor, status: 'open', rev: 1, ts: Date.now(), updatedAt: Date.now(), terms
+  };
+  db.peaceOffers.push(offer);
+  while (db.peaceOffers.length > MAX_OFFERS) db.peaceOffers.shift();
+  store.log('politics', `Deal offered: ${partyName(db, from)} → ${partyName(db, to)}`, describePact(db, terms, from, to).join('; ') || 'A message', actor, [from, to]);
+  return offer;
+}
+function revisePact(db, o, raw, actor) {
+  if (o.status !== 'open') throw new Error('That deal is no longer on the table.');
+  const doc = liveDoc(db, o.conflict);
+  o.terms = cleanPactTerms(db, o.conflict, doc, o.from, o.to, raw);
+  o.rev += 1; o.updatedAt = Date.now(); o.by = actor;
+  store.log('politics', 'Deal revised', describePact(db, o.terms, o.from, o.to).join('; ') || 'A message', actor, [o.from, o.to]);
+  return o;
+}
+function acceptPact(db, o, rev, actor) {
+  if (o.status !== 'open') throw new Error('That deal is no longer on the table.');
+  if (Number(rev) !== o.rev) throw new Error('The terms changed while you were reading them — review the revised deal first.');
+  const key = o.conflict;
+  const doc = liveDoc(db, key);
+  if (doc.startedAt !== o.talks) throw new Error('That deal belongs to an earlier conflict.');
+  if (!partyOf(doc, o.from) || !partyOf(doc, o.to)) throw new Error('One of the parties has left the conflict.');
+  const t = cleanPactTerms(db, key, doc, o.from, o.to, JSON.parse(JSON.stringify(o.terms)));
+  const other = (id) => (id === o.from ? o.to : o.from);
+  // ---- checks: nothing moves unless the whole deal can apply ----
+  let payFrom = null, payTo = null;
+  if (t.reparations) {
+    payFrom = sim.primaryAccount(t.reparations.payer, true);
+    payTo = sim.primaryAccount(other(t.reparations.payer), true);
+    if (!payFrom || !payTo) throw new Error('A party to the payment has no account.');
+    if ((payFrom.balance || 0) < t.reparations.amount) throw new Error(`${partyName(db, t.reparations.payer)} cannot pay (${db.settings.currency || ''}${Math.floor(payFrom.balance || 0).toLocaleString('en-US')} available).`);
+  }
+  const ents = {};
+  for (const id of [o.from, o.to]) { ents[id] = db.entities.find(e => e.id === id); if (!ents[id]) throw new Error('A party no longer exists.'); }
+  const need = {};
+  for (const g of t.goods || []) { const k = g.from + '|' + g.itemId; need[k] = (need[k] || 0) + g.qty; }
+  for (const k in need) {
+    const [who, itemId] = k.split('|');
+    const have = ((ents[who].inventory || []).find(r => r.itemId === itemId) || {}).qty || 0;
+    if (have < need[k]) throw new Error(`${ents[who].name} holds only ${Math.floor(have).toLocaleString('en-US')} × ${(db.items.find(i => i.id === itemId) || {}).name || itemId}.`);
+  }
+  // ---- apply ----
+  const summary = describePact(db, t, o.from, o.to);
+  if (t.reparations) sim.txn(payFrom.id, payTo.id, t.reparations.amount, `Under a deal in ${o.conflictName}`, actor, 'transfer');
+  for (const g of t.goods || []) {
+    const giver = ents[g.from], taker = ents[other(g.from)];
+    const row = giver.inventory.find(r => r.itemId === g.itemId);
+    row.qty -= g.qty;
+    giver.inventory = giver.inventory.filter(r => r.qty > 0);
+    taker.inventory = taker.inventory || [];
+    const trow = taker.inventory.find(r => r.itemId === g.itemId);
+    if (trow) trow.qty += g.qty; else taker.inventory.push({ itemId: g.itemId, qty: g.qty });
+    store.log('inventory', `${g.qty} × ${(db.items.find(i => i.id === g.itemId) || {}).name || g.itemId} handed over`, `${giver.name} → ${taker.name}, under a deal in ${o.conflictName}`, actor, [giver.id, taker.id, g.itemId]);
+  }
+  if (t.ground) war.handOverGround(db, doc, t.ground.from, t.ground.to);
+  if (t.peace) { war.dealStance(doc, o.from, o.to, 'ally'); war.dealStance(doc, o.to, o.from, 'ally'); }
+  for (const id of t.against || []) { war.dealStance(doc, o.from, id, 'enemy'); war.dealStance(doc, o.to, id, 'enemy'); }
+  if (t.borders) territory.applyTerritory(db, { regions: t.borders.regions.map(r => ({ kind: r.kind, id: r.id, shape: r.shape, labelPos: r.labelPos })), remove: [] });
+  o.status = 'accepted'; o.decidedAt = Date.now(); o.decidedBy = actor; o.terms = t;
+  // anything else still open between these two is moot now
+  for (const x of db.peaceOffers) {
+    if (x !== o && x.status === 'open' && x.kind === 'pact' && x.conflict === key && x.talks === o.talks &&
+      ((x.from === o.from && x.to === o.to) || (x.from === o.to && x.to === o.from))) { x.status = 'superseded'; x.decidedAt = Date.now(); }
+  }
+  if (t.withdraw) war.withdrawFaction(db, { conflict: key, entityId: t.withdraw }, actor);
+  const a = partyName(db, o.from), b = partyName(db, o.to);
+  store.log('event', `Deal struck — ${a} and ${b}`, summary.join('; ') || 'An understanding.', actor, [o.from, o.to]);
+  war.SERVER_CTX.news(`${a.toUpperCase()} AND ${b.toUpperCase()} STRIKE A DEAL`,
+    `In ${o.conflictName}, ${a} and ${b} have come to terms${summary.length ? ': ' + summary.join('; ') : ''}.${t.note ? ' “' + t.note + '”' : ''}`);
+  return { offer: o, applied: summary };
+}
+
+module.exports = { propose, revise, decide, accept, publicOffers, heldView, regionSides, describeTerms,
+  proposePact, revisePact, acceptPact, isPrincipalPair, pactRegionOwners, describePact };

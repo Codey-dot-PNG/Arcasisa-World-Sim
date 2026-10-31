@@ -2108,6 +2108,41 @@ function setFactionPolicy(db, opts, actor) {
   store.log('event', `${partyName(db, opts.entityId)} changes course`, `${doc.name}: ${changed.join('; ')}.`, actor || 'WAR ENGINE', [opts.entityId]);
   return { ok: true, faction: f };
 }
+// For deals between parties (server/peace.js): set a stance as part of an
+// agreed deal — no separate announcement (the deal makes the news); a sworn
+// ally turning on its own camp leaves the alliance as with setStance.
+function dealStance(doc, from, to, stance) {
+  const F = doc.factions;
+  if (!F || !F[from] || !F[to] || from === to) return false;
+  if (F[from].principal && F[to].principal) return false; // the two sides settle that at the peace table
+  F[from].stance[to] = stance;
+  for (const id of [from, to]) {
+    const f = F[id];
+    if (f && f.sworn && engine.facHostile(doc, id, engine.principalOf(doc, f.side))) unswear(doc, id, f.side);
+  }
+  return true;
+}
+// Hand every cell `from` holds to `to` (a deal's ground clause); the
+// buildings on it follow on the next occupation sweep. Returns the cells moved.
+function handOverGround(db, doc, from, to) {
+  if (!doc.factions || from === doc.defenderId) return 0;
+  const attP = engine.principalOf(doc, 'att'), defP = doc.defenderId;
+  const owners = engine.homeOwners(db, doc);
+  const enemy = (doc.grid && doc.grid.enemyCells) || {};
+  let n = 0;
+  for (const k of Object.keys(doc.cells)) {
+    if (engine.cellHolder(doc, k, owners) !== from) continue;
+    const c = doc.cells[k];
+    const home = c.c || enemy[k];
+    if (to === defP) { if (home) doc.cells[k] = { o: 'def', c: home }; else delete doc.cells[k]; }
+    else if (home && owners[home] === to) delete doc.cells[k];
+    else if (to === attP) doc.cells[k] = home ? { o: 'att', c: home } : { o: 'att', p: 1, pid: c.pid };
+    else doc.cells[k] = home ? { o: engine.facSide(doc, to), f: to, c: home } : { o: engine.facSide(doc, to), f: to, p: 1, pid: c.pid };
+    n++;
+  }
+  doc._occTick = doc.tick - OCCUPATION_CHECK_TICKS;
+  return n;
+}
 // Pull a party out: its troops go home with their kit, the ground it holds
 // returns to whoever's land it is, and the buildings on it follow on the
 // next occupation sweep.
@@ -2125,6 +2160,9 @@ function withdrawFaction(db, opts, actor) {
   delete doc.factions[id];
   for (const other of Object.values(doc.factions)) if (other.stance) delete other.stance[id];
   doc._occTick = doc.tick - OCCUPATION_CHECK_TICKS; // the buildings it held go back on the next sweep
+  for (const o of db.peaceOffers || []) {
+    if (o.status === 'open' && o.conflict === key && (o.from === id || o.to === id)) { o.status = 'void'; o.decidedAt = Date.now(); }
+  }
   const name = partyName(db, id);
   engine.pushEvent(doc, 'milestone', (doc.units.find(u => isLive(u)) || { pos: [1920, 1080] }).pos.slice(), `${name} withdraws from ${doc.name}.`);
   store.log('event', `${name} withdraws from ${doc.name}`, `${n} formation(s) go home; ${Math.round(items).toLocaleString('en-US')} item(s) back to its stockpile; the ground it held is given up.`, actor || 'WAR ENGINE', [id]);
@@ -3187,4 +3225,4 @@ function maybeWarTickSignal(db) {
   return { ticked, milestone: ticked && (milestoneKey(db.war) !== bWar || milestoneKey(db.protest) !== bProt) };
 }
 
-module.exports = { intervene, setStance, setFactionPolicy, withdrawFaction, ensureFactions, heldProperties, settleHoldings, SERVER_CTX, deployArmy, raiseUnits, standDownUnits, issueUnit, policeStrength, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };
+module.exports = { intervene, setStance, setFactionPolicy, withdrawFaction, ensureFactions, partiesOf, dealStance, handOverGround, heldProperties, settleHoldings, SERVER_CTX, deployArmy, raiseUnits, standDownUnits, issueUnit, policeStrength, clampSpeed, startWar, endWar, warTick, maybeWarTick, maybeWarTickSignal, buildGrid, dropBomb, commandUnits, orderSquadron, setAirAuto, syncAirWings, setWarTuning, spawnUnits, joinWar, applyTreaty, isLive, aircraftStock, startProtest, setProtestControl, setProtestTuning, conflictDoc, concludeProtest, fileProtestApplication, decideProtestApplication };

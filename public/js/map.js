@@ -728,7 +728,7 @@ const GameMap = {
     if (l.includes('political')) out.push({ id: 'political', label: 'Political' });
     if (l.includes('data') && perms().statistics) out.push({ id: 'data', label: 'Data' });
     if (l.includes('ownership')) out.push({ id: 'ownership', label: 'Ownership' });
-    if (S() && (S().war || S().protest)) out.push({ id: 'war', label: '⚔ War' }); // public — everyone may watch/command the front (protests ride the same layer)
+    if (S() && ((S().war && S().war.active) || (S().protest && S().protest.active))) out.push({ id: 'war', label: '⚔ War' }); // public — everyone may watch/command the front (protests ride the same layer)
     if (!out.length) out.push({ id: 'plain', label: 'Terrain' });
     return out;
   },

@@ -176,6 +176,10 @@ const War = {
     if (s.protest) out.push(s.protest);
     return out;
   },
+  // what the MAP draws: only conflicts still under way. An ended one leaves
+  // the map entirely — troops, ground, objectives, the HUD — and lives on
+  // as its after-action report in the War Room (authDocs).
+  mapDocs() { return this.authDocs().filter(d => d.active); },
   activeAuth() {
     const s = S() || {};
     this._ensureActiveKey();
@@ -429,7 +433,7 @@ const War = {
     return W.view === 'war' || (W.view === 'map' && W.layer === 'war');
   },
   _realtimeStep() {
-    const docs = this.authDocs();
+    const docs = this.mapDocs();
     if (!docs.length) { this._stopRealtime(); this._preds = {}; return; }
     if (document.hidden) return;
     if (!this._watchingWar()) return;
@@ -862,7 +866,7 @@ const War = {
   // each new simulated position instead of the old fixed 900ms ease that left
   // it parked for the back half of every 2s tick (visible stop-start motion).
   _tweenMs() {
-    const docs = this.authDocs();
+    const docs = this.mapDocs();
     const w = docs[0] || {};
     const interval = (w.tickMs || 2000) / (w.speed || 1);
     // a full tick's glide, however long: at slow speeds units creep
@@ -983,7 +987,7 @@ const War = {
      refreshLayer → _paint, which patches them. Both conflict docs (war and
      protest) draw into per-doc groups inside each sublayer. */
   renderMapLayer(map, mk, NS) {
-    const docs = this.authDocs();
+    const docs = this.mapDocs();
     if (!docs.length) {
       this._anim = {}; this._flashAnim = {};
       this._airstrikeAnim = {}; this._explosionAnim = {}; this._strikeImpactAt = {};
@@ -1080,7 +1084,7 @@ const War = {
   },
 
   _paint(map, NS) {
-    const docs = this.authDocs();
+    const docs = this.mapDocs();
     if (!docs.length) { this.renderMapLayer(map, map.mk, NS); return; }
     const onWar = W.layer === 'war';
     // the parchment veil mutes the base map so the overlay reads at a glance

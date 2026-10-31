@@ -2303,6 +2303,10 @@ move/attack, right-drag route, Ctrl-drag line-up, Shift-drag box select, Esc cle
 
 ### War Room panel (`War.renderPanel`, view `war`)
 
+The MAP draws only conflicts still under way (`War.mapDocs()`): when a war or protest ends, its
+troops, ground, objectives and HUD leave the map at once (and the War layer chip goes with the
+last live one); the ended conflict lives on as its after-action report here (`authDocs()`).
+
 Two tabs (`W.warTab`): **Situation** (below) and **Military** (`war-military.js` —
 see "Armed forces" above and docs/FRONTEND.md).
 

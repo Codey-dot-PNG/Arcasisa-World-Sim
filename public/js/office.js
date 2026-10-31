@@ -255,7 +255,7 @@ const Office = {
             el('td.num', c.sharesOutstanding ? el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(Views.livePrice(c))) : '—'),
             el('td.num', fmtMoney(balOf(c.id))),
             el('td.ow-acts',
-              btn('⚙', 'Operations desk', () => { W.ecoTab = 'company'; W.opsCo = c.id; W.opsDraft = null; App.go('economy'); }),
+              btn('⚙', 'Operations desk', () => { W.ecoTab = 'holdings'; W.holdSel = c.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); }),
               btn('⇄', 'Trade offer from ' + c.name, () => Views.tradeOfferComposer(c.id)),
               c.sharesOutstanding && ownership_controlsClient(W.me.entityId, c.id) || (isGM() && c.sharesOutstanding) ? btn('＋', 'Raise capital (issue shares)', () => Views.marketOfferModal(c)) : null))));
           more(H.companies.length);
@@ -268,7 +268,7 @@ const Office = {
               el('td', entName(pr.ownerId)),
               el('td.num', fmtNum(pr.employees || 0)),
               el('td.ow-acts',
-                btn('⚙', 'Property operations', () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); }),
+                btn('⚙', 'Property operations', () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); }),
                 btn('◎', 'Show on the map', () => { App.go('map'); setTimeout(() => select('property', pr.id), 300); }),
                 deed ? btn('⇄', 'Sell or transfer the deed', () => Views.tradeModal(deed.id, null, pr.ownerId)) : null));
           }));
@@ -405,7 +405,7 @@ const Office = {
     return { companies, properties, groups, shares, total: companies.length + properties.length + groups.length + shares.length };
   },
   empty(body, text) { body.appendChild(el('div.ow-empty', text)); },
-  openExchange(id) { W.ecoTab = 'exchange'; W.exchOpen = id; App.go('economy'); },
+  openExchange(id) { W.ecoTab = 'markets'; W.mktTab = 'exchange'; W.exchOpen = id; App.go('economy'); },
   worldTime() {
     const t = S().settings.time || {}, c = t.clock || {};
     if (!c.enabled) return 'paused';

@@ -169,8 +169,8 @@ tradeReset-cadence turn's flow reset — matching never uses order ids):
 Duration counts turn-openings regardless of idling; `turnsLeft === null` runs until
 cancelled. Signed / cancelled via `POST /api/trade/contracts`,
 `POST /api/trade/contracts/:id/cancel`, removed (when not running) via
-`DELETE /api/trade/contracts/:id`. Order contracts are managed from Economy →
-International Trade → Contracts; transfer contracts from Economy → Trade.
+`DELETE /api/trade/contracts/:id`. Order contracts are managed from Economy → Markets →
+International trade → Contracts; transfer contracts from Economy → Trades.
 
 ## Foreign military production — `runForeignMilitary` (Phase 27)
 

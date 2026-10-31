@@ -4,7 +4,7 @@ Vanilla JS, no framework, no build. `public/index.html` loads scripts in depende
 **keep this order** when adding a file:
 
 ```
-core.js → pricepath.js → charts.js → map.js → map-style.js → map-fx.js → map-pins.js → mapedit.js → borders.js → views.js → sfx.js
+core.js → pricepath.js → charts.js → map.js → map-style.js → map-fx.js → map-pins.js → mapedit.js → borders.js → views.js → holdings.js → sfx.js
 → entertainment.js → gm.js → gmbar.js → music.js → app.js
 ```
 
@@ -18,6 +18,7 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `core.js` | The `W` global (me, state, view, selection…), API client (`api()` fetch wrapper), realtime wiring (SSE or Supabase Realtime from `/api/config`), `el()` DOM builder, formatting helpers (`fmtMoney` etc.), explorer sidebar, wire ticker, modals/toasts |
 | `app.js` | Boot, login screen, navigation (`App.go(view)`), `renderAll()` orchestration, scroll preservation across periodic re-renders |
 | `views.js` | All player-facing views (map dossier panels, parliament, companies/exchange, economy, population, news, timeline) + the contextual inspector panel |
+| `holdings.js` | Folded into `Views`: the Economy's **Holdings** control board and the open pickers the money/goods modals are built from — see "Holdings & the Economy page" below |
 | `charts.js` | Zero-dep SVG charts: `Charts.chartLine(series, opts)`, `Charts.chartBars(rows, opts)` |
 | `map.js` | `GameMap` — SVG world on the **3840×2160** master grid, pan/zoom, layers (political/data/ownership/military), all drawn from state (`settings.map`, provinces, cities, properties). Also owns the day/night cycle: a continuous solar model (`setDayNight`) writes `--dn-night/warm/lights` CSS vars that drive an in-svg night grade + city-glow blobs (plain alpha, no blend modes — kept *under* buildings/labels so they stay readable) and the vehicles' headlight beams. The last reading is cached and seeded into a freshly mounted `#map-wrap` (with transitions snapped off for two frames), so returning to the map tab at night shows night at once instead of fading in from day; by day `data-dn` is absent and the whole night layer is `display:none`. Pan/zoom is rAF-coalesced (`scheduleTransform`) and traffic steps at ~30 fps |
 | `map-style.js` | Folded into `GameMap`: the **atlas** map style (GM switch `settings.ambience.mapStyle`, default `'atlas'`; `'classic'` is the original sheet) — a printed period map in the manner of Suzerain's: warm cream paper, a muted blue-green sea with coastal **water-lines** (offset contours computed once per coastline — land raster → Euclidean distance transform → marching squares, cached), foreign powers left as paper with each frontier in its own ink plus a soft band of it inside (`countryInk`), the Republic's provinces in mid-tone inks of their own colours (`atlasProvColor` — amber, sage, terracotta, never pastel) with dotted borders, one national edge and names in spaced capitals of the same hue, deep (`atlasProvLabel`), a faint conic graticule, red built-up areas round towns, red railways. **The sheet is paper in every mood**: the dark moods light it with a desk lamp (`#atlas-paper`'s vignette over a dark desk) instead of inverting it. It draws on **every layer including War** (`atlasOn`); the screen-space plate furniture — `#atlas-paper`, `#atlas-frame` (double neatline, no title), the compass rose in `#map-compass`, `#atlas-scale`, `#atlas-inset` (locator; click/drag recentres) — only off the War layer (`atlasChromeOn`; the war brings its own frame/rose/scale). **Light:** building shadows (`atlasShadows`, `settings.ambience.shadows`) are canvas-baked silhouettes offset by `--sh-x/--sh-y/--sh-o`, which `onSun` derives from the world clock (sun east at 06:00, south at noon, west at 18:00; long at dawn/dusk, gone at night; mid-afternoon when the cycle is off); after dark each building cross-fades to baked lit-window art (`.tex-night`, `--dn-night`), roads glow sodium and towns/works pool light (`atlasLights`) |
@@ -38,6 +39,54 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `music.js` | Shared soundtrack via hidden YouTube IFrame player, driven by `settings.music` (GM changes propagate on sync) |
 | `sfx.js` | Synthesised WebAudio effects; volume rides Music volume; localStorage toggle |
 | `pricepath.js` | **Byte-identical copy of server/pricepath.js** — deterministic live price wiggle so clients render (never invent) the day-market ticker |
+
+## Holdings & the Economy page
+
+The Economy page has five tabs: **Holdings** (default for players), **Markets** (Stock
+exchange · International trade, `W.mktTab`), **Trades**, **Overview**, **Gov. Finances**
+(when allowed). The old tab ids still work — `Views.ecoRoute()` maps `W.ecoTab`
+`'inventory'` → Holdings, `'company'` (+ `W.opsCo`) → that company's operations pane,
+`'property'` (+ `W.opsProp`) → that site's pane, `'exchange'`/`'intl'` → Markets.
+
+**Holdings** (`Views.viewHoldings`, holdings.js) is one control board:
+
+- a strip with your whole side's net worth, cash, goods, property, outside shares and how
+  many entities you control (players only);
+- a **rail** of cards grouped *You · Companies you control · Groups you lead · Delegated to
+  you · Stakes (no control)* (the GM gets every holder by type, with a search). Each card
+  wears a **control badge** from `Views.controlOf(id)` — `Owner`, `CEO`, `Leader`,
+  `Executive`, `Majority 54%`, `Via <parent>` (in your chain through another entity),
+  `Delegated · <post>` (a roster grant — `S().myGrants`), `Stake 12%` (minority, no
+  control) — and a one-line purse;
+- the **detail pane** for the chosen entity (`W.holdSel`): the badge with a sentence on what
+  it means, **power chips** lit or crossed (Spend money · Trade goods · Run the company · Run
+  sites · Delegate — `Views.holdPowers`), the actions you hold (Send money from its account,
+  Send goods, Trade offer, Raise capital, On the exchange), then its money as account cards,
+  goods as tiles (Send / Offer on each), properties as site cards (output, staff, net/turn,
+  condition, strike/accident flags; ⚙ Run · ◎ Map · ⇄ Deed), the shares it holds (Buy /
+  Sell *as that holder* — `marketBuyModal(c, holderId)`), and Control (owner/CEO/
+  executives, the top of the share register with a 50% mark, the org chart with
+  per-member scope chips and Revoke);
+- **panes** (`W.holdPane`): *Holdings*, *⚙ Company operations* (the company desk,
+  `viewCompanyOps(inner, id)`) and *⚙ <site>* when a site is opened (`W.holdSite`,
+  `viewPropertyOps(inner, id)`; closable). Both desks take a fixed id and then drop their
+  picker row.
+
+Control badges also sit on the Companies page cards (with *All · Under your control · Your
+stakes · Listed* filters) and in every entity dossier (`.insp-ctl`, with a "Holdings →" link).
+
+**No dropdowns in the money and goods flows.** Choices are open UI:
+`Forms.seg` (option chips — e.g. onsite safety), `Forms.pick` (searchable always-open list;
+`wrap._render()` repaints after an outside change), and in holdings.js `partyChoice`
+(your side as avatar chips, a list past 8), `recipientPick` (recent counterparties as chips
+over a searchable list of everyone), `itemTiles` (goods as tiles with quantity or price,
+single-select or add-to-basket) and `qtyField` (number + 1 · 10 · 25% · Half · All). Send
+goods, the trade-offer and contract composers (`dealSides` — *You give* / *You ask for*
+columns with baskets and money), site deposit/withdraw and the delegate-a-member modal are
+built from them.
+
+While a text box on the Economy or Companies page has focus, `Views.render` holds back
+sync redraws (`_heldSync`) and redraws on blur — after the click that caused the blur lands.
 
 ## Phase 36 UX notes
 

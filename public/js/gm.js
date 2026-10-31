@@ -1851,7 +1851,7 @@ const GM = {
     const foreigns = S().entities.filter(e => e.type === 'foreign' || e.type === 'org');
 
     main.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-bottom:8px;' },
-      'Author each foreign partner: which goods they buy from Arcasia (their demand), which they sell to it (their supply), the base price, and a High/Med/Low level that sizes the orders they post. Every turn the open market generates buy/sell orders from these settings; players fill them on Economy → International Trade.'));
+      'Author each foreign partner: which goods they buy from Arcasia (their demand), which they sell to it (their supply), the base price, and a High/Med/Low level that sizes the orders they post. Every turn the open market generates buy/sell orders from these settings; players fill them on Economy → Markets → International trade.'));
 
     main.appendChild(Views.secLabel('Foreign trade partners'));
     trade.partners.forEach((p, pi) => {

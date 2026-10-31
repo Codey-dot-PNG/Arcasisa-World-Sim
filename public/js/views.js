@@ -605,7 +605,7 @@ const Views = {
       wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items'),
-        el('button.solid-btn', { onclick: () => { W.ecoTab = 'property'; W.opsProp = pr.id; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Property Operations')));
+        el('button.solid-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Run this site')));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
@@ -625,22 +625,20 @@ const Views = {
       return it && r.qty > 0 && !(it.meta && (it.meta.companyId || it.meta.propertyId));
     });
     if (!eligible.length) return toast(withdraw ? 'The site holds nothing movable.' : (owner ? owner.name : 'The owner') + ' holds nothing movable.', true);
-    const itemSel = el('select.text-input', eligible.map(r => {
-      const it = itemById(r.itemId);
-      return el('option', { value: it.id }, `${it.name} (×${fmtNum(r.qty)})`);
-    }));
-    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
-    openModal(withdraw ? 'WITHDRAW FROM SITE — ' + pr.name : 'DEPOSIT AT SITE — ' + pr.name, el('div',
-      el('div', { style: 'font-size:12.5px; color:var(--ink-soft); margin-bottom:10px;' },
-        withdraw ? `Goods move from the site inventory to ${owner ? owner.name : 'the owner'}.` : `Goods move from ${owner ? owner.name : 'the owner'} to the site inventory.`),
-      el('label.field-label', 'Item'), itemSel,
-      el('label.field-label', 'Quantity'), qty
+    const d = { item: eligible[0].itemId, qty: 1 };
+    const held = () => ((eligible.find(r => r.itemId === d.item)) || {}).qty || 0;
+    const qty = this.qtyField(d, 'qty', () => held() || null);
+    openModal(withdraw ? 'WITHDRAW FROM SITE — ' + pr.name : 'DEPOSIT AT SITE — ' + pr.name, el('div.deal-modal',
+      el('div.deal-note', withdraw ? `Goods move from the site's stock to ${owner ? owner.name : 'the owner'}.` : `Goods move from ${owner ? owner.name : 'the owner'} to the site's stock — inputs the site consumes are drawn from here.`),
+      el('label.field-label', 'What'), this.itemTiles(eligible, d, 'item', { height: 220, onchange: () => qty._refresh() }),
+      el('label.field-label', 'How many'), qty
     ), [{
       label: withdraw ? 'Withdraw' : 'Deposit', onClick: async () => {
-        await POST('/api/property/items', { propertyId: pr.id, itemId: itemSel.value, qty: Number(qty.value), direction });
+        if (!(d.qty > 0)) throw new Error('Enter a quantity.');
+        await POST('/api/property/items', { propertyId: pr.id, itemId: d.item, qty: Number(d.qty), direction });
         toast('Goods moved.');
       }
-    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   inspEntity(id) {
@@ -654,6 +652,13 @@ const Views = {
     if (e.title) subBits.push(e.title);
     if (e.stance) subBits.push('Relations: ' + e.stance);
     wrap.appendChild(el('div.insp-sub', subBits.join(' · ')));
+    // how YOU hold this entity, and a way into the board where you run it
+    const ctl = isGM() ? null : this.controlOf(id);
+    if (ctl && ctl.level !== 'none') {
+      wrap.appendChild(el('div.insp-ctl', this.ctlBadge(ctl), el('span', ctl.detail),
+        ['self', 'full', 'deleg', 'stake'].includes(ctl.level) ? el('button.dash-btn.btn-xs', { type: 'button',
+          onclick: () => { W.ecoTab = 'holdings'; W.holdSel = id; W.holdPane = 'overview'; W.holdSite = null; App.go('economy'); App.renderView(); } }, 'Holdings →') : null));
+    }
     if (e.description) wrap.appendChild(el('div.insp-desc', e.description));
 
     if (e.type === 'company') {
@@ -839,7 +844,7 @@ const Views = {
     }
     return out;
   },
-  transferModal(prefToAcct) {
+  transferModal(prefToAcct, prefFromAcct) {
     // "my" accounts = the whole ownership chain (own entity + controlled
     // companies + their subsidiaries) plus accounts delegated to us with a
     // 'spend' grant (Phase 36), matching what the server lets us move
@@ -847,7 +852,8 @@ const Views = {
     const my = isGM() ? S().accounts : (S().accounts || []).filter(a => canSpendFromClient(a, mine));
     if (!my.length) return toast('You control no accounts.', true);
 
-    let fromId = my[0].id;
+    let fromId = prefFromAcct && my.some(a => a.id === prefFromAcct) ? prefFromAcct
+      : (my.find(a => a.ownerId === W.me.entityId) || my[0]).id;
     let to = null; // { kind:'account'|'entity', id, label }
     if (prefToAcct) {
       const a = acctById(prefToAcct);
@@ -941,44 +947,57 @@ const Views = {
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
+  // Send goods: who sends (your side, as chips), what (their stock, as
+  // tiles), to whom (a searchable list, recent counterparties on top) and
+  // how many (with presets up to everything held). Deeds and share
+  // certificates are goods too — sending one hands over the site or shares.
   tradeModal(prefItem, prefTo, prefFrom) {
-    // sender can be any entity in the controlled chain (or one we hold a
-    // trade grant on — Phase 36) that holds something
     const mine = actsForSetClient('trade');
-    const sources = S().entities.filter(e => (isGM() || mine.has(e.id)) && (e.inventory || []).length);
-    if (!sources.length) return toast('No inventory to send — you and your companies hold nothing.', true);
-    let fromId = prefFrom && sources.some(s => s.id === prefFrom) ? prefFrom
-      : sources.some(s => s.id === W.me.entityId) ? W.me.entityId : sources[0].id;
+    const sources = S().entities.filter(e => (isGM() || mine.has(e.id)) && (e.inventory || []).some(r => r.qty > 0));
+    if (!sources.length) return toast('No goods to send — you and your companies hold nothing.', true);
+    const d = { from: prefFrom && sources.some(e => e.id === prefFrom) ? prefFrom
+      : sources.some(e => e.id === W.me.entityId) ? W.me.entityId : sources[0].id, item: prefItem || null, to: prefTo || null, qty: 1 };
+    const stock = () => ((entById(d.from) || {}).inventory || []).filter(r => r.qty > 0 && itemById(r.itemId));
+    const held = () => ((stock().find(r => r.itemId === d.item)) || {}).qty || 0;
+    if (!stock().some(r => r.itemId === d.item)) d.item = (stock()[0] || {}).itemId || null;
 
-    const fromSel = el('select.text-input', sources.map(e =>
-      el('option', { value: e.id, selected: e.id === fromId ? 'selected' : undefined }, e.name)));
-    const itemSel = el('select.text-input');
-    const renderItems = () => {
-      const src = entById(fromSel.value);
-      clear(itemSel);
-      for (const r of (src && src.inventory) || []) {
-        const it = itemById(r.itemId);
-        if (it) itemSel.appendChild(el('option', { value: it.id, selected: it.id === prefItem ? 'selected' : undefined }, `${it.name} (×${fmtNum(r.qty)})`));
-      }
+    const summary = el('div.deal-summary');
+    const paintSummary = () => {
+      const it = itemById(d.item);
+      clear(summary);
+      summary.appendChild(document.createTextNode(it
+        ? `${entName(d.from)} holds ×${fmtNum(held())} ${it.name} · worth ${fmtMoney(held() * effPrice(it))}`
+        : 'Pick what to send.'));
     };
-    fromSel.addEventListener('change', renderItems);
-    renderItems();
+    const qty = this.qtyField(d, 'qty', () => held() || null);
+    const tilesBox = el('div');
+    const paintTiles = () => {
+      clear(tilesBox);
+      tilesBox.appendChild(this.itemTiles(stock(), d, 'item', { height: 210, onchange: () => { qty._refresh(); paintSummary(); } }));
+    };
+    const toBox = el('div');
+    const paintTo = () => { clear(toBox); toBox.appendChild(this.recipientPick(d, 'to', d.from)); };
+    const fromRow = this.partyChoice(d, 'from', sources.map(e => e.id), () => {
+      if (!stock().some(r => r.itemId === d.item)) d.item = (stock()[0] || {}).itemId || null;
+      if (d.to === d.from) d.to = null;
+      paintTiles(); paintTo(); qty._refresh(); paintSummary();
+    }, (id) => (entById(id).inventory || []).length + ' lines');
+    paintTiles(); paintTo(); paintSummary();
 
-    const toSel = el('select.text-input', S().entities.filter(e => e.id !== fromId).map(e =>
-      el('option', { value: e.id, selected: e.id === prefTo ? 'selected' : undefined }, e.name)));
-    const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1' });
-    openModal('TRANSFER OF GOODS', el('div',
-      el('label.field-label', 'From'), fromSel,
-      el('label.field-label', 'Item'), itemSel,
-      el('label.field-label', 'Recipient'), toSel,
-      el('label.field-label', 'Quantity'), qty
+    openModal('SEND GOODS', el('div.deal-modal',
+      el('label.field-label', 'From'), fromRow,
+      el('label.field-label', 'What'), tilesBox, summary,
+      el('label.field-label', 'To'), toBox,
+      el('label.field-label', 'How many'), qty
     ), [{
-      label: 'Transfer', onClick: async () => {
-        if (fromSel.value === toSel.value) throw new Error('Sender and recipient are the same entity.');
-        const b = { fromEntityId: fromSel.value, itemId: itemSel.value, toEntityId: toSel.value, qty: Number(qty.value) };
+      label: 'Send', onClick: async () => {
+        if (!d.item) throw new Error('Pick what to send.');
+        if (!d.to) throw new Error('Pick who receives it.');
+        if (d.from === d.to) throw new Error('Sender and recipient are the same entity.');
+        if (!(d.qty > 0)) throw new Error('Enter a quantity.');
+        const b = { fromEntityId: d.from, itemId: d.item, toEntityId: d.to, qty: Number(d.qty) };
         await POST('/api/trade', b, {
           optimistic: (s) => {
-            if (!(b.qty > 0)) return;
             const from = s.entities.find(e => e.id === b.fromEntityId);
             const dest = s.entities.find(e => e.id === b.toEntityId);
             const row = from && (from.inventory || []).find(r => r.itemId === b.itemId);
@@ -992,9 +1011,9 @@ const Views = {
             }
           }
         });
-        toast('Goods transferred.');
+        toast('Goods sent to ' + entName(b.toEntityId) + '.');
       }
-    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
+    }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },
 
   /* ═══════════ MODULE VIEWS ═══════════ */
@@ -1034,6 +1053,22 @@ const Views = {
     // …and the War Room while a peace offer is being typed (war-peace.js;
     // it redraws on blur, so the other side's live updates still land)
     if (W.view === 'war' && window.War && War.peaceBusy && War.peaceBusy()) { War._peaceSkipped = true; return; }
+    // …and the Economy / Companies pages while a box on them is being typed
+    // in (a search, a wage): the sync that was held back redraws on blur,
+    // after any click that caused the blur has landed.
+    if (W.view === 'economy' || W.view === 'companies') {
+      const a = document.activeElement;
+      if (a && container.contains(a) && (a.tagName === 'TEXTAREA' || (a.tagName === 'INPUT' && !/^(range|checkbox|radio|button|color)$/.test(a.type)))) {
+        if (!a._heldSync) {
+          a._heldSync = true;
+          a.addEventListener('blur', () => {
+            const go = () => { const b = document.activeElement; if (!(b && b._heldSync)) App.renderView(); };
+            setTimeout(() => { if (Views._ptrDown) document.addEventListener('pointerup', () => setTimeout(go, 60), { once: true }); else go(); }, 120);
+          }, { once: true });
+        }
+        return;
+      }
+    }
     // Every sync (turn tick, another player's action) rebuilds this view from
     // scratch, which used to snap the reader back to the top of the page.
     // Carry the previous scroll offset across the rebuild instead.
@@ -1737,15 +1772,31 @@ const Views = {
     const companies = S().entities.filter(e => e.type === 'company');
     inner.appendChild(el('div.doc-title', 'Companies of the Republic'));
     inner.appendChild(el('div.doc-sub', companies.length + ' registered concerns'));
+    // how you hold each one, at a glance — and a filter to just those
+    const ctl = new Map(companies.map(c => [c.id, this.controlOf(c.id)]));
+    const isYours = (c) => ['gm', 'self', 'full', 'deleg'].includes(ctl.get(c.id).level);
+    const counts = { all: companies.length, yours: companies.filter(isYours).length,
+      stakes: companies.filter(c => ctl.get(c.id).level === 'stake').length, listed: companies.filter(c => c.sharePrice !== undefined).length };
+    if (!W.coFilter || (W.coFilter !== 'all' && !counts[W.coFilter])) W.coFilter = 'all';
+    if (!isGM() && (counts.yours || counts.stakes)) {
+      const f = (k, label) => counts[k] ? el('button.chip', { class: W.coFilter === k ? 'active' : '', onclick: () => { W.coFilter = k; App.renderView(); } }, label + ' · ' + counts[k]) : null;
+      inner.appendChild(el('div.chip-row', f('all', 'All'), f('yours', 'Under your control'), f('stakes', 'Your stakes'), f('listed', 'Listed')));
+    }
+    const shown = companies.filter(c => W.coFilter === 'yours' ? isYours(c) : W.coFilter === 'stakes' ? ctl.get(c.id).level === 'stake'
+      : W.coFilter === 'listed' ? c.sharePrice !== undefined : true);
     const grid = el('div.card-grid');
-    for (const c of companies) {
-      grid.appendChild(el('div.entity-card', { onclick: () => select('entity', c.id) },
+    for (const c of shown) {
+      const k = ctl.get(c.id);
+      grid.appendChild(el('div.entity-card', { class: isYours(c) && !isGM() ? 'mine' : '', onclick: () => select('entity', c.id) },
         el('div.logo', c.logo ? el('img', { src: c.logo, alt: c.name }) : el('div.monogram', { style: 'background:' + (c.color || 'var(--ink-faint)') }, c.name[0])),
         el('div.nm', c.name),
         el('div.ind', c.industry || ''),
+        !isGM() && k.level !== 'none' ? el('div.card-ctl', this.ctlBadge(k)) : null,
         el('div.desc', (c.description || '').slice(0, 130) + ((c.description || '').length > 130 ? '…' : '')),
         el('div', { style: 'margin-top:10px; font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' },
-          'CEO ' + (c.ceoId ? entName(c.ceoId) : '—') + (c.vars && c.vars.valuation ? ' · VAL ' + CUR() + fmtCompact(c.vars.valuation) : ''))
+          'CEO ' + (c.ceoId ? entName(c.ceoId) : '—') + (c.vars && c.vars.valuation ? ' · VAL ' + CUR() + fmtCompact(c.vars.valuation) : '')),
+        isYours(c) && !isGM() ? el('div.card-acts',
+          el('button.dash-btn.btn-xs', { type: 'button', onclick: (ev) => { ev.stopPropagation(); W.ecoTab = 'holdings'; W.holdSel = c.id; W.holdPane = 'overview'; W.holdSite = null; App.go('economy'); } }, 'Open in Holdings →')) : null
       ));
     }
     inner.appendChild(grid);
@@ -1776,62 +1827,51 @@ const Views = {
         catch (err) { toast(err.message, true); b.disabled = false; }
       }
     }, 'Save Operations'),
-      el('button.dash-btn', { onclick: () => { W.ecoTab = 'company'; W.opsCo = e.id; W.opsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Full Operations Desk')));
+      el('button.dash-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = e.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Full Operations Desk')));
     return box;
   },
 
   /* ---- Phase 35 — roster / delegation --------------------------------- */
-  // Client mirror of ownership.js's one-hop control test (owner, CEO, party
-  // leader, government executive, majority shareholder). Deep chains resolve
-  // server-side; this only gates which UI is offered.
-  chainControlsClient(meId, e) {
-    if (!meId || !e) return false;
-    if (e.id === meId || e.ownerId === meId || e.ceoId === meId) return true;
-    if (Array.isArray(e.executives) && e.executives.includes(meId)) return true;
-    if (e.type === 'party' && e.leaderId === meId) return true;
-    if (e.sharesOutstanding && Array.isArray(e.shareholders)) {
-      const held = e.shareholders.filter(s => s.entityId === meId).reduce((sum, s) => sum + (s.shares || 0), 0);
-      if (held > e.sharesOutstanding / 2) return true;
-    }
-    return false;
-  },
   orgChartSection(wrap, e) {
     const roster = Array.isArray(e.roster) ? e.roster : [];
     const me = W.me.entityId;
-    const iControl = isGM() || this.chainControlsClient(me, e);
+    const iControl = isGM() || ownership_controlsClient(me, e.id);
     const SCOPE_LABELS = { company_controls: 'Company', property_controls: 'Property', trade: 'Trade', spend: 'Spend',
       campaign_minor: 'Minor campaigns', campaign_major: 'Major campaigns', command_units: 'Command units', manage_tenders: 'Tenders' };
     if (!roster.length && !iControl) return;
     wrap.appendChild(this.secLabel('Org Chart'));
+    // one row per member: who, their post, what they may do (as chips), and
+    // — for whoever controls the entity — a revoke button on the row itself
     for (const m of roster) {
-      const scopes = ((m.grants || {}).scopes || []).map(s => SCOPE_LABELS[s] || s);
+      const g = m.grants || {};
+      const scopes = (g.scopes || []).map(sc => SCOPE_LABELS[sc] || sc);
       const expired = m.expiresAt && new Date(m.expiresAt) < new Date();
-      wrap.appendChild(el('div.var-row',
-        el('span.var-label', entName(m.userId) + (m.title ? ' — ' + m.title : '') + (expired ? ' (expired)' : '')),
-        el('span.var-value', scopes.length ? scopes.join(' · ') : 'rank and file')));
+      const bits = [];
+      if (g.spendLimitPerTurn !== null && g.spendLimitPerTurn !== undefined && (g.scopes || []).includes('spend')) bits.push('cap ' + fmtMoney(g.spendLimitPerTurn) + '/turn');
+      if (m.expiresAt) bits.push((expired ? 'expired ' : 'until ') + new Date(m.expiresAt).toLocaleDateString());
+      wrap.appendChild(el('div.roster-row', { class: expired ? 'expired' : '' },
+        el('div.rr-who', el('span.rr-name', { onclick: () => select('entity', m.userId) }, entName(m.userId)), m.title ? el('span.rr-title', m.title) : null),
+        el('div.rr-scopes', scopes.length ? scopes.map(t => el('span.hp.on', t)) : el('span.hp', 'rank and file'), bits.length ? el('span.rr-note', bits.join(' · ')) : null),
+        iControl ? el('button.dash-btn.btn-xs', { type: 'button', title: 'Revoke ' + entName(m.userId) + '’s post', onclick: async () => {
+          try { await PATCH('/api/entity/' + e.id + '/roster', { remove: m.userId }); toast('Member removed.'); App.renderView(); } catch (err) { toast(err.message, true); }
+        } }, 'Revoke') : null));
     }
     if (iControl) {
       // Pending over-cap requests from delegated members.
       const pending = (e.pendingRequests || []).filter(r => r.status === 'pending');
-      if (pending.length) {
-        for (const rq of pending) {
-          wrap.appendChild(el('div.var-row',
-            el('span.var-label', entName(rq.userId) + ' asks: ' + (rq.description || rq.scope) + (rq.amount ? ' (' + CUR() + fmtNum(rq.amount) + ')' : '')),
-            el('span', el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px;', onclick: async () => {
+      for (const rq of pending) {
+        wrap.appendChild(el('div.roster-row.pending',
+          el('div.rr-who', el('span.rr-name', entName(rq.userId)), el('span.rr-title', 'asks')),
+          el('div.rr-scopes', el('span.rr-note', (rq.description || rq.scope) + (rq.amount ? ' (' + CUR() + fmtNum(rq.amount) + ')' : ''))),
+          el('span.rr-acts',
+            el('button.solid-btn.btn-xs', { type: 'button', onclick: async () => {
               try { await POST('/api/entity/' + e.id + '/requests/' + rq.id + '/approve'); toast('Request approved.'); App.renderView(true); } catch (err) { toast(err.message, true); }
             } }, 'Approve'),
-              el('button.dash-btn', { style: 'font-size:10px; padding:1px 8px; margin-left:4px;', onclick: async () => {
-                try { await POST('/api/entity/' + e.id + '/requests/' + rq.id + '/deny'); toast('Request denied.'); App.renderView(true); } catch (err) { toast(err.message, true); }
-              } }, 'Deny'))));
-        }
+            el('button.dash-btn.btn-xs', { type: 'button', onclick: async () => {
+              try { await POST('/api/entity/' + e.id + '/requests/' + rq.id + '/deny'); toast('Request denied.'); App.renderView(true); } catch (err) { toast(err.message, true); }
+            } }, 'Deny'))));
       }
       wrap.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.rosterAddModal(e) }, '+ Delegate a member')));
-      for (const m of roster) {
-        wrap.appendChild(el('div', { style: 'display:flex; gap:6px; margin:-2px 0 4px;' },
-          el('button.icon-btn', { style: 'font-size:9px;', title: 'Revoke ' + entName(m.userId), onclick: async () => {
-            try { await PATCH('/api/entity/' + e.id + '/roster', { remove: m.userId }); toast('Member removed.'); App.renderView(); } catch (err) { toast(err.message, true); }
-          } }, '✕ revoke ' + entName(m.userId))));
-      }
     }
   },
   rosterAddModal(e) {
@@ -1840,7 +1880,7 @@ const Views = {
       ['trade', 'Buy/sell items'], ['spend', 'Spend money'], ['campaign_minor', 'Minor campaigns'],
       ['campaign_major', 'Major campaigns'], ['command_units', 'Command units'], ['manage_tenders', 'Tenders']];
     openModal('DELEGATE TO ' + (e.name || '').toUpperCase(), el('div',
-      el('label.field-label', 'Member entity'), Forms.sel(draft, 'userId', Forms.entOptions(null, true)),
+      el('label.field-label', 'Who'), Forms.pick(draft, 'userId', S().entities.filter(x => x.id !== e.id).map(x => [x.id, x.name, TYPE_LABEL[x.type] || x.type]), { placeholder: 'Search people and groups…', height: 170 }),
       el('label.field-label', 'Title'), Forms.text(draft, 'title', 'Treasurer'),
       el('label.field-label', 'Permissions'),
       el('div.chip-row', SCOPE_LABELS.map(([k, label]) =>
@@ -1873,14 +1913,16 @@ const Views = {
   // Properties can be owned directly by a person, without a company in the
   // ownership chain. This desk gives those owners the same day-to-day levers
   // as a company desk, scoped to one site.
-  viewPropertyOps(inner) {
+  viewPropertyOps(inner, fixedId) {
     const props = this.opsProperties();
     if (!props.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' }, 'You directly control no property.'));
       return;
     }
+    // embedded in the Holdings board: one fixed site, no picker row
+    if (fixedId && props.some(p => p.id === fixedId) && W.opsProp !== fixedId) { W.opsProp = fixedId; W.propOpsDraft = null; }
     if (!W.opsProp || !props.some(p => p.id === W.opsProp)) W.opsProp = props[0].id;
-    if (props.length > 1) {
+    if (props.length > 1 && !fixedId) {
       inner.appendChild(el('div.chip-row', props.map(p =>
         el('button.chip', { class: p.id === W.opsProp ? 'active' : '', onclick: () => { W.opsProp = p.id; W.propOpsDraft = null; App.renderView(); } }, p.name))));
     }
@@ -1958,8 +2000,7 @@ const Views = {
       Forms.field('Work hours / day (0–24)', Forms.num(dr, 'workHours', 'any'),
         'Output scales proportionally with hours: 8 is the standard baseline, 16 doubles output, 24 triples it — decimals allowed.' +
         (owner && owner.type === 'company' ? ' The company policy default is ' + coHours + 'h.' : '')),
-      Forms.field('Onsite safety', Forms.sel(dr, 'safety',
-        [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
+      Forms.field('Onsite safety', Forms.seg(dr, 'safety', this.SAFETY_OPTS),
         'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and hit the province’s population.' +
         (owner && owner.type === 'company' ? ' The company policy default is ' + coSafety + '.' : '')),
       Forms.field('Staffing', Forms.sliderNum(dr, 'employees', 0, maxEmp * 2,
@@ -2211,6 +2252,10 @@ const Views = {
   // world adds a small per-turn wobble; this is the exact promised factor.
   // Staffing fulfilment is LINEAR past full capacity (over-staffing), capped
   // at 5× rated output — mirror of the engine's staffMult.
+  SAFETY_OPTS: [['none', 'None +50%', 'No safety rules: +50% output, 20% accident odds a turn'],
+    ['relaxed', 'Relaxed +30%', 'Relaxed rules: +30% output, 10% accident odds a turn'],
+    ['standard', 'Standard', 'Standard rules: normal output, 5% accident odds a turn'],
+    ['strict', 'Strict −30%', 'Strict rules: −30% output, 1% accident odds a turn']],
   wfMult(o) {
     const h = Number.isFinite(Number(o.hours)) ? Math.max(0, Math.min(24, Number(o.hours))) : 8;
     const SAFETY_MULT = { none: 1.5, relaxed: 1.3, standard: 1, strict: 0.7 };
@@ -2709,14 +2754,16 @@ const Views = {
     }
   },
   /* ---- Company Operations (CEO desk) ---- */
-  viewCompanyOps(inner) {
+  viewCompanyOps(inner, fixedId) {
     const cos = this.opsCompanies();
     if (!cos.length) {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' }, 'You direct no company.'));
       return;
     }
+    // embedded in the Holdings board: one fixed company, no picker row
+    if (fixedId && cos.some(c => c.id === fixedId) && W.opsCo !== fixedId) { W.opsCo = fixedId; W.opsDraft = null; }
     if (!W.opsCo || !cos.some(c => c.id === W.opsCo)) W.opsCo = cos[0].id;
-    if (cos.length > 1) {
+    if (cos.length > 1 && !fixedId) {
       inner.appendChild(el('div.chip-row', cos.map(c =>
         el('button.chip', { class: c.id === W.opsCo ? 'active' : '', onclick: () => { W.opsCo = c.id; W.opsDraft = null; App.renderView(); } }, c.abbrev || c.name))));
     }
@@ -2798,7 +2845,7 @@ const Views = {
     // right of it is kept as stock. Slider value = domestic share.
     inner.appendChild(el('div.form-grid',
       Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(dr, 'keepPct'),
-        'Kept stock piles up on your sites — sell it abroad on the open market (Economy → International Trade) or to anyone via trade offers.'),
+        'Kept stock piles up on your sites — sell it abroad on the open market (Economy → Markets → International trade) or to anyone via trade offers.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'), 'Payroll is added to upkeep for every property owned by this company')));
 
     // ---- workforce & safety (Phase 28) — company-wide policy defaults ----
@@ -2806,8 +2853,7 @@ const Views = {
     inner.appendChild(el('div.form-grid',
       Forms.field('Work hours / day — policy default (0–24)', Forms.num(dr, 'workHours', 'any'),
         'Every site follows this unless it overrides it in its own Operations desk. 8 is the standard baseline, 16 doubles output, 24 triples it — decimals allowed.'),
-      Forms.field('Onsite safety (policy default)', Forms.sel(dr, 'safety',
-        [['none', 'None — +50% output'], ['relaxed', 'Relaxed — +30% output'], ['standard', 'Standard'], ['strict', 'Strict — −30% output']]),
+      Forms.field('Onsite safety (policy default)', Forms.seg(dr, 'safety', this.SAFETY_OPTS),
         'Accident odds per turn: none 20% · relaxed 10% · standard 5% · strict 1%. Accidents kill workers, dent morale and thin the province’s population.'),
       Forms.field('Staffing (company-wide)', Forms.sliderNum(dr, 'staffingPct', 0, 200,
         { suffix: '% of capacity', allowBeyondRange: true }),
@@ -3159,13 +3205,27 @@ const Views = {
   },
   canGovFinance() { return isGM() || !!perms().government || this.controlsGov(); },
 
+  // The Economy page: five tabs. Holdings is the control board (see
+  // holdings.js) that replaced Inventory / Company Ops / Property Ops;
+  // Markets holds the stock exchange and international trade. Old entry
+  // points (W.ecoTab 'inventory' | 'company' | 'property' | 'exchange' |
+  // 'intl', with W.opsCo / W.opsProp) still land in the right place.
+  ecoRoute() {
+    const t = W.ecoTab;
+    if (t === 'inventory') W.ecoTab = 'holdings';
+    else if (t === 'company') {
+      W.ecoTab = 'holdings';
+      if (W.opsCo) { W.holdSel = W.opsCo; W.holdPane = 'ops'; W.holdSite = null; }
+    } else if (t === 'property') {
+      W.ecoTab = 'holdings';
+      const pr = W.opsProp && propById(W.opsProp);
+      if (pr) { W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; }
+    } else if (t === 'exchange' || t === 'intl') { W.mktTab = t; W.ecoTab = 'markets'; }
+    if (!W.ecoTab) W.ecoTab = (isGM() || !(W.me && W.me.entityId)) ? 'overview' : 'holdings';
+  },
   viewEconomy(inner) {
-    if (!W.ecoTab) W.ecoTab = 'overview';
+    this.ecoRoute();
     const incoming = this.openIncomingTrades();
-    const opsCos = this.opsCompanies();
-    const opsProps = this.opsProperties();
-    if (W.ecoTab === 'company' && !opsCos.length) W.ecoTab = 'overview';
-    if (W.ecoTab === 'property' && !opsProps.length) W.ecoTab = 'overview';
     if (W.ecoTab === 'government' && !this.canGovFinance()) W.ecoTab = 'overview';
     inner.appendChild(el('div.doc-title', 'The Economy'));
     inner.appendChild(el('div.doc-sub', S().settings.currencyName + ' (' + CUR() + ') · turn ' + S().settings.time.turn));
@@ -3175,69 +3235,26 @@ const Views = {
         '⚠ ECONOMIC CRISIS — THE BANK OF ARCASIA RESERVE IS EXHAUSTED (SEVERITY ' + sev + '%). Confidence, employment and happiness are falling each turn until the reserve is recapitalised.'));
     }
 
-    const tabs = el('div.chip-row',
-      el('button.chip', { class: W.ecoTab === 'overview' ? 'active' : '', onclick: () => { W.ecoTab = 'overview'; App.renderView(); } }, 'Overview'),
-      el('button.chip', { class: W.ecoTab === 'exchange' ? 'active' : '', onclick: () => { W.ecoTab = 'exchange'; App.renderView(); } }, 'Exchange'),
-      el('button.chip', { class: W.ecoTab === 'trade' ? 'active' : '', onclick: () => { W.ecoTab = 'trade'; App.renderView(); } },
-        'Player Trades', incoming.length ? el('span.count-badge', String(incoming.length)) : null),
-      el('button.chip', { class: W.ecoTab === 'intl' ? 'active' : '', onclick: () => { W.ecoTab = 'intl'; App.renderView(); } }, 'International Trade'),
-      el('button.chip', { class: W.ecoTab === 'inventory' ? 'active' : '', onclick: () => { W.ecoTab = 'inventory'; App.renderView(); } }, 'Inventory'),
-      opsCos.length ? el('button.chip', { class: W.ecoTab === 'company' ? 'active' : '', onclick: () => { W.ecoTab = 'company'; App.renderView(); } }, 'Company Ops') : null,
-      opsProps.length ? el('button.chip', { class: W.ecoTab === 'property' ? 'active' : '', onclick: () => { W.ecoTab = 'property'; App.renderView(); } }, 'Property Ops') : null,
-      this.canGovFinance() ? el('button.chip', { class: W.ecoTab === 'government' ? 'active' : '', onclick: () => { W.ecoTab = 'government'; App.renderView(); } }, 'Gov. Finances') : null
-    );
-    inner.appendChild(tabs);
+    const tab = (k, label, badge) => el('button.chip', { class: W.ecoTab === k ? 'active' : '', onclick: () => { W.ecoTab = k; App.renderView(); } },
+      label, badge ? el('span.count-badge', String(badge)) : null);
+    inner.appendChild(el('div.chip-row.eco-tabs',
+      tab('holdings', isGM() ? 'Holdings' : 'Your Holdings'),
+      tab('markets', 'Markets'),
+      tab('trade', 'Trades', incoming.length),
+      tab('overview', 'Overview'),
+      this.canGovFinance() ? tab('government', 'Gov. Finances') : null));
 
-    if (W.ecoTab === 'exchange') return this.viewExchange(inner);
+    if (W.ecoTab === 'holdings') return this.viewHoldings(inner);
+    if (W.ecoTab === 'markets') {
+      if (W.mktTab !== 'intl') W.mktTab = 'exchange';
+      inner.appendChild(el('div.hold-tabs.mkt-tabs',
+        el('button.hold-tab', { type: 'button', class: W.mktTab === 'exchange' ? 'active' : '', onclick: () => { W.mktTab = 'exchange'; App.renderView(); } }, 'Stock exchange'),
+        el('button.hold-tab', { type: 'button', class: W.mktTab === 'intl' ? 'active' : '', onclick: () => { W.mktTab = 'intl'; App.renderView(); } }, 'International trade')));
+      return W.mktTab === 'intl' ? this.viewIntlTrade(inner) : this.viewExchange(inner);
+    }
     if (W.ecoTab === 'trade') return this.viewTrade(inner);
-    if (W.ecoTab === 'intl') return this.viewIntlTrade(inner);
-    if (W.ecoTab === 'inventory') return this.viewInventory(inner);
-    if (W.ecoTab === 'company') return this.viewCompanyOps(inner);
-    if (W.ecoTab === 'property') return this.viewPropertyOps(inner);
     if (W.ecoTab === 'government') return this.viewGovFinance(inner);
     this.viewEconomyOverview(inner);
-  },
-
-  /* ---- Inventory (everything the operator's ownership chain holds) ---- */
-  viewInventory(inner) {
-    const mine = actsForSetClient('trade'); // chain + entities delegated to us for trading
-    const gm = isGM();
-    const holders = S().entities.filter(e => (gm || mine.has(e.id)) && (e.inventory || []).length);
-    const sites = S().properties.filter(pr => (pr.inventory || []).length && (gm || (pr.ownerId && mine.has(pr.ownerId))));
-
-    inner.appendChild(el('div.doc-sub', { style: 'margin-top:-8px;' },
-      gm ? 'Gamemaster view — every visible holding' : 'Holdings of your entity and the companies you control'));
-
-    if (!holders.length && !sites.length) {
-      inner.appendChild(el('div', { style: 'color:var(--ink-faint); padding:24px 0;' },
-        'Nothing on the shelves — you and your companies hold no items.'));
-      return;
-    }
-
-    // grand total across everything listed
-    let grand = 0;
-    const rowsValue = (inv) => inv.reduce((s, r) => { const it = itemById(r.itemId); return s + (it ? r.qty * effPrice(it) : 0); }, 0);
-    holders.forEach(e => grand += rowsValue(e.inventory));
-    sites.forEach(pr => grand += rowsValue(pr.inventory));
-    inner.appendChild(this.statStrip([
-      ['Holders', fmtNum(holders.length + sites.length)],
-      ['Combined market value', fmtMoney(grand)]
-    ]));
-    // Phase 36 UX: ONE send button (it was repeated under every holder,
-    // all opening the same modal) and each holder folds — your own stock
-    // starts open, as does everything when there are only a few holders.
-    inner.appendChild(el('div.btn-row', { style: 'margin:4px 0 6px;' },
-      el('button.solid-btn', { onclick: () => this.tradeModal() }, '▣ Send Items')));
-    const few = holders.length + sites.length <= 3;
-    for (const e of holders) {
-      inner.appendChild(this.ledgerFold('invOpen_' + e.id, `${e.name} — ${(e.inventory || []).length} lines · ${fmtMoney(rowsValue(e.inventory))}`,
-        () => this.inventoryTable(e.inventory, e.id), few || e.id === W.me.entityId));
-    }
-    for (const pr of sites) {
-      inner.appendChild(this.ledgerFold('invOpen_' + pr.id, `${pr.name} (site) — ${fmtMoney(rowsValue(pr.inventory))}`,
-        () => el('div', el('div.btn-row', { style: 'margin:4px 0;' }, el('button.outline-btn', { onclick: () => select('property', pr.id) }, 'Open site file')),
-          this.inventoryTable(pr.inventory, pr.ownerId)), few));
-    }
   },
 
   viewEconomyOverview(inner) {
@@ -3725,7 +3742,9 @@ const Views = {
     }, 900);
   },
 
-  marketBuyModal(c) {
+  marketBuyModal(c, holderId) {
+    const holder = holderId || W.me.entityId;
+    const asOther = holder !== W.me.entityId;
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
     const x100 = el('input', { type: 'checkbox', id: 'buy-x100', style: 'accent-color:var(--accent);' });
     const x100Info = el('div', { style: 'display:none; margin:8px 0; padding:10px; border:1px solid var(--accent); background:var(--paper-deep); font-size:12px; color:var(--ink-soft); line-height:1.7;' },
@@ -3735,6 +3754,7 @@ const Views = {
     x100.addEventListener('change', () => { x100Info.style.display = x100.checked ? 'block' : 'none'; });
     openModal('BUY SHARES — ' + c.name, el('div',
       el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you buy.'),
+      asOther ? el('div.deal-note', 'Buying for ' + entName(holder) + ' — paid from its accounts, held in its name.') : null,
       el('label.field-label', 'Shares to buy'), shares,
       el('label', { style: 'display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer;' },
         x100, el('span', { style: 'color:var(--accent); font-weight:700;' }, '×100 LEVERAGED TRADE'), el('span', { style: 'color:var(--ink-faint); font-size:11px;' }, '— high risk, high reward')),
@@ -3745,11 +3765,11 @@ const Views = {
         if (!(n > 0)) throw new Error('Enter a positive share count.');
         const lev = x100.checked;
         const px = this.livePrice(c); // pre-VAT estimate — server truth corrects it one round-trip later
-        const r = await POST('/api/market/buy', { companyId: c.id, shares: n, x100: lev }, {
+        const r = await POST('/api/market/buy', Object.assign({ companyId: c.id, shares: n, x100: lev }, asOther ? { entityId: holder } : {}), {
           optimistic: (s) => {
             if (lev) return; // leveraged buys book on the derivative lane — server truth renders it
             const co = s.entities.find(e => e.id === c.id);
-            const meId = W.me.entityId;
+            const meId = holder;
             if (!co || !meId) return;
             if (Array.isArray(co.shareholders)) {
               const row = co.shareholders.find(x => x.entityId === meId);
@@ -3763,10 +3783,12 @@ const Views = {
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
   },
-  marketSellModal(c) {
+  marketSellModal(c, holderId) {
+    const holder = holderId || W.me.entityId;
+    const asOther = holder !== W.me.entityId;
     const shares = el('input.text-input', { type: 'number', min: '1', step: '1', placeholder: 'Number of shares' });
     const x100 = el('input', { type: 'checkbox', style: 'accent-color:var(--accent);' });
-    const x100Pos = market_x100EntryOfClient(c, W.me.entityId);
+    const x100Pos = market_x100EntryOfClient(c, holder);
     const hasX100 = !!(x100Pos && x100Pos.qty > 0);
     if (!hasX100) x100.disabled = true;
     // X100 lock status — real seconds from purchase, mirrors the server's
@@ -3787,17 +3809,17 @@ const Views = {
     const refresh = () => {
       x100Info.style.display = x100.checked ? 'block' : 'none';
       if (x100.checked && hasX100) {
-        valSpan.textContent = CUR() + fmtNum(market_x100ValueClient(market_x100EntryOfClient(c, W.me.entityId), this.livePrice(c)));
+        valSpan.textContent = CUR() + fmtNum(market_x100ValueClient(market_x100EntryOfClient(c, holder), this.livePrice(c)));
       }
     };
     x100.addEventListener('change', refresh);
     // Ordinary-share position panel — entry / live value / gain or loss, the
     // same treatment the ×100 lane gets (Phase 34). Hidden when nothing held.
     const holdQty = (() => {
-      const sh = (c.shareholders || []).find(x => x.entityId === W.me.entityId);
+      const sh = (c.shareholders || []).find(x => x.entityId === holder);
       return sh ? sh.shares : 0;
     })();
-    const holdEntry = market_holdEntryOfClient(c, W.me.entityId);
+    const holdEntry = market_holdEntryOfClient(c, holder);
     const holdGainPct = holdQty > 0 && holdEntry ? (this.livePrice(c) - holdEntry) / holdEntry * 100 : null;
     const holdGainSpan = el('span', { style: 'font-weight:700; color:' + (holdGainPct === null ? 'var(--ink-faint)' : holdGainPct >= 0 ? 'var(--good)' : 'var(--accent)') + ';' },
       holdGainPct === null ? '—' : (holdGainPct >= 0 ? '+' : '') + fmtNum(holdGainPct, 1) + '%');
@@ -3808,8 +3830,9 @@ const Views = {
       el('div', 'GAIN / LOSS     ', holdGainSpan));
     openModal('SELL SHARES — ' + c.name, el('div',
       el('div', { style: 'margin-bottom:10px; font-size:12.5px; color:var(--ink-soft);' }, 'Live price ', this.livePriceEl(c), ' per share. Executes at the market price the instant you sell.'),
+      asOther ? el('div.deal-note', 'Selling for ' + entName(holder) + ' — proceeds go to its accounts.') : null,
       el('label.field-label', 'Shares to sell'), shares,
-      holdQty > 0 ? el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin:-4px 0 4px;' }, 'you hold ' + fmtNum(holdQty) + ' ordinary shares', holdEntry ? ' (avg entry ' + CUR() + fmtNum(holdEntry) + ')' : '') : null,
+      holdQty > 0 ? el('div', { style: 'font-size:10.5px; color:var(--ink-faint); margin:-4px 0 4px;' }, (asOther ? entName(holder) + ' holds ' : 'you hold ') + fmtNum(holdQty) + ' ordinary shares', holdEntry ? ' (avg entry ' + CUR() + fmtNum(holdEntry) + ')' : '') : null,
       holdInfo,
       el('label', { style: 'display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12.5px; cursor:pointer;', title: hasX100 ? '' : 'You hold no ×100 positions in this company' },
         x100, el('span', { style: 'color:var(--accent); font-weight:700;' }, '×100 LEVERAGED POSITION'), hasX100 ? null : el('span', { style: 'color:var(--ink-faint); font-size:11px;' }, '(none held)')),
@@ -3820,11 +3843,11 @@ const Views = {
         if (!(n > 0)) throw new Error('Enter a positive share count.');
         const lev = x100.checked;
         const px = this.livePrice(c); // estimate — server truth corrects it one round-trip later
-        const r = await POST('/api/market/sell', { companyId: c.id, shares: n, x100: lev }, {
+        const r = await POST('/api/market/sell', Object.assign({ companyId: c.id, shares: n, x100: lev }, asOther ? { entityId: holder } : {}), {
           optimistic: (s) => {
             if (lev) return; // leveraged payouts are amplified — server truth decides them
             const co = s.entities.find(e => e.id === c.id);
-            const meId = W.me.entityId;
+            const meId = holder;
             if (!co || !meId) return;
             if (Array.isArray(co.shareholders)) {
               const row = co.shareholders.find(x => x.entityId === meId);
@@ -4053,95 +4076,39 @@ const Views = {
     const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to contract from.', true);
-    const fromSel = el('select.text-input', sources.map(e =>
-      el('option', { value: e.id, selected: e.id === W.me.entityId ? 'selected' : undefined }, e.name)));
-    const toSel = el('select.text-input', S().entities.map(e => el('option', { value: e.id }, e.name)));
+    const d = { from: sources.some(e => e.id === W.me.entityId) ? W.me.entityId : sources[0].id, to: null,
+      give: [], get: [], moneyGive: 0, moneyGet: 0, length: 'forever', turns: 10 };
+    // contracts may promise goods not yet held (stock is checked each turn)
+    const sides = this.dealSides(d, true);
+    const toBox = el('div');
+    const paintTo = () => { clear(toBox); toBox.appendChild(this.recipientPick(d, 'to', d.from, sides.setTo)); };
+    paintTo();
+    const fromRow = this.partyChoice(d, 'from', sources.map(e => e.id), () => { d.give.length = 0; if (d.to === d.from) d.to = null; sides.repaintGive(); sides.setTo(); paintTo(); });
     const memo = el('input.text-input', { placeholder: 'e.g. Monthly steel supply agreement' });
-    const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
-    const moneyGet = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
-    const foreverCheck = el('input', { type: 'checkbox', checked: true });
-    const durInput = el('input.text-input', { type: 'number', min: '1', step: '1', value: '10', disabled: 'disabled', style: 'width:110px;' });
-    foreverCheck.addEventListener('change', () => { durInput.disabled = foreverCheck.checked; });
+    const turnsBox = el('span.deal-turns', Forms.num(d, 'turns', '1'), ' turns');
+    const syncTurns = () => turnsBox.classList.toggle('hidden', d.length !== 'turns');
+    syncTurns();
 
-    // give: checkboxes + qty over the offering entity's inventory, rebuilt
-    // whenever the From entity changes — identical to tradeOfferComposer,
-    // plus an extra "add any item" lane so a contract can promise future
-    // production you don't yet hold (stock is checked each turn, not at signing).
-    let giveRows = [];
-    const giveBox = el('div');
-    const manualGiveRows = [];
-    const manualGiveBox = el('div');
-    const renderGive = () => {
-      const src = entById(fromSel.value);
-      clear(giveBox);
-      giveRows = ((src && src.inventory) || []).map(r => {
-        const it = itemById(r.itemId);
-        if (!it) return null;
-        const check = el('input', { type: 'checkbox' });
-        const qty = el('input.text-input', { type: 'number', min: '0.000001', max: String(r.qty), step: '0.000001', value: '1', style: 'width:80px;' });
-        return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
-      }).filter(Boolean);
-      if (giveRows.length) giveRows.forEach(r => giveBox.appendChild(r.node));
-      else giveBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'That entity holds no items — use the manual lane below or just use money.'));
-    };
-    fromSel.addEventListener('change', renderGive);
-    renderGive();
-    const addManualGiveRow = () => {
-      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
-      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
-      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
-        el('button.icon-btn', { onclick: () => { manualGiveBox.removeChild(rowNode); manualGiveRows.splice(manualGiveRows.indexOf(entry), 1); } }, '✕'));
-      const entry = { itemSel, qty };
-      manualGiveRows.push(entry);
-      manualGiveBox.appendChild(rowNode);
-    };
-
-    // get: any tradable item + free qty (validated server-side at execution)
-    const getRows = [];
-    const getBox = el('div');
-    const addGetRow = () => {
-      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
-      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
-      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
-        el('button.icon-btn', { onclick: () => { getBox.removeChild(rowNode); getRows.splice(getRows.indexOf(entry), 1); } }, '✕'));
-      const entry = { itemSel, qty };
-      getRows.push(entry);
-      getBox.appendChild(rowNode);
-    };
-
-    openModal('NEW ONGOING CONTRACT', el('div',
-      el('p', { style: 'font-size:12.5px; color:var(--ink-soft); line-height:1.5; margin:0 0 6px;' },
-        'A standing trade — the same deal you would send as a one-shot offer, but replayed automatically every turn until the duration runs out or either party cancels. Give/get items and money are the same as in a normal trade offer. If you also control the receiving entity it starts immediately; otherwise the recipient must accept first.'),
-      el('label.field-label', 'Contract from'), fromSel,
-      el('label.field-label', 'Contract to'), toSel,
-      el('label.field-label', 'You give each turn (from current stock)'), giveBox,
-      el('div', { style: 'margin:4px 0 8px;' }, manualGiveBox,
-        el('button.dash-btn', { style: 'margin-top:4px;', onclick: addManualGiveRow }, '+ Add give item (any good — for future production)')),
-      el('label.field-label', 'Plus money you give each turn (' + CUR() + ')'), moneyGive,
-      el('label.field-label', 'You request each turn (items)'), getBox,
-      el('button.dash-btn', { style: 'margin:4px 0 10px;', onclick: addGetRow }, '+ Add requested item each turn'),
-      el('label.field-label', 'Plus money you request each turn (' + CUR() + ')'), moneyGet,
-      el('label.field-label', 'Duration'),
-      el('div', { style: 'display:flex; gap:14px; align-items:center;' },
-        el('label', { style: 'display:flex; gap:8px; align-items:center; font-size:13px; cursor:pointer;' }, foreverCheck, 'Run indefinitely'),
-        durInput, el('span', { style: 'font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);' }, 'turns')),
+    openModal('NEW ONGOING CONTRACT', el('div.deal-modal',
+      el('p.deal-note', 'A standing trade — the same give/get/money as a one-shot offer, replayed every turn until it runs out or either side cancels. If you also control the receiving side it starts at once; otherwise they must accept.'),
+      el('div.deal-parties',
+        el('div', el('label.field-label', 'Contract from'), fromRow),
+        el('div', el('label.field-label', 'Contract to'), toBox)),
+      sides.node,
+      el('label.field-label', 'Runs'),
+      el('div.deal-length', Forms.seg(d, 'length', [['forever', 'Until cancelled'], ['turns', 'For a set time']], syncTurns), turnsBox),
       el('label.field-label', 'Memo'), memo
     ), [{
       label: 'Send Contract', onClick: async () => {
-        if (fromSel.value === toSel.value) throw new Error('The two parties must differ.');
-        const checkedGive = giveRows.filter(r => r.check.checked).map(r => ({ itemId: r.itemId, qty: Number(r.qty.value) }));
-        const manualGive = manualGiveRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
-        const give = [...checkedGive, ...manualGive];
-        const get = getRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
-        const money = { give: Number(moneyGive.value) || 0, get: Number(moneyGet.value) || 0 };
-        if (!give.length && !get.length && !money.give && !money.get) throw new Error('An offer needs at least one item or amount of money.');
-        const r = await POST('/api/trade/contracts', {
-          kind: 'transfer',
-          fromEntityId: fromSel.value, toEntityId: toSel.value,
-          give, get, money,
-          durationTurns: foreverCheck.checked ? null : Number(durInput.value),
+        if (!d.to) throw new Error('Pick the other party.');
+        if (d.from === d.to) throw new Error('The two parties must differ.');
+        const body = this.dealPayload(d);
+        if (!body.give.length && !body.get.length && !body.money.give && !body.money.get) throw new Error('An offer needs at least one item or amount of money.');
+        const r = await POST('/api/trade/contracts', Object.assign({
+          kind: 'transfer', fromEntityId: d.from, toEntityId: d.to,
+          durationTurns: d.length === 'turns' ? Math.max(1, Math.round(Number(d.turns) || 1)) : null,
           memo: memo.value
-        });
+        }, body));
         toast(r.contract && r.contract.status === 'proposed'
           ? 'Contract sent — it starts once the recipient accepts.'
           : 'Ongoing contract signed.');
@@ -4186,7 +4153,76 @@ const Views = {
     return row;
   },
 
-  tradeOfferComposer(prefFrom) {
+  // The two sides of a deal, side by side: what you give (your stock as
+  // tiles — click to put it on the table) and what you ask for (any good),
+  // each with its basket of lines and a sum of money. d = { from, give: [],
+  // get: [], moneyGive, moneyGet }. `anyGive` (contracts) also lets you
+  // promise goods you do not hold yet. Returns { node, repaintGive }.
+  dealSides(d, anyGive) {
+    const tradable = () => S().items.filter(i => i.tradable !== false).map(i => ({ itemId: i.id, qty: null }));
+    const stock = () => ((entById(d.from) || {}).inventory || []).filter(r => r.qty > 0 && itemById(r.itemId));
+    const basket = (lines, maxOf, repaint) => {
+      const box = el('div.deal-basket');
+      if (!lines.length) { box.appendChild(el('div.hold-empty', 'Nothing yet — click a tile.')); return box; }
+      for (const line of lines) {
+        const it = itemById(line.itemId);
+        const max = maxOf ? maxOf(line.itemId) : null;
+        box.appendChild(el('div.db-line', this.itemIcon(it), el('span.db-name', it ? it.name : line.itemId),
+          el('input.text-input.db-qty', { type: 'number', min: '0', step: 'any', value: String(line.qty), title: max ? 'You hold ×' + fmtNum(max) : '',
+            oninput: (ev) => { line.qty = Number(ev.target.value); } }),
+          max ? el('button.chip.chip-xs', { type: 'button', title: 'Everything held', onclick: () => { line.qty = max; repaint(); } }, 'all') : null,
+          el('button.icon-btn', { type: 'button', title: 'Take it off the table', onclick: () => { lines.splice(lines.indexOf(line), 1); repaint(); } }, '✕')));
+      }
+      return box;
+    };
+    const toggle = (lines, itemId, dflt) => {
+      const i = lines.findIndex(l => l.itemId === itemId);
+      if (i >= 0) lines.splice(i, 1); else lines.push({ itemId, qty: dflt });
+    };
+    const money = (key) => el('div.deal-money', el('span', '+ ' + CUR()),
+      el('input.text-input', { type: 'number', min: '0', step: '0.01', value: d[key] ? String(d[key]) : '', placeholder: '0',
+        oninput: (ev) => { d[key] = Number(ev.target.value) || 0; } }));
+
+    const giveCol = el('div.deal-col');
+    let giveSrc = 'stock';
+    const repaintGive = () => {
+      clear(giveCol);
+      giveCol.appendChild(el('div.deal-col-h', 'You give', el('span', 'from ' + entName(d.from))));
+      if (anyGive) {
+        giveCol.appendChild(el('div.seg-row.seg-sm',
+          el('button.seg-opt', { type: 'button', class: giveSrc === 'stock' ? 'active' : '', onclick: () => { giveSrc = 'stock'; repaintGive(); } }, 'From stock'),
+          el('button.seg-opt', { type: 'button', class: giveSrc === 'any' ? 'active' : '', title: 'Promise goods you will produce — stock is checked each turn', onclick: () => { giveSrc = 'any'; repaintGive(); } }, 'Any good')));
+      }
+      const rows = anyGive && giveSrc === 'any' ? tradable() : stock();
+      const held = (iid) => ((stock().find(r => r.itemId === iid)) || {}).qty || null;
+      giveCol.appendChild(this.itemTiles(rows, null, null, { height: 150, searchFrom: 8, empty: 'Holds no goods' + (anyGive ? ' — switch to “Any good”.' : ' — offer money instead.'),
+        isOn: (iid) => d.give.some(l => l.itemId === iid),
+        onPick: (iid) => { toggle(d.give, iid, Math.min(1, held(iid) || 1)); repaintGive(); } }));
+      giveCol.appendChild(basket(d.give, held, repaintGive));
+      giveCol.appendChild(money('moneyGive'));
+    };
+    const getCol = el('div.deal-col');
+    const getWho = el('span');
+    const setTo = () => { getWho.textContent = d.to ? 'from ' + entName(d.to) : 'from the other side'; };
+    const repaintGet = () => {
+      clear(getCol);
+      setTo();
+      getCol.appendChild(el('div.deal-col-h', 'You ask for', getWho));
+      getCol.appendChild(this.itemTiles(tradable(), null, null, { height: 150, searchFrom: 0, max: 30, placeholder: 'Find any good…',
+        isOn: (iid) => d.get.some(l => l.itemId === iid),
+        onPick: (iid) => { toggle(d.get, iid, 1); repaintGet(); } }));
+      getCol.appendChild(basket(d.get, null, repaintGet));
+      getCol.appendChild(money('moneyGet'));
+    };
+    repaintGive(); repaintGet();
+    return { node: el('div.deal-cols', giveCol, getCol), repaintGive, repaintGet, setTo };
+  },
+  dealPayload(d) {
+    const clean = (lines) => lines.filter(l => l.itemId && Number(l.qty) > 0).map(l => ({ itemId: l.itemId, qty: Number(l.qty) }));
+    return { give: clean(d.give), get: clean(d.get), money: { give: Number(d.moneyGive) || 0, get: Number(d.moneyGet) || 0 } };
+  },
+
+  tradeOfferComposer(prefFrom, prefItem) {
     const myEnt = myEntity();
     if (!myEnt && !isGM()) return toast('You have no entity to trade from.', true);
     // offer can come from any entity in the controlled chain (or one we
@@ -4194,67 +4230,29 @@ const Views = {
     const mine = actsForSetClient('trade');
     const sources = S().entities.filter(e => isGM() || mine.has(e.id));
     if (!sources.length) return toast('You have no entity to trade from.', true);
-    const fromPick = prefFrom && sources.some(e => e.id === prefFrom) ? prefFrom : W.me.entityId;
-    const fromSel = el('select.text-input', sources.map(e =>
-      el('option', { value: e.id, selected: e.id === fromPick ? 'selected' : undefined }, e.name)));
-    const toSel = el('select.text-input', S().entities.map(e => el('option', { value: e.id }, e.name)));
+    const d = { from: prefFrom && sources.some(e => e.id === prefFrom) ? prefFrom : (W.me.entityId || sources[0].id), to: null,
+      give: prefItem ? [{ itemId: prefItem, qty: 1 }] : [], get: [], moneyGive: 0, moneyGet: 0 };
+    const sides = this.dealSides(d, false);
+    const toBox = el('div');
+    const paintTo = () => { clear(toBox); toBox.appendChild(this.recipientPick(d, 'to', d.from, sides.setTo)); };
+    paintTo();
+    const fromRow = this.partyChoice(d, 'from', sources.map(e => e.id), () => { d.give.length = 0; if (d.to === d.from) d.to = null; sides.repaintGive(); sides.setTo(); paintTo(); });
     const memo = el('input.text-input', { placeholder: 'Memo (optional)' });
-    const moneyGive = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
-    const moneyGet = el('input.text-input', { type: 'number', min: '0', step: '0.01', value: '0' });
 
-    // give: checkboxes + qty over the offering entity's inventory, rebuilt
-    // whenever the From entity changes
-    let giveRows = [];
-    const giveBox = el('div');
-    const renderGive = () => {
-      const src = entById(fromSel.value);
-      clear(giveBox);
-      giveRows = ((src && src.inventory) || []).map(r => {
-        const it = itemById(r.itemId);
-        if (!it) return null;
-        const check = el('input', { type: 'checkbox' });
-        const qty = el('input.text-input', { type: 'number', min: '0.000001', max: String(r.qty), step: '0.000001', value: '1', style: 'width:80px;' });
-        return { itemId: it.id, check, qty, node: el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, check, el('span', { style: 'flex:1;' }, it.name + ' (have ×' + fmtNum(r.qty) + ')'), qty) };
-      }).filter(Boolean);
-      if (giveRows.length) giveRows.forEach(r => giveBox.appendChild(r.node));
-      else giveBox.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'That entity holds no items.'));
-    };
-    fromSel.addEventListener('change', renderGive);
-    renderGive();
-
-    // get: any tradable item + free qty (validated server-side at accept time)
-    const getRows = [];
-    const getBox = el('div');
-    const addGetRow = () => {
-      const itemSel = el('select.text-input', Forms.itemOptions().map(o => el('option', { value: o[0] }, o[1])));
-      const qty = el('input.text-input', { type: 'number', min: '0.000001', step: '0.000001', value: '1', style: 'width:80px;' });
-      const rowNode = el('div', { style: 'display:flex; align-items:center; gap:8px; padding:3px 0;' }, itemSel, qty,
-        el('button.icon-btn', { onclick: () => { getBox.removeChild(rowNode); getRows.splice(getRows.indexOf(entry), 1); } }, '✕'));
-      const entry = { itemSel, qty };
-      getRows.push(entry);
-      getBox.appendChild(rowNode);
-    };
-
-    openModal('NEW TRADE OFFER', el('div',
-      el('label.field-label', 'Offer from'), fromSel,
-      el('label.field-label', 'Offer to'), toSel,
-      el('label.field-label', 'You give (items)'), giveBox,
-      el('label.field-label', 'Plus money you give (' + CUR() + ')'), moneyGive,
-      el('label.field-label', 'You request (items)'), getBox,
-      el('button.dash-btn', { style: 'margin:4px 0 10px;', onclick: addGetRow }, '+ Add requested item'),
-      el('label.field-label', 'Plus money you request (' + CUR() + ')'), moneyGet,
+    openModal('NEW TRADE OFFER', el('div.deal-modal',
+      el('div.deal-parties',
+        el('div', el('label.field-label', 'Offer from'), fromRow),
+        el('div', el('label.field-label', 'Offer to'), toBox)),
+      sides.node,
       el('label.field-label', 'Memo'), memo
     ), [{
       label: 'Send Offer', onClick: async () => {
-        if (fromSel.value === toSel.value) throw new Error('Offerer and recipient are the same entity.');
-        const give = giveRows.filter(r => r.check.checked).map(r => ({ itemId: r.itemId, qty: Number(r.qty.value) }));
-        const get = getRows.map(r => ({ itemId: r.itemSel.value, qty: Number(r.qty.value) })).filter(r => r.itemId && r.qty > 0);
-        await POST('/api/trades', {
-          fromEntityId: fromSel.value, toEntityId: toSel.value, give, get,
-          money: { give: Number(moneyGive.value) || 0, get: Number(moneyGet.value) || 0 },
-          memo: memo.value
-        });
-        toast('Trade offer sent.');
+        if (!d.to) throw new Error('Pick who the offer goes to.');
+        if (d.from === d.to) throw new Error('Offerer and recipient are the same entity.');
+        const body = this.dealPayload(d);
+        if (!body.give.length && !body.get.length && !body.money.give && !body.money.get) throw new Error('Put something on the table.');
+        await POST('/api/trades', Object.assign({ fromEntityId: d.from, toEntityId: d.to, memo: memo.value }, body));
+        toast('Trade offer sent to ' + entName(d.to) + '.');
       }
     }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }], true);
   },

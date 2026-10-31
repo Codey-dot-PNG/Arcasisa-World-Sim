@@ -560,6 +560,47 @@ const Forms = {
     if (obj[key] === undefined && options.length) obj[key] = options[0][0] === '__null__' ? null : options[0][0];
     return s;
   },
+  // Open choices instead of a dropdown: every option visible as a chip, the
+  // chosen one lit. For short lists (a policy level, a province, a side).
+  // options: [[value, label, hint?]]; hint shows as the chip's tooltip.
+  seg(obj, key, options, onchange) {
+    if (obj[key] === undefined && options.length) obj[key] = options[0][0];
+    const row = el('div.seg-row');
+    const paint = () => { for (const b of row.children) b.classList.toggle('active', String(obj[key]) === b.dataset.v); };
+    for (const o of options) {
+      row.appendChild(el('button.seg-opt', { type: 'button', 'data-v': String(o[0]), title: o[2] || undefined,
+        onclick: () => { obj[key] = o[0]; paint(); if (onchange) onchange(o[0]); } }, o[1]));
+    }
+    paint();
+    return row;
+  },
+  // A searchable, always-open pick list for long lists (people, companies,
+  // items): type to narrow, click to choose. options: [[value, label, sub?]].
+  pick(obj, key, options, opts) {
+    opts = opts || {};
+    const wrap = el('div.pick-wrap');
+    const search = el('input.text-input', { placeholder: opts.placeholder || 'Search…' });
+    const list = el('div.pick-list', { style: opts.height ? `max-height:${opts.height}px;` : undefined });
+    const render = () => {
+      const q = search.value.trim().toLowerCase();
+      clear(list);
+      let rows = options.filter(o => !q || String(o[1]).toLowerCase().includes(q) || String(o[2] || '').toLowerCase().includes(q)).slice(0, opts.max || 60);
+      // the current choice stays in view even past the cap
+      const cur = options.find(o => String(o[0]) === String(obj[key]));
+      if (cur && !q && !rows.includes(cur)) rows = [cur, ...rows];
+      for (const o of rows) {
+        list.appendChild(el('div.pick-item', { class: String(obj[key]) === String(o[0]) ? 'selected' : '',
+          onclick: () => { obj[key] = o[0] === '__null__' ? null : o[0]; render(); if (opts.onchange) opts.onchange(obj[key]); } },
+          el('span', o[1]), o[2] ? el('span.pi-sub', o[2]) : null));
+      }
+      if (!rows.length) list.appendChild(el('div', { style: 'padding:10px; color:var(--ink-faint); font-size:12px;' }, 'No match.'));
+    };
+    search.addEventListener('input', render);
+    render();
+    wrap.appendChild(search); wrap.appendChild(list);
+    wrap._render = render; // callers that change obj[key] from outside repaint with this
+    return wrap;
+  },
   color(obj, key) {
     return el('input', { type: 'color', value: obj[key] || '#5c5340', style: 'width:52px; height:28px; border:1px solid var(--rule-strong); background:transparent; cursor:pointer;', oninput: (e) => obj[key] = e.target.value });
   },

@@ -2448,3 +2448,33 @@ body.brush-panning #map-svg.brush-mode{cursor:grab;}
 .fac-form{display:flex; flex-direction:column; gap:10px; padding:6px 0;}
 .fac-form select{font-size:12px; background:var(--paper); border:1px solid var(--rule); color:var(--ink); padding:3px 6px;}
 .fac-inline{display:flex; gap:8px; flex-wrap:wrap;}
+
+/* ---------- player pins (map-pins.js) ---------- */
+#map-pins{position:absolute; inset:0; pointer-events:none; overflow:hidden;}
+#map-pins.hidden{display:none;}
+.map-pin{position:absolute; left:0; top:0; width:0; height:0; pointer-events:none; will-change:transform;}
+.map-pin .mp-body, .map-pin .mp-name{pointer-events:auto; cursor:pointer; touch-action:none;}
+.map-pin.draggable .mp-body{cursor:grab;}
+.map-pin .mp-body{position:absolute; left:-17px; top:-48px; width:34px; height:48px; transform-origin:17px 48px;
+  transition:transform .2s cubic-bezier(.2,.8,.3,1.25), filter .2s;}
+.map-pin .mp-head{position:relative; z-index:1; width:34px; height:34px; border-radius:50%; background:var(--pin); border:2.5px solid #f6efdc;
+  box-shadow:0 2px 5px rgba(30,20,10,.35); display:flex; align-items:center; justify-content:center; overflow:hidden; box-sizing:border-box;
+  color:#fff; font-family:var(--font-ui); font-weight:700; font-size:12px; letter-spacing:.02em; user-select:none;}
+.map-pin .mp-head img{width:100%; height:100%; object-fit:cover; pointer-events:none;}
+.map-pin .mp-tip{position:absolute; left:9px; top:28px; width:0; height:0; border-left:8px solid transparent; border-right:8px solid transparent; border-top:20px solid #f6efdc;}
+.map-pin .mp-tip::after{content:''; position:absolute; left:-5px; top:-19px; border-left:5px solid transparent; border-right:5px solid transparent; border-top:14px solid var(--pin);}
+.map-pin .mp-shadow{position:absolute; left:-8px; top:-3px; width:16px; height:6px; border-radius:50%; background:rgba(30,20,10,.32); filter:blur(1px);
+  transition:transform .2s, opacity .2s;}
+.map-pin .mp-name{position:absolute; left:0; top:5px; transform:translateX(-50%); white-space:nowrap; font-family:var(--font-mono); font-size:9.5px;
+  letter-spacing:.08em; text-transform:uppercase; color:var(--ink); background:rgba(246,239,220,.9); padding:1px 5px; border:1px solid var(--rule); user-select:none;}
+.map-pin.mine .mp-head{border-color:var(--accent); box-shadow:0 0 0 2px rgba(246,239,220,.9), 0 2px 6px rgba(30,20,10,.4);}
+.map-pin.mine .mp-name{border-color:var(--accent); color:var(--accent); font-weight:700;}
+.map-pin.lifted{z-index:5;}
+.map-pin.lifted .mp-body{cursor:grabbing; transform:translateY(-12px) scale(1.18) rotate(-4deg); filter:drop-shadow(0 14px 9px rgba(0,0,0,.32));}
+.map-pin.lifted .mp-shadow{transform:scale(.65); opacity:.45;}
+.map-pin.dropped .mp-body{animation:pinDrop .44s cubic-bezier(.3,1.5,.5,1);}
+.map-pin.spawned .mp-body{animation:pinSpawn .55s cubic-bezier(.3,1.5,.5,1);}
+@keyframes pinDrop{0%{transform:translateY(-12px) scale(1.18) rotate(-4deg);} 55%{transform:translateY(2px) scale(1.04,.94);} 100%{transform:none;}}
+@keyframes pinSpawn{0%{transform:translateY(-70px) scale(.7); opacity:0;} 60%{transform:translateY(3px) scale(1.04,.95); opacity:1;} 100%{transform:none;}}
+body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:none !important;}
+@media (prefers-reduced-motion: reduce){ .map-pin .mp-body, .map-pin .mp-shadow{transition:none;} .map-pin.dropped .mp-body, .map-pin.spawned .mp-body{animation:none;} }

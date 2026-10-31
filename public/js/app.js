@@ -347,7 +347,7 @@ const App = {
       if (fp !== lastMapFp) { lastMapFp = fp; GameMap.render(); }
       // GM map effects patch themselves in place (keyed, cheap) on every
       // sync; the disasters chip carries their count
-      else { GameMap.renderFx(); GameMap.renderLayerBar(); }
+      else { GameMap.renderFx(); GameMap.renderPins(); GameMap.renderLayerBar(); }
       return;
     }
     if (W.view === 'gm') { GM.render(container); return; }

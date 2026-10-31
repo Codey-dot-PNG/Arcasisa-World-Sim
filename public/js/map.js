@@ -398,6 +398,8 @@ const GameMap = {
     // every one of them as it was, so skip the walk (and its attribute
     // writes) unless k moved or a render/highlight asks for it
     if (force || this.view.k !== this._scaledK) { this._scaledK = this.view.k; this.updateMarkerScale(); }
+    // the players' pins are screen-space HTML: they follow every pan/zoom
+    if (this.positionPins) this.positionPins();
     // the war map's printed frame (margins, scale bar) follows the view
     if (W.layer === 'war' && window.War && War.onViewChange) War.onViewChange();
     if (this.onView) this.onView();
@@ -1315,6 +1317,8 @@ const GameMap = {
     // GM map effects (nuclear strikes, fires, floods… — map-fx.js), in the
     // overlay svg under the war's marks; kept across renders by effect id
     this.renderFx();
+    // where the players' characters are (map-pins.js) — HTML over the map
+    if (this.renderPins) this.renderPins();
 
     // night city-lights (+ the atlas's roads, towns and works)
     this.buildLights(map);
@@ -1503,6 +1507,8 @@ const GameMap = {
       bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; this.render(); } }, '✕ Close preview'));
       bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; App.go('war'); } }, 'Back to the War Room'));
     }
+    // where you are: place / find / clear your character's pin (map-pins.js)
+    if (this.pinButtons && !this.editing()) this.pinButtons(bar);
     // GM: stage disasters and effects on the map (map-fx.js) — visual only
     if (isGM() && !this.editing()) {
       const n = ((S() && S().mapFx) || []).length;

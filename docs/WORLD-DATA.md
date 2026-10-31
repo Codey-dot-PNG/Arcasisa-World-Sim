@@ -106,6 +106,8 @@ world doc so it survives serverless restarts and rides turns (`sim.advanceTurn` 
 When the count finishes, `db.election` becomes `null` and a record is appended to
 `db.elections` (`live: true`, national seat totals, province results).
 
+**Where a player is:** `entity.whereabouts = { pos:[x,y], at, provinceId, near }` — the pin a player puts their character on the map with (`PUT/DELETE /api/me/pin`, public, drawn by public/js/map-pins.js). Absent = not on the map.
+
 **Standing military orders:** `entity.militaryPlan = { doctrine: { issue:'best'|'conserve',
 arms, fuel }, posts: { 'city:<id>'|'prop:<id>': 0..3 }, armourAt, fleetAt, police: { cities,
 per } }` — absent means the defaults; set from War Room › Military (`POST

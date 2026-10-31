@@ -876,6 +876,38 @@ async function handle(req, res, pathname, method) {
     const canTrade = (entityId, amount) => !!(u.role.perms.gm ||
       ownership.canAct(db, u.user.entityId, entityId, 'trade', amount > 0 ? { amount } : undefined));
 
+    // ---- where a player's character is: a pin on the map ----
+    // Lives on the player's own entity (`entity.whereabouts = { pos, at,
+    // provinceId, near }`), so everyone's map shows it. PUT places or moves
+    // it (one call per drop — the client drags locally), DELETE takes it off
+    // the map. The GM may place or clear anyone's (b.entityId / ?entityId).
+    if (pathname === '/api/me/pin' && (method === 'PUT' || method === 'DELETE')) {
+      const b = method === 'PUT' ? await readBody(req) : {};
+      const q = new URL(req.url, 'http://localhost').searchParams;
+      const wanted = b.entityId || q.get('entityId');
+      const targetId = u.role.perms.gm && wanted ? wanted : u.user.entityId;
+      const ent = targetId && db.entities.find(e => e.id === targetId);
+      if (!ent) return bad(u.role.perms.gm ? 'Pick a character to place.' : 'You have no character in the world to place.');
+      if (method === 'DELETE') {
+        if (!ent.whereabouts) return bad('Not on the map.');
+        delete ent.whereabouts;
+        store.log('event', `${ent.name} leaves the map`, '', u.user.displayName, [ent.id]);
+      } else {
+        const pos = Array.isArray(b.pos) ? b.pos.slice(0, 2).map(Number) : null;
+        if (!pos || !pos.every(Number.isFinite) || pos[0] < 0 || pos[1] < 0 || pos[0] > 3840 || pos[1] > 2160) return bad('That spot is off the map.');
+        const at = [Math.round(pos[0] * 10) / 10, Math.round(pos[1] * 10) / 10];
+        let near = null, nd = Infinity;
+        for (const c of db.cities || []) { if (!Array.isArray(c.pos)) continue; const d = Math.hypot(c.pos[0] - at[0], c.pos[1] - at[1]); if (d < nd) { nd = d; near = c; } }
+        const provinceId = geometry.provinceAt(db.provinces, at) || null;
+        const was = ent.whereabouts;
+        ent.whereabouts = { pos: at, at: new Date().toISOString(), provinceId, near: near ? (nd < 45 ? near.name : 'near ' + near.name) : null };
+        const where = ent.whereabouts.near || (provinceId ? (db.provinces.find(p => p.id === provinceId) || {}).name : 'abroad');
+        store.log('event', `${ent.name} is ${was ? 'now ' : ''}${/^near /.test(where) ? where : 'in ' + where}`, '', u.user.displayName, [ent.id]);
+      }
+      store.save(); broadcast('sync');
+      return json(res, 200, { ok: true, whereabouts: ent.whereabouts || null });
+    }
+
     if (pathname === '/api/me' && method === 'GET') return json(res, 200, { user: userPayload(u) });
     if (pathname === '/api/me/password' && method === 'PATCH') {
       const b = await readBody(req);

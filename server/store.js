@@ -2037,6 +2037,18 @@ function migrate(world) {
     changed = true;
   }
 
+  // The 'dead' role — where a player whose character has died ends up (see
+  // server/mortality.js). No pages, no powers; the client shows them the
+  // record of their run instead of the game. Seeded when missing.
+  if (Array.isArray(world.roles) && !world.roles.some(r => r.id === 'dead')) {
+    world.roles.push({ id: 'dead', name: 'Dead', builtin: true, perms: { pages: [], inventories: 'none', accounts: 'none', companyFinancials: false, government: false, statistics: false, mapLayers: [], manageNews: false, gm: false } });
+    changed = true;
+  }
+  // Every account remembers the roles it has held (for that record).
+  for (const u of world.users || []) {
+    if (!Array.isArray(u.roleHistory)) { u.roleHistory = [{ roleId: u.roleId, at: u.created || Date.now(), turn: null }]; changed = true; }
+  }
+
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed
   // themselves on already-migrated worlds at next load. Old worlds start the
@@ -2422,7 +2434,35 @@ function recordTxn(t) {
 
 function byId(coll, id) { return (db[coll] || []).find(x => x.id === id); }
 
+// A player's whole record from the append-only logs: timeline entries they
+// made (actor) or that name any of `refs`, and transactions touching any of
+// `accounts`. In cloud mode the in-memory logs only hold the latest
+// LOG_FETCH rows, so this reads the tables themselves (newest `limit` rows).
+async function history(q) {
+  q = q || {};
+  const refs = (q.refs || []).filter(Boolean), accts = (q.accounts || []).filter(Boolean);
+  const limit = q.limit || 4000;
+  const tlHit = (e) => (q.actor && e.actor === q.actor) || (e.refs || []).some(r => refs.includes(r));
+  const txHit = (t) => accts.includes(t.from) || accts.includes(t.to);
+  if (MODE !== 'supabase') {
+    return { timeline: (db.timeline || []).filter(tlHit).slice(-limit), transactions: (db.transactions || []).filter(txHit).slice(-limit) };
+  }
+  const enc = (v) => encodeURIComponent(v);
+  const ors = [];
+  if (q.actor) ors.push(`actor.eq."${String(q.actor).replace(/"/g, '')}"`);
+  for (const r of refs.slice(0, 40)) ors.push(`refs.cs.${JSON.stringify([r])}`);
+  const timeline = ors.length
+    ? (await sb.select('timeline', `select=*&or=(${enc(ors.join(','))})&order=ts.desc&limit=${limit}`)).reverse().map(fromTlRow) : [];
+  let transactions = [];
+  if (accts.length) {
+    const list = accts.slice(0, 60).map(a => `"${a}"`).join(',');
+    transactions = (await sb.select('transactions', `select=*&or=(${enc(`from_acct.in.(${list}),to_acct.in.(${list})`)})&order=ts.desc&limit=${limit}`)).reverse().map(fromTxRow);
+  }
+  return { timeline, transactions };
+}
+
 module.exports = {
+  history,
   MODE, configure, load, begin, commit, get, save, saveNow, requestBroadcast,
   snapshot, listSnapshots, rollback, reset, importWorld, log, recordTxn, uid, byId, DATA_DIR,
   getVersion, hasUncommitted, invalidate, migrate, setSnapshotSuppression

@@ -54,6 +54,26 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 | `POST /api/protest/applications/:id/withdraw` | the applicant's chain withdraws a pending petition |
 | `POST /api/election/campaign` | run a party campaign during the election season: `{partyId, campaignId}`. Anyone who controls the party (its leader chain) or the GM; spends the party treasury + campaign stock, adds support (and late votes once the count is live). Responds-sync |
 
+## Mortality — the revolver (`server/mortality.js`)
+
+| Route | |
+|---|---|
+| `POST /api/revolver/close {loaded:[0..5]}` | Loads those chambers and spins: `user.revolver = { loaded, pos, at }` → `{ pos }` (the chamber under the hammer). Not for the GM |
+| `POST /api/revolver/fire` | One pull: empty → `{ fired:false, chamber, pos }` (cylinder advanced); live → the character dies → `{ fired:true, obituary }` |
+| `POST /api/revolver/stow` | Clears the revolver state |
+| `GET /api/me/obituary` | The record of the run (`user.obituary`, `user.deadAt`) |
+
+Death: the account's role becomes **`dead`** (seeded by `store.migrate`; no pages, no
+powers), the change joins `user.roleHistory`, the entity gets `deceased = { at, turn, date }`
+(its money, property and offices stay put — the GM plays out what follows) and a `death`
+timeline entry is logged. `user.obituary` is computed once from the world and the full logs
+(`store.history` — reads the Supabase tables in cloud mode): positions held, roles through
+time, fortune (own / controlled), money in/out, acts on record by kind and the last 14,
+trade offers, deaths on their watch (industrial accidents at their sites, enemy dead and
+civilians in conflicts their side waged), and a written summary. **A dead account may not
+make any non-GET request.** The GM brings one back by giving it another role (Roles &
+Operators); that clears `deadAt` and the entity's `deceased`.
+
 ## Market (Phase 4.4 / Workstream A)
 
 `POST /api/market/buy | sell | transfer | issue (bonus mint) | offer (capital raise) |

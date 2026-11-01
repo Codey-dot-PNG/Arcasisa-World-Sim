@@ -187,6 +187,8 @@ const App = {
   },
 
   enter() {
+    // a dead character sees only the record of their run (revolver.js)
+    if (W.me && W.me.roleId === 'dead') { document.getElementById('login-screen').classList.add('hidden'); return Revolver.showDead(); }
     document.getElementById('login-screen').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     connectStream();
@@ -336,7 +338,11 @@ const App = {
   renderView(fresh) {
     const container = document.getElementById('view');
     if (W.view === 'map') {
-      if (fresh || !document.getElementById('map-wrap')) { GameMap.mount(container); lastMapFp = mapFingerprint(); return; }
+      if (fresh || !document.getElementById('map-wrap')) {
+        GameMap.mount(container); lastMapFp = mapFingerprint();
+        if (typeof Revolver !== 'undefined') Revolver.mountStow(document.getElementById('map-wrap'));
+        return;
+      }
       // The full-SVG map rebuild is the most expensive render in the app
       // (the war layer learned this first — docs/WAR.md "war-layer-only
       // redraws"). Most syncs don't touch anything the map draws (market
@@ -348,6 +354,8 @@ const App = {
       // GM map effects patch themselves in place (keyed, cheap) on every
       // sync; the disasters chip carries their count
       else { GameMap.renderFx(); GameMap.renderPins(); GameMap.renderLayerBar(); }
+      // the revolver, stowed bottom-left (revolver.js)
+      if (typeof Revolver !== 'undefined') Revolver.mountStow(document.getElementById('map-wrap'));
       return;
     }
     if (W.view === 'gm') { GM.render(container); return; }
@@ -356,6 +364,7 @@ const App = {
 
   async renderAll() {
     if (!W.me || !S()) return;
+    if (W.me.roleId === 'dead') return; // the record of the run covers everything (revolver.js)
     // Async views make renderAll itself async (it awaits the Elections/… view
     // render). Two syncs arriving inside that window — an SSE event while a
     // response-sync is mid-render — used to rebuild the SAME container twice,

@@ -2676,3 +2676,56 @@ body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:n
 .rr-scopes{flex:1; display:flex; flex-wrap:wrap; align-items:center; gap:4px;}
 .rr-note{font-family:var(--font-mono); font-size:10px; color:var(--ink-faint);}
 .rr-acts{display:flex; gap:6px;}
+
+/* ═══════════ THE REVOLVER (revolver.js) ═══════════
+   Deliberately not in the paper style: a real, lit 3D object on the map,
+   a dark studio when it is in hand, black when it is over. */
+#revolver-stow{position:absolute; left:8px; bottom:6px; z-index:6; width:168px; height:96px; padding:0; border:none; background:none; cursor:pointer;
+  -webkit-tap-highlight-color:transparent; transition:transform .25s cubic-bezier(.2,.8,.3,1.2), filter .25s, opacity .15s;
+  filter:drop-shadow(0 6px 5px rgba(20,12,4,.45)) drop-shadow(0 1px 1px rgba(0,0,0,.4));}
+#revolver-stow .rv-stow-canvas{width:100%; height:100%; display:block; pointer-events:none;}
+#revolver-stow.failed{display:none;}
+#revolver-stow:hover{transform:translateY(-3px) rotate(-1.5deg); filter:drop-shadow(0 12px 9px rgba(20,12,4,.45)) drop-shadow(0 1px 1px rgba(0,0,0,.4));}
+#revolver-stow.lifted{opacity:0; pointer-events:none; transition:opacity .05s;}
+#map-wrap.has-revolver #map-legend{left:186px;}
+#map-wrap:has(#map-svg.war-mode) #revolver-stow{display:none;}
+#revolver-stage{position:fixed; inset:0; z-index:2000; touch-action:none; user-select:none; -webkit-user-select:none; cursor:default;}
+#revolver-stage .rv-dim{position:absolute; inset:0; opacity:0; transition:opacity .9s ease;
+  background:radial-gradient(ellipse at 55% 45%, rgba(26,22,18,.80) 0%, rgba(8,6,5,.95) 62%, rgba(0,0,0,.98) 100%);}
+#revolver-stage.on .rv-dim{opacity:1;}
+#revolver-stage .rv-canvas{position:absolute; inset:0; width:100%; height:100%; display:block;}
+#revolver-stage .rv-hint{position:absolute; left:50%; bottom:max(22px, env(safe-area-inset-bottom)); transform:translateX(-50%); max-width:min(92vw, 640px); text-align:center;
+  font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:rgba(236,226,206,.62); opacity:0; transition:opacity .4s; pointer-events:none;}
+#revolver-stage .rv-hint.on{opacity:1;}
+#revolver-stage[data-step="load"], #revolver-stage[data-step="aim"]{cursor:pointer;}
+#revolver-black{position:fixed; inset:0; z-index:3000; background:#000; opacity:0; overflow-y:auto; -webkit-overflow-scrolling:touch;}
+#revolver-black.on{opacity:1;}
+.ob-doc{max-width:760px; margin:0 auto; padding:clamp(40px, 9vh, 110px) 22px 80px; color:#d8d0c0; opacity:0; transform:translateY(10px); transition:opacity 2.4s ease, transform 2.4s ease;}
+.ob-doc.in{opacity:1; transform:none;}
+.ob-over{font-family:var(--font-mono); font-size:10px; letter-spacing:.4em; text-transform:uppercase; color:#7d7465;}
+.ob-name{font-family:var(--font-voice); font-weight:500; font-size:clamp(34px, 7vw, 64px); line-height:1.05; margin:10px 0 6px; color:#efe6d4;}
+.ob-title{font-family:var(--font-mono); font-size:11px; letter-spacing:.18em; text-transform:uppercase; color:#9b917f;}
+.ob-dates{font-family:var(--font-mono); font-size:11px; color:#7d7465; margin-top:10px; letter-spacing:.05em;}
+.ob-summary{font-family:var(--font-voice); font-style:italic; font-size:clamp(16px, 2.4vw, 19px); line-height:1.65; color:#cfc6b4; margin:28px 0 30px; border-left:2px solid #3a332b; padding-left:18px;}
+.ob-stats{display:grid; grid-template-columns:repeat(auto-fill, minmax(165px, 1fr)); gap:1px; background:#2a251f; border:1px solid #2a251f; margin-bottom:34px;}
+.ob-stat{background:#0b0a09; padding:14px 14px 12px;}
+.ob-k{font-family:var(--font-mono); font-size:8.5px; letter-spacing:.16em; text-transform:uppercase; color:#7d7465;}
+.ob-v{font-family:var(--font-voice); font-size:22px; color:#efe6d4; margin-top:5px; word-break:break-word;}
+.ob-d{font-family:var(--font-mono); font-size:9.5px; color:#6d6556; margin-top:3px;}
+.ob-sec{margin:0 0 28px;}
+.ob-sec h3{font-family:var(--font-mono); font-weight:400; font-size:9.5px; letter-spacing:.3em; text-transform:uppercase; color:#8a8070; margin:0 0 10px; display:flex; gap:10px; align-items:center;}
+.ob-sec h3::after{content:''; flex:1; height:1px; background:#2a251f;}
+.ob-roles, .ob-acts{list-style:none; margin:0; padding:0;}
+.ob-roles li, .ob-acts li{display:flex; gap:14px; padding:6px 0; border-bottom:1px dotted #2a251f; font-size:13.5px; color:#cfc6b4; line-height:1.45;}
+.ob-roles li span:first-child{flex:1;}
+.ob-when{font-family:var(--font-mono); font-size:10.5px; color:#6d6556; white-space:nowrap;}
+.ob-list{margin:0; padding-left:18px; color:#cfc6b4; font-size:13.5px; line-height:1.75;}
+.ob-chips{display:flex; flex-wrap:wrap; gap:6px;}
+.ob-chips span{font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; text-transform:uppercase; border:1px solid #3a332b; color:#a99f8c; padding:3px 8px;}
+.ob-end{text-align:center; color:#4a4238; font-size:20px; margin:40px 0 18px;}
+.ob-out{display:block; margin:0 auto; background:transparent; border:1px solid #3a332b; color:#8a8070; font-family:var(--font-mono); font-size:10px; letter-spacing:.24em; text-transform:uppercase; padding:9px 22px; cursor:pointer;}
+.ob-out:hover{color:#efe6d4; border-color:#8a8070;}
+@media (max-width:640px){
+  #revolver-stow{width:118px; height:68px; left:4px; bottom:4px;}
+  #map-wrap.has-revolver #map-legend{left:128px;}
+}

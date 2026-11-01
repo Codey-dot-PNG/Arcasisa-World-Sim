@@ -1319,6 +1319,8 @@ const GameMap = {
     this.renderFx();
     // where the players' characters are (map-pins.js) — HTML over the map
     if (this.renderPins) this.renderPins();
+    // the revolver, stowed bottom-left (revolver.js)
+    if (typeof Revolver !== 'undefined') Revolver.mountStow(document.getElementById('map-wrap'));
 
     // night city-lights (+ the atlas's roads, towns and works)
     this.buildLights(map);

@@ -4,7 +4,7 @@ Vanilla JS, no framework, no build. `public/index.html` loads scripts in depende
 **keep this order** when adding a file:
 
 ```
-core.js → pricepath.js → charts.js → map.js → map-style.js → map-fx.js → map-pins.js → mapedit.js → borders.js → views.js → holdings.js → sfx.js
+core.js → pricepath.js → charts.js → map.js → map-style.js → map-fx.js → map-pins.js → mapedit.js → borders.js → views.js → holdings.js → revolver.js → sfx.js
 → entertainment.js → gm.js → gmbar.js → music.js → app.js
 ```
 
@@ -19,6 +19,7 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `app.js` | Boot, login screen, navigation (`App.go(view)`), `renderAll()` orchestration, scroll preservation across periodic re-renders |
 | `views.js` | All player-facing views (map dossier panels, parliament, companies/exchange, economy, population, news, timeline) + the contextual inspector panel |
 | `holdings.js` | Folded into `Views`: the Economy's **Holdings** control board and the open pickers the money/goods modals are built from — see "Holdings & the Economy page" below |
+| `revolver.js` | `Revolver` — the 3D revolver a player can end their character with. See "The revolver" below |
 | `charts.js` | Zero-dep SVG charts: `Charts.chartLine(series, opts)`, `Charts.chartBars(rows, opts)` |
 | `map.js` | `GameMap` — SVG world on the **3840×2160** master grid, pan/zoom, layers (political/data/ownership/military), all drawn from state (`settings.map`, provinces, cities, properties). Also owns the day/night cycle: a continuous solar model (`setDayNight`) writes `--dn-night/warm/lights` CSS vars that drive an in-svg night grade + city-glow blobs (plain alpha, no blend modes — kept *under* buildings/labels so they stay readable) and the vehicles' headlight beams. The last reading is cached and seeded into a freshly mounted `#map-wrap` (with transitions snapped off for two frames), so returning to the map tab at night shows night at once instead of fading in from day; by day `data-dn` is absent and the whole night layer is `display:none`. Pan/zoom is rAF-coalesced (`scheduleTransform`) and traffic steps at ~30 fps |
 | `map-style.js` | Folded into `GameMap`: the **atlas** map style (GM switch `settings.ambience.mapStyle`, default `'atlas'`; `'classic'` is the original sheet) — a printed period map in the manner of Suzerain's: warm cream paper, a muted blue-green sea with coastal **water-lines** (offset contours computed once per coastline — land raster → Euclidean distance transform → marching squares, cached), foreign powers left as paper with each frontier in its own ink plus a soft band of it inside (`countryInk`), the Republic's provinces in mid-tone inks of their own colours (`atlasProvColor` — amber, sage, terracotta, never pastel) with dotted borders, one national edge and names in spaced capitals of the same hue, deep (`atlasProvLabel`), a faint conic graticule, red built-up areas round towns, red railways. **The sheet is paper in every mood**: the dark moods light it with a desk lamp (`#atlas-paper`'s vignette over a dark desk) instead of inverting it. It draws on **every layer including War** (`atlasOn`); the screen-space plate furniture — `#atlas-paper`, `#atlas-frame` (double neatline, no title), the compass rose in `#map-compass`, `#atlas-scale`, `#atlas-inset` (locator; click/drag recentres) — only off the War layer (`atlasChromeOn`; the war brings its own frame/rose/scale). **Light:** building shadows (`atlasShadows`, `settings.ambience.shadows`) are canvas-baked silhouettes offset by `--sh-x/--sh-y/--sh-o`, which `onSun` derives from the world clock (sun east at 06:00, south at noon, west at 18:00; long at dawn/dusk, gone at night; mid-afternoon when the cycle is off); after dark each building cross-fades to baked lit-window art (`.tex-night`, `--dn-night`), roads glow sodium and towns/works pool light (`atlasLights`) |
@@ -39,6 +40,31 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 | `music.js` | Shared soundtrack via hidden YouTube IFrame player, driven by `settings.music` (GM changes propagate on sync) |
 | `sfx.js` | Synthesised WebAudio effects; volume rides Music volume; localStorage toggle |
 | `pricepath.js` | **Byte-identical copy of server/pricepath.js** — deterministic live price wiggle so clients render (never invent) the day-market ticker |
+
+## The revolver
+
+A hand-written WebGL1 renderer (no libraries) draws the real 3D model built by
+`tools/build-revolver.js` (`/assets/models/revolver.{json,bin}`: quantised parts —
+frame, grip, bore plug, cylinder, trigger, hammer, cartridge — plus the chamber layout,
+pivots and barrel). PBR shading lit by a procedural studio (softbox, strip light, warm
+bounce), ACES tone mapping; the bore and chambers shade as dark holes. Picking renders part
+ids to an offscreen buffer (`pickAt`); chambers are hit by their projected centres.
+
+- **Stowed**: the live model in its own small canvas at the map's bottom-left
+  (`#revolver-stow`, one canvas/context per session moved into each new map; leans toward
+  the cursor; the legend shifts right). Mounted from `App.renderView`/`GameMap.render` via
+  `Revolver.mountStow`. Not for the GM, not on the War layer.
+- **In hand**: a full-screen stage (`#revolver-stage`, its own context, freed on stow). Pick
+  up → the gun rises from the corner, cylinder swings out; six cartridges rise where it lay.
+  Click/tap a chamber to load (again to unload), the cylinder elsewhere to close
+  (`POST /api/revolver/close` — the server spins it), then the gun turns to face the screen.
+  Click the gun to pull (`/api/revolver/fire`): an empty chamber clicks and the cylinder
+  turns; a live one → black, then the record of the run (`showDead`). Click away at any
+  stage to stow (`/api/revolver/stow`).
+- **Dead**: `App.enter`/`renderAll` show only the record for a `dead` account.
+- **Sounds** are recordings in `/assets/sfx/revolver/<slot>.mp3` — slots `pickup open load
+  unload close spin turn cock dry shot stow`; a missing file is silent.
+- `Revolver.still(w, h, opts)` renders any pose to a PNG data URL (for checking the model).
 
 ## Holdings & the Economy page
 

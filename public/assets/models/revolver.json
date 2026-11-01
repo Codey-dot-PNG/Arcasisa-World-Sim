@@ -1,0 +1,213 @@
+{
+ "source": "Revolver with a bullet — 3DRaizar (Sketchfab), used with permission",
+ "posQuant": 4096,
+ "vertexStride": 10,
+ "axes": "cylinder axis = +X through the origin; barrel toward −X; up +Y; shooter’s left +Z",
+ "materials": [
+  {
+   "name": "Material.005",
+   "color": [
+    0.7622,
+    0.7622,
+    0.7622
+   ],
+   "metallic": 0.704,
+   "roughness": 0.182
+  },
+  {
+   "name": "Material.010",
+   "color": [
+    0,
+    0,
+    0
+   ],
+   "metallic": 0,
+   "roughness": 0.436
+  },
+  {
+   "name": "Material.004",
+   "color": [
+    0.8,
+    0.7587,
+    0.2156
+   ],
+   "metallic": 1,
+   "roughness": 0.152
+  },
+  {
+   "name": "Material.006",
+   "color": [
+    0.8,
+    0.2122,
+    0.0432
+   ],
+   "metallic": 0.534,
+   "roughness": 0.267
+  },
+  {
+   "name": "Material.007",
+   "color": [
+    0.9125,
+    0.9956,
+    0.6535
+   ],
+   "metallic": 0,
+   "roughness": 0.723
+  }
+ ],
+ "parts": [
+  {
+   "name": "frame",
+   "material": 0,
+   "vertexOffset": 0,
+   "vertexCount": 6435,
+   "indexOffset": 64352,
+   "indexCount": 27588
+  },
+  {
+   "name": "grip",
+   "material": 1,
+   "vertexOffset": 119528,
+   "vertexCount": 5565,
+   "indexOffset": 175180,
+   "indexCount": 29184
+  },
+  {
+   "name": "cylinder",
+   "material": 0,
+   "vertexOffset": 233548,
+   "vertexCount": 39682,
+   "indexOffset": 630368,
+   "indexCount": 165960
+  },
+  {
+   "name": "trigger",
+   "material": 0,
+   "vertexOffset": 962288,
+   "vertexCount": 7453,
+   "indexOffset": 1036820,
+   "indexCount": 40704
+  },
+  {
+   "name": "hammer",
+   "material": 0,
+   "vertexOffset": 1118228,
+   "vertexCount": 78,
+   "indexOffset": 1119008,
+   "indexCount": 180
+  },
+  {
+   "name": "bullet_case",
+   "material": 2,
+   "vertexOffset": 1119368,
+   "vertexCount": 1421,
+   "indexOffset": 1133580,
+   "indexCount": 8064
+  },
+  {
+   "name": "bullet_tip",
+   "material": 3,
+   "vertexOffset": 1149708,
+   "vertexCount": 493,
+   "indexOffset": 1154640,
+   "indexCount": 2688
+  },
+  {
+   "name": "bullet_head",
+   "material": 2,
+   "vertexOffset": 1160016,
+   "vertexCount": 58,
+   "indexOffset": 1160596,
+   "indexCount": 168
+  },
+  {
+   "name": "bullet_primer",
+   "material": 4,
+   "vertexOffset": 1160932,
+   "vertexCount": 58,
+   "indexOffset": 1161512,
+   "indexCount": 168
+  },
+  {
+   "name": "bore",
+   "material": 1,
+   "vertexOffset": 1161848,
+   "vertexCount": 30,
+   "indexOffset": 1162148,
+   "indexCount": 84
+  }
+ ],
+ "cylinder": {
+  "rearX": 0.7679,
+  "frontX": -0.7679,
+  "radius": 0.7679
+ },
+ "chambers": [
+  {
+   "angle": 57.19,
+   "radius": 0.4864
+  },
+  {
+   "angle": 117.19,
+   "radius": 0.4864
+  },
+  {
+   "angle": 177.19,
+   "radius": 0.4864
+  },
+  {
+   "angle": -122.81,
+   "radius": 0.4864
+  },
+  {
+   "angle": -62.81,
+   "radius": 0.4864
+  },
+  {
+   "angle": -2.81,
+   "radius": 0.4864
+  }
+ ],
+ "pivots": {
+  "hammer": [
+   0.9199,
+   -0.1482,
+   0
+  ],
+  "trigger": [
+   0.3149,
+   -0.7889,
+   0
+  ],
+  "crane": [
+   0,
+   -0.7179,
+   0
+  ]
+ },
+ "barrel": {
+  "y": 0.4435,
+  "z": 0.0229,
+  "bore": 0.2075,
+  "muzzleX": -5.5975
+ },
+ "bullet": {
+  "length": 1.0899,
+  "radius": 0.1583,
+  "caseRadius": 0.1435,
+  "scale": 0.7426
+ },
+ "chamberHole": 0.1495,
+ "bounds": {
+  "min": [
+   -5.598,
+   -3.097,
+   -0.768
+  ],
+  "max": [
+   4.62,
+   1.3,
+   0.768
+  ]
+ }
+}

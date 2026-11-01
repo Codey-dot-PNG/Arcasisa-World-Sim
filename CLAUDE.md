@@ -78,10 +78,11 @@ server/mapdata.js      map document (labels/roads/rails/countries); applyMap() s
 server/territory.js    border-painter saves: found province/country, apply painted shapes, re-home places
 server/peace.js        player peace negotiations: offers, revisions, acceptance (reparations, holdings, borders)
 server/military.js     nations' armed forces: arsenal totals, militaryLog record, standing orders (plan/doctrine)
+server/mortality.js    the revolver: server-side cylinder, character death ('dead' role), the record of the run
 server/map-geometry.js AUTO-GENERATED from the master SVG — do not edit (tools/build-mapdata.js)
 server/supabase.js     minimal PostgREST/Realtime client (plain fetch)
 public/js/*            client modules — see docs/FRONTEND.md
-tools/                 build-mapdata.js, diagnose-sync.js, migrate-world.js
+tools/                 build-mapdata.js, build-revolver.js (3D model → public/assets/models), diagnose-sync.js, migrate-world.js
 data/                  world.json (live state — do not hand-edit while running), snapshots/
 ```
 

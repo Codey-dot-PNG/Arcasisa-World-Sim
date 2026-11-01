@@ -250,7 +250,10 @@ dropped first).
 User: `{ id, username, displayName, salt, passHash (scrypt), roleId, entityId (their persona),
 office ({widgets, updatedAt} — the Office tab layout, Phase 36),
 newspaperId (journalists), lastReadNewsTs (news "News (n)" badge waterline, migrate-defaulted
-to 0), created, lastLogin }`. Seeded users all use passphrase `arcasia`:
+to 0), created, lastLogin, roleHistory ([{roleId, at, turn}] — migrate-seeded, appended on every
+role change), revolver ({loaded, pos, at} while a loaded revolver is closed — server/mortality.js),
+deadAt, obituary (the record of the run, written at death) }`. Role **`dead`** is seeded by
+migrate; a dead character's entity carries `deceased: { at, turn, date }`. Seeded users all use passphrase `arcasia`:
 gm, president (Miron Valen), journalist (Jana Halden), executive (Kira Moss), citizen
 (Toma Rill), plus MPs/executives/judge/military/police personas (verenne, stahl, kandel, suri,
 hale, keller, odek, grazi, orn, krenn, voss, falk).

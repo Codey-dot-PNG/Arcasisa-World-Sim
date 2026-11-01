@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const store = require('./store');
 const sim = require('./sim');
+const mortality = require('./mortality');
 const ownership = require('./ownership');
 const market = require('./market');
 const deeds = require('./deeds');
@@ -207,6 +208,7 @@ function userPayload(u) {
     entityId: u.user.entityId, roleId: u.user.roleId, newspaperId: u.user.newspaperId || null,
     lastReadNewsTs: u.user.lastReadNewsTs || 0,
     office: u.user.office || null,
+    deadAt: u.user.deadAt || null,
     role: { id: u.role.id, name: u.role.name, perms: u.role.perms }
   };
 }
@@ -869,6 +871,33 @@ async function handle(req, res, pathname, method) {
 
     // everything below requires a session
     if (!u) return json(res, 401, { error: 'Not authenticated' });
+
+    // ---- a dead character (server/mortality.js) ----
+    // The record of their run is all a dead account may read; it may change
+    // nothing at all.
+    if (pathname === '/api/me/obituary' && method === 'GET') {
+      return json(res, 200, { obituary: u.user.obituary || null, deadAt: u.user.deadAt || null });
+    }
+    if (u.user.roleId === 'dead' && method !== 'GET') return deny('Your character is dead.');
+
+    // ---- the revolver: close (load + spin), pull, stow ----
+    if (pathname.startsWith('/api/revolver/') && method === 'POST') {
+      if (u.role.perms.gm) return deny('The Game Master cannot use the revolver.');
+      const act = pathname.slice('/api/revolver/'.length);
+      const b = await readBody(req);
+      if (act === 'close') { const r = mortality.close(u.user, b.loaded); store.save(); return json(res, 200, r); }
+      if (act === 'stow') { mortality.stow(u.user); store.save(); return json(res, 200, { ok: true }); }
+      if (act === 'fire') {
+        if (!u.user.revolver) return bad('Load and close the revolver first.');
+        const r = mortality.pull(u.user);
+        if (!r.fired) { store.save(); return json(res, 200, r); }
+        const record = await mortality.die(db, u.user);
+        store.log('death', `${record.name} has died`, record.title || '', u.user.displayName, [u.user.entityId].filter(Boolean));
+        store.save(); broadcast('sync');
+        return json(res, 200, { fired: true, chamber: r.chamber, obituary: record });
+      }
+      return bad('Unknown revolver action.');
+    }
     // Phase 36 — acting for an entity in trade: its control chain, or a live
     // roster grant carrying the 'trade' scope (cash the entity pays out
     // counts against that grant's spend cap). The roster editor has offered
@@ -3540,6 +3569,16 @@ async function handle(req, res, pathname, method) {
           if (b.displayName !== undefined) target.displayName = String(b.displayName).slice(0, 60);
           if (b.roleId !== undefined) {
             if (!db.roles.some(r => r.id === b.roleId)) return bad('Unknown role.');
+            if (b.roleId !== target.roleId) {
+              target.roleHistory = Array.isArray(target.roleHistory) ? target.roleHistory : [];
+              target.roleHistory.push({ roleId: b.roleId, at: Date.now(), turn: db.settings.time.turn });
+              // brought back from the dead by the GM: the character lives again
+              if (target.roleId === 'dead') {
+                delete target.deadAt;
+                const te = db.entities.find(e => e.id === target.entityId);
+                if (te) delete te.deceased;
+              }
+            }
             target.roleId = b.roleId;
           }
           if (b.entityId !== undefined) {

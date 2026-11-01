@@ -31,7 +31,7 @@
    record of its run (Revolver.showDead). */
 const Revolver = (() => {
   const MODEL = '/assets/models/revolver';
-  const SOUNDS = ['pickup', 'open', 'load', 'unload', 'close', 'spin', 'turn', 'cock', 'dry', 'shot', 'stow'];
+  const SOUNDS = ['pickup', 'cock', 'release', 'shot', 'stow'];
   const FOV = 32 * Math.PI / 180;
   const DEG = Math.PI / 180;
 
@@ -507,7 +507,6 @@ void main(){
         if (k >= 1) { R.tweens.splice(R.tweens.indexOf(tw), 1); tw.res(); }
       }
       P.look.x += (P.lookT.x - P.look.x) * 0.12; P.look.y += (P.lookT.y - P.look.y) * 0.12;
-      if (R.stage && R.stage.dataset.step === 'turning') turnStep();
       for (const r of P.rounds) if (r.at === 'fly') {
         r.k = Math.min(1, (now - r.t0) / r.ms);
         if (r.k >= 1) {
@@ -585,7 +584,7 @@ void main(){
     if (!ST.el) {
       ST.canvas = el('canvas.rv-stow-canvas');
       ST.el = el('button#revolver-stow', { type: 'button', title: 'A revolver', 'aria-label': 'Pick up the revolver' }, ST.canvas);
-      ST.el.addEventListener('click', (e) => { e.stopPropagation(); pickUp(ST.el); });
+      ST.el.addEventListener('click', (e) => { e.stopPropagation(); if (!R.held) pickUp(ST.el, e); });
       ST.el.addEventListener('pointermove', (e) => {
         const r = ST.el.getBoundingClientRect();
         ST.want = [((e.clientY - r.top) / r.height - 0.5) * 0.35, ((e.clientX - r.left) / r.width - 0.5) * 0.5];
@@ -636,157 +635,102 @@ void main(){
   const restSpin = () => -R.data.meta.chambers[0].angle * DEG;
 
   /* ---------------- the stage ---------------- */
-  // touch screens are told to tap, and get the short version
-  const TOUCH = () => window.matchMedia && matchMedia('(pointer:coarse)').matches;
-  const HINTS = {
-    load: ['Drag a round into a chamber (or out of one) · click the cylinder to close it · click away to put the gun down', 'Drag a round into a chamber · tap the cylinder to close · tap away to put it down'],
-    loadOnly: ['Drag the round onto a chamber', 'Drag the round onto a chamber'],
-    turn: ['Move the mouse to turn the gun round to face you', 'Drag to turn the gun round to face you'],
-    close: ['Click the cylinder to close it', 'Tap the cylinder to close it'],
-    aim: ['Click the gun to pull the trigger · click away to put it down', 'Tap the gun to pull the trigger · tap away to put it down'],
-    again: ['Click the gun to pull the trigger again · click away to put it down', 'Tap the gun to pull again · tap away to put it down']
-  };
-  const say = (k) => hint(HINTS[k][TOUCH() ? 1 : 0]);
-  function hint(text) {
-    const h = R.stage && R.stage.querySelector('.rv-hint');
-    if (h) { h.textContent = text || ''; h.classList.toggle('on', !!text); }
+  /* ---------------- held: the gun is the cursor ----------------
+     Click the stowed gun and it becomes your cursor, drawn over the page
+     (no separate screen). Near its spot it lies as it was stowed; the
+     further the hand moves from there, the more it turns to face you — and
+     the more it trembles the longer it does. Click on its spot to put it
+     back. Anywhere else, press and HOLD: the trigger pulls back and the
+     hammer rises, double-action; let go early and both fall back. A full
+     pull fires (POST /api/revolver/fire). */
+  const PULL_MS = 650;
+  const STOW_R = 70; // px around the spot that count as "putting it back"
+  function heldFacing() {
+    const c = R.home, d = Math.hypot(R.cur[0] - c[0], R.cur[1] - c[1]);
+    const x = Math.max(0, Math.min(1, (d - 30) / 240));
+    return x * x * (3 - 2 * x);
   }
-  async function pickUp(stowEl) {
-    if (R.stage || R.busy) return;
+  function heldPose() {
+    const v = view(), f = heldFacing(), w0 = R.stowRect.width, h0 = R.stowRect.height;
+    const k = lerp(1, 1.9, f), w = w0 * k, h = h0 * k;
+    const now = performance.now();
+    if (f > 0.85) { if (!P.aimAt) P.aimAt = now; } else if (f < 0.5) P.aimAt = 0;
+    Object.assign(P.gun, fitPose(v, { left: R.cur[0] - w / 2, top: R.cur[1] - h / 2, width: w, height: h },
+      { rx: lerp(STOW_POSE.rx, 2 * DEG, f), ry: lerp(STOW_POSE.ry, 90 * DEG, f), rz: lerp(STOW_POSE.rz, 0, f), z: 0 }, 0.96));
+    // double action: the pull draws the trigger and lifts the hammer
+    if (R.pull) {
+      const k2 = Math.min(1, (now - R.pull.t0) / PULL_MS);
+      P.trigger = k2; P.hammer = k2;
+      if (k2 >= 1 && !R.pull.fired) { R.pull.fired = true; fire(); }
+    } else if (!R.firing) { P.trigger += (0 - P.trigger) * 0.35; P.hammer += (0 - P.hammer) * 0.35; }
+  }
+  const nearHome = () => Math.hypot(R.cur[0] - R.home[0], R.cur[1] - R.home[1]) < STOW_R;
+  function onHeldMove(e) { R.cur = [e.clientX, e.clientY]; }
+  function onHeldDown(e) {
+    if (!R.held) return;
+    e.preventDefault(); e.stopPropagation();
+    R.cur = [e.clientX, e.clientY];
+    if (R.firing) return;
+    if (nearHome()) return stow();
+    R.pull = { t0: performance.now(), fired: false };
+    sound('cock');
+  }
+  function onHeldUp(e) {
+    if (!R.held) return;
+    e.preventDefault(); e.stopPropagation();
+    if (R.pull && !R.pull.fired) { R.pull = null; sound('release'); }
+  }
+  const swallow = (e) => { if (R.held) { e.preventDefault(); e.stopPropagation(); } };
+  const HELD_EVENTS = [['pointermove', onHeldMove], ['pointerdown', onHeldDown], ['pointerup', onHeldUp], ['pointercancel', onHeldUp], ['click', swallow], ['contextmenu', swallow], ['dblclick', swallow]];
+  async function pickUp(stowEl, ev) {
+    if (R.held || R.busy) return;
     R.busy = true;
     loadSounds();
-    const rect = stowEl.getBoundingClientRect();
-    const stage = el('div#revolver-stage', el('div.rv-dim'), el('canvas.rv-canvas'), el('div.rv-hint'));
-    document.body.appendChild(stage);
-    R.stage = stage;
-    try {
-      await load();
-      R.stageCtx = initGL(stage.querySelector('canvas'));
-    } catch (e) {
-      stage.remove(); R.stage = null; R.busy = false;
-      toast(e.message || 'The revolver could not be drawn.', true);
-      return;
-    }
-    const v = view();
-    R.stowRect = rect;
-    Object.assign(P.gun, stowPose(v, rect));
-    P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.sway = 0; P.alpha = 1;
-    P.rounds = [];
-    // the tray: where the gun lay
-    const tp = unproject(v, rect.left + rect.width * 0.18, rect.top + rect.height * 0.62, 1.5);
-    Object.assign(P.tray, { x: tp[0], y: tp[1], z: tp[2], up: 0 });
-    draw();
+    try { await load(); } catch (e) { R.busy = false; return toast('The revolver could not be drawn.', true); }
+    const layer = el('canvas#revolver-held');
+    document.body.appendChild(layer);
+    try { R.stageCtx = initGL(layer); } catch (e) { layer.remove(); R.busy = false; return toast(e.message, true); }
+    R.stage = layer; R.held = true;
+    R.stowRect = stowEl.getBoundingClientRect();
+    R.home = [R.stowRect.left + R.stowRect.width / 2, R.stowRect.top + R.stowRect.height / 2];
+    R.cur = ev ? [ev.clientX, ev.clientY] : R.home.slice();
+    P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.alpha = 1; P.rounds = []; P.lean = 0; P.aimAt = 0; P.sway = 0.6;
     stowEl.classList.add('lifted');
-    stage.classList.add('on');
-    stage.addEventListener('pointerdown', onPointer);
-    stage.addEventListener('pointermove', onMove);
-    stage.addEventListener('pointerup', onUp);
-    stage.addEventListener('pointercancel', onUp);
-    P.aimAt = 0; P.lean = 0;
+    document.body.classList.add('revolver-held');
+    for (const [t, f] of HELD_EVENTS) document.addEventListener(t, f, true);
     sound('pickup');
-    const lp = loadPose(v);
-    await tween(P.gun, lp, 900, 'inOut');
-    P.sway = 1; loop();
-    sound('open');
-    await tween(P, { crane: 1 }, 380, 'back');
-    // the rounds already in it stay; the rest rise where the gun lay
-    const inGun = ((W.me && W.me.revolverLoaded) || []).filter(i => i >= 0 && i < 6);
-    for (const i of inGun) P.rounds.push({ at: 'chamber', chamber: i, slot: -1 });
-    for (let i = 0; i < 6 - inGun.length; i++) P.rounds.push({ at: 'tray', slot: i, chamber: -1 });
-    P.lean = 1;
-    P.tray.up = 0;
-    await tween(P.tray, { up: 1 }, 420, 'back');
-    R.stage.dataset.step = 'load';
-    say('load');
     R.busy = false;
+    const frame = () => {
+      if (!R.held) return;
+      heldPose(); draw();
+      requestAnimationFrame(frame);
+    };
+    requestAnimationFrame(frame);
   }
-  // the chambers in use, saved so the rounds stay in the gun between visits
-  function persist() {
-    const l = loaded();
-    if (W.me) W.me.revolverLoaded = l;
-    POST('/api/revolver/load', { loaded: l }).catch(() => { });
+  function letGo() {
+    R.held = false; R.pull = null;
+    for (const [t, f] of HELD_EVENTS) document.removeEventListener(t, f, true);
+    document.body.classList.remove('revolver-held');
+    if (R.stage) R.stage.remove();
+    R.stage = null;
+    release(R.stageCtx); R.stageCtx = null;
   }
-  function fly(round, to, ms, done) {
-    round.from = roundM(round, gunM(), view());
-    Object.assign(round, { at: 'fly', to, k: 0, t0: performance.now(), ms, done });
-    loop();
-  }
-  function freeSlot() {
-    const used = new Set(P.rounds.filter(r => r.at === 'tray' || (r.at === 'fly' && r.to === 'tray')).map(r => r.slot));
-    for (let i = 0; i < 6; i++) if (!used.has(i)) return i;
-    return 0;
-  }
-  // which tray round is under a screen point
-  function trayAt(sx, sy) {
-    const v = view();
-    let best = null, bd = Infinity;
-    for (const r of P.rounds) {
-      if (r.at !== 'tray') continue;
-      const m = trayM(r.slot, v), q = project(v, [m[12], m[13], m[14]]);
-      const d = Math.hypot(sx - q[0], sy - q[1]);
-      if (d < bd) { bd = d; best = r; }
-    }
-    return best;
-  }
-  // after closing: the player turns the gun round with the mouse (or a
-  // finger) until it faces them, and there it locks
-  function turnStep() {
-    const A = R.poseA, B = R.poseB, tr = R.turn;
-    const f = Math.max(0, Math.min(1, (tr.ry - A.ry) / (B.ry - A.ry)));
-    for (const k of ['x', 'y', 'z', 's', 'rz']) P.gun[k] = lerp(A[k], B[k], f);
-    P.gun.ry = tr.ry; P.gun.rx = lerp(A.rx, B.rx, f) + tr.rx;
-    if (Math.abs(tr.ry - B.ry) < 6 * DEG && Math.abs(tr.rx) < 10 * DEG) {
-      R.stage.dataset.step = 'locking';
-      tween(P.gun, B, 220, 'out').then(() => { R.stage.dataset.step = 'aim'; P.aimAt = performance.now(); say('aim'); });
-      sound('turn');
-    }
-  }
-  async function closeGun() {
-    R.busy = true;
-    R.stage.dataset.step = 'closing';
-    hint('');
-    // stray rounds go back in the box
-    await tween(P.tray, { up: 0 }, 260, 'inOut');
-    P.rounds = P.rounds.filter(r => r.at === 'chamber');
-    sound('close');
-    await tween(P, { crane: 0 }, 260, 'inOut');
-    let res;
-    if (W.me) W.me.revolverLoaded = loaded();
-    try { res = await POST('/api/revolver/close', { loaded: loaded() }); }
-    catch (e) { toast(e.message, true); R.busy = false; return stow(); }
-    // the server's spin: land chamber `pos` under the hammer
-    const a = R.data.meta.chambers[res.pos].angle * DEG;
-    let target = -a;
-    while (target > P.spin - 5 * Math.PI * 2) target -= Math.PI * 2;
-    sound('spin');
-    await tween(P, { spin: target }, 1500, 'out');
-    // now the player must turn it on themselves
-    R.poseA = Object.assign({}, P.gun); R.poseB = aimPose(view());
-    R.turn = { ry: P.gun.ry, rx: 0 }; // rx: the player's tilt on top of the turn
-    P.lean = 0;
-    R.stage.dataset.step = 'turning';
-    say('turn');
-    R.busy = false;
+  function stow() {
+    sound('stow');
+    letGo();
+    const st = document.getElementById('revolver-stow');
+    if (st) st.classList.remove('lifted');
+    P.aimAt = 0;
+    drawStow();
   }
   async function fire() {
-    R.busy = true;
-    hint('');
-    const req = POST('/api/revolver/fire').catch(e => ({ error: e }));
-    sound('cock');
-    await Promise.all([tween(P, { hammer: 1, trigger: 0.7 }, 260, 'inOut'), wait(380)]);
-    const res = await req;
-    if (res.error) { toast(res.error.message, true); await tween(P, { hammer: 0, trigger: 0 }, 160); R.busy = false; return; }
-    if (res.fired) return death(res);
-    await tween(P, { hammer: 0, trigger: 1 }, 45, 'lin');
-    sound('dry');
-    await tween(P, { trigger: 0 }, 180, 'out');
-    // the cylinder turns to the next chamber
-    const a = R.data.meta.chambers[res.pos].angle * DEG;
-    let target = -a;
-    while (target > P.spin + 0.01) target -= Math.PI * 2;
-    await tween(P, { spin: target }, 200, 'out');
-    say('again');
-    R.busy = false;
+    R.firing = true;
+    let res;
+    try { res = await POST('/api/revolver/fire'); }
+    catch (e) { R.firing = false; R.pull = null; return toast(e.message, true); }
+    R.firing = false;
+    if (res && res.fired) return death(res);
+    R.pull = null;
   }
   async function death(res) {
     // the hammer falls; the world ends
@@ -795,111 +739,12 @@ void main(){
     sound('shot');
     const black = el('div#revolver-black');
     document.body.appendChild(black);
-    requestAnimationFrame(() => black.classList.add('on'));
-    if (R.stage) { R.stage.remove(); R.stage = null; }
-    release(R.stageCtx); R.stageCtx = null;
+    black.classList.add('on');
+    letGo();
     P.sway = 0; R.tweens = [];
     W.me.roleId = 'dead';
     await wait(2200);
     showDead(res.obituary, black);
-  }
-  async function stow() {
-    if (!R.stage) return;
-    R.busy = true;
-    hint('');
-    const step = R.stage.dataset.step;
-    if (step !== 'load') POST('/api/revolver/stow').catch(() => { });
-    P.aimAt = 0; P.lean = 0;
-    const v = view();
-    if (P.crane > 0.01) { sound('close'); await tween(P, { crane: 0 }, 220); }
-    await tween(P.tray, { up: 0 }, 200);
-    P.rounds = [];
-    P.sway = 0;
-    sound('stow');
-    const sp = stowPose(v, R.stowRect);
-    await tween(P.gun, sp, 800, 'inOut');
-    const st = document.getElementById('revolver-stow');
-    if (st) st.classList.remove('lifted');
-    R.stage.classList.remove('on');
-    await wait(120);
-    if (R.stage) R.stage.remove();
-    R.stage = null; R.busy = false;
-    release(R.stageCtx); R.stageCtx = null;
-    drawStow();
-  }
-  const local = (e) => { const r = R.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
-  function onPointer(e) {
-    if (!R.stage || R.busy) return;
-    e.preventDefault();
-    const [sx, sy] = local(e);
-    R.down = { x: sx, y: sy, lx: e.clientX, ly: e.clientY, moved: false };
-    try { R.stage.setPointerCapture(e.pointerId); } catch (err) { /* old browsers */ }
-    const step = R.stage.dataset.step;
-    if (step !== 'load') return;
-    const hit = pickAt(sx, sy);
-    R.down.hit = hit;
-    const v = view();
-    // pick a round up: from the tray, or out of a chamber
-    let round = null;
-    if (hit === 3) round = trayAt(sx, sy);
-    else if (hit === 2) { const ch = chamberAt(sx, sy); if (ch >= 0) round = P.rounds.find(r => r.at === 'chamber' && r.chamber === ch); }
-    if (round) {
-      const was = round.at;
-      round.pos = unproject(v, sx, sy, 2.5);
-      round.at = 'drag';
-      if (was === 'chamber') { round.chamber = -1; sound('unload'); }
-      R.drag = round;
-    }
-  }
-  function onMove(e) {
-    if (!R.stage) return;
-    P.lookT.x = Math.max(-1, Math.min(1, e.clientX / innerWidth * 2 - 1));
-    P.lookT.y = Math.max(-1, Math.min(1, e.clientY / innerHeight * 2 - 1));
-    if (R.down) {
-      const [sx, sy] = local(e);
-      if (Math.hypot(sx - R.down.x, sy - R.down.y) > 6) R.down.moved = true;
-    }
-    if (R.drag) { const [sx, sy] = local(e); R.drag.pos = unproject(view(), sx, sy, 2.5); loop(); }
-    // turning the gun round: the hand's movement turns it
-    if (R.stage.dataset.step === 'turning' && R.turn) {
-      const last = R.lastMove || [e.clientX, e.clientY];
-      const dx = e.clientX - last[0], dy = e.clientY - last[1];
-      if (e.pointerType !== 'touch' || R.down) {
-        const A = R.poseA, B = R.poseB;
-        R.turn.ry = Math.max(A.ry, Math.min(B.ry + 25 * DEG, R.turn.ry + dx * 0.45 * DEG));
-        R.turn.rx = Math.max(-20 * DEG, Math.min(20 * DEG, R.turn.rx + dy * 0.2 * DEG));
-      }
-    }
-    R.lastMove = [e.clientX, e.clientY];
-  }
-  function onUp(e) {
-    if (!R.stage) return;
-    const down = R.down; R.down = null;
-    const [sx, sy] = local(e);
-    const step = R.stage.dataset.step;
-    if (R.drag) {
-      const round = R.drag; R.drag = null;
-      // dropped on an empty chamber → in it goes; anywhere else → back to the box
-      R.drag = null;
-      const ch = chamberAt(sx, sy);
-      const taken = ch >= 0 && P.rounds.some(r => r !== round && r.chamber === ch && (r.at === 'chamber' || (r.at === 'fly' && r.to === 'chamber')));
-      if (ch >= 0 && !taken) { round.chamber = ch; fly(round, 'chamber', 260, () => { sound('load'); persist(); }); }
-      else { round.chamber = -1; round.slot = freeSlot(); fly(round, 'tray', 380, () => persist()); }
-      return;
-    }
-    if (!down || down.moved || R.busy) return;
-    const hit = pickAt(sx, sy);
-    if (step === 'load') {
-      if (hit === 2) return closeGun();
-      if (hit === 1) return say('close');
-      if (hit === 3) return say('loadOnly');
-      return stow();
-    }
-    if (step === 'turning') { if (!hit) stow(); return; }
-    if (step === 'aim') {
-      if (hit === 1 || hit === 2) return fire();
-      return stow();
-    }
   }
 
   /* ---------------- the record of the run ---------------- */

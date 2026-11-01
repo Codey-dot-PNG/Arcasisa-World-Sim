@@ -54,7 +54,13 @@ ids to an offscreen buffer (`pickAt`); chambers are hit by their projected centr
   (`#revolver-stow`, one canvas/context per session moved into each new map; leans toward
   the cursor; the legend shifts right). Mounted from `App.renderView`/`GameMap.render` via
   `Revolver.mountStow`. Not for the GM, not on the War layer.
-- **In hand**: a full-screen stage (`#revolver-stage`, its own context, freed on stow). Pick
+- **In hand** (current): clicking the stowed gun makes it the cursor (`#revolver-held`, a
+  pointer-transparent full-page canvas; document-level capture listeners swallow clicks).
+  Near its spot it lies as stowed; moving away turns it to face the player (and it trembles
+  the longer it does). Clicking on the spot puts it back; elsewhere, HOLD to pull the trigger
+  double-action (trigger + hammer over ~0.65 s; release early and they fall back); a full
+  pull → `POST /api/revolver/fire` → death. Sound slots: `pickup cock release shot stow`.
+- *(Superseded loading flow, kept for reference:)* a full-screen stage (`#revolver-stage`, its own context, freed on stow). Pick
   up → the gun rises from the corner, cylinder swings out; six cartridges rise where it lay.
   Drag a round from the tray onto a chamber to load it; drag one out of a chamber to unload
   (rounds persist: `POST /api/revolver/load` → `user.revolverLoaded`, in `W.me`). The gun

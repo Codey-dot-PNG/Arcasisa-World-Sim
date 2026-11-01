@@ -890,13 +890,11 @@ async function handle(req, res, pathname, method) {
       if (act === 'close') { const r = mortality.close(u.user, b.loaded); store.save(); return json(res, 200, r); }
       if (act === 'stow') { mortality.stow(u.user); store.save(); return json(res, 200, { ok: true }); }
       if (act === 'fire') {
-        if (!u.user.revolver) return bad('Load and close the revolver first.');
-        const r = mortality.pull(u.user);
-        if (!r.fired) { store.save(); return json(res, 200, r); }
+        // a full pull of the trigger: the gun is always loaded
         const record = await mortality.die(db, u.user);
         store.log('death', `${record.name} has died`, record.title || '', u.user.displayName, [u.user.entityId].filter(Boolean));
         store.save(); broadcast('sync');
-        return json(res, 200, { fired: true, chamber: r.chamber, obituary: record });
+        return json(res, 200, { fired: true, obituary: record });
       }
       return bad('Unknown revolver action.');
     }

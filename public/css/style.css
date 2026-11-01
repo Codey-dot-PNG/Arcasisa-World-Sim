@@ -2687,7 +2687,6 @@ body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:n
 #revolver-stow.failed{display:none;}
 #revolver-stow:hover{transform:translateY(-3px) rotate(-1.5deg); filter:drop-shadow(0 12px 9px rgba(20,12,4,.45)) drop-shadow(0 1px 1px rgba(0,0,0,.4));}
 #revolver-stow.lifted{opacity:0; pointer-events:none; transition:opacity .05s;}
-#map-wrap.has-revolver #map-legend{left:186px;}
 #map-wrap:has(#map-svg.war-mode) #revolver-stow{display:none;}
 #revolver-stage{position:fixed; inset:0; z-index:2000; touch-action:none; user-select:none; -webkit-user-select:none; cursor:default;}
 #revolver-stage .rv-dim{position:absolute; inset:0; opacity:0; transition:opacity .9s ease;
@@ -2697,7 +2696,10 @@ body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:n
 #revolver-stage .rv-hint{position:absolute; left:50%; bottom:max(22px, env(safe-area-inset-bottom)); transform:translateX(-50%); max-width:min(92vw, 640px); text-align:center;
   font-family:var(--font-mono); font-size:10.5px; letter-spacing:.14em; text-transform:uppercase; color:rgba(236,226,206,.62); opacity:0; transition:opacity .4s; pointer-events:none;}
 #revolver-stage .rv-hint.on{opacity:1;}
-#revolver-stage[data-step="load"], #revolver-stage[data-step="aim"]{cursor:pointer;}
+#revolver-stage[data-step="load"]{cursor:grab;}
+#revolver-stage[data-step="load"]:active{cursor:grabbing;}
+#revolver-stage[data-step="aim"]{cursor:pointer;}
+#revolver-stage[data-step="turning"]{cursor:ew-resize;}
 #revolver-black{position:fixed; inset:0; z-index:3000; background:#000; opacity:0; overflow-y:auto; -webkit-overflow-scrolling:touch;}
 #revolver-black.on{opacity:1;}
 .ob-doc{max-width:760px; margin:0 auto; padding:clamp(40px, 9vh, 110px) 22px 80px; color:#d8d0c0; opacity:0; transform:translateY(10px); transition:opacity 2.4s ease, transform 2.4s ease;}
@@ -2727,5 +2729,4 @@ body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:n
 .ob-out:hover{color:#efe6d4; border-color:#8a8070;}
 @media (max-width:640px){
   #revolver-stow{width:118px; height:68px; left:4px; bottom:4px;}
-  #map-wrap.has-revolver #map-legend{left:128px;}
 }

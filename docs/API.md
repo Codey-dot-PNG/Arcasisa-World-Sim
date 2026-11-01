@@ -60,7 +60,8 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 |---|---|
 | `POST /api/revolver/close {loaded:[0..5]}` | Loads those chambers and spins: `user.revolver = { loaded, pos, at }` → `{ pos }` (the chamber under the hammer). Not for the GM |
 | `POST /api/revolver/fire` | One pull: empty → `{ fired:false, chamber, pos }` (cylinder advanced); live → the character dies → `{ fired:true, obituary }` |
-| `POST /api/revolver/stow` | Clears the revolver state |
+| `POST /api/revolver/load {loaded}` | Saves which chambers hold rounds (`user.revolverLoaded`, also in the session user) — rounds persist between visits |
+| `POST /api/revolver/stow` | Clears the closed/spun state (the rounds stay) |
 | `GET /api/me/obituary` | The record of the run (`user.obituary`, `user.deadAt`) |
 
 Death: the account's role becomes **`dead`** (seeded by `store.migrate`; no pages, no

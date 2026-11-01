@@ -209,6 +209,7 @@ function userPayload(u) {
     lastReadNewsTs: u.user.lastReadNewsTs || 0,
     office: u.user.office || null,
     deadAt: u.user.deadAt || null,
+    revolverLoaded: u.user.revolverLoaded || [],
     role: { id: u.role.id, name: u.role.name, perms: u.role.perms }
   };
 }
@@ -885,6 +886,7 @@ async function handle(req, res, pathname, method) {
       if (u.role.perms.gm) return deny('The Game Master cannot use the revolver.');
       const act = pathname.slice('/api/revolver/'.length);
       const b = await readBody(req);
+      if (act === 'load') { mortality.setLoaded(u.user, b.loaded); store.save(); return json(res, 200, { loaded: u.user.revolverLoaded }); }
       if (act === 'close') { const r = mortality.close(u.user, b.loaded); store.save(); return json(res, 200, r); }
       if (act === 'stow') { mortality.stow(u.user); store.save(); return json(res, 200, { ok: true }); }
       if (act === 'fire') {

@@ -198,6 +198,7 @@ void main(){
   const P = {
     gun: { x: 0, y: 0, z: 0, rx: 0, ry: 0, rz: 0, s: 1 },
     crane: 0, spin: 0, hammer: 0, trigger: 0, flash: 0, sway: 0, alpha: 1,
+    look: { x: 0, y: 0 }, lookT: { x: 0, y: 0 }, lean: 0, aimAt: 0,
     tray: { x: 0, y: 0, z: 0, up: 0 }, rounds: [] // per round: { at: 'tray'|'chamber'|'fly', chamber, k, from, toChamber }
   };
   const loaded = () => P.rounds.filter(r => r.at === 'chamber').map(r => r.chamber);
@@ -314,9 +315,14 @@ void main(){
     return [(x / w + 1) / 2 * v.w, (1 - y / w) / 2 * v.h];
   }
   function gunM() {
-    const g = P.gun, sw = P.sway;
-    const t = performance.now() / 1000;
-    const bx = sw * (Math.sin(t * 0.9) * 0.6 + Math.sin(t * 2.3) * 0.25) * DEG, by = sw * (Math.sin(t * 0.7 + 1) * 0.8) * DEG;
+    const g = P.gun, now = performance.now(), t = now / 1000;
+    // held at your head, the hand shakes more the longer it waits
+    const held = P.aimAt ? Math.min(7, (now - P.aimAt) / 1400) : 0;
+    const sw = P.sway * (1 + held * 0.5);
+    let bx = sw * (Math.sin(t * 0.9) * 0.6 + Math.sin(t * 2.3) * 0.25) * DEG, by = sw * (Math.sin(t * 0.7 + 1) * 0.8) * DEG;
+    if (held) { bx += held * (Math.sin(t * 11.3) + Math.sin(t * 17.9) * 0.6) * 0.06 * DEG; by += held * Math.sin(t * 13.7 + 2) * 0.07 * DEG; }
+    // the gun leans a little toward the cursor while it is open
+    bx += P.lean * P.look.y * 5 * DEG; by += P.lean * P.look.x * 8 * DEG;
     return chain(T(g.x, g.y + sw * Math.sin(t * 1.1) * 0.04, g.z), Rx(g.rx + bx), Ry(g.ry + by), Rz(g.rz), Sc(g.s));
   }
   function craneM() {
@@ -347,6 +353,7 @@ void main(){
     const cyl = cylM(G);
     if (r.at === 'chamber') return mul(cyl, chamberLocal(r.chamber));
     if (r.at === 'tray') return trayM(r.slot, v);
+    if (r.at === 'drag') return chain(T(r.pos[0], r.pos[1], r.pos[2]), Rx(-14 * DEG), Rz(-90 * DEG), Sc(P.gun.s));
     // in flight: from its start pose to the chamber (or back to the tray)
     const a = r.from, b = r.to === 'tray' ? trayM(r.slot, v) : mul(cyl, chamberLocal(r.chamber));
     // approach along the chamber axis for the last stretch
@@ -499,6 +506,8 @@ void main(){
         for (const key in tw.to) tw.obj[key] = lerp(tw.from[key], tw.to[key], e);
         if (k >= 1) { R.tweens.splice(R.tweens.indexOf(tw), 1); tw.res(); }
       }
+      P.look.x += (P.lookT.x - P.look.x) * 0.12; P.look.y += (P.lookT.y - P.look.y) * 0.12;
+      if (R.stage && R.stage.dataset.step === 'turning') turnStep();
       for (const r of P.rounds) if (r.at === 'fly') {
         r.k = Math.min(1, (now - r.t0) / r.ms);
         if (r.k >= 1) {
@@ -535,7 +544,7 @@ void main(){
   }
   function aimPose(v) {
     // turned round: the muzzle looks straight out of the screen
-    return fitPose(v, centre(v, v.aspect < 0.9 ? 0.86 : 0.5), { rx: 7 * DEG, ry: 74 * DEG, rz: -5 * DEG, z: 1.5 }, 0.95);
+    return fitPose(v, centre(v, v.aspect < 0.9 ? 0.86 : 0.5), { rx: 2 * DEG, ry: 90 * DEG, rz: 0, z: 1.5 }, 0.95);
   }
   // the pose matching the still on the map (screen rect → world)
   // Fit a pose into a screen rect (contain): project the model's box at a
@@ -586,6 +595,11 @@ void main(){
       window.addEventListener('resize', () => drawStow());
     }
     if (ST.el.parentNode !== wrap) wrap.appendChild(ST.el);
+    // it lies just to the right of the map key, following it as it opens/closes
+    const lg = wrap.querySelector('#map-legend');
+    const place = () => { if (lg && lg.isConnected) ST.el.style.left = (lg.offsetLeft + lg.offsetWidth + 10) + 'px'; };
+    place();
+    if (lg && window.ResizeObserver && ST.lg !== lg) { ST.lg = lg; if (ST.ro) ST.ro.disconnect(); ST.ro = new ResizeObserver(place); ST.ro.observe(lg); }
     ST.el.classList.toggle('lifted', !!R.stage);
     load().then(() => drawStow()).catch(() => { ST.el.classList.add('failed'); });
   }
@@ -625,8 +639,9 @@ void main(){
   // touch screens are told to tap, and get the short version
   const TOUCH = () => window.matchMedia && matchMedia('(pointer:coarse)').matches;
   const HINTS = {
-    load: ['Click a chamber to load a round · click the cylinder to close it · click away to put the gun down', 'Tap a chamber to load · tap the cylinder to close · tap away to put it down'],
-    loadOnly: ['Click a chamber to load a round', 'Tap a chamber to load a round'],
+    load: ['Drag a round into a chamber (or out of one) · click the cylinder to close it · click away to put the gun down', 'Drag a round into a chamber · tap the cylinder to close · tap away to put it down'],
+    loadOnly: ['Drag the round onto a chamber', 'Drag the round onto a chamber'],
+    turn: ['Move the mouse to turn the gun round to face you', 'Drag to turn the gun round to face you'],
     close: ['Click the cylinder to close it', 'Tap the cylinder to close it'],
     aim: ['Click the gun to pull the trigger · click away to put it down', 'Tap the gun to pull the trigger · tap away to put it down'],
     again: ['Click the gun to pull the trigger again · click away to put it down', 'Tap the gun to pull again · tap away to put it down']
@@ -664,35 +679,67 @@ void main(){
     stowEl.classList.add('lifted');
     stage.classList.add('on');
     stage.addEventListener('pointerdown', onPointer);
+    stage.addEventListener('pointermove', onMove);
+    stage.addEventListener('pointerup', onUp);
+    stage.addEventListener('pointercancel', onUp);
+    P.aimAt = 0; P.lean = 0;
     sound('pickup');
     const lp = loadPose(v);
     await tween(P.gun, lp, 900, 'inOut');
     P.sway = 1; loop();
     sound('open');
     await tween(P, { crane: 1 }, 380, 'back');
-    // six cartridges rise where the gun lay
-    for (let i = 0; i < 6; i++) P.rounds.push({ at: 'tray', slot: i, chamber: -1 });
+    // the rounds already in it stay; the rest rise where the gun lay
+    const inGun = ((W.me && W.me.revolverLoaded) || []).filter(i => i >= 0 && i < 6);
+    for (const i of inGun) P.rounds.push({ at: 'chamber', chamber: i, slot: -1 });
+    for (let i = 0; i < 6 - inGun.length; i++) P.rounds.push({ at: 'tray', slot: i, chamber: -1 });
+    P.lean = 1;
     P.tray.up = 0;
     await tween(P.tray, { up: 1 }, 420, 'back');
     R.stage.dataset.step = 'load';
     say('load');
     R.busy = false;
   }
-  function loadRound(i) {
-    const round = P.rounds.filter(r => r.at === 'tray').sort((a, b) => a.slot - b.slot)[0];
-    if (!round) return;
-    const v = view();
-    round.from = trayM(round.slot, v);
-    Object.assign(round, { at: 'fly', to: 'chamber', chamber: i, k: 0, t0: performance.now(), ms: 520, done: () => sound('load') });
+  // the chambers in use, saved so the rounds stay in the gun between visits
+  function persist() {
+    const l = loaded();
+    if (W.me) W.me.revolverLoaded = l;
+    POST('/api/revolver/load', { loaded: l }).catch(() => { });
+  }
+  function fly(round, to, ms, done) {
+    round.from = roundM(round, gunM(), view());
+    Object.assign(round, { at: 'fly', to, k: 0, t0: performance.now(), ms, done });
     loop();
   }
-  function unloadRound(i) {
-    const round = P.rounds.find(r => r.at === 'chamber' && r.chamber === i);
-    if (!round) return;
-    round.from = mul(cylM(gunM()), chamberLocal(i));
-    sound('unload');
-    Object.assign(round, { at: 'fly', to: 'tray', k: 0, t0: performance.now(), ms: 460, done: null });
-    loop();
+  function freeSlot() {
+    const used = new Set(P.rounds.filter(r => r.at === 'tray' || (r.at === 'fly' && r.to === 'tray')).map(r => r.slot));
+    for (let i = 0; i < 6; i++) if (!used.has(i)) return i;
+    return 0;
+  }
+  // which tray round is under a screen point
+  function trayAt(sx, sy) {
+    const v = view();
+    let best = null, bd = Infinity;
+    for (const r of P.rounds) {
+      if (r.at !== 'tray') continue;
+      const m = trayM(r.slot, v), q = project(v, [m[12], m[13], m[14]]);
+      const d = Math.hypot(sx - q[0], sy - q[1]);
+      if (d < bd) { bd = d; best = r; }
+    }
+    return best;
+  }
+  // after closing: the player turns the gun round with the mouse (or a
+  // finger) until it faces them, and there it locks
+  function turnStep() {
+    const A = R.poseA, B = R.poseB, tr = R.turn;
+    const f = Math.max(0, Math.min(1, (tr.ry - A.ry) / (B.ry - A.ry)));
+    for (const k of ['x', 'y', 'z', 's', 'rz']) P.gun[k] = lerp(A[k], B[k], f);
+    P.gun.ry = tr.ry; P.gun.rx = lerp(A.rx, B.rx, f) + tr.rx;
+    if (Math.abs(tr.ry - B.ry) < 6 * DEG && Math.abs(tr.rx) < 10 * DEG) {
+      R.stage.dataset.step = 'locking';
+      tween(P.gun, B, 220, 'out').then(() => { R.stage.dataset.step = 'aim'; P.aimAt = performance.now(); say('aim'); });
+      sound('turn');
+    }
   }
   async function closeGun() {
     R.busy = true;
@@ -704,6 +751,7 @@ void main(){
     sound('close');
     await tween(P, { crane: 0 }, 260, 'inOut');
     let res;
+    if (W.me) W.me.revolverLoaded = loaded();
     try { res = await POST('/api/revolver/close', { loaded: loaded() }); }
     catch (e) { toast(e.message, true); R.busy = false; return stow(); }
     // the server's spin: land chamber `pos` under the hammer
@@ -712,10 +760,12 @@ void main(){
     while (target > P.spin - 5 * Math.PI * 2) target -= Math.PI * 2;
     sound('spin');
     await tween(P, { spin: target }, 1500, 'out');
-    sound('turn');
-    await tween(P.gun, aimPose(view()), 1100, 'inOut');
-    R.stage.dataset.step = 'aim';
-    say('aim');
+    // now the player must turn it on themselves
+    R.poseA = Object.assign({}, P.gun); R.poseB = aimPose(view());
+    R.turn = { ry: P.gun.ry, rx: 0 }; // rx: the player's tilt on top of the turn
+    P.lean = 0;
+    R.stage.dataset.step = 'turning';
+    say('turn');
     R.busy = false;
   }
   async function fire() {
@@ -758,7 +808,8 @@ void main(){
     R.busy = true;
     hint('');
     const step = R.stage.dataset.step;
-    if (step === 'aim' || step === 'closing') POST('/api/revolver/stow').catch(() => { });
+    if (step !== 'load') POST('/api/revolver/stow').catch(() => { });
+    P.aimAt = 0; P.lean = 0;
     const v = view();
     if (P.crane > 0.01) { sound('close'); await tween(P, { crane: 0 }, 220); }
     await tween(P.tray, { up: 0 }, 200);
@@ -776,27 +827,75 @@ void main(){
     release(R.stageCtx); R.stageCtx = null;
     drawStow();
   }
+  const local = (e) => { const r = R.canvas.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
   function onPointer(e) {
     if (!R.stage || R.busy) return;
     e.preventDefault();
-    const rect = R.canvas.getBoundingClientRect();
-    const sx = e.clientX - rect.left, sy = e.clientY - rect.top;
+    const [sx, sy] = local(e);
+    R.down = { x: sx, y: sy, lx: e.clientX, ly: e.clientY, moved: false };
+    try { R.stage.setPointerCapture(e.pointerId); } catch (err) { /* old browsers */ }
     const step = R.stage.dataset.step;
+    if (step !== 'load') return;
+    const hit = pickAt(sx, sy);
+    R.down.hit = hit;
+    const v = view();
+    // pick a round up: from the tray, or out of a chamber
+    let round = null;
+    if (hit === 3) round = trayAt(sx, sy);
+    else if (hit === 2) { const ch = chamberAt(sx, sy); if (ch >= 0) round = P.rounds.find(r => r.at === 'chamber' && r.chamber === ch); }
+    if (round) {
+      const was = round.at;
+      round.pos = unproject(v, sx, sy, 2.5);
+      round.at = 'drag';
+      if (was === 'chamber') { round.chamber = -1; sound('unload'); }
+      R.drag = round;
+    }
+  }
+  function onMove(e) {
+    if (!R.stage) return;
+    P.lookT.x = Math.max(-1, Math.min(1, e.clientX / innerWidth * 2 - 1));
+    P.lookT.y = Math.max(-1, Math.min(1, e.clientY / innerHeight * 2 - 1));
+    if (R.down) {
+      const [sx, sy] = local(e);
+      if (Math.hypot(sx - R.down.x, sy - R.down.y) > 6) R.down.moved = true;
+    }
+    if (R.drag) { const [sx, sy] = local(e); R.drag.pos = unproject(view(), sx, sy, 2.5); loop(); }
+    // turning the gun round: the hand's movement turns it
+    if (R.stage.dataset.step === 'turning' && R.turn) {
+      const last = R.lastMove || [e.clientX, e.clientY];
+      const dx = e.clientX - last[0], dy = e.clientY - last[1];
+      if (e.pointerType !== 'touch' || R.down) {
+        const A = R.poseA, B = R.poseB;
+        R.turn.ry = Math.max(A.ry, Math.min(B.ry + 25 * DEG, R.turn.ry + dx * 0.45 * DEG));
+        R.turn.rx = Math.max(-20 * DEG, Math.min(20 * DEG, R.turn.rx + dy * 0.2 * DEG));
+      }
+    }
+    R.lastMove = [e.clientX, e.clientY];
+  }
+  function onUp(e) {
+    if (!R.stage) return;
+    const down = R.down; R.down = null;
+    const [sx, sy] = local(e);
+    const step = R.stage.dataset.step;
+    if (R.drag) {
+      const round = R.drag; R.drag = null;
+      // dropped on an empty chamber → in it goes; anywhere else → back to the box
+      R.drag = null;
+      const ch = chamberAt(sx, sy);
+      const taken = ch >= 0 && P.rounds.some(r => r !== round && r.chamber === ch && (r.at === 'chamber' || (r.at === 'fly' && r.to === 'chamber')));
+      if (ch >= 0 && !taken) { round.chamber = ch; fly(round, 'chamber', 260, () => { sound('load'); persist(); }); }
+      else { round.chamber = -1; round.slot = freeSlot(); fly(round, 'tray', 380, () => persist()); }
+      return;
+    }
+    if (!down || down.moved || R.busy) return;
     const hit = pickAt(sx, sy);
     if (step === 'load') {
-      if (hit === 2 || hit === 3 || hit === 1) {
-        const ch = hit !== 3 ? chamberAt(sx, sy) : -1;
-        if (ch >= 0) {
-          if (P.rounds.some(r => r.chamber === ch && r.at !== 'tray' && !(r.at === 'fly' && r.to === 'tray'))) unloadRound(ch);
-          else if (!P.rounds.some(r => r.at === 'fly')) loadRound(ch);
-          return;
-        }
-        if (hit === 2) return closeGun();
-        if (hit === 3) return say('loadOnly');
-        return say('close');
-      }
+      if (hit === 2) return closeGun();
+      if (hit === 1) return say('close');
+      if (hit === 3) return say('loadOnly');
       return stow();
     }
+    if (step === 'turning') { if (!hit) stow(); return; }
     if (step === 'aim') {
       if (hit === 1 || hit === 2) return fire();
       return stow();

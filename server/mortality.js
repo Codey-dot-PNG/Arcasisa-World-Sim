@@ -25,7 +25,10 @@ const CHAMBERS = 6;
 
 const clean = (loaded) => [...new Set((Array.isArray(loaded) ? loaded : []).map(Number).filter(n => Number.isInteger(n) && n >= 0 && n < CHAMBERS))].sort();
 
+// the rounds stay in the gun between visits (user.revolverLoaded)
+function setLoaded(user, loaded) { user.revolverLoaded = clean(loaded); }
 function close(user, loaded) {
+  setLoaded(user, loaded);
   user.revolver = { loaded: clean(loaded), pos: Math.floor(Math.random() * CHAMBERS), at: Date.now() };
   return { pos: user.revolver.pos, loaded: user.revolver.loaded };
 }
@@ -132,6 +135,15 @@ async function obituary(db, user) {
     accidentDeaths += n;
     accidents.push({ title: e.title, deaths: n, turn: e.turn, date: e.simDate });
   }
+  // workplace accidents the logs no longer reach: each of their sites keeps
+  // its last accident on the property itself
+  for (const pr of db.properties || []) {
+    const a = pr.accident;
+    if (!a || !chain.includes(pr.ownerId) || !(a.deaths > 0)) continue;
+    if (accidents.some(x => x.turn === a.turn && x.title.includes(pr.name))) continue;
+    accidentDeaths += a.deaths;
+    accidents.push({ title: `Industrial accident at ${pr.name}`, deaths: a.deaths, turn: a.turn, date: a.date });
+  }
   const conflicts = [];
   for (const doc of [db.war, db.protest]) {
     if (!doc || !doc.stats) continue;
@@ -205,10 +217,10 @@ async function die(db, user) {
     record.roles.push({ role: 'Dead', at: Date.now(), turn: t.turn });
   }
   user.roleId = 'dead';
-  delete user.revolver;
+  delete user.revolver; delete user.revolverLoaded;
   const ent = (db.entities || []).find(e => e.id === user.entityId);
   if (ent) ent.deceased = { at: Date.now(), turn: t.turn, date: t.date };
   return record;
 }
 
-module.exports = { CHAMBERS, close, stow, pull, die, obituary, worth, longDate };
+module.exports = { CHAMBERS, setLoaded, close, stow, pull, die, obituary, worth, longDate };

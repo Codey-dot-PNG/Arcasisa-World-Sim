@@ -56,8 +56,12 @@ ids to an offscreen buffer (`pickAt`); chambers are hit by their projected centr
   `Revolver.mountStow`. Not for the GM, not on the War layer.
 - **In hand**: a full-screen stage (`#revolver-stage`, its own context, freed on stow). Pick
   up → the gun rises from the corner, cylinder swings out; six cartridges rise where it lay.
-  Click/tap a chamber to load (again to unload), the cylinder elsewhere to close
-  (`POST /api/revolver/close` — the server spins it), then the gun turns to face the screen.
+  Drag a round from the tray onto a chamber to load it; drag one out of a chamber to unload
+  (rounds persist: `POST /api/revolver/load` → `user.revolverLoaded`, in `W.me`). The gun
+  leans toward the cursor while open. Click the cylinder to close (`POST /api/revolver/close`
+  — the server spins it); then the player turns the gun round with mouse movement (a drag on
+  touch) until it faces them square-on, where it locks; it trembles more the longer it is
+  held there. Sits just right of the map key.
   Click the gun to pull (`/api/revolver/fire`): an empty chamber clicks and the cylinder
   turns; a live one → black, then the record of the run (`showDead`). Click away at any
   stage to stow (`/api/revolver/stow`).

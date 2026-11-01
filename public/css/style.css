@@ -2732,5 +2732,6 @@ body.pin-dragging, body.pin-dragging *{cursor:grabbing !important; user-select:n
 }
 
 /* the revolver in hand: drawn over the page as the cursor */
-#revolver-held{position:fixed; inset:0; width:100vw; height:100vh; z-index:2000; pointer-events:none;}
+#revolver-held{position:fixed; inset:0; width:100vw; height:100vh; z-index:2000; pointer-events:none;
+  filter:drop-shadow(10px 16px 9px rgba(12,8,4,.42)) drop-shadow(2px 3px 2px rgba(0,0,0,.35));}
 body.revolver-held, body.revolver-held *{cursor:none !important;}

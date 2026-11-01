@@ -625,13 +625,15 @@ void main(){
       const v = view();
       Object.assign(P.gun, fitPose(v, { left: 0, top: 0, width: w, height: h },
         { rx: STOW_POSE.rx + ST.tilt[0], ry: STOW_POSE.ry + ST.tilt[1], rz: STOW_POSE.rz }, 0.96));
-      P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.sway = 0; P.alpha = 1; P.rounds = [];
+      P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.sway = 0; P.alpha = 1; P.rounds = FULL();
       draw();
       Object.assign(P, JSON.parse(saved));
     } catch (e) { ST.el && ST.el.classList.add('failed'); }
     finally { use(prev && prev !== ST.ctx ? prev : null); }
   }
   // the cylinder at rest: a chamber lined up under the hammer
+  // the gun is always fully loaded: a round in every chamber
+  const FULL = () => [0, 1, 2, 3, 4, 5].map(i => ({ at: 'chamber', chamber: i, slot: -1 }));
   const restSpin = () => -R.data.meta.chambers[0].angle * DEG;
 
   /* ---------------- the stage ---------------- */
@@ -694,7 +696,7 @@ void main(){
     R.stowRect = stowEl.getBoundingClientRect();
     R.home = [R.stowRect.left + R.stowRect.width / 2, R.stowRect.top + R.stowRect.height / 2];
     R.cur = ev ? [ev.clientX, ev.clientY] : R.home.slice();
-    P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.alpha = 1; P.rounds = []; P.lean = 0; P.aimAt = 0; P.sway = 0.6;
+    P.crane = 0; P.spin = restSpin(); P.hammer = 0; P.trigger = 0; P.flash = 0; P.alpha = 1; P.rounds = FULL(); P.lean = 0; P.aimAt = 0; P.sway = 0.6;
     stowEl.classList.add('lifted');
     document.body.classList.add('revolver-held');
     for (const [t, f] of HELD_EVENTS) document.addEventListener(t, f, true);

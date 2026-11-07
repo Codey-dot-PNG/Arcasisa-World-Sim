@@ -2150,6 +2150,18 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- GDP level (flag world._gdpLevel1) ------------------------------------
+  // GDP is set by a level (settings.economy.gdpTarget, ₳M a year) and moves
+  // with the wage bill, employment and output from there — so re-pegging the
+  // wage scale (below) changes wage units, not the size of the economy.
+  // ₳36,000M is where the economy stood on the ₳1-a-day scale.
+  if (!world._gdpLevel1) {
+    const econ = world.settings.economy = world.settings.economy || {};
+    if (econ.gdpTarget === undefined) econ.gdpTarget = 36000;
+    world._gdpLevel1 = true;
+    changed = true;
+  }
+
   // ---- The wage scale pegged to grain (flag world._wageAnchor1) -----------
   // Economy v2 put incomes on the ₳1/day scale the sites were authored
   // around — far too low against prices that sit close to 1960 dollars. The

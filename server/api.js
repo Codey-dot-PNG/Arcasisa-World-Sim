@@ -3573,7 +3573,7 @@ async function handle(req, res, pathname, method) {
             birthRate: [0, 0.08], adultDeathRate: [0, 0.05], oldAgeRate: [0, 0.5], diseaseK: [0, 0.1], graduationRate: [0, 1],
             urbanization: [0, 0.1], incomeSpread: [0.1, 1.5], importMarkup: [0, 3], exportDiscount: [0, 0.9],
             importCap: [0, 1], exportCap: [0, 2], reorderTurns: [0, 120], priceAdjust: [0, 0.5], priceStepMax: [0, 0.3],
-            stapleStepMax: [0, 0.3], unemploymentBenefit: [0, 1], dependentStipend: [0, 1e6]
+            stapleStepMax: [0, 0.3], unemploymentBenefit: [0, 1], dependentStipend: [0, 1e6], gdpTarget: [0, 1e9]
           };
           for (const k in BOUNDS) if (e[k] !== undefined) {
             const n = Number(e[k]);
@@ -3594,7 +3594,10 @@ async function handle(req, res, pathname, method) {
           }
           if (e.recalibrate) {
             delete e.recalibrate;
-            delete db.econ;
+            // the GDP figure keeps its level across a recalibration
+            const gdpNow = db.provinces.reduce((t, p) => t + (Number(p.vars && p.vars.gdp) || 0), 0);
+            db.econ = gdpNow > 0 ? { gdpLevel: gdpNow } : undefined;
+            if (!db.econ) delete db.econ;
             for (const p of db.provinces) delete p.econ;
             for (const it of db.items) if (it.meta) { delete it.meta.demand; delete it.meta._lastPrice; }
           }

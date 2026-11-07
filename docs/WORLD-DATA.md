@@ -236,7 +236,8 @@ lottery…] }, economy { dailyVariance?, happinessOutputK?, domesticMultiplier?,
 expensesMultiplier?, dayTickMs?, x100Mult?, x100LockSec?, and the national economy's
 groupRoles, referenceGroup, ladder, urbanize, jobsPerEmployee, wageAnchor { itemId, units }
 (a day's work buys this much of a good — the wage scale), wageScale (the scale the world is
-on — engine bookkeeping), dependentStipend, dependentGroups + the tunables in economy.js
+on — engine bookkeeping), gdpTarget (₳M a year — the level GDP is set to, then moves from;
+0 = wage bill ÷ labourShare), dependentStipend, dependentGroups + the tunables in economy.js
 DEF }, trade { partners, govBuyPrices, govBuy,
 exports, imports, lastFlows, lastExportFill, stockIn, history }, map { countries [{id, name,
 entityId, fill, shape}], labels, roads, rails, lights, land? }, mapDecor, election { durationTurns (14), deviationPct (12), supportToVotes

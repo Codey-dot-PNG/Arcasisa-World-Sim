@@ -106,7 +106,8 @@ const DEF = {
   importCap: 0.3,            // background imports cover at most this share of a good's demand
   exportCap: 0.5,            // … and exports take at most this share of it
   reorderTurns: 10,          // sites with input needs keep about this many turns of stock
-  labourShare: 0.5,          // wages ÷ GDP — GDP is the wage bill grossed up by this
+  labourShare: 0.5,          // wages ÷ GDP — GDP is the wage bill grossed up by this (when no gdpTarget)
+  gdpTarget: 0,              // ₳M a year: when set, GDP starts at this level and moves with the wage bill and output
   stapleStepMax: 0.015,      // staples' max price move per turn (food prices are sticky)
   unemploymentBenefit: 0,    // share of lost wages the treasury replaces (0 = none)
 };
@@ -180,12 +181,24 @@ function applyWageAnchor(world) {
     if (!PE) continue;
     sc(PE, ['w0', 'wMarket', 'w', 'wageBill', 'spend0']);
     for (const g in (PE.seg || {})) sc(PE.seg[g], ['income0', 'ref', 'ref3', 'cPrev']);
-    if (p.vars) sc(p.vars, ['wage', 'income', 'gdp', 'gdpReal']);
+    if (p.vars) sc(p.vars, ['wage', 'income']);
   }
   const E = world.econ;
   if (E) {
-    sc(E, ['w0Nat', 'nonFoodReal0', 'gdpReal0', 'gdpRealLastMonth']);
-    if (E.settling) { sc(E.settling, ['nonFood', 'gdp']); for (const pid in (E.settling.spend || {})) E.settling.spend[pid] *= k; }
+    sc(E, ['w0Nat', 'nonFoodReal0']);
+    // GDP: with a GDP level set, a wage rescale is a change of wage units, not
+    // of output (no quantity or price moved) — the figure keeps its level.
+    // Without one, GDP is wages ÷ labour share and moves with them.
+    if (Number(econ.gdpTarget) > 0) { if (E.gdpK > 0) E.gdpK = E.gdpK / k; }
+    else {
+      sc(E, ['gdpReal0', 'gdpRealLastMonth']);
+      for (const p of (world.provinces || [])) if (p.vars) sc(p.vars, ['gdp', 'gdpReal']);
+    }
+    if (E.settling) {
+      sc(E.settling, ['nonFood']);
+      if (!(Number(econ.gdpTarget) > 0)) sc(E.settling, ['gdp']);
+      for (const pid in (E.settling.spend || {})) E.settling.spend[pid] *= k;
+    }
   }
   return k;
 }
@@ -860,6 +873,33 @@ function runTurn(db, actor, monthBoundary, opts) {
   // ---- phase D: output, attitudes, statistics per province ----
   const actualWar = warSev;
   let gdpNom = 0, natJobs = 0, natLf = 0, natW = 0, natW0 = 0, natInc = 0, natPop = 0, natPoor = 0;
+  // GDP level. With settings.economy.gdpTarget the size of the economy's
+  // output figure is set once — the national factor makes GDP equal the target
+  // (or, after a Recalibrate, what it read before) — and from there GDP moves
+  // with the wage bill, employment and listed output. Without it, GDP is the
+  // wage bill ÷ labourShare (province gdpK).
+  const gdpTarget = Math.max(0, num(opt(db, 'gdpTarget'), 0));
+  if (gdpTarget > 0 && (!(E.gdpK > 0) || E.gdpKFor !== gdpTarget)) {
+    let base = 0;
+    for (const p of db.provinces) if (p.econ) {
+      const PE = p.econ;
+      const lEma = PE.listedEma === undefined ? num(PE.listedGross, 0) : PE.listedEma;
+      const lIdx = PE.listedGross0 > 0 ? clamp(lEma / PE.listedGross0, 0.2, 3) : 1;
+      base += num(PE.wageBill, 0) * 365 / 1e6 * (0.9 + 0.1 * lIdx);
+    }
+    const level = E.gdpKFor === undefined && E.gdpLevel > 0 ? E.gdpLevel : gdpTarget;
+    if (base > 0) {
+      // the industrial-demand and growth baselines were measured on last
+      // turn's GDP figure; carry them onto the new level so no index jumps
+      const before = db.provinces.reduce((t, p) => t + num(p.vars && p.vars.gdp, 0), 0);
+      const r = before > 0 ? level / before : 1;
+      if (E.gdpReal0 > 0) E.gdpReal0 *= r;
+      if (E.gdpRealLastMonth > 0) E.gdpRealLastMonth *= r;
+      if (E.settling && E.settling.gdp > 0) E.settling.gdp *= r;
+      E.gdpK = level / base; E.gdpKFor = gdpTarget; delete E.gdpLevel;
+    }
+  }
+  const gdpK = (p) => gdpTarget > 0 && E.gdpK > 0 ? E.gdpK : p.econ.gdpK;
   const natPts = [];
   for (const p of db.provinces) {
     const PE = p.econ, demo = p.demographics || {};
@@ -873,7 +913,7 @@ function runTurn(db, actor, monthBoundary, opts) {
     PE.listedEma = PE.listedEma === undefined ? num(PE.listedGross, 0) : PE.listedEma + (num(PE.listedGross, 0) - PE.listedEma) * Math.min(1, dt / 20);
     if (PE.listedGross0 === undefined && PE.listedEma > 0) PE.listedGross0 = PE.listedEma;
     const lIdx = PE.listedGross0 > 0 ? clamp(PE.listedEma / PE.listedGross0, 0.2, 3) : 1;
-    const gdp = PE.wageBill * 365 / 1e6 * PE.gdpK * (0.9 + 0.1 * lIdx);
+    const gdp = PE.wageBill * 365 / 1e6 * gdpK(p) * (0.9 + 0.1 * lIdx);
     p.vars.gdp = r2(gdp);
     p.vars.gdpReal = r2(gdp / (E.cpi || 1));
     gdpNom += gdp;

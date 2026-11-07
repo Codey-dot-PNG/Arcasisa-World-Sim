@@ -177,7 +177,7 @@ whenever the GM changes it) scales incomes, savings, the poverty line, income-ta
 stipends and every company's and site's wage by k, and runs each site with k times fewer,
 k times better-paid workers (headcounts ÷k, `jobsPerEmployee` ×k) — payroll in ₳, profits
 and provincial jobs stay as they were; the engine's ₳ baselines scale with it, so nothing
-re-settles. New companies default to the going wage (`economy.nationalWage`).
+re-settles, and GDP keeps its level (`gdpTarget`). New companies default to the going wage (`economy.nationalWage`).
 
 **Wages.** The province's market wage heads (2% a day) for `w0 × CPI^0.85 × productivity
 growth × (1 + 0.01 × employment gap)` — a level, so it cannot drift away. Listed employers
@@ -235,8 +235,14 @@ toward the targets (between turns on the demographics cadence). GM/event changes
 province's happiness or approval are folded into its groups as shocks that fade; employment,
 GDP and population are the engine's (writes to them are overwritten next turn).
 
-**Statistics** (`globalVars`): `gdp` (₳M/yr nominal, = wage bill ÷ `labourShare` tilted by
-listed output), `gdpReal`, `realGrowthAnnual`, `cpi`, `inflation` (12-month), `foodPriceIndex`,
+**Statistics** (`globalVars`): `gdp` (₳M/yr nominal). Its level is set by
+`settings.economy.gdpTarget` (₳36,000M, seeded by `store.migrate` flag `world._gdpLevel1`):
+the first turn after calibration a national factor makes GDP equal it (a GM change of the
+target re-sets it; Recalibrate keeps the current level), and from there it moves with the
+wage bill, employment and listed output — a wage-scale move leaves it where it is (wage
+units changed, not output). With `gdpTarget` 0 it is the wage bill ÷ `labourShare`. When the
+factor is (re)set, the industrial-demand and growth baselines are carried onto the new level
+so no index jumps. `gdpReal`, `realGrowthAnnual`, `cpi`, `inflation` (12-month), `foodPriceIndex`,
 `averageDailyWage` (going wage), `wageIndex`, `realWageIndex`, `laborForce`,
 `totalEmployment`, `unemploymentRate`, `avgIncome`, `consumerSpending` (₳/day),
 `householdSavings`, `povertyLineNominal`, `povertyRateNational`, `giniNational`,

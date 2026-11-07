@@ -1442,7 +1442,7 @@ const GM = {
     // spending, food, prices, population and moods are computed each turn
     // from conditions. These are its dials; defaults come from the engine.
     const ec = (S().settings.economy) || {};
-    const D = { jobsPerEmployee: 200, referenceWage: 1, labourShare: 0.5, wageFlex: 0.01, wageIndexation: 0.85, productivityGrowth: 0.015,
+    const D = { gdpTarget: 0, jobsPerEmployee: 200, referenceWage: 1, labourShare: 0.5, wageFlex: 0.01, wageIndexation: 0.85, productivityGrowth: 0.015,
       subsistenceShare: 0.5, reliefDecay: 0.10, famineMortalityK: 0.5, birthRate: 0.034, adultDeathRate: 0.007, oldAgeRate: 0.075,
       diseaseK: 0.012, graduationRate: 0.12, urbanization: 0.01, incomeSpread: 0.5, importMarkup: 0.25, exportDiscount: 0.2,
       importCap: 0.3, exportCap: 0.5, reorderTurns: 10, unemploymentBenefit: 0, dependentStipend: 0 };
@@ -1476,7 +1476,8 @@ const GM = {
     sl('Wage response to labour tightness', 'wageFlex', 0, 0.03, 0.001, 'Going wage +this per point of employment above normal (and down when jobs are scarce).');
     sl('Wage indexation to prices', 'wageIndexation', 0, 1.2, 0.05, 'How far wages follow the consumer price level (1 = fully).');
     sl('Productivity growth / year', 'productivityGrowth', -0.02, 0.06, 0.005, 'Real wages rise this much a year when nothing else changes.');
-    sl('Labour share of GDP', 'labourShare', 0.2, 0.9, 0.05, 'GDP is the wage bill divided by this.');
+    sl('GDP level (\u20b3 millions a year)', 'gdpTarget', 0, 200000, 500, 'The size of the economy\u2019s output figure: GDP is set to this, then moves with wages, jobs and output. 0 = the wage bill divided by the labour share below.');
+    sl('Labour share of GDP', 'labourShare', 0.2, 0.9, 0.05, 'Used only when the GDP level is 0: GDP is the wage bill divided by this.');
     sl('Unemployment benefit (share of lost pay)', 'unemploymentBenefit', 0, 1, 0.05, 'Paid by the treasury to the jobless (0 = none). Softens slumps; costs real money.');
     sl('Welfare stipend per 1,000 dependents / turn', 'dependentStipend', 0, 2000, 10, 'Paid by the treasury to students and retirees (0 = off).');
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Food'));

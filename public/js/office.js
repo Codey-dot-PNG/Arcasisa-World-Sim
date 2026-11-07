@@ -5,10 +5,13 @@
    operator and reuse the existing desks' actions (transfer/trade modals,
    trade accept/decline, the food release form…) — no new authority here.
 
-   Layout persists on the user record (PUT /api/me/office — validated against
+   Layout persists in this browser (localStorage, keyed by account name) so a
+   world reset — which re-seeds the user records — leaves every desk as it
+   was, and also on the user record (PUT /api/me/office — validated against
    the same TYPES/STYLES whitelist server-side, see server/api.js
-   OFFICE_TYPES), so it follows the operator across devices. Keep TYPES' keys
-   in lockstep with OFFICE_TYPES. */
+   OFFICE_TYPES), so it follows the operator across devices; the newer copy
+   wins on load (see layout()). Keep TYPES' keys in lockstep with
+   OFFICE_TYPES. */
 
 const OFFICE_STYLES = [
   ['ledger', 'Ledger'], ['card', 'Card'], ['dark', 'Night desk'], ['telegram', 'Telegram'], ['accent', 'Dispatch']
@@ -16,6 +19,7 @@ const OFFICE_STYLES = [
 
 const Office = {
   _local: null,        // this tab's latest layout — authoritative over W.me.office once edited
+  _localUser: null,    // whose desk _local is (the storage key it was loaded for)
   _saveTimer: null,
   _drag: null,         // active pointer drag { card, pointerId }
   _settingsOpen: {},   // widget id → settings panel open
@@ -356,22 +360,54 @@ const Office = {
     const T = this.TYPES[type];
     return { id: 'ow' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), type, w: T.size[0], h: T.size[1], style: 'ledger', title: '', opts: {} };
   },
+  // The desk lives in this browser first (localStorage, per account name) and
+  // on the user record second. The user record goes when the world is reset
+  // (store.reset re-seeds users), the browser copy doesn't — so a reset no
+  // longer clears anyone's office. Whichever copy was saved last wins on load,
+  // which keeps the cross-device behaviour; a browser copy that is newer than
+  // the server's (always the case right after a reset) is pushed back up.
+  _storeKey() { return W.me && W.me.username ? 'arcasia-office:' + String(W.me.username).toLowerCase() : null; },
+  _readStored() {
+    const k = this._storeKey();
+    if (!k) return null;
+    try {
+      const v = JSON.parse(localStorage.getItem(k) || 'null');
+      return v && Array.isArray(v.widgets) ? v : null;
+    } catch (e) { return null; }
+  },
+  _writeStored(updatedAt) {
+    const k = this._storeKey();
+    if (!k || !this._local) return;
+    try { localStorage.setItem(k, JSON.stringify({ widgets: this._local, updatedAt: updatedAt || Date.now() })); } catch (e) { /* storage full or blocked — the server copy still saves */ }
+  },
   layout() {
+    // a different operator on this tab (re-login) never inherits the last one's desk
+    if (this._local && this._localUser !== this._storeKey()) this._local = null;
     if (!this._local) {
-      const saved = W.me && W.me.office && Array.isArray(W.me.office.widgets) ? W.me.office.widgets : null;
+      const server = W.me && W.me.office && Array.isArray(W.me.office.widgets) ? W.me.office : null;
+      const stored = this._readStored();
+      const useStored = stored && (!server || Number(stored.updatedAt || 0) > Number(server.updatedAt || 0));
+      const saved = useStored ? stored.widgets : server ? server.widgets : null;
       this._local = saved ? JSON.parse(JSON.stringify(saved)).filter(w => this.TYPES[w.type]) : this.defaults();
+      this._localUser = this._storeKey();
+      if (useStored) this.save();                       // restore the user record (e.g. after a reset)
+      else if (server && !stored) this._writeStored(server.updatedAt); // first visit in this browser
     }
     return this._local;
   },
   // Debounced persist; the local copy is already live, so the page never
-  // waits on the network (and a slow save can't snap a widget back).
+  // waits on the network (and a slow save can't snap a widget back). The
+  // browser copy is written at once — it is what survives a reset.
   save() {
+    this._writeStored();
     clearTimeout(this._saveTimer);
     this._saveTimer = setTimeout(async () => {
       try {
         const r = await PUT('/api/me/office', { widgets: this._local });
         if (W.me) W.me.office = r.office;
-      } catch (e) { toast('Office layout not saved: ' + e.message, true); }
+        // align the stamps so the next load doesn't see two "different" copies
+        if (r.office && r.office.updatedAt) this._writeStored(r.office.updatedAt);
+      } catch (e) { toast('Office layout not saved to the server (kept in this browser): ' + e.message, true); }
     }, 500);
   },
   update(mut) { mut(this._local); this.save(); this.rerender(); },

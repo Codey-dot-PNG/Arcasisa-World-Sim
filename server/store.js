@@ -2136,14 +2136,19 @@ async function begin() {
   if (!meta || !meta.length) return firstSeed();
 
   if (!db || Number(meta[0].version) !== version) {
-    const rows = await sb.select('world', 'id=eq.1&select=version,doc');
+    // The doc and the two log tails are independent reads — fetch them
+    // together. Sequentially they cost three round trips to Postgres on every
+    // request that finds the world changed (most requests while people play).
+    const [rows, tl, tx] = await Promise.all([
+      sb.select('world', 'id=eq.1&select=version,doc'),
+      sb.select('timeline', `select=*&order=ts.desc&limit=${LOG_FETCH}`),
+      sb.select('transactions', `select=*&order=ts.desc&limit=${LOG_FETCH}`)
+    ]);
     if (!rows || !rows.length) return firstSeed(); // row vanished mid-flight (concurrent cold boot)
     version = Number(rows[0].version);
     db = rows[0].doc;
-    const tl = await sb.select('timeline', `select=*&order=ts.desc&limit=${LOG_FETCH}`);
-    db.timeline = tl.reverse().map(fromTlRow);
-    const tx = await sb.select('transactions', `select=*&order=ts.desc&limit=${LOG_FETCH}`);
-    db.transactions = tx.reverse().map(fromTxRow);
+    db.timeline = (tl || []).reverse().map(fromTlRow);
+    db.transactions = (tx || []).reverse().map(fromTxRow);
     if (migrate(db)) save();
   }
   return db;
@@ -2182,7 +2187,9 @@ async function commit() {
       // loaded `version`. A 0-row result means a concurrent request won —
       // throw so the caller retries against fresh state instead of clobbering it.
       const newVersion = Math.max(Date.now(), version + 1);
-      const rows = await sb.updateRep('world', 'id=eq.1&version=eq.' + version, { version: newVersion, doc: coreDoc() });
+      // select=version: the representation only has to prove a row matched —
+      // without it PostgREST echoed the WHOLE world doc back on every write.
+      const rows = await sb.updateRep('world', 'id=eq.1&version=eq.' + version + '&select=version', { version: newVersion, doc: coreDoc() });
       if (!rows || !rows.length) {
         const err = new Error('world version conflict');
         err.code = 'WORLD_CONFLICT';
@@ -2207,12 +2214,16 @@ async function commit() {
     // losing ledger rows for changes that WERE committed. begin() preserves
     // stranded buffers across reloads so the next commit retries them.
     bufferStranded = true; // from here the world doc is committed; rows must not be lost
+    // Both inserts are idempotent and independent, so they go out together;
+    // if either fails the buffers stay stranded and both retry next commit.
+    const flushes = [];
     if (pendingTimeline.length) {
-      await sb.insert('timeline?on_conflict=id', pendingTimeline.map(tlRow), 'return=minimal,resolution=merge-duplicates');
+      flushes.push(sb.insert('timeline?on_conflict=id', pendingTimeline.map(tlRow), 'return=minimal,resolution=merge-duplicates'));
     }
     if (pendingTxns.length) {
-      await sb.insert('transactions?on_conflict=id', pendingTxns.map(txRow), 'return=minimal,resolution=merge-duplicates');
+      flushes.push(sb.insert('transactions?on_conflict=id', pendingTxns.map(txRow), 'return=minimal,resolution=merge-duplicates'));
     }
+    if (flushes.length) await Promise.all(flushes);
     pendingTimeline = []; pendingTxns = [];
     bufferStranded = false;
     // Ping clients only when a handler explicitly asked (broadcast('sync') →
@@ -2226,8 +2237,10 @@ async function commit() {
     // matter to other players all broadcast explicitly; tick churn (war
     // movement, day-market gates) is pulled by the clients that watch it.
     if (broadcastPending) {
-      await sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }); // table may not exist on older deployments
-      await sb.broadcast('world', 'sync');
+      await Promise.all([
+        sb.upsert('world_version', [{ id: 1, version }]).catch(() => { }), // table may not exist on older deployments
+        sb.broadcast('world', 'sync')
+      ]);
     }
     dirty = false; broadcastPending = false;
   } finally {

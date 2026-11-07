@@ -183,8 +183,10 @@ sync redraws (`_heldSync`) and redraws on blur — after the click that caused t
   control or lead) and share positions, with the existing modals as actions
   (`tradeOfferComposer(prefFrom)`, `tradeModal(item, to, prefFrom)` — deeds sell from the
   owning entity — `transferModal`, market buy/sell/offer, ops desks). Layout is kept in
-  `Office._local` and
-  saved debounced to `PUT /api/me/office`; `Views.render` skips rebuilding the Office while a
+  `Office._local`, written at once to this browser's localStorage (`arcasia-office:<username>` —
+  a world reset re-seeds the user records but never touches it) and saved debounced to
+  `PUT /api/me/office` (the cross-device copy); on load the newer copy wins by `updatedAt`, and a
+  newer browser copy (e.g. right after a reset) is pushed back to the server; `Views.render` skips rebuilding the Office while a
   drag or a focused widget input is live (`Office.busy`). Widgets only render filtered state
   and call existing routes — they add no authority.
 - **Ledger views (compact UI pass)**: the Exchange is a quote board (`viewExchange` — one

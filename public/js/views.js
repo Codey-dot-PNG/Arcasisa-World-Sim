@@ -1087,10 +1087,16 @@ const Views = {
     // Every sync (turn tick, another player's action) rebuilds this view from
     // scratch, which used to snap the reader back to the top of the page.
     // Carry the previous scroll offset across the rebuild instead.
+    // The offset comes from the page's own scroll listener (`_st`), not a
+    // scrollTop read: by now renderAll has already rewritten the top bar and
+    // explorer, so reading scrollTop here forced a full synchronous layout of
+    // the OLD page on every sync, only to throw that page away.
     const prevScroll = container.querySelector('.doc-view');
-    const scrollTop = prevScroll ? prevScroll.scrollTop : 0;
+    const scrollTop = prevScroll ? (prevScroll._st || 0) : 0;
     this.snapshotDeskForms(container);
     const doc = el('div.doc-view', el('div.doc-inner'));
+    doc._st = scrollTop;
+    doc.addEventListener('scroll', () => { doc._st = doc.scrollTop; }, { passive: true });
     clear(container).appendChild(doc);
     const inner = doc.firstChild;
     let done = Promise.resolve();

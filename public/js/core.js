@@ -57,10 +57,21 @@ const clear = (n) => { while (n.firstChild) n.removeChild(n.firstChild); return 
 
 /* ---------- formatting ---------- */
 const CUR = () => (W.state ? W.state.settings.currency : '₳');
+// Number.prototype.toLocaleString with options builds a fresh Intl formatter
+// on every call (~20µs each, ~100µs on a phone) — and every ledger, dossier
+// and quote board calls this hundreds of times per render. One cached
+// formatter per decimal count gives byte-identical output for a fraction of
+// the cost.
+const _numFmts = {};
 function fmtNum(n, dec) {
   if (n === undefined || n === null || isNaN(n)) return '—';
   const d = dec === undefined ? (Math.abs(n) < 10 && n % 1 !== 0 ? 2 : 0) : dec;
-  return Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d });
+  let f = _numFmts[d];
+  if (!f) {
+    try { f = _numFmts[d] = new Intl.NumberFormat('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); }
+    catch (e) { return Number(n).toLocaleString('en-US', { minimumFractionDigits: d, maximumFractionDigits: d }); } // out-of-range digits: same error path as before
+  }
+  return f.format(Number(n));
 }
 function fmtMoney(n) { return n === undefined || n === null || isNaN(n) ? '—' : CUR() + fmtNum(Math.round(n * 100) / 100); }
 function fmtCompact(n) {
@@ -711,13 +722,20 @@ function select(kind, id, opts) {
 // the sidebar reads as an index rather than a 250-row scroll; a search opens
 // every matching section, and a section the operator toggled stays as set.
 const EXP_FOLD_OVER = 12;
+// Rows are plain data first ([kind, id, name, sub, color, logo]); DOM is only
+// built for OPEN sections, and not at all when nothing the sidebar shows has
+// changed since the last paint. renderExplorer runs on every sync, and most
+// syncs (a trade, a news item, a war heartbeat) leave the index untouched —
+// rebuilding ~300 rows each time (folded sections included) was one of the
+// biggest per-sync costs on a phone.
+let _expSig = null;
 function expSection(key, label, rows, searching) {
   if (!rows.length) return null;
   const open = searching || (W.expOpen[key] !== undefined ? W.expOpen[key] : rows.length <= EXP_FOLD_OVER);
   return el('div.exp-section',
     el('div.exp-section-head', { onclick: () => { W.expOpen[key] = !open; renderExplorer(); } },
       el('span', (open ? '▾ ' : '▸ ') + label), el('span.exp-count', String(rows.length))),
-    open ? rows : null
+    open ? rows.map(r => expItem(...r)) : null
   );
 }
 function expItem(kind, id, name, sub, color, logo) {
@@ -733,7 +751,6 @@ function renderExplorer() {
   if (!S()) return;
   const q = (document.getElementById('exp-search').value || '').trim().toLowerCase();
   const match = (s) => !q || String(s || '').toLowerCase().includes(q);
-  clear(body);
 
   const provs = S().provinces.filter(p => match(p.name));
   const cities = S().cities.filter(c => match(c.name));
@@ -744,20 +761,27 @@ function renderExplorer() {
   const foreign = S().entities.filter(e => (e.type === 'foreign' || e.type === 'org') && match(e.name));
   const props = S().properties.filter(p => match(p.name));
   const items = S().items.filter(i => match(i.name));
+  const ents = new Map(S().entities.map(e => [e.id, e]));
 
-  const sections = [
-    expSection('prov', 'Provinces', provs.map(p => expItem('province', p.id, p.name, fmtCompact(p.vars.population), p.color)), !!q),
-    expSection('city', 'Cities', cities.map(c => expItem('city', c.id, c.name, c.isCapital ? '★ capital' : '', 'var(--ink-faint)')), !!q),
-    expSection('co', 'Companies', companies.map(e => expItem('entity', e.id, e.name, e.industry, e.color, e.logo)), !!q),
-    expSection('party', 'Political Parties', parties.map(e => expItem('entity', e.id, e.name, (e.mpCount || 0) + ' MPs', e.color, e.logo)), !!q),
-    expSection('gov', 'Government', gov.map(e => expItem('entity', e.id, e.name, '', e.color)), !!q),
-    expSection('ppl', 'People', people.map(e => expItem('entity', e.id, e.name, e.title, e.color)), !!q),
-    expSection('for', 'Foreign Powers', foreign.map(e => expItem('entity', e.id, e.name, e.stance, e.color, e.logo)), !!q),
-    expSection('prop', 'Properties', props.map(p => expItem('property', p.id, p.name, entName(p.ownerId), (entById(p.ownerId) || {}).color)), !!q),
-    expSection('item', 'Items & Markets', items.map(i => expItem('item', i.id, i.name, fmtMoney(i.marketValue), 'var(--paper-line)')), !!q)
+  const spec = [
+    ['prov', 'Provinces', provs.map(p => ['province', p.id, p.name, fmtCompact(p.vars.population), p.color])],
+    ['city', 'Cities', cities.map(c => ['city', c.id, c.name, c.isCapital ? '★ capital' : '', 'var(--ink-faint)'])],
+    ['co', 'Companies', companies.map(e => ['entity', e.id, e.name, e.industry, e.color, e.logo])],
+    ['party', 'Political Parties', parties.map(e => ['entity', e.id, e.name, (e.mpCount || 0) + ' MPs', e.color, e.logo])],
+    ['gov', 'Government', gov.map(e => ['entity', e.id, e.name, '', e.color])],
+    ['ppl', 'People', people.map(e => ['entity', e.id, e.name, e.title, e.color])],
+    ['for', 'Foreign Powers', foreign.map(e => ['entity', e.id, e.name, e.stance, e.color, e.logo])],
+    ['prop', 'Properties', props.map(p => ['property', p.id, p.name, entName(p.ownerId), (ents.get(p.ownerId) || {}).color])],
+    ['item', 'Items & Markets', items.map(i => ['item', i.id, i.name, fmtMoney(i.marketValue), 'var(--paper-line)'])]
   ];
+  const sel = W.selection ? W.selection.kind + ':' + W.selection.id : '';
+  let sig;
+  try { sig = JSON.stringify([q, sel, W.expOpen, spec]); } catch (e) { sig = null; }
+  if (sig !== null && sig === _expSig && body.firstChild) return; // nothing on the sidebar changed
+  _expSig = sig;
 
-  sections.forEach(s => s && body.appendChild(s));
+  clear(body);
+  spec.forEach(([key, label, rows]) => { const s = expSection(key, label, rows, !!q); if (s) body.appendChild(s); });
   if (!body.children.length) body.appendChild(el('div', { style: 'padding:20px 16px; color:var(--ink-faint); font-family:var(--font-mono); font-size:10px; letter-spacing:.1em;' }, 'NOTHING IN THE FILES.'));
 }
 

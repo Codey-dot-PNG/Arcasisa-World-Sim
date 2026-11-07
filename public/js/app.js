@@ -96,7 +96,9 @@ const App = {
       document.addEventListener('click', (e) => { if (!palette.contains(e.target)) palette.classList.remove('open'); });
     }
     let fitT = null;
-    window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(() => { if (W.me && S()) this.renderTabs(); }, 120); });
+    window.addEventListener('resize', () => { clearTimeout(fitT); fitT = setTimeout(() => { if (W.me && S()) this.renderTabs(true); }, 120); });
+    // web fonts change the tabs' widths once they land — re-fit then too
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (W.me && S()) this.renderTabs(true); }).catch(() => { });
     try {
       await refreshState(true); // first paint must never be skipped by the v-unchanged fast path
       this.enter();
@@ -225,12 +227,16 @@ const App = {
     return S().news.reduce((c, n) => c + (n.status === 'published' && Number(n.ts) > since ? 1 : 0), 0);
   },
 
-  renderTabs() {
+  // Rebuilding the strip and re-fitting it forces a synchronous layout (the
+  // overflow probes in fitTabs), and renderAll calls this on every sync. The
+  // strip only needs redoing when a label, the active tab, the window size or
+  // something sharing the bar's width changed — the signature below — so
+  // ordinary syncs keep the existing buttons (and an open "More ▾" menu).
+  // `force` (resize, fonts loaded) always re-fits.
+  renderTabs(force) {
     const tabs = document.getElementById('tabs');
-    clear(tabs);
-    this.closeTabMenu();
     const elc = S() && S().election;
-    const btns = [];
+    const list = [];
     for (const [id, label] of this.PAGES) {
       if (!can(id)) continue;
       let text = label;
@@ -242,6 +248,19 @@ const App = {
         const unread = this.unreadNews();
         if (unread > 0) text = label + ' (' + unread + ')';
       }
+      list.push([id, text]);
+    }
+    const txt = (id) => { const n = document.getElementById(id); return n ? n.textContent : ''; };
+    const hid = (id) => { const n = document.getElementById(id); return n ? (n.classList.contains('hidden') ? 1 : 0) : -1; };
+    const sig = JSON.stringify([list, W.view, window.innerWidth, window.innerHeight,
+      txt('brand-world'), txt('clock-turn'), txt('clock-date'), txt('user-chip'),
+      hid('advance-btn'), hid('clock-auto'), hid('music-widget')]);
+    if (!force && sig === this._tabSig && tabs.firstChild) return;
+    this._tabSig = sig;
+    clear(tabs);
+    this.closeTabMenu();
+    const btns = [];
+    for (const [id, text] of list) {
       const b = el('button.tab', { class: W.view === id ? 'active' : '', onclick: () => this.go(id) }, text);
       btns.push(b);
       tabs.appendChild(b);

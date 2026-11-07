@@ -139,6 +139,20 @@ through market/deeds (see the `moveItem` helper in trade-accept, `/api/trade`, a
   and fireballs are canvas-baked sprites (`map-fx.js _fxBake`) that only move, scale and
   fade — not SVG primitives (they read as geometry) and not per-element filters.
 
+## Per-sync render budget (client)
+
+`App.renderAll` runs on every sync, so everything it calls must be cheap when nothing it shows
+changed:
+- `renderTabs` and `renderExplorer` compare a signature of what they draw (labels, active tab,
+  window size, top-bar texts / row data, search, selection, folds) and keep the existing DOM
+  when it matches. Feed any new input they draw into that signature, or it won't repaint.
+  `renderTabs(true)` forces a re-fit (resize, web fonts loaded).
+- Don't read layout (`scrollTop`, `offsetWidth`, `getBoundingClientRect`, `scrollWidth`) after
+  writing DOM inside the render pass — each read forces a synchronous layout. `Views.render`
+  carries the page's scroll offset from its own scroll listener (`doc._st`) for this reason.
+- `fmtNum` caches one `Intl.NumberFormat` per decimal count; don't call
+  `toLocaleString(locale, options)` in hot loops (it builds a formatter per call).
+
 ## Data & environment
 
 - `data/world.json` is live state — don't hand-edit while a server is running (the debounced

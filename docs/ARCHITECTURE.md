@@ -40,8 +40,9 @@ fresh state (body was read once up front; `store.invalidate()` drops the poisone
   `saveNow()` is synchronous (used on shutdown/SIGINT and a 60s safety interval). `fileRev`
   bumps on every save so `getVersion()` is meaningful in both modes.
 - **Cloud mode:** `begin()` per request loads the doc if the stored `version` changed
-  (otherwise reuses the warm module-level cache); `commit()` does a compare-and-swap
-  (`version=eq.N`) update, inserts pending timeline/transaction rows, upserts one snapshot at
+  (otherwise reuses the warm module-level cache; the doc and both log tails are fetched in
+  parallel); `commit()` does a compare-and-swap (`version=eq.N`, returning only `version` —
+  never the doc) update, inserts pending timeline/transaction rows (in parallel), upserts one snapshot at
   most, upserts `world_version`, and broadcasts `sync`. The doc stored in Postgres **excludes**
   `timeline`/`transactions` (append-only tables of their own; last 400 loaded per request).
 - **Snapshots:** one before every turn (`sim.advanceTurn` calls `store.snapshot()`), 60 kept,

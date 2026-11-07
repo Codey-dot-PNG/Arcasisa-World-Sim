@@ -75,6 +75,20 @@ civilians in conflicts their side waged), and a written summary. **A dead accoun
 make any non-GET request.** The GM brings one back by giving it another role (Roles &
 Operators); that clears `deadAt` and the entity's `deceased`.
 
+## The baseline (`/api/gm/canon*`, GM only — server/canon.js)
+
+| Route | |
+|---|---|
+| `GET /api/gm/canon` | `{ summary, entries }` — what is kept (entries without their bodies) |
+| `POST /api/gm/canon/scan {world?, name?}` | One source compared with the world a reset produces now: the live world (no body) or an uploaded export (migrated on a copy first) → `{ scan: { name, live, turn, date, candidates } }` |
+| `POST /api/gm/canon/merge {scans}` | Many scans → one list (oldest first, live last): new records as first created with their latest wording, edits at their latest value, `firstSeen`, `inLatest`, `origin` (`player` · `junk` · `renamed`) and a `suggest` tick |
+| `POST /api/gm/canon/save {entries}` | Keep candidates (validated to their field group) → `world.canon` |
+| `POST /api/gm/canon/save-record {coll, id}` | Keep one record as it is now (every group that differs; a new record whole) — the dossiers' "★ Save to baseline" |
+| `POST /api/gm/canon/remove {keys}` | Stop keeping entries |
+| `GET /api/gm/canon/baseline` | Download the whole next world: seed + migrations + canon applied (commit it as `data/baseline-world.json`) |
+
+`POST /api/gm/reset` now reports how many kept changes were written in.
+
 ## Market (Phase 4.4 / Workstream A)
 
 `POST /api/market/buy | sell | transfer | issue (bonus mint) | offer (capital raise) |

@@ -2092,7 +2092,12 @@ async function load(seed, reseed) {
       }
       if (migrate(db)) saveNow();
     }
-    else { db = seedFn(); migrate(db); saveNow(); } // run migrations on a fresh seed too, so structural upgrades live only in migrate()
+    else {
+      // --reseed keeps the baseline canon the old world file held
+      let keep = null;
+      if (fs.existsSync(DB_FILE)) { try { keep = JSON.parse(fs.readFileSync(DB_FILE, 'utf8')).canon || null; } catch (e) { /* unreadable: start clean */ } }
+      db = seedWithCanon(seedFn, keep); saveNow(); // run migrations on a fresh seed too, so structural upgrades live only in migrate()
+    }
     return db;
   }
   if (reseed) await reset(seedFn);
@@ -2339,6 +2344,8 @@ async function rollback(turn) {
   restored.users = db.users;
   restored.sessions = db.sessions;
   restored.roles = db.roles;
+  // the baseline canon is about the NEXT world, not this one: keep today's list
+  if (db.canon) restored.canon = db.canon; else delete restored.canon;
   db = restored;
   // A snapshot can predate a schema-bumping deploy — bring it up to the
   // current shape before any new-engine code touches it (same rule as boot,
@@ -2380,8 +2387,17 @@ async function importWorld(world, currentGmUser) {
   return db;
 }
 
+// A fresh world from the seed, with the baseline canon (canon.js) written in:
+// the canon the old world kept wins, else the one the seed file carries.
+function seedWithCanon(seed, keepCanon) {
+  const w = (seed || seedFn)(); migrate(w);
+  if (keepCanon) w.canon = JSON.parse(JSON.stringify(keepCanon));
+  if (w.canon) { try { require('./canon').apply(w); } catch (e) { console.error('canon apply failed:', e.message); } }
+  return w;
+}
+
 async function reset(seed) {
-  db = (seed || seedFn)(); migrate(db);
+  db = seedWithCanon(seed, db && db.canon);
   if (MODE === 'file') {
     // a new world starts with a clean archive
     for (const f of fs.readdirSync(SNAP_DIR)) {

@@ -191,7 +191,7 @@ const GM = {
   // the old Global Editor → Entities; Snapshots + Archive & Danger →
   // Archive; Taxation joined the economy levers).
   GROUPS: [
-    { id: 'world', label: 'World', subs: [['settings', 'Settings & Time', 'tabWorld'], ['presentation', 'Presentation', 'tabPresentation'], ['archive', 'Archive & Rollback', 'tabArchive']] },
+    { id: 'world', label: 'World', subs: [['settings', 'Settings & Time', 'tabWorld'], ['presentation', 'Presentation', 'tabPresentation'], ['baseline', 'Baseline', 'tabBaseline'], ['archive', 'Archive & Rollback', 'tabArchive']] },
     { id: 'map', label: 'Map & Territory', subs: [['territory', 'Territory', 'tabTerritory'], ['provinces', 'Provinces', 'tabProvinces'], ['mapobjects', 'Cities & Properties', 'tabMapObjects']] },
     { id: 'entities', label: 'Entities', subs: [['editor', 'Entities', 'tabGlobalEdit']] },
     { id: 'economy', label: 'Economy & Trade', subs: [['levers', 'Levers & Tax', 'tabEconomy'], ['money', 'Money Supply', 'tabMoney'], ['items', 'Items & Market', 'tabItems'], ['trade', 'Trade Partners', 'tabTrade']] },
@@ -2653,6 +2653,182 @@ const GM = {
           el('button.icon-btn', { title: 'Delete', onclick: () => confirmModal('REVOKE ACCESS', `Delete operator “${u2.username}”?`, async () => { await DEL('/api/gm/users/' + u2.id); toast('Revoked.'); }) }, '✕')))))));
   },
 
+  /* ═══════════ BASELINE — what survives a reset (server/canon.js) ═══════════
+     The live world (and any older exports the GM adds) is compared with the
+     world a reset would produce now. What differs is listed by kind — new
+     records, text, setup, ownership, removals, settings — each ticked or not
+     by suggestion; the GM keeps the ticked ones. Kept changes are written
+     into every reset. Scans are cached on W.cb so syncs don't re-run them. */
+  tabBaseline(main) {
+    const cb = W.cb = W.cb || { scans: [], exports: [], merged: null, ticks: {}, kind: 'all', showGone: false, q: '', busy: false, saved: null };
+    main.appendChild(el('div.doc-title', 'Baseline'));
+    main.appendChild(el('div.doc-sub', 'what the next world starts from · keep what is canon, let the campaign go'));
+    main.appendChild(el('div.stage.cb-intro',
+      el('p', 'A reset starts from the seed and recreates everything the game itself adds (weapons, arsenals, airbases…). What you and your players wrote since is listed below. ',
+        el('b', 'Tick what is canon and keep it'), ': kept changes are written into every reset from now on. Everything else — balances, ownership, news, elections — goes with the campaign.'),
+      el('p.cb-small', 'Suggestions are only a start: text edits and new records made by the GM come ticked; setup and ownership changes, removals, player characters and renamed seed characters come unticked.')));
+
+    // ---- what is kept ----
+    const keptBox = el('div');
+    main.appendChild(Views.secLabel('Kept for the next world'));
+    main.appendChild(keptBox);
+    const paintKept = () => {
+      clear(keptBox);
+      const k = cb.saved;
+      if (!k) { keptBox.appendChild(el('div.cb-small', 'Loading…')); return; }
+      const sum = k.summary, by = sum.byKind || {};
+      const NAMES = { add: 'new records', text: 'text edits', setup: 'setup edits', ownership: 'ownership edits', remove: 'removals', setting: 'settings' };
+      keptBox.appendChild(el('div.cb-keptline',
+        el('span', sum.count ? `${sum.count} kept: ` + Object.entries(by).map(([x, n]) => `${n} ${NAMES[x] || x}`).join(' · ') : 'Nothing kept yet — a reset gives the bare seed.'),
+        el('a.dash-btn.btn-xs', { href: '/api/gm/canon/baseline', download: 'baseline-world.json', title: 'The seed + migrations + what is kept, as one file — commit it as data/baseline-world.json to make it every deploy\u2019s starting world' }, '↓ Download baseline file')));
+      if (sum.lastApplied && (sum.lastApplied.skipped || []).length) {
+        keptBox.appendChild(Views.ledgerFold('cbSkipped', `Last reset: ${sum.lastApplied.applied} written in, ${sum.lastApplied.skipped.length} notes`, () =>
+          el('ul.cb-notes', sum.lastApplied.skipped.map(x => el('li', `${x.key} — ${x.why}`)))));
+      }
+      if (k.entries.length) {
+        keptBox.appendChild(Views.ledgerFold('cbKeptList', `Show the ${k.entries.length} kept change${k.entries.length === 1 ? '' : 's'}`, () => el('div.cb-list', k.entries.map(e =>
+          el('div.cb-row.kept',
+            el('span.cb-kind', { class: 'k-' + e.kind }, e.kind),
+            el('span.cb-coll', e.coll),
+            el('span.cb-label', e.label),
+            el('span.cb-detail', e.fields ? e.fields.join(', ') : ''),
+            el('span.cb-when', e.savedAt ? new Date(e.savedAt).toLocaleDateString() : ''),
+            el('button.icon-btn', { title: 'Stop keeping this', onclick: async () => {
+              try { await POST('/api/gm/canon/remove', { keys: [e.key] }); toast('No longer kept.'); await this.cbLoad(true); } catch (err) { toast(err.message, true); }
+            } }, '✕'))))));
+      }
+    };
+    paintKept();
+
+    // ---- differences ----
+    main.appendChild(Views.secLabel('Differences from the baseline'));
+    const filePick = el('input', { type: 'file', accept: '.json,application/json', multiple: 'multiple', style: 'display:none;' });
+    filePick.addEventListener('change', async () => {
+      const files = [...(filePick.files || [])]; filePick.value = '';
+      for (const f of files) {
+        try {
+          const world = JSON.parse(await f.text());
+          if (!world || !world.settings || !Array.isArray(world.entities)) { toast(f.name + ' is not a world export.', true); continue; }
+          cb.exports = cb.exports.filter(x => x.name !== f.name).concat([{ name: f.name, world }]);
+        } catch (e) { toast(f.name + ': ' + e.message, true); }
+      }
+      await this.cbScan();
+    });
+    main.appendChild(el('div.cb-sources',
+      el('span.cb-small', 'Compared: '),
+      ...(cb.scans.length ? cb.scans.map(sc => el('span.chip.chip-xs.active', { title: sc.date || '' }, `${sc.name} · turn ${sc.turn}`)) : [el('span.cb-small', 'the live world')]),
+      filePick,
+      el('button.dash-btn.btn-xs', { title: 'Older world exports show when each change first appeared, and how new records looked when they were made', onclick: () => filePick.click() }, '＋ Add older exports'),
+      el('button.dash-btn.btn-xs', { onclick: () => this.cbScan() }, '↻ Rescan')));
+    const listBox = el('div');
+    main.appendChild(listBox);
+    this.cbPaint = () => this.cbPaintList(listBox);
+    if (!cb.merged && !cb.busy) this.cbScan(); else this.cbPaint();
+    if (!cb.saved) this.cbLoad(false).then(paintKept);
+  },
+  async cbLoad(rescan) {
+    const cb = W.cb;
+    try { cb.saved = await GET('/api/gm/canon'); } catch (e) { cb.saved = { summary: { count: 0, byKind: {} }, entries: [] }; }
+    if (rescan) return this.cbScan(); else if (W.view === 'gm') App.renderView();
+  },
+  async cbScan() {
+    const cb = W.cb;
+    cb.busy = true; if (this.cbPaint) this.cbPaint();
+    try {
+      const scans = [];
+      for (const x of cb.exports) scans.push((await POST('/api/gm/canon/scan', { world: x.world, name: x.name })).scan);
+      scans.push((await POST('/api/gm/canon/scan', {})).scan);
+      cb.scans = scans;
+      cb.merged = (await POST('/api/gm/canon/merge', { scans })).candidates;
+      // ticks: keep the GM's choices for rows still listed, suggestion for new ones
+      const ticks = {};
+      for (const c of cb.merged) ticks[c.key] = cb.ticks[c.key] !== undefined ? cb.ticks[c.key] : !!c.suggest;
+      cb.ticks = ticks;
+    } catch (e) { toast(e.message, true); }
+    cb.busy = false;
+    if (W.view === 'gm') App.renderView();
+  },
+  cbPaintList(box) {
+    const cb = W.cb;
+    clear(box);
+    if (cb.busy && !cb.merged) { box.appendChild(el('div.cb-small', 'Comparing with the baseline…')); return; }
+    if (!cb.merged) return;
+    const KINDS = [['all', 'All'], ['add', 'New'], ['text', 'Text & look'], ['setup', 'Setup'], ['ownership', 'Ownership'], ['remove', 'Removed'], ['setting', 'Settings']];
+    const visibleBase = cb.merged.filter(c => cb.showGone || c.inLatest);
+    const q = cb.q.trim().toLowerCase();
+    const shown = visibleBase.filter(c => (cb.kind === 'all' || c.kind === cb.kind) &&
+      (!q || String(c.label).toLowerCase().includes(q) || c.coll.includes(q)));
+    const goneN = cb.merged.filter(c => !c.inLatest).length;
+    const search = el('input.text-input.cb-search', { placeholder: 'Find…', value: cb.q, oninput: (e) => { cb.q = e.target.value; clearTimeout(this._cbT); this._cbT = setTimeout(() => { this.cbPaint(); const s = document.querySelector('.cb-search'); if (s) { s.focus(); s.setSelectionRange(s.value.length, s.value.length); } }, 200); } });
+    box.appendChild(el('div.cb-bar',
+      el('div.chip-row', KINDS.map(([k, label]) => {
+        const n = k === 'all' ? visibleBase.length : visibleBase.filter(c => c.kind === k).length;
+        return n || k === 'all' ? el('button.chip', { class: cb.kind === k ? 'active' : '', onclick: () => { cb.kind = k; this.cbPaint(); } }, `${label} · ${n}`) : null;
+      })),
+      search,
+      goneN ? Forms.check(cb, 'showGone', `Also show ${goneN} change${goneN === 1 ? '' : 's'} only in older exports`) : null));
+    box.querySelector('input[type=checkbox]') && box.querySelector('input[type=checkbox]').addEventListener('change', () => this.cbPaint());
+    const tickAll = (v) => { for (const c of shown) cb.ticks[c.key] = v; this.cbPaint(); };
+    const ticked = cb.merged.filter(c => cb.ticks[c.key] && (cb.showGone || c.inLatest));
+    box.appendChild(el('div.cb-bulk',
+      el('button.dash-btn.btn-xs', { onclick: () => { for (const c of shown) cb.ticks[c.key] = !!c.suggest; this.cbPaint(); } }, 'Suggested'),
+      el('button.dash-btn.btn-xs', { onclick: () => tickAll(true) }, 'Tick all shown'),
+      el('button.dash-btn.btn-xs', { onclick: () => tickAll(false) }, 'Untick all shown'),
+      el('span.cb-small', `${shown.length} shown · ${ticked.length} ticked in total`)));
+    if (!shown.length) { box.appendChild(el('div.cb-small', { style: 'padding:14px 0;' }, cb.merged.length ? 'Nothing here.' : 'The live world matches the baseline — nothing to keep.')); }
+    const ents = new Map(((S() && S().entities) || []).map(e => [e.id, e.name]));
+    const nm = (id) => ents.get(id) || id;
+    const short = (v) => { if (v === null || v === undefined) return '∅'; const t = typeof v === 'string' ? v : JSON.stringify(v); return t.length > 140 ? t.slice(0, 137) + '…' : t; };
+    const TAG = { player: 'player character', junk: 'looks like junk', renamed: 'seed character renamed' };
+    const list = el('div.cb-list');
+    for (const c of shown.slice(0, 400)) {
+      const tags = [];
+      if (c.origin && TAG[c.origin]) tags.push(el('span.cb-tag.warn', TAG[c.origin]));
+      if (!c.inLatest) tags.push(el('span.cb-tag', 'gone in the latest world'));
+      if (cb.scans.length > 1 && c.firstSeen) tags.push(el('span.cb-tag', 'since ' + c.firstSeen));
+      let detail = null;
+      if (c.fields) {
+        detail = el('div.cb-fields', Object.keys(c.fields).map(f => el('div.cb-field',
+          el('span.cb-f', f), el('span.cb-from', { title: typeof c.from[f] === 'string' ? c.from[f] : '' }, short(c.from[f])), el('span.cb-arrow', '→'),
+          el('span.cb-to', { title: typeof c.fields[f] === 'string' ? c.fields[f] : '' }, short(c.fields[f])))));
+      } else if (c.kind === 'add') {
+        const r = c.record || {};
+        const bits = [r.type || r.kind || r.category || r.scope, r.ownerId ? 'owner ' + nm(r.ownerId) : null, r.ceoId ? 'CEO ' + nm(r.ceoId) : null,
+          (c.extras && c.extras.accounts || []).length ? 'with ' + c.extras.accounts.length + ' account(s)' : null].filter(Boolean);
+        detail = el('div.cb-fields', el('div.cb-field', el('span.cb-to', bits.join(' · ') + (r.description ? ' — ' + short(r.description) : ''))));
+      } else if (c.kind === 'remove') {
+        detail = el('div.cb-fields', el('div.cb-field', el('span.cb-from', 'In the seed, deleted in this world. Keeping this removes it from the next world too (only if nothing still points at it).')));
+      } else if (c.kind === 'setting') {
+        detail = el('div.cb-fields', el('div.cb-field', el('span.cb-to', short(c.value))));
+      }
+      list.appendChild(el('label.cb-row', { class: cb.ticks[c.key] ? 'on' : '' },
+        el('input', { type: 'checkbox', checked: cb.ticks[c.key] ? 'checked' : undefined, onchange: (e) => { cb.ticks[c.key] = e.target.checked; e.target.closest('.cb-row').classList.toggle('on', e.target.checked); this.cbFooter(); } }),
+        el('span.cb-kind', { class: 'k-' + c.kind }, c.kind === 'add' ? 'new' : c.kind === 'remove' ? 'removed' : c.kind === 'setting' ? 'setting' : c.groupLabel || c.kind),
+        el('span.cb-coll', c.coll),
+        el('span.cb-label', c.label),
+        el('span.cb-tags', tags),
+        detail));
+    }
+    if (shown.length > 400) list.appendChild(el('div.cb-small', `…and ${shown.length - 400} more — narrow with the filters.`));
+    box.appendChild(list);
+    const foot = el('div.cb-foot');
+    box.appendChild(foot);
+    this.cbFooter = () => {
+      const picks = cb.merged.filter(c => cb.ticks[c.key] && (cb.showGone || c.inLatest));
+      clear(foot);
+      foot.appendChild(el('span', `${picks.length} ticked`));
+      foot.appendChild(el('button.solid-btn', { disabled: picks.length && !cb.busy ? undefined : 'disabled', onclick: async (ev) => {
+        ev.currentTarget.disabled = true;
+        try {
+          const r = await POST('/api/gm/canon/save', { entries: picks });
+          toast(`Kept ${r.saved} change${r.saved === 1 ? '' : 's'} for the next world.`);
+          await this.cbLoad(true);
+        } catch (err) { toast(err.message, true); ev.currentTarget.disabled = false; }
+      } }, `Keep ${picks.length} in the baseline`));
+    };
+    this.cbFooter();
+  },
+
   /* ═══════════ DANGER ═══════════ */
   tabArchive(main) {
     main.appendChild(el('div.doc-title', 'Archive & Rollback'));
@@ -2709,9 +2885,9 @@ const GM = {
 
     main.appendChild(el('div.stage', { style: 'margin-top:16px;' },
       el('div.stage-header', el('span.stage-chapter', 'Total Reset'), el('span.stage-year', '§3')),
-      el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Reset the world to the seed of March 1962. Every change, account and article since is destroyed. Operator accounts are re-seeded too.'),
+      el('p', { style: 'font-family:var(--font-voice); font-size:15px; line-height:1.6;' }, 'Reset the world to its baseline: the seed, plus everything kept on the Baseline page. Every other change, account and article since is destroyed. Operator accounts are re-seeded too.'),
       el('div.btn-row', el('button.danger-btn', {
-        onclick: () => confirmModal('BURN THE ARCHIVE', 'Reset the entire world to the 1962 seed? This cannot be undone (export first).', async () => {
+        onclick: () => confirmModal('BURN THE ARCHIVE', 'Reset the entire world to its baseline (the seed plus what you kept on the Baseline page)? This cannot be undone (export first).', async () => {
           await POST('/api/gm/reset');
           toast('The world begins again. 1962.');
         }, 'Reset Everything')

@@ -8,7 +8,7 @@ role-play on Discord; this app is the source of truth for money, ownership, poli
 
 ```
 node server.js            # http://localhost:4820  (PORT env overrides)
-node server.js --reseed   # wipe the world back to the 1962 seed
+node server.js --reseed   # wipe the world back to the seed + its kept baseline canon (server/canon.js)
 ```
 
 Node 18+, **zero npm dependencies, no build step** (both are deliberate — never add a package
@@ -79,10 +79,11 @@ server/territory.js    border-painter saves: found province/country, apply paint
 server/peace.js        player peace negotiations: offers, revisions, acceptance (reparations, holdings, borders)
 server/military.js     nations' armed forces: arsenal totals, militaryLog record, standing orders (plan/doctrine)
 server/mortality.js    the revolver: server-side cylinder, character death ('dead' role), the record of the run
+server/canon.js        the baseline canon: what survives a reset (scan/merge/keep authored changes; reset applies them)
 server/map-geometry.js AUTO-GENERATED from the master SVG — do not edit (tools/build-mapdata.js)
 server/supabase.js     minimal PostgREST/Realtime client (plain fetch)
 public/js/*            client modules — see docs/FRONTEND.md
-tools/                 build-mapdata.js, build-revolver.js (3D model → public/assets/models), diagnose-sync.js, migrate-world.js
+tools/                 build-mapdata.js, build-revolver.js (3D model → public/assets/models), world-canon.js (scan exports / bake a baseline), diagnose-sync.js, migrate-world.js
 data/                  world.json (live state — do not hand-edit while running), snapshots/
 ```
 

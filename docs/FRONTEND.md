@@ -76,6 +76,20 @@ ids to an offscreen buffer (`pickAt`); chambers are hit by their projected centr
   unload close spin turn cock dry shot stow`; a missing file is silent.
 - `Revolver.still(w, h, opts)` renders any pose to a PNG data URL (for checking the model).
 
+## GM Studio › World › Baseline (gm.js `tabBaseline`)
+
+The review desk for what survives a reset. On open it scans the live world against the world
+a reset would produce now; "＋ Add older exports" (multi-file) scans exports too, one request
+each, then merges them (`/api/gm/canon/merge`) so each change shows where it first appeared.
+Rows by kind — New · Text & look · Setup · Ownership · Removed · Settings — each with the old
+value struck through → the new one, tags (player character, looks like junk, seed character
+renamed, since <export>, gone in the latest world), and a tick that starts at the server's
+suggestion. "Keep N in the baseline" saves the ticked rows; kept rows leave the list (the
+reference now includes them). The kept list folds open with ✕ per entry, notes from the last
+reset, and "↓ Download baseline file". State lives on `W.cb` so syncs don't rescan.
+Every GM dossier (entity, property, province, city, item) has **★ Save to baseline** beside
+"Open in GM Studio" (`Views.gmJump`) — keeps that record exactly as it is now.
+
 ## Holdings & the Economy page
 
 The Economy page has five tabs: **Holdings** (default for players), **Markets** (Stock

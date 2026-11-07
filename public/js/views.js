@@ -135,7 +135,21 @@ const Views = {
   gmJump(kind, id) {
     if (!isGM()) return null;
     const tabByKind = { province: 'provinces', city: 'mapobjects', property: 'mapobjects', item: 'items' };
-    return el('button.dash-btn', {
+    // keep this record, as it is now, in the baseline the next reset starts
+    // from (server/canon.js; reviewed in GM Studio › World › Baseline)
+    const keep = this.EDIT_COLL[kind] ? el('button.dash-btn', {
+      title: 'Keep this record as it is now in the baseline — the next reset starts from it',
+      onclick: async (ev) => {
+        const b = ev.currentTarget; b.disabled = true;
+        try {
+          const r = await POST('/api/gm/canon/save-record', { coll: this.EDIT_COLL[kind], id });
+          toast(r.saved ? `Kept in the baseline (${(r.kinds || []).map(k => k === 'add' ? 'new record' : k).join(', ')}).` : 'Already matches the baseline — nothing to keep.');
+          if (W.cb) W.cb.merged = null; // the Baseline page rescans next time
+        } catch (err) { toast(err.message, true); }
+        b.disabled = false;
+      }
+    }, '★ Save to baseline') : null;
+    const open = el('button.dash-btn', {
       onclick: () => {
         if (kind === 'entity') {
           // the Entities desk picks by class, then entity
@@ -146,6 +160,7 @@ const Views = {
         App.go('gm');
       }
     }, '✎ Open in GM Studio');
+    return keep ? el('span.gm-jump', open, ' ', keep) : open;
   },
 
   /* ═══════════ INSPECTOR — edit mode (Phase 2) ═══════════

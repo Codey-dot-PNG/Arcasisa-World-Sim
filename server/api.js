@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const zlib = require('zlib');
 const store = require('./store');
 const sim = require('./sim');
+const canon = require('./canon');
 const mortality = require('./mortality');
 const ownership = require('./ownership');
 const market = require('./market');
@@ -3265,6 +3266,55 @@ async function handle(req, res, pathname, method) {
         res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="arcasia-world.json"' });
         return res.end(JSON.stringify(db, null, 1));
       }
+      // ---- the baseline (server/canon.js): what survives a reset ----
+      if (pathname === '/api/gm/canon' && method === 'GET') {
+        const entries = Object.values(((db.canon || {}).entries) || {}).map(e => ({
+          key: e.key, kind: e.kind, coll: e.coll, id: e.id, label: e.label, savedAt: e.savedAt, savedBy: e.savedBy,
+          fields: e.fields ? Object.keys(e.fields) : undefined
+        })).sort((a, b) => (b.savedAt || 0) - (a.savedAt || 0));
+        return json(res, 200, { summary: canon.summary(db), entries });
+      }
+      if (pathname === '/api/gm/canon/scan' && method === 'POST') {
+        // one source per call (an export can be ~1 MB): the live world, or an
+        // uploaded export — compared with what a reset produces now
+        const b = await readBody(req, 32e6);
+        const ref = canon.reference(db);
+        const fromExport = b && b.world && typeof b.world === 'object';
+        if (fromExport && (!b.world.settings || !Array.isArray(b.world.entities))) return bad('That file is not an Arcasia world export.');
+        const src = fromExport ? canon.prepare(b.world) : db;
+        return json(res, 200, { scan: {
+          name: fromExport ? String(b.name || 'export').slice(0, 80) : 'Live world', live: !fromExport,
+          turn: ((src.settings || {}).time || {}).turn || 0, date: ((src.settings || {}).time || {}).date || null,
+          candidates: canon.scanOne(ref, src)
+        } });
+      }
+      if (pathname === '/api/gm/canon/merge' && method === 'POST') {
+        const b = await readBody(req, 32e6);
+        return json(res, 200, { candidates: canon.merge(Array.isArray(b.scans) ? b.scans : []) });
+      }
+      if ((pathname === '/api/gm/canon/save' || pathname === '/api/gm/canon/save-record') && method === 'POST') {
+        const b = await readBody(req, 32e6);
+        const picks = pathname.endsWith('save-record') ? canon.recordCandidates(db, String(b.coll || ''), String(b.id || '')) : (Array.isArray(b.entries) ? b.entries : []);
+        if (!picks.length) return json(res, 200, { saved: 0, summary: canon.summary(db) });
+        let saved;
+        try { saved = canon.save(db, picks, u.user.displayName); } catch (e) { return bad(e.message); }
+        store.log('system', `Baseline: ${saved.length} change${saved.length === 1 ? '' : 's'} kept for the next world`,
+          saved.slice(0, 8).map(e => `${e.label} (${e.kind})`).join(', ') + (saved.length > 8 ? ` and ${saved.length - 8} more` : ''), actor, []);
+        store.save(); broadcast('sync');
+        return json(res, 200, { saved: saved.length, kinds: [...new Set(saved.map(e => e.kind))], summary: canon.summary(db) });
+      }
+      if (pathname === '/api/gm/canon/remove' && method === 'POST') {
+        const b = await readBody(req);
+        const n = canon.remove(db, Array.isArray(b.keys) ? b.keys : []);
+        if (n) { store.log('system', `Baseline: ${n} change${n === 1 ? '' : 's'} no longer kept`, '', actor, []); store.save(); broadcast('sync'); }
+        return json(res, 200, { removed: n, summary: canon.summary(db) });
+      }
+      if (pathname === '/api/gm/canon/baseline' && method === 'GET') {
+        // the whole next world as a file: seed + migrations + the kept canon
+        const w = canon.bake(db);
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="baseline-world.json"' });
+        return res.end(JSON.stringify(w, null, 1));
+      }
       if (pathname === '/api/gm/rollback' && method === 'POST') {
         const b = await readBody(req);
         await store.rollback(Math.round(Number(b.turn)));
@@ -3293,7 +3343,8 @@ async function handle(req, res, pathname, method) {
       }
       if (pathname === '/api/gm/reset' && method === 'POST') {
         await store.reset(seed);
-        store.log('system', 'World reset to the seed of 1962', '', actor, []);
+        const kept = (store.get().canon || {}).lastApplied;
+        store.log('system', 'World reset to the baseline', kept ? `${kept.applied} kept change${kept.applied === 1 ? '' : 's'} written in` + (kept.skipped.length ? `, ${kept.skipped.length} skipped` : '') : '', actor, []);
         sim.scheduleAuto();
         broadcast('sync');
         return json(res, 200, { ok: true });

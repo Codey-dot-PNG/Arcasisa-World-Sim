@@ -258,6 +258,36 @@ gm, president (Miron Valen), journalist (Jana Halden), executive (Kira Moss), ci
 (Toma Rill), plus MPs/executives/judge/military/police personas (verenne, stahl, kandel, suri,
 hale, keller, odek, grazi, orn, krenn, voss, falk).
 
+## The baseline canon (`world.canon`, server/canon.js)
+
+What survives a reset. A reset (`store.reset`, `--reseed`) builds the next world from the seed
+(`data/baseline-world.json`) + `store.migrate` (engine content: weapons, arsenals, airbases…)
+and then **applies the canon** the old world kept — so authored changes the GM marked canon
+come back and the campaign's play state does not. Rollback keeps the current canon list (it
+is about the next world, not the restored one). `filterState` never ships it.
+
+```
+canon: { v: 1, updatedAt, lastApplied: { at, applied, skipped: [{ key, why }] },
+  entries: { "<key>": entry } }
+key   = "<collection>/<id>#<kind>" | "settings/<dotted.path>"
+entry = { key, kind, coll, id, label, savedAt, savedBy, …one of:
+  fields: { field: value }          // kind text | setup | ownership (null = delete the field)
+  record, extras: { accounts, items } // kind add — the record as first created
+  value                              // kind setting — settings path (economy, trade.partners, map.countries…)
+  (nothing)                          // kind remove — only applied if nothing points at the record
+}
+```
+
+Field groups per collection (`canon.GROUPS`): **text** (names, descriptions, titles, logos,
+colours…; for variables/events/roles/markers the whole definition), **setup** (entity type/meta/
+military plan; property placement and production line; province borders; item price/meta) and
+**ownership** (owner, CEO, leader, board, share register). Everything else is play state.
+Derived items (deeds, share certificates, ×100 positions) are never kept — `apply` re-runs
+`deeds.syncAllDeeds` / `market.syncAllCertificates`, and clears references from kept records to
+entities that are not in the new world (reported in `lastApplied.skipped`). Values compare by
+meaning (object key order and the order of simple lists are ignored — cloud exports come back
+from Postgres reordered).
+
 ## Schema history (migration gates in store.migrate)
 
 - **< 2:** removed Kordistan foreign power, population ×2.79 / GDP ×2.686 rescale, Valen no

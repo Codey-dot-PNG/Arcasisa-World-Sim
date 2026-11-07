@@ -2150,6 +2150,27 @@ function migrate(world) {
     changed = true;
   }
 
+  // ---- The wage scale pegged to grain (flag world._wageAnchor1) -----------
+  // Economy v2 put incomes on the ₳1/day scale the sites were authored
+  // around — far too low against prices that sit close to 1960 dollars. The
+  // going wage is now pegged to a good: a day's work for the reference group
+  // buys ~58 kg of grain (₳3 at ₳52/t). economy.applyWageAnchor rescales
+  // incomes, savings and thresholds and every wage by k, and runs each site
+  // with k times fewer, better-paid workers (headcount ÷k, jobs-per-employee
+  // ×k) so payroll in ₳, profits and provincial jobs are unchanged.
+  if (!world._wageAnchor1) {
+    const econ = world.settings.economy = world.settings.economy || {};
+    // an earlier build kept last turn's sales under vars (listed as a statistic)
+    for (const pr of (world.properties || [])) if (pr.vars && pr.vars.lastSold !== undefined) delete pr.vars.lastSold;
+    const grain = (world.items || []).find(i => i.id === 'item_grain');
+    if (!econ.wageAnchor && grain && grain.marketValue > 0) econ.wageAnchor = { itemId: 'item_grain', units: 0.0577 };
+    try {
+      require('./economy').applyWageAnchor(world);
+      world._wageAnchor1 = true;
+      changed = true;
+    } catch (e) { /* economy unavailable during early boot — retried next load */ }
+  }
+
   // ---- Polling starts where Parliament stands (flag world._pollAppeal1) ----
   // Party scores now count negative regional standing (a regional party no
   // longer polls nationally) and carry an `appeal` term. Calibrate appeal

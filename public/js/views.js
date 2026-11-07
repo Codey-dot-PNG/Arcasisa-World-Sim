@@ -582,7 +582,7 @@ const Views = {
     const grossPerTurn = (pr.prodMode === 'goods'
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0) * wf;
-    const wagePerTurn = owner && owner.type === 'company' ? Math.max(0, Number(owner.wagePerTurn === undefined ? 1 : owner.wagePerTurn) || 0) : 0;
+    const wagePerTurn = wageForClient(pr);
     const wages = (pr.employees || 0) * wagePerTurn;
     const upkeep = effUpkeep(pr);
     const totalExpenses = upkeep + wages;
@@ -1825,7 +1825,7 @@ const Views = {
   companyControls(e) {
     const controllable = isGM() || (W.me && W.me.entityId && ownership_controlsClient(W.me.entityId, e.id));
     const keep = e.keepPct === undefined ? 0 : e.keepPct;
-    const wage = e.wagePerTurn === undefined ? 1 : e.wagePerTurn;
+    const wage = e.wagePerTurn === undefined ? Math.round(goingWageClient() * 100) / 100 : e.wagePerTurn;
     const box = el('div');
     box.appendChild(this.secLabel('Operations'));
     if (!controllable) {
@@ -1951,7 +1951,7 @@ const Views = {
     const prodMode = pr.prodMode || 'none';
     const produces = pr.produces || [];
     const baseKeep = pr.keepPct !== undefined ? pr.keepPct : (owner && owner.type === 'company' ? (owner.keepPct || 0) : 0);
-    const baseWage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (owner && owner.type === 'company' ? (owner.wagePerTurn || 1) : 0);
+    const baseWage = Math.round(wageForClient(pr) * 100) / 100;
     const maxEmp = pr.maxEmployees !== undefined ? Math.max(0, Math.round(pr.maxEmployees)) : Math.max(1, pr.employees || 1);
     const coHours = owner && owner.type === 'company' && owner.workHours !== undefined ? owner.workHours : 8;
     const coSafety = owner && owner.type === 'company' && owner.safety !== undefined ? owner.safety : 'standard';
@@ -2146,7 +2146,10 @@ const Views = {
         const btn = ev.currentTarget; btn.disabled = true;
         try {
           const r = await PATCH('/api/property/' + pr.id + '/controls', {
-            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem, wagePerTurn: dr.wagePerTurn,
+            keepPct: dr.keepPct, keepPctByItem: dr.keepPctByItem,
+            // only an owner's change sets the site's own wage — saving the
+            // desk used to freeze whatever it displayed (₳0 on state sites)
+            ...(Number(dr.wagePerTurn) !== Number(baseWage) ? { wagePerTurn: dr.wagePerTurn } : {}),
             workHours: dr.inherit ? 'inherit' : dr.workHours,
             safety: dr.inherit ? 'inherit' : dr.safety,
             employees: dr.employees,
@@ -2792,7 +2795,7 @@ const Views = {
       ? (pr.produces || []).reduce((s, e) => s + (e.perTurn || 0) * priceOf(e.itemId), 0)
       : pr.prodMode === 'cash' ? (pr.cashPerTurn || 0) : 0;
     const employees = props.reduce((s, pr) => s + (pr.employees || 0), 0);
-    const wagePerTurn = Math.max(0, Number(c.wagePerTurn === undefined ? 1 : c.wagePerTurn) || 0);
+    const wagePerTurn = Math.max(0, Number(c.wagePerTurn === undefined ? goingWageClient() : c.wagePerTurn) || 0);
     const upkeepPerTurn = props.reduce((s, pr) => s + effUpkeep(pr), 0);
     const wagesPerTurn = employees * wagePerTurn;
     const cash = this.accountsOf(c.id).reduce((s, a) => s + a.balance, 0);
@@ -2832,7 +2835,7 @@ const Views = {
     const dr = (W.opsDraft && W.opsDraft.id === c.id) ? W.opsDraft : (W.opsDraft = {
       id: c.id,
       keepPct: c.keepPct === undefined ? 0 : c.keepPct,
-      wagePerTurn: c.wagePerTurn === undefined ? 1 : c.wagePerTurn,
+      wagePerTurn: c.wagePerTurn === undefined ? Math.round(goingWageClient() * 100) / 100 : c.wagePerTurn,
       keepPctByItem: Object.assign({}, c.keepPctByItem || {}),
       workHours: c.workHours !== undefined ? c.workHours : 8,
       safety: c.safety !== undefined ? c.safety : 'standard',

@@ -802,8 +802,7 @@ const GM = {
      block) saved through the properties collection. */
   geProperties(main, e) {
     const props = (S().properties || []).filter(p => p.ownerId === e.id);
-    const wage = e.type === 'company' ? Math.max(0, Number(e.wagePerTurn === undefined ? 1 : e.wagePerTurn) || 0) : 0;
-    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - effUpkeep(p) - (p.employees || 0) * wage, color: 'var(--accent)' }));
+    const rows = props.map(p => ({ label: p.name, value: (p.cashPerTurn || 0) - effUpkeep(p) - (p.employees || 0) * wageForClient(p), color: 'var(--accent)' }));
     if (rows.length) {
       main.appendChild(Views.secLabel('Net cash / turn by property'));
       main.appendChild(Charts.chartBars(rows, { horizontal: true, width: 520, height: Math.max(90, rows.length * 24 + 30), valueFormat: v => fmtMoney(v) }));
@@ -1452,6 +1451,26 @@ const GM = {
     main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
       'The population is modelled as groups per province, with no bank accounts. Each turn the engine works out jobs (listed sites plus a local economy that follows spending), the going wage, each group\u2019s income, food, spending and saving, prices from demand against supply, and moods from what people live through. Births, deaths, schooling and class mobility run monthly. It calibrates to the world as it stands, so "normal" is today; Recalibrate makes it re-read the world after you edit groups, sites or prices.'));
     const sl = (label, key, min, max, step, help) => main.appendChild(this.field(label, Forms.sliderNum(nd, key, min, max, { step }), help));
+    // the wage scale: a day's work for the reference group buys this much of a good
+    const anc = ec.wageAnchor || {};
+    const ad = this.getDraft('wageAnchor', { itemId: anc.itemId || 'item_grain', units: anc.units || 0.0577 });
+    const goods = (S().items || []).filter(i => !(i.meta && (i.meta.companyId || i.meta.propertyId || i.meta.bond)) && i.marketValue > 0 && /commodit|goods/i.test(i.category || ''));
+    const anchorPrice = () => { const it = itemById(ad.itemId); return it ? ((it.meta && it.meta.basePrice) || it.marketValue || 0) : 0; };
+    const anchorOut = el('div', { style: 'font-family:var(--font-mono); font-size:11px; color:var(--ink-soft); margin-top:4px;' });
+    const paintAnchor = () => { anchorOut.textContent = '= ' + CUR() + fmtNum((Number(ad.units) || 0) * anchorPrice(), 2) + ' a day for the reference worker (now ' + CUR() + fmtNum(Number(ec.wageScale) || 0, 2) + ')'; };
+    paintAnchor();
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Wage scale'));
+    main.appendChild(el('div.form-grid',
+      this.field('A day\u2019s work buys (good)', Forms.sel(ad, 'itemId', goods.map(i => [i.id, i.name + ' \u2014 ' + CUR() + fmtNum((i.meta && i.meta.basePrice) || i.marketValue, 2)]), paintAnchor)),
+      this.field('Amount (in the good\u2019s units)', Forms.num(ad, 'units', '0.0001'), 'e.g. 0.0577 t of grain \u2248 58 kg, or 1 barrel of crude')));
+    const numIn = main.querySelectorAll('input[type=number]');
+    if (numIn.length) numIn[numIn.length - 1].addEventListener('input', paintAnchor);
+    main.appendChild(anchorOut);
+    main.appendChild(el('div.btn-row', { style: 'margin:6px 0 10px;' }, el('button.dash-btn', {
+      onclick: () => confirmModal('MOVE THE WAGE SCALE', 'Every group\u2019s income and savings, the poverty line, the income-tax brackets and every company\u2019s and site\u2019s wage scale by the change; each site\u2019s headcount moves the other way (fewer, better-paid workers or the reverse), so payroll, profits and jobs stay as they are. The economy then recalibrates.', async () => {
+        try { await PATCH('/api/gm/settings', { economy: { wageAnchor: { itemId: ad.itemId, units: Number(ad.units) } } }); this.draftKey = null; toast('Wage scale moved.'); } catch (e) { toast(e.message, true); }
+      }, 'Move the scale')
+    }, 'Set wage scale')));
     main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Jobs & wages'));
     sl('Jobs per listed employee', 'jobsPerEmployee', 10, 1000, 10, 'Each employee at a listed site stands for this many jobs in its industry and suppliers: how much a company\u2019s hiring and firing moves its province.');
     sl('Wage response to labour tightness', 'wageFlex', 0, 0.03, 0.001, 'Going wage +this per point of employment above normal (and down when jobs are scarce).');

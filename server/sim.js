@@ -1120,9 +1120,10 @@ function runEconomy(db, actor, scale) {
       const unsold = cleanQty(r.units - sold);
       if (unsold > 0) addInventory(r.pr, r.itemId, unsold);
       if (sold > 0) perOwner[r.ownerId].dom += sold * price * domMult;
-      r.pr.vars = r.pr.vars || {};
-      r.pr.vars.lastSold = r.pr.vars.lastSold || {};
-      r.pr.vars.lastSold[r.itemId] = { offered: r.units, sold };
+      // last turn's home sales per product (kept off `vars`, which the
+      // property file lists as statistics)
+      r.pr.lastSold = r.pr.lastSold || {};
+      r.pr.lastSold[r.itemId] = { offered: Math.round(r.units * 100) / 100, sold: Math.round(sold * 100) / 100 };
     }
   }
 

@@ -72,7 +72,7 @@ Per property (owner required): output scales with province happiness
   → the property's own inventory; the rest is **offered to the home market**. After the
   property loop the market clears (`economy.clearMarket`, below): each good sells as far as
   demand reaches, sellers sharing it pro rata at the turn's opening price; what is not bought
-  goes back into the site's stock (`pr.vars.lastSold[item] = {offered, sold}`).
+  goes back into the site's stock (`pr.lastSold[item] = {offered, sold}`).
 - `prodMode 'cash'`: `cashPerTurn` revenue (shops, offices, casinos, ports) × the province's
   **services index** (what people spend there vs. normal — `economy.servicesIndex`).
 - `prodMode 'none'`: pure cost.
@@ -167,6 +167,17 @@ rest and heads for its calibrated size × population × services index^0.5 × (1
 × (1 − 0.10·bank crisis), closing 3% of the gap a day. Employment = jobs ÷ labour force
 (worker + rural groups); each group's unemployment is the province rate × its calibrated
 exposure, renormalised.
+
+**The wage scale.** The going wage of the reference group is pegged to a good:
+`settings.economy.wageAnchor = { itemId, units }` — a day's work buys `units` of it at its
+normal price (seeded as 0.0577 t of grain ≈ 58 kg ≈ ₳3/day; prices sit close to 1960
+dollars). `settings.economy.wageScale` records the scale the world is on. Moving the anchor
+(`economy.applyWageAnchor`, run once by `store.migrate` flag `world._wageAnchor1` and again
+whenever the GM changes it) scales incomes, savings, the poverty line, income-tax brackets,
+stipends and every company's and site's wage by k, and runs each site with k times fewer,
+k times better-paid workers (headcounts ÷k, `jobsPerEmployee` ×k) — payroll in ₳, profits
+and provincial jobs stay as they were; the engine's ₳ baselines scale with it, so nothing
+re-settles. New companies default to the going wage (`economy.nationalWage`).
 
 **Wages.** The province's market wage heads (2% a day) for `w0 × CPI^0.85 × productivity
 growth × (1 + 0.01 × employment gap)` — a level, so it cannot drift away. Listed employers

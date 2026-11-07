@@ -439,7 +439,7 @@
         employees: pr.employees || 0, cap: maxEmp, invested: pr.upgradeInvested, value: pr.value });
       const rev = pr.prodMode === 'goods' ? (pr.produces || []).reduce((s, x) => s + (x.perTurn || 0) * effPrice(itemById(x.itemId)), 0) * wf
         : pr.prodMode === 'cash' ? (Number(pr.cashPerTurn) || 0) * wf : 0;
-      const wage = pr.wagePerTurn !== undefined ? pr.wagePerTurn : (co ? (co.wagePerTurn === undefined ? 1 : co.wagePerTurn) : 0);
+      const wage = wageForClient(pr);
       const net = rev - effUpkeep(pr) - (pr.employees || 0) * (Number(wage) || 0);
       const makes = pr.prodMode === 'goods' ? (pr.produces || []).map(x => fmtNum(x.perTurn * wf, 1) + ' ' + ((itemById(x.itemId) || {}).name || x.itemId)).join(', ') + ' / turn'
         : pr.prodMode === 'cash' ? fmtMoney(rev) + ' / turn' : 'upkeep only';

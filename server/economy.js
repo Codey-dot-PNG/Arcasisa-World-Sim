@@ -78,7 +78,7 @@ const Z5 = [-1.2816, -0.5244, 0, 0.5244, 1.2816]; // quintile mid-points of a st
 // Engine defaults — every one GM-tunable under settings.economy.
 const DEF = {
   jobsPerEmployee: 200,      // jobs each listed employee stands for (industry + suppliers)
-  referenceWage: 1,          // ₳/day the reference group earns at calibration (= the default company wage)
+  referenceWage: 1,          // ₳/day for the reference group when no wageAnchor is set
   localAdjust: 0.03,         // per day: local jobs close this share of the gap to their target
   wageFlex: 0.01,            // wage level +1% per point of employment above its normal level
   wageAdjust: 0.02,          // per day: share of the gap to the target wage closed
@@ -111,6 +111,90 @@ const DEF = {
   unemploymentBenefit: 0,    // share of lost wages the treasury replaces (0 = none)
 };
 function settings(db) { return (db.settings && db.settings.economy) || {}; }
+
+// ---------- the wage scale ------------------------------------------------------
+// The going wage of the reference group is pegged to a good: a day's work buys
+// `wageAnchor.units` of `wageAnchor.itemId` at its normal price (basePrice) —
+// e.g. 0.0577 t of grain ≈ ₳3 a day. Prices in the world are close to 1960
+// dollars, so this sets every income, wage and threshold on a scale that
+// matches what things cost.
+function anchorWage(db) {
+  const a = settings(db).wageAnchor;
+  if (!a || !a.itemId || !(Number(a.units) > 0)) return null;
+  const it = (db.items || []).find(i => i.id === a.itemId);
+  const price = it ? (it.meta && it.meta.basePrice > 0 ? it.meta.basePrice : it.marketValue) : 0;
+  return price > 0 ? Number(a.units) * price : null;
+}
+function referenceWage(db) {
+  return anchorWage(db) || num(opt(db, 'referenceWage'), 1);
+}
+// Put the world on the anchored wage scale. `settings.economy.wageScale` is
+// the scale the world is on now (₳1 after the Economy v2 rescale). Moving to a
+// scale k times higher: incomes, savings, the poverty line, income-tax
+// brackets and stipends ×k; every company's and site's wage ×k; and — so
+// payroll in ₳, company profits and the jobs each province has stay exactly
+// as they were — each site runs k times fewer, k times better-paid workers
+// (headcounts ÷k, jobsPerEmployee ×k). The engine then recalibrates. Works
+// on any world object (store.migrate, or the GM changing the anchor).
+// Returns k (1 when nothing changed).
+function applyWageAnchor(world) {
+  world.settings = world.settings || {};
+  const econ = world.settings.economy = world.settings.economy || {};
+  const target = anchorWage(world);
+  if (!target) return 1;
+  const from = Number(econ.wageScale) > 0 ? Number(econ.wageScale) : (Number(econ.referenceWage) > 0 ? Number(econ.referenceWage) : 1);
+  const k = target / from;
+  econ.wageScale = r4(target);
+  if (!(k > 0) || Math.abs(k - 1) < 0.005) return 1;
+  const money = (v) => Math.round(v * k * 100) / 100;
+  for (const p of (world.provinces || [])) for (const g in (p.demographics || {})) {
+    const S = p.demographics[g];
+    for (const key of ['income', 'netIncome', 'incomeTax', 'savings']) if (Number.isFinite(Number(S[key]))) S[key] = money(Number(S[key]));
+  }
+  world.globalVars = world.globalVars || {};
+  if (Number(world.globalVars.povertyLine) > 0) world.globalVars.povertyLine = money(Number(world.globalVars.povertyLine));
+  const tax = world.settings.taxation;
+  if (tax && Array.isArray(tax.pitBrackets)) for (const b of tax.pitBrackets) {
+    if (b.upTo !== null && b.upTo !== undefined && Number.isFinite(Number(b.upTo))) b.upTo = money(Number(b.upTo));
+  }
+  if (Number(econ.dependentStipend) > 0) econ.dependentStipend = money(Number(econ.dependentStipend));
+  for (const e of (world.entities || [])) {
+    if (e.type === 'company') e.wagePerTurn = money(e.wagePerTurn === undefined ? 1 : Number(e.wagePerTurn) || 0);
+  }
+  const heads = (v) => { const n = Number(v) || 0; return n > 0 ? Math.max(1, Math.round(n / k)) : 0; };
+  for (const pr of (world.properties || [])) {
+    if (pr.wagePerTurn !== undefined) pr.wagePerTurn = money(Number(pr.wagePerTurn) || 0);
+    if (pr.employees !== undefined) pr.employees = heads(pr.employees);
+    if (pr.maxEmployees !== undefined) pr.maxEmployees = heads(pr.maxEmployees);
+    if (pr.staffTarget !== undefined) pr.staffTarget = heads(pr.staffTarget);
+  }
+  econ.jobsPerEmployee = Math.round((Number(econ.jobsPerEmployee) > 0 ? Number(econ.jobsPerEmployee) : DEF.jobsPerEmployee) * k * 100) / 100;
+  // The engine's own baselines move with the scale, so nothing re-settles:
+  // goods, prices and the market calibration are untouched (a wage rescale
+  // changes no quantity or price), and every ₳-denominated wage, income and
+  // spending baseline is scaled like the incomes it measures. GDP (the wage
+  // bill grossed up) scales with them.
+  const sc = (o, keys) => { for (const key of keys) if (o && Number.isFinite(Number(o[key]))) o[key] = Number(o[key]) * k; };
+  for (const p of (world.provinces || [])) {
+    const PE = p.econ;
+    if (!PE) continue;
+    sc(PE, ['w0', 'wMarket', 'w', 'wageBill', 'spend0']);
+    for (const g in (PE.seg || {})) sc(PE.seg[g], ['income0', 'ref', 'ref3', 'cPrev']);
+    if (p.vars) sc(p.vars, ['wage', 'income', 'gdp', 'gdpReal']);
+  }
+  const E = world.econ;
+  if (E) {
+    sc(E, ['w0Nat', 'nonFoodReal0', 'gdpReal0', 'gdpRealLastMonth']);
+    if (E.settling) { sc(E.settling, ['nonFood', 'gdp']); for (const pid in (E.settling.spend || {})) E.settling.spend[pid] *= k; }
+  }
+  return k;
+}
+// The going wage across the country (₳/day for the reference group) — what a
+// new company pays by default.
+function nationalWage(db) {
+  const g = db.globalVars || {};
+  return g.averageDailyWage > 0 ? g.averageDailyWage : referenceWage(db);
+}
 function opt(db, k) { const s = settings(db); return s[k] !== undefined ? s[k] : DEF[k]; }
 function roleOf(db, gname) { const r = settings(db).groupRoles || {}; return r[gname] || 'worker'; }
 const inLabour = (role) => role === 'worker' || role === 'rural';
@@ -248,7 +332,7 @@ function calibrateProvince(db, p) {
   if (refG && demo[refG] && demo[refG].income > 0) {
     w0 = demo[refG].income / 30 / Math.max(0.3, num(demo[refG].employment, 90) / 100);
   }
-  if (!(w0 > 0)) w0 = nat.w0Nat || num(opt(db, 'referenceWage'), 1);
+  if (!(w0 > 0)) w0 = nat.w0Nat || referenceWage(db);
   let lf = 0, emp = 0, wb = 0, wInc = 0, wPop = 0;
   for (const g in demo) {
     const S = demo[g];
@@ -345,7 +429,7 @@ function ensure(db) {
     // national reference wage = LF-weighted mean of province reference wages
     let s = 0, w = 0;
     for (const p of db.provinces) if (p.econ && p.econ.w0) { s += p.econ.w0 * (p.econ.lf0 || 1); w += p.econ.lf0 || 1; }
-    E.w0Nat = w ? s / w : num(opt(db, 'referenceWage'), 1);
+    E.w0Nat = w ? s / w : referenceWage(db);
   }
   for (const p of db.provinces) {
     p.vars = p.vars || {};
@@ -530,7 +614,7 @@ function marketWage(db, provinceId) {
   if (p && p.econ && p.econ.w > 0) return p.econ.w;
   if (p && p.econ && p.econ.w0 > 0) return p.econ.w0;
   const E = db.econ;
-  return E && E.w0Nat > 0 ? E.w0Nat : num(opt(db, 'referenceWage'), 1);
+  return E && E.w0Nat > 0 ? E.w0Nat : referenceWage(db);
 }
 
 // ---------- income tax -----------------------------------------------------------
@@ -1152,7 +1236,7 @@ function povertyOf(db, provinceId, group) {
 }
 
 module.exports = {
-  DEF, ensure, calibrateMarket, calibrateProvince, clearMarket, runTurn, drift, runPopulation,
+  DEF, ensure, calibrateMarket, anchorWage, referenceWage, applyWageAnchor, nationalWage, calibrateProvince, clearMarket, runTurn, drift, runPopulation,
   releaseFood, reliefDays, servicesIndex, marketWage, povertyOf, pitOf, daysPerTurn, roleOf,
   povertyShare, gini
 };

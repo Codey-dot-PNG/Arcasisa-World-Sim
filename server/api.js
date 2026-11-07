@@ -526,7 +526,9 @@ function filterState(u) {
   const provinces = db.provinces.map(pr => {
     if (p.gm) return pr;
     if (p.statistics) { const out = { ...pr }; delete out.econ; return out; }
-    const out = { ...pr, vars: { population: pr.vars.population } };
+    // the going wage is public labour-market information (what a site with
+    // no wage of its own pays)
+    const out = { ...pr, vars: { population: pr.vars.population, wage: pr.vars.wage } };
     delete out.demographics;
     delete out.econ;
     return out;
@@ -3541,7 +3543,18 @@ async function handle(req, res, pathname, method) {
         }
         if (b.economy) { // Phase 13 economy tunables — merge so a partial save (e.g. the GM Economy tab) never wipes sibling knobs
           const e = s.economy = s.economy || {};
-          for (const k in b.economy) e[k] = b.economy[k];
+          // wageScale is the engine's bookkeeping of the scale the world is on
+          // (economy.applyWageAnchor) — never set from outside
+          const incoming = Object.assign({}, b.economy);
+          delete incoming.wageScale;
+          // the wage anchor is validated before anything is merged
+          const anchorIn = incoming.wageAnchor;
+          delete incoming.wageAnchor;
+          if (anchorIn !== undefined) {
+            const okItem = anchorIn && db.items.some(i => i.id === anchorIn.itemId && !(i.meta && (i.meta.companyId || i.meta.propertyId || i.meta.bond)));
+            if (!okItem || !(Number(anchorIn.units) > 0)) return bad('The wage anchor needs a good and a positive amount per day.');
+          }
+          for (const k in incoming) e[k] = incoming[k];
           // GM levers are unbounded above — a GM may type any multiplier they
           // want; only a safety floor keeps values from going negative/zero.
           for (const k of ['domesticMultiplier', 'exportMultiplier', 'importMultiplier', 'expensesMultiplier']) {
@@ -3570,6 +3583,15 @@ async function handle(req, res, pathname, method) {
           // "recalibrate": the engine forgets what it took as normal and
           // re-reads the world as it stands next turn (after GM edits to
           // demographics, sites or prices)
+          // the wage anchor: a day's work for the reference group buys `units`
+          // of `itemId`. Changing it moves the whole wage scale (incomes,
+          // wages, headcounts — economy.applyWageAnchor) and recalibrates.
+          if (anchorIn !== undefined) {
+            e.wageAnchor = { itemId: anchorIn.itemId, units: Math.round(Number(anchorIn.units) * 1e6) / 1e6 };
+            const before = e.wageScale;
+            const kx = require('./economy').applyWageAnchor(db);
+            if (kx !== 1) store.log('economy', 'The wage scale moves', `going wage ${db.settings.currency}${before} → ${db.settings.currency}${e.wageScale} a day: incomes and wages ×${Math.round(kx * 1000) / 1000}, headcounts ÷${Math.round(kx * 1000) / 1000}`, actor, []);
+          }
           if (e.recalibrate) {
             delete e.recalibrate;
             delete db.econ;
@@ -3692,7 +3714,8 @@ async function handle(req, res, pathname, method) {
             }
           }
           b.id = b.id && !db[coll].some(x => x.id === b.id) ? String(b.id) : store.uid(COLLS[coll]);
-          if (coll === 'entities' && b.type === 'company' && b.wagePerTurn === undefined) b.wagePerTurn = 1;
+          // a new company pays the going wage unless told otherwise
+          if (coll === 'entities' && b.type === 'company' && b.wagePerTurn === undefined) b.wagePerTurn = Math.round(require('./economy').nationalWage(db) * 100) / 100;
           if (coll === 'properties') {
             // staffing/cap split (Phase 28b): new sites start fully staffed —
             // the cap is seeded from the authored headcount and stays a GM

@@ -102,6 +102,25 @@ function esc(s) {
 const S = () => W.state;
 const entById = (id) => S() && S().entities.find(e => e.id === id);
 const provById = (id) => S() && S().provinces.find(p => p.id === id);
+// The going wage (₳/day, the economy's reference worker) in a province — public
+// labour-market data (filterState ships vars.wage to everyone) — or across
+// the country when the province has none.
+function goingWageClient(provinceId) {
+  const p = provinceId && provById(provinceId);
+  if (p && p.vars && p.vars.wage > 0) return p.vars.wage;
+  const ws = ((S() && S().provinces) || []).map(x => x.vars && x.vars.wage).filter(w => w > 0);
+  return ws.length ? ws.reduce((a, b) => a + b, 0) / ws.length : 0;
+}
+// What a site pays each employee per turn — mirrors server sim.wageFor: its
+// own wage, else its company's, else (state, character or party sites) the
+// going wage in its province.
+function wageForClient(pr) {
+  if (!pr) return 0;
+  if (pr.wagePerTurn !== undefined) return Math.max(0, Number(pr.wagePerTurn) || 0);
+  const owner = entById(pr.ownerId);
+  if (owner && owner.type === 'company') return Math.max(0, Number(owner.wagePerTurn === undefined ? goingWageClient(pr.provinceId) : owner.wagePerTurn) || 0);
+  return goingWageClient(pr.provinceId);
+}
 const cityById = (id) => S() && S().cities.find(c => c.id === id);
 const propById = (id) => S() && S().properties.find(p => p.id === id);
 const markerById = (id) => S() && (S().markers || []).find(m => m.id === id);

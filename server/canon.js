@@ -47,7 +47,7 @@ const GROUPS = {
     text: ['name', 'description', 'icon'],
     setup: ['pos', 'kind', 'type', 'provinceId', 'value', 'income', 'expenses', 'prodMode', 'produces', 'requires', 'cashPerTurn', 'maxEmployees', 'targetRevenue'],
     ownership: ['ownerId'],
-    volatile: ['accident', 'texture', 'workerHappiness', 'upgradeInvested']
+    volatile: ['accident', 'texture', 'workerHappiness', 'upgradeInvested', 'lastSold']
   },
   provinces: {
     text: ['name', 'description', 'color', 'capital', 'labelPos', 'labelRot', 'labelSize'],

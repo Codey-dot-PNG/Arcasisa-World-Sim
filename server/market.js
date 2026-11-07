@@ -748,6 +748,6 @@ module.exports = {
   offer, bonusMint, buyback, remarkFromTrade,
   x100HeldTotal, x100HoldingOf, x100EntryOf, x100Value, x100ItemFor, x100ItemId,
   x100MultOf, x100LockSecOf, syncAllX100Certificates,
-  currentDayPrice, applyDayImpact, dayReanchor, dayMarketTick, maybeDayTick, recomputeEconConfidence, nudgeConfidence,
+  currentDayPrice, applyDayImpact, dayReanchor, dayMarketTick, maybeDayTick, recomputeEconConfidence, nudgeConfidence, warSeverity,
   BANK_ID, DEFAULT_DEPTH, DEFAULT_VOL, X100_MULT_DEFAULT, X100_LOCK_SEC_DEFAULT
 };

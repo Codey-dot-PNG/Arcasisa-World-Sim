@@ -22,7 +22,7 @@ see [docs/WORLD-DATA.md](docs/WORLD-DATA.md)) — passphrase `arcasia` for all.
 |---|---|
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | anything — module layout, request flow, file vs Supabase storage, deployment |
 | [docs/WORLD-DATA.md](docs/WORLD-DATA.md) | the world document: collections, schemas, id conventions, migrations, seed |
-| [docs/SIMULATION.md](docs/SIMULATION.md) | turns, events/effects/expressions, economy, foreign trade, stock market, elections |
+| [docs/SIMULATION.md](docs/SIMULATION.md) | turns, events/effects/expressions, economy (production + the national economy), foreign trade, stock market, elections |
 | [docs/WAR.md](docs/WAR.md) | the realtime battlefield RTS: war state, tick pipeline, AI grand strategy, scenario format |
 | [docs/API.md](docs/API.md) | HTTP endpoints, auth, roles/permissions, the ownership-control chain |
 | [docs/FRONTEND.md](docs/FRONTEND.md) | the client: vanilla-JS modules, rendering, map, GM Studio, realtime sync |
@@ -63,7 +63,8 @@ server.js              HTTP server, static files, long-lived timers (local mode 
 api/index.js           Vercel serverless entry (same handler, per-request begin/commit + CAS retry)
 server/store.js        persistence (file | supabase), migrate(), snapshots, audit log
 server/seed.js         the 1962 world as pure data (fresh seed = data/baseline-world.json if present)
-server/sim.js          expression lang, event engine, turn loop, economy, elections, presidency
+server/sim.js          expression lang, event engine, turn loop, production economy, elections, presidency
+server/economy.js      the national economy: jobs, wages, incomes, food, home market & prices, population, moods
 server/api.js          auth, permission filtering (filterState), all REST routes, SSE hub
 server/market.js       stock market: turn price + day market, National Bank counterparty
 server/ownership.js    "who controls whom" chain (owner/CEO/leader/majority shares)

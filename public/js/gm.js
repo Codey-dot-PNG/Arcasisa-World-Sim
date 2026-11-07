@@ -1354,19 +1354,23 @@ const GM = {
     main.appendChild(Views.secLabel('Taxation'));
     d.taxVatRate = d.taxVatRate === undefined ? ((s.taxation || {}).vatRate || 0) : d.taxVatRate;
     d.taxGamblingRate = d.taxGamblingRate === undefined ? ((s.taxation || {}).gamblingRate || 0) : d.taxGamblingRate;
-    main.appendChild(this.check(d, 'taxEnabled', 'Enable taxation (corporate/property monthly; VAT & gambling duty on every transaction)'));
+    if (d.taxPitEnabled === undefined) d.taxPitEnabled = !!(s.taxation || {}).pitEnabled;
+    main.appendChild(this.check(d, 'taxEnabled', 'Enable taxation (corporate/property on profit each turn; VAT on purchases and on what the population spends; gambling duty)'));
+    main.appendChild(this.check(d, 'taxPitEnabled', 'Also tax the population\u2019s incomes (personal income tax, by the brackets below) \u2014 a large revenue that people feel'));
+    const brk = ((s.taxation || {}).pitBrackets || []).map(x => (x.upTo === null || x.upTo === undefined ? 'above' : 'to ' + CUR() + fmtNum(x.upTo, 2)) + ': ' + Math.round((x.rate || 0) * 100) + '%').join(' \u00b7 ');
+    if (brk) main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:11px; margin:-2px 0 6px;' }, 'Income tax brackets (per person per month): ' + brk));
     main.appendChild(el('div.form-grid',
       this.field('Corporate tax rate (%)', this.num(d, 'taxCorporateRate')),
       this.field('Property tax rate (%)', this.num(d, 'taxPropertyRate')),
       this.field('VAT on purchases (%)', this.num(d, 'taxVatRate')),
       this.field('Gambling duty (%)', this.num(d, 'taxGamblingRate'))));
     main.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:4px;' },
-      'Corporate/property tax is collected monthly from net property income. VAT is added to market purchases; gambling duty skims the casinos’ winnings. All flow into the Federal Treasury (raising it, shrinking the money supply).'));
+      'Corporate/property tax is taken each turn from profit after payroll. VAT is added to market purchases and is inside what the population pays for goods; gambling duty skims the casinos’ winnings; income tax comes off people’s pay. All flow into the Federal Treasury.'));
     main.appendChild(el('div.btn-row', { style: 'margin-top:14px;' }, el('button.solid-btn', {
       onclick: async () => {
         try {
           await PATCH('/api/gm/settings', {
-            taxation: { enabled: !!d.taxEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0, vatRate: Number(d.taxVatRate) || 0, gamblingRate: Number(d.taxGamblingRate) || 0 }
+            taxation: { enabled: !!d.taxEnabled, pitEnabled: !!d.taxPitEnabled, corporateRate: Number(d.taxCorporateRate) || 0, propertyRate: Number(d.taxPropertyRate) || 0, vatRate: Number(d.taxVatRate) || 0, gamblingRate: Number(d.taxGamblingRate) || 0 }
           });
           this._taxDraft = null;
           toast('Taxation settings saved.');
@@ -1434,79 +1438,61 @@ const GM = {
       }
     }, 'Save Economy Settings')));
 
-    // ---- Households & living standards (Phase 3) ----
-    const hh = (S().settings.households) || {};
-    const hd = this.getDraft('households', {
-      enabled: hh.enabled === undefined ? true : hh.enabled,
-      foodReqPerCapPerTurn: hh.foodReqPerCapPerTurn === undefined ? 0.5 : hh.foodReqPerCapPerTurn,
-      dependentStipend: hh.dependentStipend === undefined ? 0 : hh.dependentStipend,
-      wageIncomeK: hh.wageIncomeK === undefined ? 0.2 : hh.wageIncomeK,
-      studentGraduationRate: hh.studentGraduationRate === undefined ? 0.10 : hh.studentGraduationRate,
-      retirementRate: hh.retirementRate === undefined ? 0.04 : hh.retirementRate,
-      wcToMcRate: hh.wcToMcRate === undefined ? 0.05 : hh.wcToMcRate,
-      mcToUcRate: hh.mcToUcRate === undefined ? 0.02 : hh.mcToUcRate,
-      educationMobilityK: hh.educationMobilityK === undefined ? 1.5 : hh.educationMobilityK,
-      oldAgeMortalityRate: hh.oldAgeMortalityRate === undefined ? 0.012 : hh.oldAgeMortalityRate,
-      diseaseMortalityK: hh.diseaseMortalityK === undefined ? 0.0004 : hh.diseaseMortalityK,
-      famineMortalityRate: hh.famineMortalityRate === undefined ? 0.0015 : hh.famineMortalityRate,
-      stipendHappinessK: hh.stipendHappinessK === undefined ? 1.5 : hh.stipendHappinessK,
-      demoSyncStrength: hh.demoSyncStrength === undefined ? 0.5 : hh.demoSyncStrength
-    });
-    main.appendChild(Views.secLabel('Households & Living Standards'));
+    // ---- The national economy (Economy v2 — server/economy.js) ----
+    // The people are a sector, not bank accounts: jobs, wages, incomes,
+    // spending, food, prices, population and moods are computed each turn
+    // from conditions. These are its dials; defaults come from the engine.
+    const ec = (S().settings.economy) || {};
+    const D = { jobsPerEmployee: 200, referenceWage: 1, labourShare: 0.5, wageFlex: 0.01, wageIndexation: 0.85, productivityGrowth: 0.015,
+      subsistenceShare: 0.5, reliefDecay: 0.10, famineMortalityK: 0.5, birthRate: 0.034, adultDeathRate: 0.007, oldAgeRate: 0.075,
+      diseaseK: 0.012, graduationRate: 0.12, urbanization: 0.01, incomeSpread: 0.5, importMarkup: 0.25, exportDiscount: 0.2,
+      importCap: 0.3, exportCap: 0.5, reorderTurns: 10, unemploymentBenefit: 0, dependentStipend: 0 };
+    const nd = this.getDraft('economyV2', Object.fromEntries(Object.keys(D).map(k => [k, ec[k] === undefined ? D[k] : ec[k]])));
+    main.appendChild(Views.secLabel('The National Economy'));
     main.appendChild(el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:8px;' },
-      'The simulated population: wages paid by companies, consumption (food that must feed every citizen), hunger/famine, a stipend welfare programme, class mobility and mortality. Food demand is real — a deficit starves the population through the famine rate below. Domestic food sales feed the national stockpile; release food to provinces via Population → Food Distribution.'));
-    main.appendChild(this.field('Population engine', this.check(hd, 'enabled', ''),
-      'Turn the household simulation on/off (wages, consumption, famine, mobility, mortality).'));
-    main.appendChild(this.field('Minimum food / citizen / turn (units)',
-      Forms.sliderNum(hd, 'foodReqPerCapPerTurn', 0.1, 2, { step: 0.1 }),
-      'Per-citizen daily food requirement. Supply below it drives hunger and famine mortality.'));
-    main.appendChild(this.field('Monthly famine mortality per turn above threshold',
-      Forms.sliderNum(hd, 'famineMortalityRate', 0, 0.01, { step: 0.0001 }),
-      'Population fraction that dies each turn while food security stays below the famine threshold.'));
-    main.appendChild(Views.secLabel('Welfare Stipend (opt-in)'));
-    main.appendChild(this.field('Stipend per dependent / turn (' + CUR() + ')',
-      Forms.sliderNum(hd, 'dependentStipend', 0, 200, { step: 1 }, true),
-      'What the treasury pays each targeted dependent (default 0 = OFF). Setting it buys subsistence AND a happiness uplift for Students & Retired — a real budget decision.'));
-    main.appendChild(this.field('Stipend happiness uplift (×)',
-      Forms.sliderNum(hd, 'stipendHappinessK', 0, 3, { step: 0.1 }),
-      'How hard the stipend raises targeted households’ happiness, from their baseline.'));
-    main.appendChild(Views.secLabel('Class Mobility & Mortality (monthly)'));
-    main.appendChild(this.field('Working Class → Middle Class / year',
-      Forms.sliderNum(hd, 'wcToMcRate', 0, 0.3, { step: 0.005 }),
-      'Share of the Working Class that rises to the Middle Class each year, scaled by education.'));
-    main.appendChild(this.field('Middle Class → Upper Class / year',
-      Forms.sliderNum(hd, 'mcToUcRate', 0, 0.2, { step: 0.005 }),
-      'Share of the Middle Class that rises to the Upper Class each year, scaled by education.'));
-    main.appendChild(this.field('Education mobility multiplier (×)',
-      Forms.sliderNum(hd, 'educationMobilityK', 0, 3, { step: 0.1 }),
-      'How much a group’s education level accelerates (or, below ~1, mutes) the class ramps.'));
-    main.appendChild(this.field('Student graduation / year',
-      Forms.sliderNum(hd, 'studentGraduationRate', 0, 0.3, { step: 0.005 }),
-      'Share of Students that graduate into the Working Class each year.'));
-    main.appendChild(this.field('Working Class retirement / year',
-      Forms.sliderNum(hd, 'retirementRate', 0, 0.2, { step: 0.005 }),
-      'Share of the Working Class that ages into Retired each year.'));
-    main.appendChild(this.field('Old-age mortality / month',
-      Forms.sliderNum(hd, 'oldAgeMortalityRate', 0, 0.05, { step: 0.001 }),
-      'Monthly share of the Retired cohort that passes from old age.'));
-    main.appendChild(this.field('Disease mortality (per 100−healthcare)',
-      Forms.sliderNum(hd, 'diseaseMortalityK', 0, 0.002, { step: 0.0001 }),
-      'Monthly mortality scaled by how far a province lies below full healthcare.'));
-    main.appendChild(this.field('Wage tracking speed (×)',
-      Forms.sliderNum(hd, 'wageIncomeK', 0, 1, { step: 0.05 }),
-      'How fast household income statistics track realised wages. 0 freezes them; 1 snaps them to the companies’ payroll.'));
-    main.appendChild(this.field('Demographic sync strength (×)',
-      Forms.sliderNum(hd, 'demoSyncStrength', 0, 1, { step: 0.05 }),
-      'How hard the household simulation reconciles to your authored demographics each month.'));
-    main.appendChild(el('div.btn-row', { style: 'margin-top:12px;' }, el('button.solid-btn', {
-      onclick: async () => {
-        try {
-          await PATCH('/api/gm/settings', { households: hd });
-          this.draftKey = null;
-          toast('Household settings saved.');
-        } catch (e) { toast(e.message, true); }
-      }
-    }, 'Save Household Settings')));
+      'The population is modelled as groups per province, with no bank accounts. Each turn the engine works out jobs (listed sites plus a local economy that follows spending), the going wage, each group\u2019s income, food, spending and saving, prices from demand against supply, and moods from what people live through. Births, deaths, schooling and class mobility run monthly. It calibrates to the world as it stands, so "normal" is today; Recalibrate makes it re-read the world after you edit groups, sites or prices.'));
+    const sl = (label, key, min, max, step, help) => main.appendChild(this.field(label, Forms.sliderNum(nd, key, min, max, { step }), help));
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Jobs & wages'));
+    sl('Jobs per listed employee', 'jobsPerEmployee', 10, 1000, 10, 'Each employee at a listed site stands for this many jobs in its industry and suppliers: how much a company\u2019s hiring and firing moves its province.');
+    sl('Wage response to labour tightness', 'wageFlex', 0, 0.03, 0.001, 'Going wage +this per point of employment above normal (and down when jobs are scarce).');
+    sl('Wage indexation to prices', 'wageIndexation', 0, 1.2, 0.05, 'How far wages follow the consumer price level (1 = fully).');
+    sl('Productivity growth / year', 'productivityGrowth', -0.02, 0.06, 0.005, 'Real wages rise this much a year when nothing else changes.');
+    sl('Labour share of GDP', 'labourShare', 0.2, 0.9, 0.05, 'GDP is the wage bill divided by this.');
+    sl('Unemployment benefit (share of lost pay)', 'unemploymentBenefit', 0, 1, 0.05, 'Paid by the treasury to the jobless (0 = none). Softens slumps; costs real money.');
+    sl('Welfare stipend per 1,000 dependents / turn', 'dependentStipend', 0, 2000, 10, 'Paid by the treasury to students and retirees (0 = off).');
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Food'));
+    sl('Rural self-sufficiency', 'subsistenceShare', 0, 0.95, 0.05, 'Share of a rural group\u2019s food it grows itself; the rest must be bought from the farms.');
+    sl('Relief food spoilage / turn', 'reliefDecay', 0, 0.5, 0.01, 'Share of released reserve food in a province that spoils each turn.');
+    sl('Hunger mortality', 'famineMortalityK', 0, 2, 0.05, 'Excess deaths a year at total food loss (scales with the shortfall squared; none above 90% access).');
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Population (per year)'));
+    sl('Birth rate', 'birthRate', 0, 0.06, 0.001, 'Births per person per year (lower in hunger, war or misery).');
+    sl('Adult death rate', 'adultDeathRate', 0, 0.03, 0.001, 'Base mortality outside old age.');
+    sl('Old-age death rate', 'oldAgeRate', 0, 0.2, 0.005, 'Mortality among the retired.');
+    sl('Disease (at healthcare 0)', 'diseaseK', 0, 0.05, 0.001, 'Extra mortality that falls to zero at healthcare 100.');
+    sl('Graduation rate', 'graduationRate', 0, 0.5, 0.01, 'Students who finish each year and join the workforce.');
+    sl('Urbanisation', 'urbanization', 0, 0.05, 0.001, 'Rural to urban migration at baseline; faster when towns pay better.');
+    main.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:9.5px; letter-spacing:.14em; text-transform:uppercase; color:var(--ink-soft); margin:12px 0 4px;' }, 'Markets & foreign trade (background)'));
+    sl('Import price markup', 'importMarkup', 0, 1, 0.05, 'Imports flow once a good costs world price \u00d7 (1 + this + import tariff).');
+    sl('Export price discount', 'exportDiscount', 0, 0.6, 0.05, 'Surplus goes abroad once a good falls to world price \u00d7 (1 \u2212 this \u2212 export tariff).');
+    sl('Import capacity', 'importCap', 0, 1, 0.05, 'Share of a home-made good\u2019s demand that imports can cover (goods the country does not make import in full).');
+    sl('Export capacity', 'exportCap', 0, 2, 0.05, 'Share of a good\u2019s market that can be sold abroad in a glut.');
+    sl('Input stock kept by sites (turns)', 'reorderTurns', 0, 60, 1, 'Sites with supply chains buy inputs from the market to keep this many turns in stock (switch off per site with autoSupply: false).');
+    sl('Income spread within a group', 'incomeSpread', 0.1, 1.2, 0.05, 'Drives poverty and Gini: how unequal incomes are inside each group.');
+    main.appendChild(el('div.btn-row', { style: 'margin-top:12px;' },
+      el('button.solid-btn', {
+        onclick: async () => {
+          try {
+            await PATCH('/api/gm/settings', { economy: Object.fromEntries(Object.keys(D).map(k => [k, Number(nd[k])])) });
+            this.draftKey = null;
+            toast('National economy settings saved.');
+          } catch (e) { toast(e.message, true); }
+        }
+      }, 'Save National Economy'),
+      el('button.dash-btn', {
+        onclick: () => confirmModal('RECALIBRATE THE ECONOMY', 'The engine takes the world as it stands next turn as \u201cnormal\u201d: today\u2019s incomes, jobs, prices, output and moods become the baseline it holds steady. Use it after editing demographics, sites or prices by hand.', async () => {
+          try { await PATCH('/api/gm/settings', { economy: { recalibrate: true } }); toast('The economy will recalibrate next turn.'); } catch (e) { toast(e.message, true); }
+        }, 'Recalibrate')
+      }, '\u21bb Recalibrate')));
     this.taxSection(main);
   },
 

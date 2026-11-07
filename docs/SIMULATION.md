@@ -1,4 +1,4 @@
-# Simulation Engine (server/sim.js, server/market.js)
+# Simulation Engine (server/sim.js, server/economy.js, server/market.js)
 
 ## The turn loop — `sim.advanceTurn(steps, actor)`
 
@@ -9,10 +9,13 @@ Per step, in order:
 3. **Events** whose trigger is due run (`every_turn`, `interval` n, `weekly`/`monthly`
    boundary crossings, `date` reached). Conditions checked against `globalVars`; each effect
    applied with per-effect error isolation (a failed effect logs and continues).
-4. **`runEconomy`** — the per-turn production economy (below), ending with the war's
-   civilian-mood hit (`applyWarHappinessImpact`, Phase 27 — see "War → happiness" below)
+4. **`runEconomy`** — the per-turn production economy (below): sites produce, the home
+   market clears (`economy.clearMarket`), owners are settled (sales, upkeep, payroll, tax)
 5. **`runForeignMilitary`** — foreign powers quietly re-arm off-books (Phase 27, below)
-6. **`runBankCrisis`** — bank-reserve solvency check → economy-wide crash while underwater
+6. **`runBankCrisis`** — bank-reserve solvency check → sets `bankCrisisSeverity`, which the
+   national economy reads (it no longer writes province numbers itself)
+6b. **`economy.runTurn`** — the national economy (see "The national economy" below): jobs,
+   wages, incomes, food, spending, taxes on people, prices, moods; monthly population
 7. `updateDerived()` — recompute globalVars (population, gdp, avgHappiness, avgApproval,
    moneySupply, treasury, econConfidence). Since Phase 27 `moneySupply` sums DOMESTIC
    accounts only — accounts owned by `foreign`/`org` entities (e.g. `acct_markasia`) are
@@ -21,7 +24,7 @@ Per step, in order:
 9. Lottery draws due this turn (`casino.drawDueLotteries`)
 10. `recordHistory()` (chart time-series; polling sampled weekly) + `recordTradeHistory()`
 11. `generateTradeOrders()` — opens the next turn's foreign-trade order book (below), then
-    `runDemographics`, `redeemMaturedBonds`, `runDiplomacy`
+    `redeemMaturedBonds`, `runDiplomacy`
 12. `store.log('time', …)`
 
 Then one `store.save()` + `broadcast('sync')` for the whole batch.
@@ -54,33 +57,42 @@ pop(all|provId), balance(entId)`. `interpolate(str)` substitutes `{expr}`, `{dat
 | `election` | run a general election now |
 | `property_pl` | legacy monthly property P&L (kept as a manual GM tool) |
 | `log` | timeline entry |
-| `recompute_employment` | jobs→employment from property `employees` vs labour force |
+| `recompute_employment` | legacy: jobs→employment from property `employees` vs labour force. The national economy computes employment every turn now; an event using this is overwritten next turn |
 | `adjust_trust` | drift company trust toward an expression (`avghappiness` exposed) |
 | `reprice_shares` | fundamentals reprice: `price ×= 1 + a·(profit/valuation) + b·gdpGrowth + c·((trust−50)/100) + 0.05·((econC−50)/100) ± e` |
 | `set_share_price` | direct set (`$price` = current) |
 
-## The production economy — `runEconomy` (Phase 13/14)
+## The production economy — `runEconomy` (Phase 13/14, Economy v2)
 
 Per property (owner required): output scales with province happiness
 (`1 + (hap−50)/50 × happinessOutputK`) and a per-turn random wobble (`dailyVariance`).
-- `prodMode 'goods'`: mint `produces[].perTurn` units. Split per item: `keepPct`% → the
-  property's own inventory; of the sellable rest, `govMix`% (or `govMixByItem`) is offered to
-  the state. The state buys only if the company's ask (`retail × co.govPriceMult`) ≤ the
-  government ceiling (`trade.govBuy[item].maxMult`, per-company overrides), up to remaining
-  quota — bought goods go into `ent_gov.inventory` (the national stockpile), paid from the
-  treasury. Whatever the state declines sells on the abstract domestic market.
-- `prodMode 'cash'`: `cashPerTurn` revenue (casinos, offices, banks).
-- `prodMode 'none'`: pure cost; its `expenses` count as public output for GDP.
+`productionContext(db, pr, {noise:false})` gives the expected multiplier without the wobble
+(the national economy sizes markets with it).
+- `prodMode 'goods'`: mint `produces[].perTurn` units. Split per item (`keepPctFor`): `keepPct`%
+  → the property's own inventory; the rest is **offered to the home market**. After the
+  property loop the market clears (`economy.clearMarket`, below): each good sells as far as
+  demand reaches, sellers sharing it pro rata at the turn's opening price; what is not bought
+  goes back into the site's stock (`pr.vars.lastSold[item] = {offered, sold}`).
+- `prodMode 'cash'`: `cashPerTurn` revenue (shops, offices, casinos, ports) × the province's
+  **services index** (what people spend there vs. normal — `economy.servicesIndex`).
+- `prodMode 'none'`: pure cost.
 
-Settlement per owner: domestic revenue is scaled by **economic confidence**
-(`0.7 + 0.006 × econConfidence`); minus per-turn `expenses` and the wage delta
-(`employees × baseDailyWage × (wage−100)/100`); per-turn tax on positive net (corporate /
-property rate) when `taxation.enabled`; net minted/burned at the world edge via `ledgerTxn`
-(no per-call timeline spam — one summary log per turn). Government purchases transfer
-treasury → company. Company `vars.revenue/profit` are annualised (×365). Wage index nudges
-province happiness/employment; confidence shifts happiness/approval
-(`happinessConfK`, default 1.6 — a major driver). Province GDP = production gross ×
-`globalVars.gdpScale` (calibrated once at migration).
+Settlement per owner: sales − upkeep (`expenses × expensesMultiplier` + maintenance +
+training) minted/burned at the edge; then **payroll** (`employees × wagePerTurn`) leaves the
+owner's account (`'Payroll'`) for the population sector — an owner short of cash pays what it
+can pro rata and its sites' morale drops; a sovereign (`allowNegative`) pays in full; then
+corporate/property tax on profit **after** payroll. Company `vars.revenue/expenses/profit`
+are annualised (×365). `globalVars.listedAverageWage`, `listedEmployees`, `lastWageSpend`
+describe the listed payroll; `p.econ.listedGross` feeds province GDP.
+
+**Wages & morale.** `sim.wageFor(db, pr)`: the site's `wagePerTurn`, else its company's
+(₳1 default), else — state, character or party sites — the province's going wage
+(`economy.marketWage`). Worker morale heads for `50 + 25·log2(wage ÷ going wage)` (±30).
+
+**Staffing after losses.** `pr.staffTarget` is the headcount the owner chose (set whenever
+the owner or GM sets `employees`). Accidents thin the crew; each turn the site rehires 15%
+of the gap (down to a fifth of that at very low morale). Before this, unattended sites bled
+staff to every accident for ever.
 
 **Zero-property companies bleed (Phase 27, war overhaul):** company profit is now tied
 STRICTLY to properties. A company that owns no property at all this turn (lost them to war
@@ -97,13 +109,10 @@ company's authored `vars.revenue` — without it, flipping to property-only inco
 silently slashed every company's earnings. The wartime mechanism that actually strips
 properties from companies is documented in docs/WAR.md "Occupation property transfers".
 
-**War → happiness (`applyWarHappinessImpact`, Phase 27):** called at the end of runEconomy
-while a war is active. Every province takes a flat nationwide −0.05 happiness/turn (people
-worry about a distant war too), plus an occupation hit scaling with
-`war.stats.provinceControl[provId]` — up to −0.6 happiness/turn at full occupation; approval
-takes 0.6× of the same hit. Generic: reads only `db.war`/`db.provinces`, no
-scenario-specific knowledge. (The market-side war effects live in server/market.js — see
-"War → market" below.)
+**War → the economy (Economy v2):** a live war's severity (`market.warSeverity`) and each
+province's occupation (`war.stats.provinceControl`) feed the national economy: occupied
+provinces lose local jobs and rural self-sufficiency, imports shrink under blockade, and
+moods carry a war term. (The old flat per-turn happiness hit is gone.)
 
 **Strikes (`applyStrikes`, Phase 31):** at the top of runEconomy, every live `att` (crowd)
 unit in an active protest marks nearby sites on strike. A property within
@@ -124,6 +133,113 @@ and every `tuning.refugeeEvery` ticks (default 4) a wave moves `tuning.refugeeFr
 `settleRefugees` machinery as war refugees (see docs/WAR.md "Refugee columns"); columns
 render and settle identically, and `war.stats.civilianDeaths`/`refugees` feed the War
 Room strip.
+
+## The national economy — `server/economy.js` (Economy v2)
+
+The people the players govern, employ, feed and sell to. It replaced households.js (175
+representative households with bank accounts that received wages and never spent them),
+`runDemographics` and the seeded drift events, which together let a famine halve the
+population while approval rose.
+
+**The people are a sector, not accounts.** Each province × demographic group ("segment",
+`p.demographics[g]`) carries `income` (₳ per person per month), `netIncome`, `incomeTax`,
+`savings` (₳ per person), `employment`/`unemployment`, `foodAccess`, `poverty` (% below the
+line) and the attitudes (`happiness`, `economicConfidence`, `governmentSupport`). Real money
+lives only in actors' accounts. It crosses the edge metered: payroll leaves employers,
+consumer spending arrives as sales revenue, income tax and VAT reach the treasury, welfare and
+unemployment benefit leave it.
+
+**Roles** come from `settings.economy.groupRoles` (`worker` default, `rural`, `student`,
+`retired`); `referenceGroup` anchors the wage scale; `ladder` (low → high) is the class
+ladder; `urbanize {from, to}` the rural → urban drift. The engine assumes no names.
+
+**Calibration.** The first time it runs (or after "Recalibrate") the engine reads the world
+as it stands as normal: each group's wage multiple, unemployment exposure and food share,
+the steady-state flow rates of the population, every good's market size, the food need per
+head. Then **settling**: from turn 16 to 45 it measures what actually happens (sites run a
+little below rated output — accidents, rehiring, moods, inputs) and re-reads each good's
+market, the food need, the spending/output baselines and each province's normal employment
+from that, once. Change after that comes from conditions, not from the rules drifting.
+
+**Jobs.** Each listed employee stands for `jobsPerEmployee` (200) jobs in the province's
+industry and suppliers; the **local economy** (shops, services, small farms) supplies the
+rest and heads for its calibrated size × population × services index^0.5 × (1 − 0.35·occupation)
+× (1 − 0.10·bank crisis), closing 3% of the gap a day. Employment = jobs ÷ labour force
+(worker + rural groups); each group's unemployment is the province rate × its calibrated
+exposure, renormalised.
+
+**Wages.** The province's market wage heads (2% a day) for `w0 × CPI^0.85 × productivity
+growth × (1 + 0.01 × employment gap)` — a level, so it cannot drift away. Listed employers
+lead it: `going wage = market wage × (listed average ÷ market wage)^(listed share of jobs)`
+(relative to calibration; listed pay counts up to 3× the market). Workers earn
+`going wage × group multiple × 30 × employment`; students and retirees a calibrated share
+of working incomes; plus opt-in stipends and unemployment benefit (paid by the treasury).
+
+**Spending.** Per group: income − income tax (if `taxation.enabled && pitEnabled`, brackets
+in ₳/person/month) = disposable; food first (a full bought diet costs the group's
+calibrated food share × base income × food price index); the rest is spent less a saving
+rate that rises with income, with savings drawn down when income falls. VAT is inside what
+people pay (the state takes `vat/(1+vat)`).
+
+**The home market — `clearMarket(db, offers)`.** Every produced good has
+`item.meta.demand = {kind, base, home0, backlog}` (`staple` by `meta.stapleFood`,
+`military`/`consumer` by category, else `industrial`). Demand = `base × index ×
+(price ÷ (basePrice × CPI))^−elasticity` + what industry buys. Indices: staple = commercial
+food need × affordability; consumer = real non-food spending; industrial = real GDP;
+military = 1 (+0.6 in a war). Lumpy goods sell against built-up demand (`backlog`);
+staples never carry over. Prices move `0.05 × ln(demand ÷ supply)` a turn on smoothed values
+(max 3%; staples 1.5%), within 0.3–3× base. **The rest of the world**: at import parity
+(base × (1 + 25% + import tariff)) imports cover part of a shortage (30% of demand for a
+good the country makes; in full for one it does not; less under blockade); at export parity
+(base × (1 − 20% − export tariff)) part of a glut goes abroad. Military goods have no
+background trade. A GM/event reprice (`marketValue` changed outside the engine) rebases
+`basePrice`. Result per good: `item.meta.market = {offered, demand, sold, imports, exports,
+price, base, turn}` (public).
+
+**Industrial purchasing.** Sites with `requires` (supply chains) and `autoSupply !== false`
+buy inputs from the home market each turn, up to `reorderTurns` (10) of stock and 3 turns'
+use at a time, paid by the owner (never more than half its cash).
+
+**Food.** Need = population × need per head (per turn, the farms' perTurn scale). Rural
+groups grow `subsistenceShare` of theirs (less under occupation); the rest is bought from
+the market (sales + imports), rationed by demand × affordability, with a pantry buffer
+(smoothed fill) so a day's shortfall is not a famine. Relief food released from the national
+reserve (`releaseFood` → `p.vars.foodStock`) feeds whoever is still short and spoils
+`reliefDecay` a turn. The reserve (government inventory) is filled only by what the state
+keeps or buys — domestic sales no longer pour into it. `foodSecurity` per province;
+hunger deaths only below 90% access (`famineMortalityK × shortfall²` a year).
+
+**Population (monthly).** Births (`birthRate`, lower with misery, hunger and war) join the
+working groups; deaths by age, disease (`diseaseK × (100 − healthcare)/100`) and hunger;
+ageing into retirement and school enrolment/graduation at the calibrated steady-state
+rates; the class ladder moves up with education and growth and down with unemployment
+(balanced at calibration); urbanisation speeds up when towns pay better.
+
+**Attitudes.** Each group's targets: happiness = baseline + real (after-tax, VAT-inclusive)
+income vs. what it has come to expect (adapts over ~a year) + unemployment vs. normal + food
+access + healthcare/education/crime vs. calibration + war + inequality change. Confidence
+adds the short-run income trend, inflation and the stock market. Government support follows
+happiness and confidence plus how far the governing parties sit from the group. They drift
+toward the targets (between turns on the demographics cadence). GM/event changes to a
+province's happiness or approval are folded into its groups as shocks that fade; employment,
+GDP and population are the engine's (writes to them are overwritten next turn).
+
+**Statistics** (`globalVars`): `gdp` (₳M/yr nominal, = wage bill ÷ `labourShare` tilted by
+listed output), `gdpReal`, `realGrowthAnnual`, `cpi`, `inflation` (12-month), `foodPriceIndex`,
+`averageDailyWage` (going wage), `wageIndex`, `realWageIndex`, `laborForce`,
+`totalEmployment`, `unemploymentRate`, `avgIncome`, `consumerSpending` (₳/day),
+`householdSavings`, `povertyLineNominal`, `povertyRateNational`, `giniNational`,
+`foodSecurity`, `foodSupplied`/`foodNeed`/`foodImported`, `famineDeaths`, `lastMonthBirths`,
+`lastMortalityDeaths`, `populationGrowthAnnual`, `pitRevenue`, `vatRevenue`,
+`welfareSpending`, `bgImports`/`bgExports`. Province `vars`: `employment`, `unemployment`,
+`wage`, `income`, `gdp`, `gdpReal`, `foodSecurity`, `foodStock`, `povertyRate`,
+`povertyGap`, `giniIndex`, `happiness`, `approval`, `economicConfidence`, `lifeExpectancy`,
+`infantMortality`, `mortalityRate`, `birthRate`. Poverty and Gini assume a lognormal spread
+of income inside each group (`incomeSpread`).
+
+**Tunables** (`settings.economy`, GM Studio › Economy & Trade › Levers & Tax): see `DEF` at
+the top of server/economy.js. `PATCH /api/gm/settings {economy:{recalibrate:true}}` forgets
+the calibration (re-read next turn).
 
 ## Foreign trade — the order book (`generateTradeOrders` / `executeTrade`)
 
@@ -294,8 +410,12 @@ Exchange can show position value and gain/loss for normal holdings too.
 
 `computePolling`: per province, per demographic group — turnout from happiness/education;
 party scores from ideology distance vs `politicalLeaning`, education vs `soc`, government
-approval (`inGovernment` flips the sign), and regional `support` bonuses; votes split by
-softmax. A province `voterBase` overrides all of it. `runElection`: seats apportioned to
+approval (`inGovernment` flips the sign), a party's `appeal`, and regional `support` —
+negative standing counts too (it used to be ignored, so a regional party authored at −30
+outside its home polled a third of the national vote); votes split by softmax.
+`computePollingFor(db, noise)` is the pure form. `party.appeal` is calibrated once
+(`world._pollAppeal1`) so national polling opens at each party's share of the seats it holds;
+group `governmentSupport` then moves with lived conditions (economy.js). A province `voterBase` overrides all of it. `runElection`: seats apportioned to
 provinces by population (largest remainder, min 2), allocated by **D'Hondt**; writes an
 election record, sets `party.mpCount`, publishes news. Manual entry supported
 (`/api/gm/election` with `manual: { rows, turnout }`). `GET /api/polling` is public.
@@ -367,7 +487,8 @@ time-of-day, or rate was actually changed — never on a plain echo of the Studi
 Cadences:
 - production (1h): the hourly production engine below + condition decay/maintenance,
   capital projects, tender closing.
-- demographics (4h): fast demographic drift, scaled to preserve per-turn totals.
+- demographics (4h): moods drift toward the targets the last turn's economy set
+  (`economy.drift`), by the elapsed world time; the turn pass then skips its own drift.
 - 	radeReset (1h): rerolls the foreign order book WITHOUT resetting per-turn flow
   accounting; orders.seq is the monotonic stamp clients key drafts off.
 
@@ -376,10 +497,12 @@ once per turn.
 
 ## Hourly production & turn settlement
 
-unHourlyProductionTick pays out each active property's per-turn budget in world-hourly
+
+unHourlyProductionTick pays out each active property's per-turn budget in world-hourly
 slices using fractional accumulators (ars._prodAccum for items with whole-unit flooring,
 ars._cashAccum for cash-mode deposits). Sold slices accumulate on the property and are
-settled into revenue ONCE per turn by unEconomy, which reads its hourlyAccrued flag:
+settled into revenue ONCE per turn by 
+unEconomy, which reads its hourlyAccrued flag:
 when any production tick fired since the last turn boundary it only settles what accrued;
 otherwise it falls back to the legacy lump pass (so paused-clock / manual-turn worlds keep
 a working economy). Wages, upkeep, tax, accidents, morale and share repricing stay strictly
@@ -390,8 +513,10 @@ output-multiplier stack.
 
 property.requires = [{ itemId, perUnit }] — inputs consumed from the SITE inventory per
 1 unit of primary output, every production hour. The worst input-availability ratio scales
-ALL outputs and persists as ars.supplyFulfillment. Absent equires ⇒ byte-identical
-behaviour. Edited via PATCH /api/property/:id/controls (equires), GM Studio editor.
+ALL outputs and persists as ars.supplyFulfillment. Absent 
+equires ⇒ byte-identical
+behaviour. Edited via PATCH /api/property/:id/controls (
+equires), GM Studio editor.
 
 ## Tenders
 

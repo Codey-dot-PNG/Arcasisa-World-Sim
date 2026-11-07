@@ -2049,6 +2049,137 @@ function migrate(world) {
     if (!Array.isArray(u.roleHistory)) { u.roleHistory = [{ roleId: u.roleId, at: u.created || Date.now(), turn: null }]; changed = true; }
   }
 
+  // ---- Economy v2 (flag world._economyV2) ----------------------------------
+  // The national economy moves to server/economy.js: the population becomes a
+  // sector (no household bank accounts), goods sell against real demand, food
+  // goes to the people, wages and moods follow conditions. This one-shot:
+  //   · names the roles of this world's demographic groups (world data — the
+  //     engine reads them from settings.economy and assumes no names);
+  //   · rescales group incomes, the poverty line and the income-tax brackets
+  //     onto the wage scale players actually pay (₳1/day by default for the
+  //     reference group) — they were ~17× it, so a company paying the going
+  //     rate looked like a sweatshop and every income statistic was off;
+  //   · retires the 175 household accounts and the household collection,
+  //     carries their tunables over, and drops the seeded drift events the
+  //     engine now owns (only when they are still the seeded rules);
+  //   · forgets any previous calibration so the engine re-reads this world.
+  if (!world._economyV2) {
+    const econ = world.settings.economy = world.settings.economy || {};
+    const hhs = world.settings.households || {};
+    const groupsIn = new Set();
+    for (const p of (world.provinces || [])) for (const g in (p.demographics || {})) groupsIn.add(g);
+    if (!econ.groupRoles) {
+      econ.groupRoles = {};
+      for (const [g, r] of [['Students', 'student'], ['Retired', 'retired'], ['Rural', 'rural']]) if (groupsIn.has(g)) econ.groupRoles[g] = r;
+    }
+    if (econ.referenceGroup === undefined && groupsIn.has('Working Class')) econ.referenceGroup = 'Working Class';
+    if (econ.ladder === undefined) econ.ladder = ['Working Class', 'Middle Class', 'Upper Class'].filter(g => groupsIn.has(g));
+    if (econ.urbanize === undefined && groupsIn.has('Rural') && groupsIn.has('Urban')) econ.urbanize = { from: 'Rural', to: 'Urban' };
+    const evEmp = (world.events || []).find(e => e.id === 'ev_employment');
+    const kEff = evEmp && (evEmp.effects || []).find(f => f.type === 'recompute_employment');
+    if (econ.jobsPerEmployee === undefined) econ.jobsPerEmployee = kEff && Number(kEff.k) > 0 ? Number(kEff.k) : 200;
+    if (econ.dependentStipend === undefined) econ.dependentStipend = Number(hhs.dependentStipend) || 0;
+    if (econ.dependentGroups === undefined) econ.dependentGroups = Array.isArray(hhs.dependentGroups) ? hhs.dependentGroups : ['Students', 'Retired'].filter(g => groupsIn.has(g));
+    if (econ.reliefDecay === undefined && hhs.foodStockDecayRate !== undefined) econ.reliefDecay = Number(hhs.foodStockDecayRate);
+    if (world.settings.taxation && world.settings.taxation.pitEnabled === undefined) world.settings.taxation.pitEnabled = false;
+
+    // income rescale onto the wage scale
+    const refG = econ.referenceGroup;
+    const refWage = Number(econ.referenceWage) > 0 ? Number(econ.referenceWage) : 1;
+    let s = 0, w = 0;
+    for (const p of (world.provinces || [])) {
+      const S = refG && p.demographics && p.demographics[refG];
+      if (!S || !(S.income > 0) || !(S.population > 0)) continue;
+      s += S.population * S.income / Math.max(0.3, (Number(S.employment) || 90) / 100);
+      w += S.population;
+    }
+    const perEmployedMonth = w > 0 ? s / w : 0;
+    const k = perEmployedMonth > 0 ? (30 * refWage) / perEmployedMonth : 1;
+    if (k > 0 && (k < 0.8 || k > 1.25)) {
+      for (const p of (world.provinces || [])) for (const g in (p.demographics || {})) {
+        const S = p.demographics[g];
+        if (S.income !== undefined) S.income = Math.round(S.income * k * 100) / 100;
+      }
+      world.globalVars = world.globalVars || {};
+      if (Number(world.globalVars.povertyLine) > 0) world.globalVars.povertyLine = Math.round(world.globalVars.povertyLine * k * 100) / 100;
+      const tax = world.settings.taxation;
+      if (tax && Array.isArray(tax.pitBrackets)) for (const b of tax.pitBrackets) {
+        if (b.upTo !== null && b.upTo !== undefined && Number.isFinite(Number(b.upTo))) b.upTo = Math.round(Number(b.upTo) * k * 100) / 100;
+      }
+      econ.incomeRescale = Math.round(k * 1e6) / 1e6;
+    }
+
+    // household accounts & collection retire (their savings become each
+    // group's savings, recalibrated by the engine at two months' income)
+    const hhAccts = new Set((world.accounts || []).filter(a => a.meta && a.meta.isHousehold).map(a => a.id));
+    for (const h of (world.households || [])) if (h.accountId) hhAccts.add(h.accountId);
+    if (hhAccts.size) world.accounts = world.accounts.filter(a => !hhAccts.has(a.id));
+    delete world.households;
+    delete world.settings.households;
+    if (world.globalVars) { delete world.globalVars.totalHouseholds; delete world.globalVars.wageIndex; }
+
+    // seeded drift rules the engine now owns — disabled only while they are
+    // still the seeded rule (same id, same kind of effect)
+    const OWNED = { ev_employment: 'recompute_employment', ev_econ_drift: 'adjust_var', ev_confidence: 'adjust_demo', ev_polling: 'adjust_demo', ev_census: 'adjust_demo' };
+    for (const ev of (world.events || [])) {
+      const kind = OWNED[ev.id];
+      if (!kind || !ev.enabled) continue;
+      const fx = ev.effects || [];
+      if (fx.length !== 1 || fx[0].type !== kind) continue;
+      ev.enabled = false;
+      ev.description = (ev.description ? ev.description + ' ' : '') + '[Retired: the national economy (server/economy.js) now computes this every turn — re-enabling it would push the same numbers twice.]';
+    }
+
+    // recalibrate from this world on the next turn
+    for (const p of (world.provinces || [])) {
+      delete p.econ;
+      for (const g in (p.demographics || {})) { delete p.demographics[g].savings; delete p.demographics[g].foodAccess; }
+    }
+    delete world.econ;
+    for (const it of (world.items || [])) if (it.meta) { delete it.meta.demand; delete it.meta.market; delete it.meta._lastPrice; }
+
+    // group table: the new per-group numbers (additive; GM edits kept)
+    const dm = world.settings.demographics = world.settings.demographics || {};
+    dm.metrics = Array.isArray(dm.metrics) ? dm.metrics : [];
+    for (const m of [{ key: 'unemployment', label: 'Unemployment', format: 'percent' }, { key: 'poverty', label: 'In Poverty', format: 'percent' }, { key: 'foodAccess', label: 'Food Access', format: 'percent' }, { key: 'savings', label: 'Savings / Person', format: 'money' }]) {
+      if (!dm.metrics.some(x => x.key === m.key)) dm.metrics.push(m);
+    }
+    const inc = dm.metrics.find(x => x.key === 'income');
+    if (inc && inc.label === 'Avg. Income') inc.label = 'Income / Month';
+    world._economyV2 = true;
+    changed = true;
+  }
+
+  // ---- Polling starts where Parliament stands (flag world._pollAppeal1) ----
+  // Party scores now count negative regional standing (a regional party no
+  // longer polls nationally) and carry an `appeal` term. Calibrate appeal
+  // once so national polling opens at each party's share of the seats it
+  // holds; from there the polls move with what people live through.
+  if (!world._pollAppeal1) {
+    try {
+      const sim = require('./sim');
+      const parties = (world.entities || []).filter(e => e.type === 'party');
+      const seats = parties.reduce((t, p) => t + (p.mpCount || 0), 0);
+      if (parties.length > 1 && seats > 0) {
+        for (const p of parties) if (p.appeal === undefined) p.appeal = 0;
+        for (let it = 0; it < 60; it++) {
+          const { national, totalVotes } = sim.computePollingFor(world, false);
+          let worst = 0;
+          for (const p of parties) {
+            const want = Math.max(0.005, (p.mpCount || 0) / seats);
+            const have = Math.max(1e-4, (national[p.id] || 0) / (totalVotes || 1));
+            const step = Math.max(-6, Math.min(6, 0.7 * 9 * Math.log(want / have)));
+            p.appeal = Math.max(-60, Math.min(60, Math.round((p.appeal + step) * 100) / 100));
+            worst = Math.max(worst, Math.abs(want - have));
+          }
+          if (worst < 0.004) break;
+        }
+      }
+      world._pollAppeal1 = true;
+      changed = true;
+    } catch (e) { /* sim unavailable during early boot — retried next load */ }
+  }
+
   // Cadence state seeds unconditionally (NOT inside a schema gate): migrate()
   // is idempotent and additive, so new cadences added by later updates seed
   // themselves on already-migrated worlds at next load. Old worlds start the

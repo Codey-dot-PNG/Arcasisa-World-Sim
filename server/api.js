@@ -520,10 +520,15 @@ function filterState(u) {
     return out;
   });
 
+  // Economy v2: a province's `econ` block is the engine's calibration and
+  // working state (economy.js) — the GM's to inspect; everyone else reads the
+  // published numbers in vars / demographics.
   const provinces = db.provinces.map(pr => {
-    if (p.statistics) return pr;
+    if (p.gm) return pr;
+    if (p.statistics) { const out = { ...pr }; delete out.econ; return out; }
     const out = { ...pr, vars: { population: pr.vars.population } };
     delete out.demographics;
+    delete out.econ;
     return out;
   });
 
@@ -1690,6 +1695,7 @@ async function handle(req, res, pathname, method) {
       }
       if (b.employees !== undefined) {
         pr.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
+        pr.staffTarget = pr.employees; // the headcount the site rehires toward after losses
       }
       if (b.upgradeInvest !== undefined) {
         const amt = Math.round((Number(b.upgradeInvest) || 0) * 100) / 100;
@@ -2300,6 +2306,7 @@ async function handle(req, res, pathname, method) {
           if (pr2.ownerId !== co.id) continue;
           const cap = pr2.maxEmployees !== undefined ? Math.max(0, Math.round(pr2.maxEmployees)) : Math.max(1, Math.round(pr2.employees || 1));
           pr2.employees = Math.round(cap * pct / 100);
+          pr2.staffTarget = pr2.employees;
           staffed.push({ id: pr2.id, employees: pr2.employees });
         }
       }
@@ -2364,8 +2371,7 @@ async function handle(req, res, pathname, method) {
       if (!gm && !ownership.controls(u.user.entityId, 'ent_gov') && !hasAbility(u, 'distribute_food')) return deny('Only the government may release food.');
       const b = await readBody(req);
       try {
-        const hh = require('./households');
-        const r = hh.releaseFood(db, b.itemId, b.qty, b.provinceIds, u.user.displayName);
+        const r = require('./economy').releaseFood(db, b.itemId, b.qty, b.provinceIds, u.user.displayName);
         store.save(); broadcast('sync');
         return json(res, 200, r);
       } catch (e) { return bad(e.message); }
@@ -3458,6 +3464,15 @@ async function handle(req, res, pathname, method) {
           if (b.taxation.propertyRate !== undefined) t.propertyRate = clamp(b.taxation.propertyRate);
           if (b.taxation.vatRate !== undefined) t.vatRate = clamp(b.taxation.vatRate);
           if (b.taxation.gamblingRate !== undefined) t.gamblingRate = clamp(b.taxation.gamblingRate);
+          // personal income tax on the population's earnings (economy.js), on
+          // top of `enabled`; brackets are ₳ per person per month
+          if (b.taxation.pitEnabled !== undefined) t.pitEnabled = !!b.taxation.pitEnabled;
+          if (Array.isArray(b.taxation.pitBrackets)) {
+            t.pitBrackets = b.taxation.pitBrackets.slice(0, 12).map(x => ({
+              upTo: x && x.upTo !== null && x.upTo !== undefined && x.upTo !== '' && Number.isFinite(Number(x.upTo)) ? Math.max(0, Number(x.upTo)) : null,
+              rate: Math.max(0, Math.min(1, Number(x && x.rate) || 0))
+            }));
+          }
         }
         if (b.cadence) { // Phase 35 cadence intervals (world hours), clamped to engine-safe ranges
           const cd = s.cadence = s.cadence || {};
@@ -3473,27 +3488,6 @@ async function handle(req, res, pathname, method) {
           }
         }
         if (b.demographics) Object.assign(s.demographics, b.demographics);
-        if (b.households) { // Phase 3 household tunables — merge so a partial
-          // save never wipes sibling knobs; clamp to engine-safe ranges.
-          const hh = s.households = s.households || {};
-          const num = (v, d = 0) => (v === undefined ? d : Number(v));
-          const clamp = (v, lo, hi, d) => Math.max(lo, Math.min(hi, num(v, d)));
-          hh.enabled = b.households.enabled !== undefined ? !!b.households.enabled : (hh.enabled !== false);
-          if (b.households.foodReqPerCapPerTurn !== undefined) hh.foodReqPerCapPerTurn = clamp(b.households.foodReqPerCapPerTurn, 0.01, 10);
-          if (b.households.govFoodReleaseRate !== undefined) hh.govFoodReleaseRate = Math.max(0, num(b.households.govFoodReleaseRate));
-          if (b.households.dependentStipend !== undefined) hh.dependentStipend = Math.max(0, num(b.households.dependentStipend));
-          if (b.households.wageIncomeK !== undefined) hh.wageIncomeK = clamp(b.households.wageIncomeK, 0, 1);
-          if (b.households.demoSyncStrength !== undefined) hh.demoSyncStrength = clamp(b.households.demoSyncStrength, 0, 1);
-          if (b.households.studentGraduationRate !== undefined) hh.studentGraduationRate = clamp(b.households.studentGraduationRate, 0, 1);
-          if (b.households.retirementRate !== undefined) hh.retirementRate = clamp(b.households.retirementRate, 0, 1);
-          if (b.households.wcToMcRate !== undefined) hh.wcToMcRate = clamp(b.households.wcToMcRate, 0, 1);
-          if (b.households.mcToUcRate !== undefined) hh.mcToUcRate = clamp(b.households.mcToUcRate, 0, 1);
-          if (b.households.educationMobilityK !== undefined) hh.educationMobilityK = Math.max(0, num(b.households.educationMobilityK));
-          if (b.households.oldAgeMortalityRate !== undefined) hh.oldAgeMortalityRate = clamp(b.households.oldAgeMortalityRate, 0, 0.5);
-          if (b.households.diseaseMortalityK !== undefined) hh.diseaseMortalityK = Math.max(0, num(b.households.diseaseMortalityK));
-          if (b.households.famineMortalityRate !== undefined) hh.famineMortalityRate = clamp(b.households.famineMortalityRate, 0, 0.5);
-          if (b.households.stipendHappinessK !== undefined) hh.stipendHappinessK = Math.max(0, num(b.households.stipendHappinessK));
-        }
         if (b.ambience) {
           s.ambience = s.ambience || {};
           // map presentation: the atlas plate (default) or the classic sheet,
@@ -3557,6 +3551,31 @@ async function handle(req, res, pathname, method) {
           // sane non-negative seconds count (0 disables the lock).
           if (e.x100Mult !== undefined) e.x100Mult = Math.max(1, Number(e.x100Mult) || 100);
           if (e.x100LockSec !== undefined) e.x100LockSec = Math.max(0, Math.min(86400, Number(e.x100LockSec) || 0));
+          // Economy v2 knobs (server/economy.js) — bounded to ranges the model
+          // stays sane in; anything else in b.economy is stored as given.
+          const BOUNDS = {
+            jobsPerEmployee: [1, 5000], referenceWage: [0.01, 1e6], labourShare: [0.2, 0.9],
+            wageFlex: [0, 0.05], wageAdjust: [0.001, 1], wageIndexation: [0, 1.2], productivityGrowth: [-0.05, 0.1],
+            subsistenceShare: [0, 0.95], foodMargin: [0.5, 2], reliefDecay: [0, 1], famineMortalityK: [0, 3],
+            birthRate: [0, 0.08], adultDeathRate: [0, 0.05], oldAgeRate: [0, 0.5], diseaseK: [0, 0.1], graduationRate: [0, 1],
+            urbanization: [0, 0.1], incomeSpread: [0.1, 1.5], importMarkup: [0, 3], exportDiscount: [0, 0.9],
+            importCap: [0, 1], exportCap: [0, 2], reorderTurns: [0, 120], priceAdjust: [0, 0.5], priceStepMax: [0, 0.3],
+            stapleStepMax: [0, 0.3], unemploymentBenefit: [0, 1], dependentStipend: [0, 1e6]
+          };
+          for (const k in BOUNDS) if (e[k] !== undefined) {
+            const n = Number(e[k]);
+            e[k] = Number.isFinite(n) ? Math.max(BOUNDS[k][0], Math.min(BOUNDS[k][1], n)) : undefined;
+            if (e[k] === undefined) delete e[k];
+          }
+          // "recalibrate": the engine forgets what it took as normal and
+          // re-reads the world as it stands next turn (after GM edits to
+          // demographics, sites or prices)
+          if (e.recalibrate) {
+            delete e.recalibrate;
+            delete db.econ;
+            for (const p of db.provinces) delete p.econ;
+            for (const it of db.items) if (it.meta) { delete it.meta.demand; delete it.meta._lastPrice; }
+          }
         }
         if (b.election) { // Phase 33/34 — Election Commission knobs + campaign
           // catalogue. Whole-object replace of the authored sub-fields (the
@@ -3678,7 +3697,7 @@ async function handle(req, res, pathname, method) {
             // staffing/cap split (Phase 28b): new sites start fully staffed —
             // the cap is seeded from the authored headcount and stays a GM
             // constant; staffing itself is CEO-editable afterwards.
-            if (b.employees !== undefined) b.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
+            if (b.employees !== undefined) { b.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0))); b.staffTarget = b.employees; }
             if (b.maxEmployees !== undefined) b.maxEmployees = Math.max(0, Math.round(Number(b.maxEmployees) || 0));
             else b.maxEmployees = Math.max(1, Math.round(b.employees || 1));
             buildings.assignTexture(b); // random variant for the kind
@@ -3696,6 +3715,7 @@ async function handle(req, res, pathname, method) {
           const b = await readBody(req);
           if (coll === 'properties' && b.employees !== undefined) {
             b.employees = Math.max(0, Math.min(1000000, Math.round(Number(b.employees) || 0)));
+            b.staffTarget = b.employees;
           }
           if (coll === 'properties' && b.maxEmployees !== undefined) {
             b.maxEmployees = Math.max(0, Math.round(Number(b.maxEmployees) || 0));

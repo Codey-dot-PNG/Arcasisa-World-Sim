@@ -67,7 +67,7 @@ const DEFINITION_COLLS = new Set(['variables', 'events', 'roles', 'markers']);
 // order book are play state and never offered.
 const SETTINGS_PATHS = [
   'worldName', 'currency', 'currencyName', 'parliamentSeats', 'economy', 'taxation', 'war', 'ambience', 'election',
-  'households', 'demographics', 'entertainment', 'music', 'newspapers', 'newspaperRouting', 'newsThresholds',
+  'demographics', 'entertainment', 'music', 'newspapers', 'newspaperRouting', 'newsThresholds',
   'registration', 'time.unit', 'time.perTurn', 'trade.partners', 'trade.tariffs',
   'map.countries', 'map.labels', 'map.roads', 'map.rails', 'map.lights'
 ];
@@ -124,10 +124,24 @@ function prepare(world) {
 }
 
 /* ---------- one source vs the reference ---------- */
+// Economy v2: a good's home-market state (meta.demand/market/basePrice) is
+// play state the engine rewrites every turn, and its marketValue moves with
+// demand. What a GM authors is its normal price — meta.basePrice, which the
+// engine moves only when the GM or an event reprices — so items compare on
+// that, and on meta without the engine's keys.
+const ENGINE_META = ['demand', 'market', 'basePrice', '_lastPrice'];
+function fieldOf(coll, rec, f) {
+  if (coll === 'items' && rec) {
+    if (f === 'meta' && rec.meta) { const m = { ...rec.meta }; for (const k of ENGINE_META) delete m[k]; return m; }
+    if (f === 'marketValue' && rec.meta && rec.meta.basePrice > 0) return Math.round(rec.meta.basePrice * 100) / 100;
+  }
+  return rec[f];
+}
 function cleanRecord(coll, rec, derivedIds) {
   const g = GROUPS[coll];
   const out = clone(rec);
   for (const k of Object.keys(out)) if (k[0] === '_' || g.volatile.includes(k)) delete out[k];
+  if (coll === 'items') { out.meta = fieldOf(coll, rec, 'meta'); out.marketValue = fieldOf(coll, rec, 'marketValue'); }
   if (Array.isArray(out.inventory)) out.inventory = out.inventory.filter(r => !derivedIds.has(r.itemId));
   return out;
 }
@@ -164,7 +178,10 @@ function scanOne(ref, src) {
       for (const grp of ['text', 'setup', 'ownership']) {
         if (!g[grp]) continue;
         const fields = {}, from = {};
-        for (const f of g[grp]) if (!same(rec[f], base[f])) { fields[f] = clone(norm(rec[f])); from[f] = clone(norm(base[f])); }
+        for (const f of g[grp]) {
+          const a = fieldOf(coll, rec, f), b = fieldOf(coll, base, f);
+          if (!same(a, b)) { fields[f] = clone(norm(a)); from[f] = clone(norm(b)); }
+        }
         if (!Object.keys(fields).length) continue;
         const c = { key: `${coll}/${id}#${grp}`, kind: grp, coll, id, label: labelOf(rec), fields, from };
         // a seed character given a whole new name was most likely handed to

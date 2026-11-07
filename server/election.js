@@ -209,18 +209,9 @@ function economicResonance(db, camp, provinceId) {
   if (!(K > 0)) return 1;
   const prov = db.provinces.find(p => p.id === provinceId);
   if (!prov) return 1;
-  const povertyLine = Number(db.globalVars && db.globalVars.povertyLine) || 400;
-  const tgt = camp.targetGroup;
-  let poverty = null;
-  if (tgt && tgt !== 'all') {
-    const homes = (db.households || []).filter(h => h.provinceId === provinceId && h.group === tgt && (h.population || 0) > 0);
-    const total = homes.reduce((s, h) => s + (h.population || 0), 0);
-    const poor = homes.filter(h => (h.income || 0) < povertyLine).reduce((s, h) => s + (h.population || 0), 0);
-    if (total > 0) poverty = poor / total;
-  } else {
-    const rate = prov.vars && prov.vars.povertyRate;
-    if (rate !== undefined) poverty = Math.min(1, Math.max(0, rate / 100));
-  }
+  // Economy v2: each group's poverty share comes from its income spread
+  // against the (price-indexed) poverty line — see economy.povertyOf.
+  const poverty = require('./economy').povertyOf(db, provinceId, camp.targetGroup);
   if (poverty === null || poverty <= 0) return 1;
   return Math.round((1 + K * poverty) * 1000) / 1000;
 }

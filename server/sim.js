@@ -835,21 +835,39 @@ const TRAINING_RISK_DIV = 10000;
 // keep-stock policy and staffing ratio every consumer needs. Used by BOTH
 // runEconomy's turn-end pass and the hourly production cadence
 // (runHourlyProductionTick), so the two can never drift apart.
-function productionContext(db, pr) {
+// What a site pays each employee per turn: its own override, else its
+// company's policy (₳1 by default), else — a site owned by the state, a
+// character or a party — the going wage in its province (economy.js).
+function wageFor(db, pr) {
+  if (pr.wagePerTurn !== undefined) return Math.max(0, Number(pr.wagePerTurn) || 0);
+  const owner = db.entities.find(e => e.id === pr.ownerId);
+  if (owner && owner.type === 'company') return Math.max(0, Number(owner.wagePerTurn === undefined ? 1 : owner.wagePerTurn) || 0);
+  return require('./economy').marketWage(db, pr.provinceId);
+}
+// Share of a product a site keeps in stock instead of selling: per-item site
+// override, per-item company policy, then the site/company keep %.
+function keepPctFor(pr, ctx, itemId) {
+  if (pr.keepPctByItem && pr.keepPctByItem[itemId] !== undefined) return clampPct(pr.keepPctByItem[itemId], ctx.keepPct);
+  if (ctx.co && ctx.co.keepPctByItem && ctx.co.keepPctByItem[itemId] !== undefined) return clampPct(ctx.co.keepPctByItem[itemId], ctx.keepPct);
+  return ctx.keepPct;
+}
+
+// opts.noise === false: the expected multiplier without the random wobble
+// (economy.js sizes markets with it).
+function productionContext(db, pr, opts) {
   const econ = db.settings.economy || {};
-  const variance = econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06;
+  const variance = opts && opts.noise === false ? 0 : (econ.dailyVariance !== undefined ? Number(econ.dailyVariance) : 0.06);
   const hapK = econ.happinessOutputK !== undefined ? Number(econ.happinessOutputK) : 0.15;
   const owner = db.entities.find(e => e.id === pr.ownerId);
   const co = owner && owner.type === 'company' ? owner : null;
   const keepPct = pr.keepPct !== undefined
     ? clampPct(pr.keepPct, 0)
     : (co ? clampPct(co.keepPct, 0) : 0); // property override, then company policy
-  // Direct currency wages replace the old relative wage index. Keep the
-  // derived index for the existing province happiness/employment nudges.
-  const wagePerTurn = pr.wagePerTurn !== undefined
-    ? Math.max(0, Number(pr.wagePerTurn) || 0)
-    : (co ? Math.max(0, Number(co.wagePerTurn === undefined ? 1 : co.wagePerTurn) || 0) : 0);
-  const wageIdx = co ? wagePerTurn * 100 : 100;
+  // Economy v2: pay is measured against the province's going wage — paying
+  // it keeps morale at 50; the index is relative to that wage.
+  const wagePerTurn = wageFor(db, pr);
+  const marketWage = require('./economy').marketWage(db, pr.provinceId);
+  const wageIdx = marketWage > 0 ? wagePerTurn / marketWage * 100 : 100;
   const hoursRaw = pr.workHours !== undefined ? pr.workHours : (co && co.workHours !== undefined ? co.workHours : 8);
   const hoursNum = Number(hoursRaw);
   const hoursMult = (Number.isFinite(hoursNum) ? Math.max(0, Math.min(24, hoursNum)) : 8) / 8;
@@ -872,10 +890,13 @@ function productionContext(db, pr) {
   // a flat line. The wobble floor applies to the output base only, so
   // safety/staffing/upgrade decisions always move production exactly as much
   // as they promise.
+  // Cash-mode sites (shops, offices, casinos, ports) sell services: their
+  // takings follow what people spend in the province (1 = calibrated level).
+  const svc = pr.prodMode === 'cash' ? require('./economy').servicesIndex(db, pr.provinceId) : 1;
   const f = active
-    ? Math.max(0.4, provF * (1 + (Math.random() * 2 - 1) * variance)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult * Math.max(0, 1 - strikeOf)
+    ? Math.max(0.4, provF * (1 + (Math.random() * 2 - 1) * variance)) * hoursMult * (SAFETY_MULT[safetyRaw] || 1) * staffMult * upgradeMult * Math.max(0, 1 - strikeOf) * svc
     : 1;
-  return { owner, co, active, f, keepPct, wagePerTurn, wageIdx, hoursMult, safetyRaw, staffRatio };
+  return { owner, co, active, f, keepPct, wagePerTurn, marketWage, wageIdx, hoursMult, safetyRaw, staffRatio };
 }
 
 // Condition factor (6a) off the persisted vars. Default is neutral (100), so
@@ -928,7 +949,6 @@ function runEconomy(db, actor, scale) {
   // multipliers. Records keep their authored values; the engine scales here.
   const domMult = econ.domesticMultiplier !== undefined ? Number(econ.domesticMultiplier) : 1;
   const expMult = econ.expensesMultiplier !== undefined ? Number(econ.expensesMultiplier) : 1;
-  const gdpScale = g.gdpScale || 1;
   const gov = db.entities.find(e => e.id === 'ent_gov') || db.entities.find(e => e.type === 'government');
   const treasury = db.accounts.find(a => a.id === 'acct_treasury') || (gov && db.accounts.find(a => a.ownerId === gov.id));
   const tax = db.settings.taxation && db.settings.taxation.enabled ? db.settings.taxation : null;
@@ -939,11 +959,20 @@ function runEconomy(db, actor, scale) {
   // to the legacy full lump production so the turn economy never stalls.
   const hourlyAccrued = (db._prodTicksThisTurn || 0) > 0;
 
-  const perOwner = {};      // ownerId -> { dom, upkeep, wage, gross }
+  const perOwner = {};      // ownerId -> { dom, upkeep, wage, gross, props }
   const provGross = {};     // provinceId -> production value this turn
-  const provWage = {};      // provinceId -> { wSum, emp } employee-weighted wage index
-  const own = (id) => (perOwner[id] = perOwner[id] || { dom: 0, upkeep: 0, wage: 0, gross: 0 });
-  let payEmp = 0, payWageSum = 0; // nationwide payroll → averageDailyWage / wageIndex
+  const own = (id) => (perOwner[id] = perOwner[id] || { dom: 0, upkeep: 0, wage: 0, gross: 0, props: [] });
+  let payEmp = 0, payWageSum = 0; // nationwide listed payroll → listedAverageWage
+  // Economy v2 — goods are OFFERED to the home market here and sold against
+  // real demand after the loop (economy.clearMarket): sellers share what
+  // people want; what is not bought stays in the site's stock.
+  const offers = new Map();  // itemId -> units offered
+  const offerRows = [];      // { pr, ownerId, itemId, units }
+  const offer = (pr, itemId, units) => {
+    if (!(units > 0)) return;
+    offers.set(itemId, (offers.get(itemId) || 0) + units);
+    offerRows.push({ pr, ownerId: pr.ownerId, itemId, units });
+  };
 
   for (const pr of db.properties) {
     if (!pr.ownerId) continue;
@@ -977,42 +1006,27 @@ function runEconomy(db, actor, scale) {
 
     const o = own(pr.ownerId);
     o.gross += gross;
+    o.props.push(pr);
 
-    // revenue — one split per item: keep a slice as company stock (tradable on
-    // the open market / via trade offers), sell the rest at domestic retail.
-    // Government purchases are no longer routed here: the state buys goods
-    // through the trade-offer system or the open market like everyone else.
+    // goods — one split per item: keep a slice as site stock (tradable on the
+    // open market / via trade offers), offer the rest to the home market.
     if (pr.prodMode === 'goods') {
-      // record what actually reached the domestic market this turn — the
-      // household food pass (households.js runFoodSupply) turns these sales
-      // into real circulating food stock instead of letting them vanish.
-      pr._domesticMarketSalesThisTurn = [];
+      if (pr._domesticMarketSalesThisTurn !== undefined) delete pr._domesticMarketSalesThisTurn; // pre-v2 scratch
       if (hourlyAccrued) {
         // The hourly cadence minted whole-unit slices onto the site and
-        // accumulated what it sold; settle that revenue here, once per turn.
+        // accumulated what it offered; it goes to market here, once per turn.
         const salesAcc = pr._salesAccum || {};
-        for (const itemId in salesAcc) {
-          const sold = salesAcc[itemId];
-          if (!(sold > 0)) continue;
-          pr._domesticMarketSalesThisTurn.push({ itemId, qty: sold });
-          o.dom += sold * priceOf(itemId) * domMult;
-        }
+        for (const itemId in salesAcc) offer(pr, itemId, salesAcc[itemId]);
         pr._salesAccum = null;
         pr._prodMade = null;
       } else {
         for (const e of (pr.produces || [])) {
-          const retail = priceOf(e.itemId);
           const produced = cleanQty((e.perTurn || 0) * f * scale * reqMult * conditionFactor);
           if (produced <= 0) continue;
-          const itemKeepPct = pr.keepPctByItem && pr.keepPctByItem[e.itemId] !== undefined
-            ? clampPct(pr.keepPctByItem[e.itemId], ctx.keepPct)
-            : (co && co.keepPctByItem && co.keepPctByItem[e.itemId] !== undefined
-              ? clampPct(co.keepPctByItem[e.itemId], ctx.keepPct) : ctx.keepPct);
-          const keep = cleanQty(produced * itemKeepPct / 100);
+          const keep = cleanQty(produced * keepPctFor(pr, ctx, e.itemId) / 100);
           const sold = cleanQty(produced - keep);
           if (keep > 0) addInventory(pr, e.itemId, keep); // stock accrues on site
-          if (sold > 0) pr._domesticMarketSalesThisTurn.push({ itemId: e.itemId, qty: sold });
-          o.dom += sold * retail * domMult;
+          offer(pr, e.itemId, sold);
         }
       }
     } else if (pr.prodMode === 'cash') {
@@ -1027,8 +1041,17 @@ function runEconomy(db, actor, scale) {
     // morale, thin the province's population and post a notice for the desk.
     // Runs once per turn here only — never on the hourly cadence — so the
     // accident odds and morale convergence stay exactly as authored.
+    // Economy v2 — the headcount the owner chose (staffTarget) survives
+    // losses: accidents thin the crew, and the site rehires toward it from
+    // the province's job-seekers, a share of the gap a turn, unless morale
+    // there is so low nobody will sign on. Before this, an unattended site
+    // bled staff to every accident forever.
+    if (pr.staffTarget === undefined) pr.staffTarget = pr.employees || 0;
     if (ctx.active && ctx.hoursMult > 0 && (pr.employees || 0) > 0) {
-      const target = 50 + clamp01((ctx.wagePerTurn - 1) * 25, -30, 30); // ₳1 wage anchors at 50
+      // morale against the province's going wage: paying it anchors at 50,
+      // double it ~75, half of it ~25 (economy.js marketWage)
+      const rel = ctx.marketWage > 0 ? Math.max(0.05, ctx.wagePerTurn) / ctx.marketWage : 1;
+      const target = 50 + clamp01(25 * Math.log2(rel), -30, 30);
       const h0 = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
       pr.workerHappiness = Math.round(clamp01(h0 + (target - h0) * 0.03 + (Math.random() * 2 - 1) * 0.5, 0, 100) * 10) / 10;
       // Accident odds (Phase 28b): the policy base is multiplied by a
@@ -1061,6 +1084,16 @@ function runEconomy(db, actor, scale) {
           `${fmtNum(deaths)} dead, ${fmtNum(injuries)} injured (${ctx.safetyRaw} safety)`, actor || 'ENGINE', [pr.id, pr.ownerId]);
       }
     }
+    {
+      // rehiring: 15% of the gap a turn at normal morale, slower (down to a
+      // fifth of that) the worse the site's reputation among workers
+      const staffGap = (pr.staffTarget || 0) - (pr.employees || 0);
+      if (staffGap > 0) {
+        const mor = pr.workerHappiness === undefined ? 50 : pr.workerHappiness;
+        const rate = 0.15 * Math.max(0.2, Math.min(1, mor / 50)) * scale;
+        pr.employees = (pr.employees || 0) + Math.min(staffGap, Math.max(1, Math.round(staffGap * rate)));
+      }
+    }
 
     // expenses: property upkeep, direct company payroll, and the per-turn
     // controllable spends (6a maintenance / 6f training) — charged here
@@ -1071,51 +1104,67 @@ function runEconomy(db, actor, scale) {
       + (pv.maintenanceSpend || 0) + (pv.trainingSpend || 0);
     o.wage += (pr.employees || 0) * ctx.wagePerTurn;
     if ((pr.employees || 0) > 0 && ctx.wagePerTurn > 0) { payEmp += (pr.employees || 0); payWageSum += (pr.employees || 0) * ctx.wagePerTurn; }
+  }
 
-    // wage pressure on the province (employee-weighted)
-    if (pr.provinceId && pr.employees) {
-      const w = provWage[pr.provinceId] = provWage[pr.provinceId] || { wSum: 0, emp: 0 };
-      w.wSum += ctx.wageIdx * pr.employees; w.emp += pr.employees;
+  // The home market clears: each good sells as far as demand reaches, the
+  // sellers sharing it pro rata at the turn's opening price; the unsold rest
+  // goes back into each site's stock (export it, trade it, or hold it).
+  if (offerRows.length) {
+    let cleared = new Map();
+    try { cleared = require('./economy').clearMarket(db, offers); } catch (e) { console.error('market clearing failed:', e.message); }
+    for (const r of offerRows) {
+      const c = cleared.get(r.itemId);
+      const phi = c ? c.phi : 1;
+      const price = c ? c.price : priceOf(r.itemId);
+      const sold = cleanQty(r.units * phi);
+      const unsold = cleanQty(r.units - sold);
+      if (unsold > 0) addInventory(r.pr, r.itemId, unsold);
+      if (sold > 0) perOwner[r.ownerId].dom += sold * price * domMult;
+      r.pr.vars = r.pr.vars || {};
+      r.pr.vars.lastSold = r.pr.vars.lastSold || {};
+      r.pr.vars.lastSold[r.itemId] = { offered: r.units, sold };
     }
   }
 
-  // settle each owner: net abstract money-in, government purchases, tax.
-  // Revenue is tied to economic confidence (the Day-Market knock-on): a confident
-  // economy spends, a spooked one doesn't. Domestic consumer sales scale by
-  // confFactor.
-  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
-  const confFactor = 0.7 + 0.006 * econC; // conf 50→1.0, 100→1.3, 0→0.7
-  let settledOwners = 0, netTotal = 0, taxTotal = 0;
+  // settle each owner: sales in, upkeep out, payroll to the workforce, tax.
+  // Payroll leaves the owner's account for the population sector — the
+  // national economy (economy.js) counts those wages as people's income.
+  let settledOwners = 0, netTotal = 0, taxTotal = 0, payrollTotal = 0;
   for (const ownerId in perOwner) {
     const o = perOwner[ownerId];
     const owner = db.entities.find(e => e.id === ownerId);
     const acct = primaryAccount(ownerId, true);
-    const dom = o.dom * confFactor; // consumer revenue, confidence-scaled
-    // The wage bill is NO LONGER deducted here at the mint: previously the
-    // wages money was destroyed at the market edge and nobody actually got
-    // paid. It rides the revenue into the owner's account, and the household
-    // pass (households.js runWages) then DEBITS that account into real
-    // household wallets — money conserved, wages paid with real balances.
-    // o.wage still feeds vars.expenses/vars.profit below for the accounting.
-    let netAbstract = dom - o.upkeep;
+    const dom = o.dom;
+    const netAbstract = dom - o.upkeep;
 
-    // Settle the abstract net FIRST (mint on profit, capped draw on loss), then
-    // collect tax as a straight account→treasury transfer. The previous order
-    // (withhold t from the deposit AND debit t from the account) taxed every
-    // profitable owner twice: balance delta was net − 2·rate% instead of
-    // net − rate%, silently impoverishing companies and landowners each turn.
+    // Settle sales less upkeep first (mint on profit, capped draw on loss).
     if (netAbstract > 0) ledgerTxn(null, acct.id, netAbstract, 'Daily operations', actor, 'deposit');
     else if (netAbstract < 0) {
       const draw = Math.min(-netAbstract, Math.max(0, acct.balance)); // never overdraw below zero
       if (draw > 0) ledgerTxn(acct.id, null, draw, 'Daily upkeep', actor, 'withdraw');
     }
 
-    // per-turn tax on positive operating net (rates are the same %; net is 1/30
-    // of the old monthly figure, so the monthly burden matches the old system)
-    if (tax && netAbstract > 0 && owner && owner.id !== 'ent_gov' && owner.id !== 'ent_bank' && owner.type !== 'government') {
+    // Payroll: an employer short of cash pays what it can, pro rata, and its
+    // workforce's morale suffers for it; a sovereign (allowNegative) pays in full.
+    let paid = 0;
+    if (o.wage > 0 && acct) {
+      const allowNeg = !!(acct.meta && acct.meta.allowNegative);
+      paid = allowNeg ? o.wage : Math.min(o.wage, Math.max(0, acct.balance));
+      paid = Math.round(paid * 100) / 100;
+      if (paid > 0) ledgerTxn(acct.id, null, paid, 'Payroll', actor, 'withdraw');
+      const short = o.wage > 0 ? 1 - paid / o.wage : 0;
+      if (short > 0.001) for (const pr of o.props) {
+        if (pr.workerHappiness !== undefined) pr.workerHappiness = Math.round(clamp01(pr.workerHappiness - 15 * short, 0, 100) * 10) / 10;
+      }
+      payrollTotal += paid;
+    }
+
+    // per-turn tax on positive profit after payroll
+    const taxable = dom - o.upkeep - paid;
+    if (tax && taxable > 0 && owner && owner.id !== 'ent_gov' && owner.id !== 'ent_bank' && owner.type !== 'government') {
       const rate = owner.type === 'company' ? (tax.corporateRate || 0) : (tax.propertyRate || 0);
       if (rate > 0 && treasury) {
-        const t = Math.round(netAbstract * rate / 100 * 100) / 100;
+        const t = Math.min(Math.round(taxable * rate / 100 * 100) / 100, Math.max(0, acct.balance));
         if (t > 0) { ledgerTxn(acct.id, treasury.id, t, 'Tax', 'TREASURY', 'transfer'); taxTotal += t; }
       }
     }
@@ -1154,36 +1203,12 @@ function runEconomy(db, actor, scale) {
     co.vars.valuation = Math.max(0, Math.round((co.vars.valuation || 0) * 0.995 * 100) / 100);
   }
 
-  // GDP: province output × calibration scale (global gdp summed by updateDerived)
+  // Economy v2: GDP, employment, wages and moods are the national economy's
+  // (economy.runTurn, right after this pass). It reads each province's listed
+  // output from here.
   for (const p of db.provinces) {
-    p.vars.gdp = Math.round((provGross[p.id] || 0) * gdpScale * 100) / 100;
+    if (p.econ) p.econ.listedGross = Math.round((provGross[p.id] || 0) * 100) / 100;
   }
-
-  // wage pressure → happiness & employment nudges (small, per turn, clamped)
-  for (const p of db.provinces) {
-    const w = provWage[p.id];
-    if (!w || !w.emp) continue;
-    const delta = (w.wSum / w.emp - 100) / 100; // avg (wage-100)/100 in this province
-    if (delta === 0) continue;
-    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness + econ.wageHappinessK * delta) * 100) / 100, 0, 100);
-    if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment + econ.wageEmploymentK * delta) * 100) / 100, 0, 100);
-  }
-
-  // economic confidence → civilian mood (other-systems knock-on). A confident
-  // economy lifts happiness/approval; a market crash drags them down hard. The
-  // strength is a GM knob (economy.happinessConfK); the default makes confidence
-  // a MAJOR happiness driver — a deep slump (conf 20) costs ~0.48 happiness/turn.
-  const confK = econ.happinessConfK !== undefined ? Number(econ.happinessConfK) : 1.6;
-  const cShift = Math.round(((econC - 50) / 100) * confK * 100) / 100;
-  if (cShift !== 0) for (const p of db.provinces) {
-    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness + cShift) * 100) / 100, 0, 100);
-    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval + cShift * 0.6) * 100) / 100, 0, 100);
-  }
-
-  // War overhaul — a live war depresses civilian mood: occupied provinces take
-  // a per-turn hit scaled by how much of them is under enemy control, plus a
-  // smaller nationwide malus everywhere while any war is active at all.
-  applyWarHappinessImpact(db);
 
   // advance the Day Market one step per turn too, so speculation keeps moving in
   // deployments without the long-lived 5s ticker (e.g. serverless).
@@ -1197,17 +1222,11 @@ function runEconomy(db, actor, scale) {
   // per-turn government income samples for the finance graphs (recordHistory)
   g.lastTaxIncome = Math.round(taxTotal * 100) / 100;
 
-  // The nation's average wage comes straight off the payroll: employee-
-  // weighted mean of what companies actually pay (a ₳1/day baseline anchors
-  // wageIndex at 100, keeping the wage happiness/employment nudges stable).
-  // Household income tracks this via households.js's upward income nudge, so
-  // raising company wages measurably lifts the class statistics it feeds.
-  if (payEmp > 0 && payWageSum > 0) {
-    const avg = Math.round(payWageSum / payEmp * 100) / 100;
-    g.averageDailyWage = avg;
-    g.wageIndex = Math.round(avg * 100 * 100) / 100;
-    g.totalEmployment = payEmp;
-  }
+  // What the listed employers pay, on average, and what payroll cost them
+  // this turn (the national going wage is economy.js's averageDailyWage).
+  g.listedAverageWage = payEmp > 0 ? Math.round(payWageSum / payEmp * 100) / 100 : 0;
+  g.listedEmployees = payEmp;
+  g.lastWageSpend = Math.round(payrollTotal * 100) / 100;
 
   if (settledOwners) {
     store.log('economy', `Daily economy settled`,
@@ -1370,26 +1389,6 @@ function closeDueTenders(db, actor) {
     store.log('economy', `Tender ${t.id} awarded`, `${(winnerEnt || {}).name || winner.entityId} wins at ${db.settings.currency}${winner.price}/unit — ${note}`, actor || 'ENGINE', [t.openerEntityId, winner.entityId]);
     draftNews(`State tender awarded: ${item ? item.name : t.itemId}`,
       `The ${t.qtyWanted}-unit order has been placed with ${(winnerEnt || {}).name || 'the winning bidder'} at ${db.settings.currency}${winner.price} per unit.`, 'Business', false, 'Procurement Office');
-  }
-}
-
-// War overhaul — civilian mood under fire. `war.stats.provinceControl` maps
-// provinceId -> attacker occupation % (0-100); any province with a nonzero
-// figure takes a happiness/approval hit that scales with how occupied it is,
-// on top of a small national malus that applies everywhere the moment a war
-// goes active (people worry about a war on the far side of the country too).
-// Generic: reads only db.war/db.provinces, no scenario-specific knowledge.
-function applyWarHappinessImpact(db) {
-  const war = db.war;
-  if (!war || !war.active) return;
-  const ctl = (war.stats && war.stats.provinceControl) || {};
-  const NATIONWIDE = 0.05; // happiness/turn everywhere, any active war
-  for (const p of db.provinces) {
-    const occ = clamp01(Number(ctl[p.id]) || 0, 0, 100);
-    const occHit = (occ / 100) * 0.6; // up to ~0.6 happiness/turn at full occupation
-    const hit = occHit + NATIONWIDE;
-    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness - hit) * 100) / 100, 0, 100);
-    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval - hit * 0.6) * 100) / 100, 0, 100);
   }
 }
 
@@ -1910,12 +1909,9 @@ function runBankCrisis(db, actor) {
       } catch (e) { /* market optional */ }
     }
   }
-  const hHit = 2.2 * sev, eHit = 1.6 * sev, aHit = 1.4 * sev;
-  for (const p of db.provinces) {
-    if (p.vars.happiness !== undefined) p.vars.happiness = clamp01(Math.round((p.vars.happiness - hHit) * 100) / 100, 0, 100);
-    if (p.vars.employment !== undefined) p.vars.employment = clamp01(Math.round((p.vars.employment - eHit) * 100) / 100, 0, 100);
-    if (p.vars.approval !== undefined) p.vars.approval = clamp01(Math.round((p.vars.approval - aHit) * 100) / 100, 0, 100);
-  }
+  // The slump itself is the national economy's: economy.runTurn reads
+  // bankCrisisSeverity — local businesses shed jobs, confidence collapses,
+  // and moods follow from that (no direct writes to province numbers here).
   g.bankCrisisSeverity = Math.round(sev * 100) / 100;
   if (!g.bankCrisis) {
     g.bankCrisis = true;
@@ -1924,67 +1920,6 @@ function runBankCrisis(db, actor) {
       'Economy', true, 'State Statistical Bureau');
   }
   store.log('economy', 'Bank reserve exhausted — economic crash', `reserve ${db.settings.currency}${fmtNum(bal)} · severity ${(sev * 100).toFixed(0)}%`, actor || 'ENGINE', ['ent_bank']);
-}
-
-// Demographics breathe with the economy. Each turn every province's
-// demographic groups drift toward the anchors the economy is setting
-// (employment, happiness, approval, global economic confidence) — with
-// class-specific sensitivity, so a market boom lifts the Upper Class mood
-// before the Working Class feels it. On month boundaries the slower forces
-// act: incomes track GDP growth and confidence, populations grow (or stall)
-// with wellbeing, and a confident economy pulls villagers into the cities.
-// Phase 35: `scale` parameter (default 1) multiplies all drift rates so
-// the cadence scheduler can fire this at sub-turn intervals while preserving
-// cumulative per-turn effects.
-const DEMO_SENS = { 'Upper Class': 1.6, 'Middle Class': 1.2, 'Urban': 1.2, 'Working Class': 0.9, 'Students': 0.8, 'Rural': 0.7, 'Retired': 0.6 };
-function runDemographics(db, monthBoundary, scale) {
-  scale = typeof scale === 'number' && isFinite(scale) ? scale : 1;
-  const econC = db.globalVars.econConfidence === undefined ? 50 : db.globalVars.econConfidence;
-  const gdpGrowth = Number(db.globalVars.gdpGrowth || 0);
-  const crisis = db.globalVars.bankCrisis ? (db.globalVars.bankCrisisSeverity || 0.5) : 0;
-  const r1 = (v) => Math.round(v * 10) / 10;
-  const clampB = (v) => Math.max(0, Math.min(100, v));
-  // Jitter scales with sqrt of the drift scale so a cadence firing N times
-  // per turn accumulates roughly the same per-turn randomness as one full
-  // call, and scale=0 (month-boundary-only mode) jitters not at all.
-  const jitter = 0.15 * Math.sqrt(Math.max(0, Math.min(1, scale)));
-  const pull = (cur, target, k) => cur + (target - cur) * k + (Math.random() * 2 - 1) * jitter;
-  for (const p of db.provinces) {
-    if (!p.demographics) continue;
-    const hapA = p.vars.happiness !== undefined ? p.vars.happiness : 50;
-    const empA = p.vars.employment !== undefined ? p.vars.employment : 85;
-    const appA = p.vars.approval !== undefined ? p.vars.approval : 50;
-    for (const gname in p.demographics) {
-      const d = p.demographics[gname];
-      const sens = DEMO_SENS[gname] || 1;
-      // fast per-turn drift toward the province/economy anchors (scaled by
-      // `scale` for sub-turn cadence ticks — Phase 35)
-      d.economicConfidence = r1(clampB(pull(d.economicConfidence, econC, 0.06 * sens * scale)));
-      d.employment = r1(clampB(pull(d.employment, empA - crisis * 3 * sens, 0.05 * scale)));
-      d.happiness = r1(clampB(pull(d.happiness, hapA + (d.employment - empA) * 0.15, 0.04 * scale)));
-      d.governmentSupport = r1(clampB(pull(d.governmentSupport, appA - crisis * 4, 0.025 * scale)));
-      if (monthBoundary) {
-        // incomes ride GDP growth and confidence, with class sensitivity
-        const incF = 1 + gdpGrowth * 0.5 * sens + ((econC - 50) / 50) * 0.012 * sens - crisis * 0.02;
-        d.income = Math.max(50, Math.round(d.income * incF));
-        // population growth: wellbeing-driven, roughly −2%…+5% a year
-        const r = Math.max(-0.002, Math.min(0.004,
-          0.0012 + (d.happiness - 50) * 0.00003 + (d.employment - 85) * 0.00002 - crisis * 0.0015));
-        d.population = Math.max(0, Math.round(d.population * (1 + r)));
-      }
-    }
-    // monthly rural→urban migration: a confident economy urbanises
-    if (monthBoundary && p.demographics['Rural'] && p.demographics['Urban']) {
-      const rate = Math.max(0, Math.min(0.004, 0.001 + (econC - 50) * 0.00004 - crisis * 0.001));
-      const movers = Math.round(p.demographics['Rural'].population * rate);
-      if (movers > 0) {
-        p.demographics['Rural'].population -= movers;
-        p.demographics['Urban'].population += movers;
-      }
-    }
-    p.vars.population = Object.values(p.demographics).reduce((s, d) => s + (d.population || 0), 0);
-  }
-  db.globalVars.population = db.provinces.reduce((s, p) => s + (p.vars.population || 0), 0);
 }
 
 // Append a compact trade sample for the graphs (kept bounded).
@@ -2120,6 +2055,18 @@ function advanceTurn(steps, actor) {
     try { runForeignMilitary(db, actor || 'ENGINE'); } catch (e) { console.error('runForeignMilitary failed:', e.message); }
     // Bank solvency check → economy-wide crash while its reserve is underwater.
     try { runBankCrisis(db, actor || 'ENGINE'); } catch (e) { console.error('runBankCrisis failed:', e.message); }
+    // Economy v2 — the national economy (server/economy.js): jobs, wages,
+    // incomes, food, spending and saving, prices, moods, and — on month
+    // boundaries — births, deaths, ageing, schooling and mobility. When the
+    // demographics cadence already drifted moods during the turn, this pass
+    // only sets their targets.
+    {
+      const monthB = monthIndex(newMs) !== monthIndex(oldMs);
+      const demoTicked = !!(db._cadenceTicks && db._cadenceTicks.demographics > 0);
+      try { require('./economy').runTurn(db, actor || 'ENGINE', monthB, { demoTicked }); }
+      catch (e) { console.error('economy pass failed:', e.stack || e.message); }
+      if (demoTicked) db._cadenceTicks.demographics = 0;
+    }
     // Phase 34 — live elections: the count now runs off the continuous world
     // clock (sim.worldClockNow), not turns — see election.js's maybeTick,
     // which is the count's real driver, ridden from GET /api/state and a
@@ -2171,40 +2118,9 @@ function advanceTurn(steps, actor) {
     // tradeReset cadence has been rerolling all turn (either way it matches by
     // partner + item + side, never by order id)
     try { runTradeContracts(db, actor || 'ENGINE'); } catch (e) { console.error('runTradeContracts failed:', e.message); }
-    // demographics breathe with the economy. Fast drift lives on the
-    // demographics cadence now (scaled world-hourly slices); when that
-    // cadence fired this turn, the pass here runs drift-free and only
-    // applies month-boundary growth. When it didn't (paused clock), fall
-    // back to the legacy full-strength per-turn drift.
-    const demoTicked = db._cadenceTicks && db._cadenceTicks.demographics > 0;
-    try { runDemographics(db, monthBoundary, demoTicked ? 0 : undefined); }
-    catch (e) { console.error('runDemographics failed:', e.message); }
-    if (demoTicked) db._cadenceTicks.demographics = 0;
     // matured war bonds pay out; foreign relations drift with trade/tariffs
     try { redeemMaturedBonds(db, actor || 'ENGINE'); } catch (e) { console.error('redeemMaturedBonds failed:', e.message); }
     try { runDiplomacy(db); } catch (e) { console.error('runDiplomacy failed:', e.message); }
-    // Domestic economy & fiscal overhaul (Phases 1–4): wages flow from owners
-    // to household wallets, household consumption, real circulating food stock
-    // (famine is now a supply fact), inequality stats, and the monthly class-
-    // mobility / mortality / demographic-sync passes. Lazy require keeps the
-    // sim↔households cycle out of boot. After runEconomy's settlement so the
-    // wage money is already sitting in owner accounts when it debits out.
-    try {
-      const hh = require('./households');
-      hh.runWages(db, actor || 'ENGINE');
-      hh.runConsumption(db, actor || 'ENGINE');
-      hh.runFoodSupply(db, actor || 'ENGINE');
-      hh.runInequality(db, actor || 'ENGINE');
-      // Health descriptor stats (life expectancy / infant mortality) are cheap
-      // and healthcare-driven — refresh every turn so dashboards never sit on
-      // stale or missing values. Mortality THINNING stays monthly below.
-      hh.refreshHealthStats(db);
-      if (monthBoundary) {
-        hh.runMobility(db, actor || 'ENGINE');
-        hh.runMortality(db, actor || 'ENGINE');
-        hh.syncDemographics(db, actor || 'ENGINE');
-      }
-    } catch (e) { console.error('households pass failed:', e.message); }
     store.log('time', `Turn ${t.turn} — ${t.date}`, '', actor || 'ENGINE', []);
   }
   store.save();
@@ -2223,7 +2139,8 @@ function recordHistory(weekly) {
   for (const p of db.provinces) {
     provinces[p.id] = {
       gdp: p.vars.gdp || 0, happiness: p.vars.happiness || 0,
-      approval: p.vars.approval || 0, employment: p.vars.employment || 0
+      approval: p.vars.approval || 0, employment: p.vars.employment || 0,
+      food: p.vars.foodSecurity, income: p.vars.income, wage: p.vars.wage
     };
   }
   const shares = {}, profits = {}, revenues = {};
@@ -2239,6 +2156,10 @@ function recordHistory(weekly) {
     avgHappiness: g.avgHappiness || 0, avgApproval: g.avgApproval || 0,
     moneySupply: g.moneySupply || 0, treasury: g.treasury || 0,
     tax: g.lastTaxIncome || 0, exports: g.lastExportIncome || 0, imports: g.lastImportSpend || 0,
+    // Economy v2 national series (economy.js)
+    gdpReal: g.gdpReal, cpi: g.cpi, inflation: g.inflation, unemployment: g.unemploymentRate,
+    wage: g.averageDailyWage, income: g.avgIncome, food: g.foodSecurity, poverty: g.povertyRateNational,
+    pit: g.pitRevenue, vat: g.vatRevenue,
     provinces, shares, profits, revenues,
     expenses: Object.fromEntries(db.entities.filter(e => e.type === 'company' && e.vars && e.vars.expenses !== undefined).map(e => [e.id, e.vars.expenses]))
   };
@@ -2268,19 +2189,26 @@ function scoreParty(party, gname, group, provId) {
   s += (50 - (group.education || 50)) * (ideo.soc || 0) * 0.006;
   const gs = group.governmentSupport || 50;
   s += party.inGovernment ? (gs - 50) * 0.35 : (50 - gs) * 0.12;
+  // Economy v2: a party's standing beyond its programme (organisation, name,
+  // history) — calibrated once so the polls start where the last election
+  // left Parliament (store.migrate), GM-editable afterwards.
+  s += Number(party.appeal) || 0;
   const sup = (party.support || {})[provId];
   if (sup) {
     // `all` is the legacy blanket bucket (untargeted drives, unchanged);
     // a group key is support a targeted campaign won from that demographic
-    // bucket specifically. Both count toward the group being scored.
+    // bucket specifically. Both count toward the group being scored — and
+    // negative standing counts too: a regional party authored at −30 outside
+    // its home province used to poll as if it were national (only positive
+    // credit was applied), which put it at a third of the national vote.
     const credit = (sup.all || 0) + (sup[gname] || 0);
-    if (credit > 0) s += credit * 1.2;
+    if (credit) s += credit * 1.2;
   }
   return s;
 }
 
-function computePolling(noise) {
-  const db = store.get();
+function computePolling(noise) { return computePollingFor(store.get(), noise); }
+function computePollingFor(db, noise) {
   const parties = db.entities.filter(e => e.type === 'party');
   const byProvince = {};
   const national = {};
@@ -2561,11 +2489,12 @@ function autoTick(actor) {
 
 module.exports = {
   init, evalExpr, interpolate, applyEffect, runEvent, checkConditions, advanceTurn,
-  runEconomy, runElection, apportionSeats, computePolling, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
+  runEconomy, runElection, apportionSeats, computePolling, computePollingFor, scoreParty, txn, ledgerTxn, primaryAccount, draftNews, updateDerived,
   scheduleAuto, setLongLived, isLongLived, autoTick, syncPresidency,
   generateTradeOrders, rerollTradeBook, resetTradeFlows, executeTrade, holderStock, tradeTariffRate,
-  shiftRelations, relationsOf, worldClockNow, runDemographics,
+  shiftRelations, relationsOf, worldClockNow,
+  productionContext, keepPctFor, wageFor,
   runHourlyProductionTick,
   createTenderObj, closeDueTenders,
-  findProv, findEnt, findItem
+  findProv, findEnt, findItem, addInventory, removeInventory, inventoryQty
 };

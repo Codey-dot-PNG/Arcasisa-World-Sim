@@ -84,8 +84,10 @@ const Views = {
   secLabel(t, extra) { return el('div.section-label', t, extra || null); },
   barRow(label, pct, color, valueText) {
     return el('div', { style: 'display:flex; align-items:center; gap:10px; padding:4px 0;' },
-      el('span', { style: 'width:170px; font-size:12.5px; color:var(--ink-soft); flex-shrink:0;' }, label),
-      el('div.bar-track', { style: 'flex:1;' }, el('div.bar-fill', { style: `width:${Math.min(100, Math.max(0, pct))}%; background:${color || 'var(--accent)'};` })),
+      // the label gives way in narrow cards (it used to hold 170px and push the
+      // bar out of a ~240px column); wide layouts are unchanged
+      el('span', { style: 'flex:0 1 170px; min-width:0; font-size:12.5px; color:var(--ink-soft);' }, label),
+      el('div.bar-track', { style: 'flex:1 1 40px; min-width:40px;' }, el('div.bar-fill', { style: `width:${Math.min(100, Math.max(0, pct))}%; background:${color || 'var(--accent)'};` })),
       el('span', { style: 'font-family:var(--font-mono); font-size:11px; width:64px; text-align:right;' }, valueText !== undefined ? valueText : (Math.round(pct * 10) / 10 + '%'))
     );
   },
@@ -3272,18 +3274,50 @@ const Views = {
     this.viewEconomyOverview(inner);
   },
 
+  // Economy v2 — the home market: every good sold at home this turn, what was
+  // offered against what people (and industry) wanted, at what price against
+  // its normal level, and what the rest of the world took or supplied.
+  // item.meta.market is public market data (economy.clearMarket).
+  homeMarket(inner) {
+    const rows = (S().items || []).filter(i => i.meta && i.meta.market && i.meta.demand)
+      .sort((a, b) => (b.meta.market.sold * b.marketValue) - (a.meta.market.sold * a.marketValue));
+    if (!rows.length) return;
+    inner.appendChild(this.secLabel('The Home Market'));
+    inner.appendChild(el('div', { style: 'font-size:11.5px; color:var(--ink-faint); margin:-2px 0 6px;' },
+      'What each good sold for at home this turn. Sellers share what is wanted; what nobody buys stays in their stock. Prices rise in a shortage until imports come in, and fall in a glut until the surplus goes abroad.'));
+    const kindLabel = { staple: 'Food', consumer: 'Consumer', industrial: 'Industry', military: 'State' };
+    inner.appendChild(el('table.data',
+      el('thead', el('tr', el('th', 'Good'), el('th.col-opt', 'Market'), el('th.num', 'Price'), el('th.num', 'vs normal'),
+        el('th.num', 'Offered'), el('th.num', 'Wanted'), el('th.num.col-opt', 'Imported'), el('th.num.col-opt', 'Exported'), el('th', 'State'))),
+      el('tbody', rows.map(it => {
+        const m = it.meta.market, base = it.meta.market.base || it.meta.basePrice || it.marketValue;
+        const rel = base ? (it.marketValue / base - 1) * 100 : 0;
+        const short = m.demand > m.offered * 1.08, glut = m.offered > m.demand * 1.08;
+        const state = short ? (m.imports > 0 ? 'Short — importing' : 'Short') : glut ? (m.exports > 0 ? 'Glut — exporting' : 'Glut — stock piling up') : 'Balanced';
+        const color = short ? 'var(--bad)' : glut ? 'var(--accent)' : 'var(--good)';
+        return el('tr.row-link', { onclick: () => select('item', it.id) },
+          el('td', it.name), el('td.col-opt', kindLabel[it.meta.demand.kind] || it.meta.demand.kind),
+          el('td.num', fmtMoney(it.marketValue)),
+          el('td.num', { style: 'color:' + (Math.abs(rel) < 3 ? 'var(--ink-soft)' : rel > 0 ? 'var(--bad)' : 'var(--good)') + ';' }, (rel >= 0 ? '+' : '') + fmtNum(rel, 0) + '%'),
+          el('td.num', fmtNum(m.offered, m.offered < 10 ? 2 : 0)), el('td.num', fmtNum(m.demand, m.demand < 10 ? 2 : 0)),
+          el('td.num.col-opt', m.imports ? fmtNum(m.imports, 0) : '—'), el('td.num.col-opt', m.exports ? fmtNum(m.exports, 0) : '—'),
+          el('td', { style: 'color:' + color + '; font-size:12px;' }, state));
+      }))));
+  },
+
   viewEconomyOverview(inner) {
     const g = S().globalVars || {};
     const cells = [];
     if (g.gdp !== undefined) cells.push(['National GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)]);
     if (g.moneySupply !== undefined) cells.push(['Money Supply', CUR() + fmtCompact(g.moneySupply)]);
     if (g.treasury !== undefined) cells.push(['Federal Treasury', CUR() + fmtCompact(g.treasury)]);
-    if (g.averageDailyWage !== undefined) cells.push(['Avg Daily Wage', CUR() + fmtNum(g.averageDailyWage)]);
-    if (g.wageIndex !== undefined) cells.push(['Wage Index (100=baseline)', fmtNum(Math.round(g.wageIndex)) + '']);
-    if (g.totalEmployment !== undefined) cells.push(['Total Employment', fmtNum(g.totalEmployment)]);
-    if (g.povertyRateNational !== undefined) cells.push(['Poverty Rate', Math.round(g.povertyRateNational * 100) / 100 + '%']);
-    if (g.giniNational !== undefined) cells.push(['National Gini', (Math.round(g.giniNational * 100) / 100) + '']);
+    if (g.cpi !== undefined) cells.push(['Prices (CPI)', fmtNum(g.cpi, 1), 'inflation ' + fmtNum(g.inflation || 0, 1) + '% a year']);
+    if (g.unemploymentRate !== undefined) cells.push(['Unemployment', fmtNum(g.unemploymentRate, 1) + '%']);
+    if (g.averageDailyWage !== undefined) cells.push(['Going Wage', CUR() + fmtNum(g.averageDailyWage, 2), 'a day · listed avg ' + CUR() + fmtNum(g.listedAverageWage || 0, 2)]);
+    if (g.consumerSpending !== undefined) cells.push(['Consumer Spending', CUR() + fmtCompact(g.consumerSpending), 'a day']);
+    if (g.povertyRateNational !== undefined) cells.push(['Poverty Rate', fmtNum(g.povertyRateNational, 1) + '%']);
     if (cells.length) inner.appendChild(this.statStrip(cells));
+    this.homeMarket(inner);
 
     const mineSet = ownershipSetClient();
     const myAccts = (S().accounts || []).filter(a => canSpendFromClient(a, mineSet) && (isGM() ? mineSet.has(a.ownerId) : true));
@@ -4280,7 +4314,7 @@ const Views = {
     // Food Distribution sits at the TOP now (it was the last thing on a very
     // long page, and only the head of government could see it at all).
     if (this.canFood()) {
-      inner.appendChild(this.ledgerFold('foodOpen', 'Food Distribution — national stockpile',
+      inner.appendChild(this.ledgerFold('foodOpen', 'Food Relief — the national reserve',
         () => { const box = el('div'); this.foodDistribution(box); return box; }, true));
     }
     if (!perms().statistics && !isGM()) {
@@ -4297,59 +4331,84 @@ const Views = {
       inner.appendChild(el('div', { style: 'color:var(--ink-faint); font-size:12px; margin-top:8px;' }, 'Demographic detail — happiness, income, employment and voting groups — requires statistics clearance.'));
       return;
     }
+    // Economy v2 (server/economy.js): the population is groups per province
+    // with incomes, jobs, food and moods computed from conditions each turn.
+    const pct = (v, d) => v === undefined || v === null ? '—' : fmtNum(v, d === undefined ? 1 : d) + '%';
+    const money = (v, d) => v === undefined || v === null ? '—' : CUR() + fmtNum(v, d === undefined ? 2 : d);
     inner.appendChild(this.statStrip([
-      ['Population', fmtCompact(g.population)],
-      ['Avg. Happiness', (g.avgHappiness !== undefined ? g.avgHappiness + '%' : '—')],
-      ['Avg. Approval', (g.avgApproval !== undefined ? g.avgApproval + '%' : '—')],
-      ['GDP', CUR() + fmtCompact((g.gdp || 0) * 1e6)],
-      ['Avg Daily Wage', g.averageDailyWage !== undefined ? CUR() + fmtNum(g.averageDailyWage) : '—', 'across all employed labour'],
-      ['Wage Index', g.wageIndex !== undefined ? Math.round(g.wageIndex) : '—', '100 = baseline pay'],
-      ['Employment', g.totalEmployment !== undefined ? fmtNum(g.totalEmployment) : '—', 'citizens on a payroll'],
-      ['Poverty Rate', g.povertyRateNational !== undefined ? Math.round(g.povertyRateNational * 100) / 100 + '%' : '—', 'below ' + CUR() + (g.povertyLine !== undefined ? fmtNum(g.povertyLine) : '400') + '/day'],
-      ['National Gini', g.giniNational !== undefined ? (Math.round(g.giniNational * 100) / 100) : '—', '0 = equal · 1 = one person']
+      ['Population', fmtCompact(g.population), g.populationGrowthAnnual !== undefined ? (g.populationGrowthAnnual >= 0 ? '+' : '') + fmtNum(g.populationGrowthAnnual, 2) + '% a year' : ''],
+      ['Unemployment', pct(g.unemploymentRate), g.laborForce ? fmtCompact(g.laborForce) + ' in the labour force' : ''],
+      ['Going Wage', money(g.averageDailyWage), 'a day · real wage index ' + (g.realWageIndex !== undefined ? Math.round(g.realWageIndex) : '—')],
+      ['Avg. Income', money(g.avgIncome), 'per person a month'],
+      ['Prices', g.cpi !== undefined ? fmtNum(g.cpi, 1) : '—', 'CPI · inflation ' + pct(g.inflation)],
+      ['Food Security', pct(g.foodSecurity), 'food prices ' + (g.foodPriceIndex !== undefined ? fmtNum(g.foodPriceIndex, 0) : '—')],
+      ['Poverty', pct(g.povertyRateNational), 'below ' + money(g.povertyLineNominal) + '/month'],
+      ['Gini', g.giniNational !== undefined ? fmtNum(g.giniNational, 2) : '—', '0 = equal · 1 = one person']
     ]));
 
-    // ---- The citizenry — living standards (national) ----
     const provs = S().provinces || [];
-    const pOk = provs.filter(x => x.vars && x.vars.foodSecurity !== undefined && x.vars.population > 0);
-    const popTot = pOk.reduce((s, x) => s + (x.vars.population || 0), 0);
-    const foodSecNat = popTot ? pOk.reduce((s, x) => s + (x.vars.foodSecurity || 0) * (x.vars.population || 0) / popTot, 0) : undefined;
-    const lifeExpNat = popTot ? pOk.reduce((s, x) => s + (x.vars.lifeExpectancy || 0) * (x.vars.population || 0) / popTot, 0) : undefined;
-    const foodColor = (v) => v === undefined ? 'var(--ink-faint)' : (v >= 70 ? 'var(--good)' : v >= 30 ? 'var(--accent)' : 'var(--bad)');
-    const avgHap = (x) => {
-      const vals = (x.demographics && Object.keys(x.demographics)) || [];
-      if (!vals.length) return undefined;
-      const pop = vals.reduce((s, n) => s + (x.demographics[n].population || 0), 0);
-      return pop ? vals.reduce((s, n) => s + (x.demographics[n].happiness || 0) * (x.demographics[n].population || 0) / pop, 0) : undefined;
-    };
-
-    inner.appendChild(this.secLabel('The Citizenry — Living Standards'));
-    const natGrid = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    const foodColor = (v) => v === undefined ? 'var(--ink-faint)' : (v >= 90 ? 'var(--good)' : v >= 70 ? 'var(--accent)' : 'var(--bad)');
     const col = (title, rows) => el('div.stage', { style: 'flex:1 1 240px; min-width:0;' },
       el('div', { style: 'font-family:var(--font-mono); font-size:9px; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); margin-bottom:8px;' }, title),
       ...rows);
-    natGrid.appendChild(col('Labour & Wages', [
-      el('div', { style: 'display:flex; flex-wrap:wrap; gap:8px; margin-bottom:6px;' },
-        this.statCell('Daily wage', g.averageDailyWage !== undefined ? CUR() + fmtNum(g.averageDailyWage) : '—'),
-        this.statCell('Wage index', g.wageIndex !== undefined ? Math.round(g.wageIndex) : '—')),
-      this.kv('Payroll paid last turn', g.lastWageSpend !== undefined ? CUR() + fmtNum(g.lastWageSpend) : '—'),
-      this.kv('Employed citizens', fmtNum(g.totalEmployment) || '—'),
-      this.kv('Households simulated', fmtNum(g.totalHouseholds) || '—')
+    const gov = entById('ent_gov');
+    const reserve = ((gov && gov.inventory) || []).reduce((t, r) => {
+      const it = itemById(r.itemId);
+      return t + (it && it.meta && it.meta.stapleFood ? r.qty * (it.meta.foodCalorieWeight || 1) : 0);
+    }, 0);
+
+    inner.appendChild(this.secLabel('The Nation — Work, Food & Living Standards'));
+    const natGrid = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
+    natGrid.appendChild(col('Work & Pay', [
+      this.barRow('Employment', 100 - (g.unemploymentRate || 0), 'var(--good)', pct(100 - (g.unemploymentRate || 0))),
+      this.kv('People in work', fmtCompact(g.totalEmployment || 0) + ' of ' + fmtCompact(g.laborForce || 0)),
+      this.kv('Going wage (reference worker)', money(g.averageDailyWage) + ' a day'),
+      this.kv('Listed employers pay on average', money(g.listedAverageWage) + ' a day'),
+      this.kv('Listed payroll last turn', money(g.lastWageSpend, 0)),
+      this.kv('Unemployment benefit & stipends', money(g.welfareSpending, 0) + ' last turn')
     ]));
-    natGrid.appendChild(col('Subsistence & Health', [
-      this.barRow('National food security', foodSecNat || 0, foodColor(foodSecNat), (foodSecNat !== undefined ? Math.round(foodSecNat) + '%' : '—')),
-      this.kv('Famine deaths (cumulative)', g.famineDeaths !== undefined ? fmtNum(g.famineDeaths) : '—'),
-      this.kv('Avg. life expectancy', lifeExpNat !== undefined ? Math.round(lifeExpNat) + ' yrs' : '—'),
-      this.kv('Avg. happiness', g.avgHappiness !== undefined ? g.avgHappiness + '%' : '—')
+    natGrid.appendChild(col('Food', [
+      this.barRow('Food security', g.foodSecurity || 0, foodColor(g.foodSecurity), pct(g.foodSecurity)),
+      el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:4px;' }, (g.foodSecurity || 100) < 70
+        ? 'Hunger — people cannot get or afford enough to eat; deaths are rising.'
+        : (g.foodSecurity || 100) < 90 ? 'Shortages — the poorest go short; prices are climbing.' : 'Fed — farms, imports and smallholdings cover the need.'),
+      this.kv('Food price index', g.foodPriceIndex !== undefined ? fmtNum(g.foodPriceIndex, 0) + ' (100 = normal)' : '—'),
+      this.kv('Imported this turn', g.foodNeed ? pct((g.foodImported || 0) / g.foodNeed * 100) + ' of the need' : '—'),
+      this.kv('National reserve', fmtNum(Math.round(reserve)) + ' food units' + (g.foodNeed ? ' · ' + fmtNum(reserve / Math.max(1, g.foodNeed), 1) + ' days of need' : '')),
+      this.kv('Hunger deaths (all time)', fmtNum(g.famineDeaths || 0))
     ]));
-    natGrid.appendChild(col('Inequality & Welfare', [
-      this.barRow('Poverty rate', g.povertyRateNational || 0, 'var(--accent)', (g.povertyRateNational !== undefined ? Math.round(g.povertyRateNational * 100) / 100 + '%' : '—')),
-      this.kv('National Gini', g.giniNational !== undefined ? (Math.round(g.giniNational * 100) / 100) : '—'),
-      this.kv('Welfare spending last turn', g.welfareSpending !== undefined ? CUR() + fmtNum(g.welfareSpending) : '—'),
-      this.kv('Stipend payout last turn', g.lastStipendSpend !== undefined ? CUR() + fmtNum(g.lastStipendSpend) : '—'),
-      this.kv('Wealth of named citizens', g.namedCitizenWealth !== undefined ? CUR() + fmtCompact(g.namedCitizenWealth) : '—')
+    natGrid.appendChild(col('Living Standards', [
+      this.kv('Average income', money(g.avgIncome) + ' a month'),
+      this.kv('Consumer spending', money(g.consumerSpending, 0) + ' a day'),
+      this.kv('Household savings', CUR() + fmtCompact(g.householdSavings || 0)),
+      this.barRow('In poverty', g.povertyRateNational || 0, 'var(--accent)', pct(g.povertyRateNational)),
+      this.kv('Poverty line', money(g.povertyLineNominal) + ' a month (rises with prices)'),
+      this.kv('Income tax / VAT last turn', money(g.pitRevenue, 0) + ' / ' + money(g.vatRevenue, 0))
+    ]));
+    natGrid.appendChild(col('Population', [
+      this.kv('Growth', g.populationGrowthAnnual !== undefined ? fmtNum(g.populationGrowthAnnual, 2) + '% a year' : '—'),
+      this.kv('Births last month', fmtNum(g.lastMonthBirths || 0)),
+      this.kv('Deaths last month', fmtNum(g.lastMortalityDeaths || 0)),
+      this.kv('Avg. happiness', pct(g.avgHappiness)),
+      this.kv('Avg. approval of government', pct(g.avgApproval))
     ]));
     inner.appendChild(natGrid);
+
+    // national series over time (statistics clearance ships the history)
+    const histN = (Views.histAll() || []).filter(r => r.cpi !== undefined);
+    if (histN.length >= 2) {
+      inner.appendChild(this.secLabel('The Nation Over Time'));
+      const row = el('div.chart-row');
+      row.appendChild(Charts.chartLine([
+        { name: 'Unemployment', color: 'var(--bad)', points: histN.map(r => ({ x: r.turn, y: r.unemployment })) },
+        { name: 'Poverty', color: 'var(--accent)', points: histN.map(r => ({ x: r.turn, y: r.poverty })) }
+      ], { title: 'UNEMPLOYMENT & POVERTY', yFormat: v => fmtNum(v, 0) + '%' }));
+      row.appendChild(Charts.chartLine([
+        { name: 'Prices (CPI)', color: 'var(--ink)', points: histN.map(r => ({ x: r.turn, y: r.cpi })) },
+        { name: 'Food security', color: 'var(--good)', points: histN.map(r => ({ x: r.turn, y: r.food })) }
+      ], { title: 'PRICES & FOOD', yFormat: v => fmtNum(v, 0) }));
+      inner.appendChild(row);
+    }
 
     if (!W.popProv || !provById(W.popProv)) W.popProv = S().provinces[0] && S().provinces[0].id;
     this.popProvP = provById(W.popProv) || S().provinces[0];
@@ -4362,6 +4421,7 @@ const Views = {
     }
     inner.appendChild(chips);
 
+    const avgHap = (x) => x.vars && x.vars.happiness !== undefined ? x.vars.happiness : undefined;
     // ---- Selected province: class income + class share (charts) ----
     const gnames = Object.keys(p.demographics);
     const klColors = ['#3f5c3a', '#7a6a3a', '#2456a8', '#8a2f24', '#6b7280', '#9aa88a', '#a37427', '#5b5e2c'];
@@ -4373,7 +4433,7 @@ const Views = {
       const chartRow = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start;' });
       chartRow.appendChild(Charts.chartBars(incRows, {
         horizontal: true, width: 430, height: Math.max(110, incRows.length * 22 + 30),
-        title: 'AVERAGE INCOME BY CLASS (' + CUR() + '/day)', valueFormat: v => CUR() + fmtNum(v)
+        title: 'INCOME BY GROUP (' + CUR() + ' PER PERSON A MONTH)', valueFormat: v => CUR() + fmtNum(v, 2)
       }));
       chartRow.appendChild(Charts.chartPie(shareRows, { width: 320, height: 210, title: p.name + ' — CITIZENS BY CLASS' }));
       inner.appendChild(chartRow);
@@ -4383,25 +4443,27 @@ const Views = {
     const pv = p.vars || {};
     inner.appendChild(this.secLabel(p.name + ' — Living Standards'));
     const provGrid = el('div', { style: 'display:flex; gap:16px; flex-wrap:wrap;' });
-    provGrid.appendChild(col('Food & Hunger', [
-      this.barRow('Food security', pv.foodSecurity || 0, foodColor(pv.foodSecurity), (pv.foodSecurity !== undefined ? Math.round(pv.foodSecurity) + '%' : '—')),
-      el('div', { style: 'font-size:11px; color:var(--ink-faint); margin-bottom:4px;' }, pv.foodSecurity !== undefined && pv.foodSecurity < 30
-        ? 'FAMINE — the rationing network is failing and the population is dying.'
-        : (pv.foodSecurity !== undefined && pv.foodSecurity < 70 ? 'Shortages — bare shelves; hunger is spreading.' : 'Well fed — supply covers demand.')),
-      this.kv('Food stock on hand (units)', pv.foodStock !== undefined ? fmtNum(Math.round(pv.foodStock)) : '—'),
-      this.kv('Province population', fmtNum(pv.population) || '—')
+    provGrid.appendChild(col('Work & Pay', [
+      this.barRow('Employment', pv.employment || 0, 'var(--good)', pct(pv.employment)),
+      this.kv('Going wage', money(pv.wage) + ' a day'),
+      this.kv('Average income', money(pv.income) + ' a month'),
+      this.kv('Output (GDP)', CUR() + fmtCompact((pv.gdp || 0) * 1e6) + ' a year')
+    ]));
+    provGrid.appendChild(col('Food', [
+      this.barRow('Food security', pv.foodSecurity || 0, foodColor(pv.foodSecurity), pct(pv.foodSecurity)),
+      this.kv('Relief food on hand', fmtNum(Math.round(pv.foodStock || 0)) + ' units'),
+      this.kv('Healthcare index', pv.healthcare !== undefined ? pv.healthcare : '—')
     ]));
     provGrid.appendChild(col('Poverty & Inequality', [
-      this.barRow('Poverty rate', pv.povertyRate || 0, 'var(--accent)', (pv.povertyRate !== undefined ? pv.povertyRate + '%' : '—')),
-      this.kv('Gini index', pv.giniIndex !== undefined ? (Math.round(pv.giniIndex * 100) / 100) : '—'),
-      this.kv('Poverty gap', pv.povertyGap !== undefined ? Math.round(pv.povertyGap * 100) / 100 + '%' : '—'),
-      this.kv('Avg. group happiness', avgHap(p) !== undefined ? Math.round(avgHap(p)) + '%' : '—')
+      this.barRow('In poverty', pv.povertyRate || 0, 'var(--accent)', pct(pv.povertyRate)),
+      this.kv('Gini index', pv.giniIndex !== undefined ? fmtNum(pv.giniIndex, 2) : '—'),
+      this.kv('Poverty gap', pct(pv.povertyGap))
     ]));
-    provGrid.appendChild(col('Health & Mortality', [
+    provGrid.appendChild(col('Health & Population', [
       this.kv('Life expectancy', pv.lifeExpectancy !== undefined ? Math.round(pv.lifeExpectancy) + ' yrs' : '—'),
       this.kv('Infant mortality / 1000', pv.infantMortality !== undefined ? Math.round(pv.infantMortality) : '—'),
-      this.kv('Mortality / 1000 / year', pv.mortalityRate !== undefined ? (Math.round(pv.mortalityRate * 10) / 10) : '—'),
-      this.kv('Healthcare index', pv.healthcare !== undefined ? pv.healthcare : '—')
+      this.kv('Deaths / 1000 / year', pv.mortalityRate !== undefined ? fmtNum(pv.mortalityRate, 1) : '—'),
+      this.kv('Births / 1000 / year', pv.birthRate !== undefined ? fmtNum(pv.birthRate, 1) : '—')
     ]));
     inner.appendChild(provGrid);
 
@@ -4435,28 +4497,25 @@ const Views = {
     inner.appendChild(el('table.data', el('thead', head), tbody));
 
     // ---- Living standards by province (national table) ----
-    inner.appendChild(this.secLabel('Living Standards by Province'));
+    inner.appendChild(this.secLabel('Provinces Compared'));
     const provTbl = el('table.data',
       el('thead', el('tr',
-        el('th', 'Province'),
-        el('th.num', 'Population'),
-        el('th.num', 'Food security'),
-        el('th.num', 'Poverty'),
-        el('th.num', 'Gini'),
-        el('th.num', 'Mort./1000'),
-        el('th.num', 'Life exp.'),
-        el('th.num', 'Happiness'))),
+        el('th', 'Province'), el('th.num', 'Population'), el('th.num', 'Unemployed'), el('th.num', 'Wage/day'),
+        el('th.num.col-opt', 'Income/month'), el('th.num', 'Food'), el('th.num.col-opt', 'Poverty'), el('th.num.col-opt', 'Gini'),
+        el('th.num', 'Happiness'), el('th.num', 'Approval'))),
       el('tbody', provs.map(px => {
         const xv = px.vars || {};
         const tr = el('tr', { class: (px.id === p.id ? 'active ' : '') + 'row-link', onclick: () => { W.popProv = px.id; App.renderView(); } });
         tr.appendChild(el('td', px.name));
         tr.appendChild(el('td.num', fmtNum(xv.population || 0)));
-        tr.appendChild(el('td.num', xv.foodSecurity !== undefined ? el('span', { style: 'color:' + foodColor(xv.foodSecurity) + ';' }, Math.round(xv.foodSecurity) + '%') : '—'));
-        tr.appendChild(el('td.num', xv.povertyRate !== undefined ? Math.round(xv.povertyRate) + '%' : '—'));
-        tr.appendChild(el('td.num', xv.giniIndex !== undefined ? (Math.round(xv.giniIndex * 100) / 100) : '—'));
-        tr.appendChild(el('td.num', xv.mortalityRate !== undefined ? (Math.round(xv.mortalityRate * 10) / 10) : '—'));
-        tr.appendChild(el('td.num', xv.lifeExpectancy !== undefined ? Math.round(xv.lifeExpectancy) : '—'));
-        tr.appendChild(el('td.num', (avgHap(px) !== undefined ? Math.round(avgHap(px)) + '%' : '—')));
+        tr.appendChild(el('td.num', pct(xv.unemployment)));
+        tr.appendChild(el('td.num', money(xv.wage)));
+        tr.appendChild(el('td.num.col-opt', money(xv.income)));
+        tr.appendChild(el('td.num', xv.foodSecurity !== undefined ? el('span', { style: 'color:' + foodColor(xv.foodSecurity) + ';' }, pct(xv.foodSecurity, 0)) : '—'));
+        tr.appendChild(el('td.num.col-opt', pct(xv.povertyRate, 0)));
+        tr.appendChild(el('td.num.col-opt', xv.giniIndex !== undefined ? fmtNum(xv.giniIndex, 2) : '—'));
+        tr.appendChild(el('td.num', pct(xv.happiness, 0)));
+        tr.appendChild(el('td.num', pct(xv.approval, 0)));
         return tr;
       })));
     inner.appendChild(provTbl);
@@ -4489,7 +4548,7 @@ const Views = {
 
     if (!stapleItems.length) {
       inner.appendChild(el('div.stage', el('div', { style: 'color:var(--ink-faint); font-size:12.5px; padding:4px 0;' },
-        'The national stockpile holds no staple food. Produce grain or livestock domestically — their sales feed the pool.')));
+        'The national reserve holds no staple food. Farms sell their harvest to the people; the reserve holds only what the state keeps or buys — set a state farm to keep part of its output and move it here, buy grain abroad (Markets › International trade), or take it in trade offers.')));
     } else {
       // Draft state for the form
       if (!W.foodDraft) W.foodDraft = {};
@@ -4504,7 +4563,7 @@ const Views = {
 
       const formBox = el('div.stage');
       formBox.appendChild(el('div', { style: 'font-size:12px; margin-bottom:8px;' },
-        'Release staple food from the national stockpile to provinces. Each unit delivers ' + weight + '× in food stock (calorie weight).'));
+        'Release staple food from the national reserve to provinces as relief: it feeds whoever cannot get or afford enough there, before it spoils. Each unit delivers ' + weight + '× in food (calorie weight).'));
 
       // Item + quantity row
       const row1 = el('div', { style: 'display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:8px;' });

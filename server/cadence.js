@@ -212,16 +212,14 @@ function registerDefaults() {
     require('./sim').runHourlyProductionTick(db, 'CADENCE', width);
   });
 
-  // Demographic fast drift (Part 3b): the per-turn drift moved off
-  // advanceTurn onto the demographics cadence, scaled so cumulative drift
-  // per turn is preserved whatever the interval. Month-boundary passes stay
-  // on advanceTurn (see runDemographics' scale=0 mode). The scale follows
-  // the window argument so a collapsed catch-up backlog drifts by exactly
-  // the elapsed share instead of one slice's worth.
+  // Mood drift between turns (Economy v2): each group's happiness,
+  // confidence and support of government move toward the targets the last
+  // turn's economy set (economy.drift), by exactly the elapsed world time —
+  // so the mood of the country moves smoothly instead of once a day. The
+  // turn pass skips its own drift when this ran (advanceTurn's demoTicked).
   register('demographics', (db, widthWorldMs) => {
     const width = Number(widthWorldMs) > 0 ? Number(widthWorldMs) : intervalOf(db, 'demographics');
-    const scale = width / turnWorldMs(db);
-    require('./sim').runDemographics(db, false, scale);
+    require('./economy').drift(db, width / 86400000);
   });
 
   // Trade desk reroll (Part 3c): rebuild the foreign order book hourly

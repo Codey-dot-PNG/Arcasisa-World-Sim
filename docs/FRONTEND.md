@@ -98,6 +98,16 @@ exchange · International trade, `W.mktTab`), **Trades**, **Overview**, **Gov. F
 `'inventory'` → Holdings, `'company'` (+ `W.opsCo`) → that company's operations pane,
 `'property'` (+ `W.opsProp`) → that site's pane, `'exchange'`/`'intl'` → Markets.
 
+**Overview** shows the national figures (GDP, prices, unemployment, the going wage,
+consumer spending, poverty) and **The Home Market** (`Views.homeMarket`) — every good sold at
+home last turn from `item.meta.market`: price vs normal, offered, wanted, imported,
+exported, and whether it is short or in glut. The **Population** page reads the national
+economy (docs/SIMULATION.md "The national economy"): work & pay, food (security, prices,
+imports, the national reserve and its days of need), living standards, population, the
+nation over time, then the chosen province (groups' income per month, work, food, poverty,
+health) and the provinces compared. Food Relief (release from the reserve) folds open at the
+top for the head of government, the Cabinet and the GM.
+
 **Holdings** (`Views.viewHoldings`, holdings.js) is one control board:
 
 - a strip with your whole side's net worth, cash, goods, property, outside shares and how

@@ -33,7 +33,7 @@ On cloud hosting the embedded `v` is composed pre-commit; `api/index.js` rewrite
 |---|---|
 | `POST /api/transfer` | money between accounts; must control source (ownership chain); GM may overdraw |
 | `POST /api/trade` | instant item transfer between entities. Cert/deed items route through `market.transfer`/`deeds.transfer` |
-| `POST /api/food/release` | `{itemId, qty, provinceIds?}` — staple food from the national stockpile to provinces, split by population. Head of government (controls `ent_gov`), the `distribute_food` ability, or GM |
+| `POST /api/food/release` | `{itemId, qty, provinceIds?}` — staple food from the national reserve (government inventory) to provinces as relief (`p.vars.foodStock`, eaten by whoever is still short; spoils over time), split by population. Head of government (controls `ent_gov`), the `distribute_food` ability, or GM |
 | `POST /api/property/items` | deposit/withdraw goods between a property site and its owner (`direction: 'withdraw'`) |
 | `POST /api/trades` | create negotiated offer `{fromEntityId, toEntityId, give[], get[], money{give,get}, memo}`; no escrow |
 | `POST /api/trades/:id/(accept\|decline\|cancel)` | accept validates everything first, then moves items/money; single-company cert-vs-cash trades re-mark the day quote |
@@ -129,7 +129,7 @@ venue owner's controller or GM tunes odds/limits; GM-only: enable, rename, re-ow
 | `GET snapshots` · `POST rollback` `{turn}` | |
 | `GET export` · `POST import` | full world JSON archive |
 | `POST reset` | reseed |
-| `PATCH settings` | worldName, currency, time (+auto), registration, taxation, newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns), `ambience` (`traffic`; `mapStyle: 'atlas'\|'classic'`, `shadows`), `war.protest` (Phase 36 protest rules — opinion knobs, `applications` switch, new-protest defaults; merged & clamped) |
+| `PATCH settings` | worldName, currency, time (+auto), registration, taxation (+ `pitEnabled`, `pitBrackets`), economy (the national economy's tunables, bounded; `{recalibrate:true}` forgets its calibration), newspapers routing, entertainment, music, map, trade (govBuyPrices/partners), economy, election (durationTurns/deviationPct/supportToVotes/campaigns), `ambience` (`traffic`; `mapStyle: 'atlas'\|'classic'`, `shadows`), `war.protest` (Phase 36 protest rules — opinion knobs, `applications` switch, new-protest defaults; merged & clamped) |
 | `POST mapfx` · `DELETE mapfx/:id` · `POST mapfx/clear` | GM map effects — stage `{kind, pos:[x,y], r?, label?}` (`nuke, explosion, fire, flood, quake, storm, eruption, toxic`; r clamped 15–900; at most 40 on the map), remove one, or clear all. Visual only (`state.mapFx`, public); logged GM-only as type `map` |
 | `POST users` · `PATCH users/:id` | Phase 36: an unknown `roleId`/`entityId` is a 400 (it used to be stored and silently fall back to Citizen); the editor's `'__null__'` persona means none |
 | `POST users` · `PATCH\|DELETE users/:id` | user CRUD; calls `sim.syncPresidency` |
@@ -167,7 +167,8 @@ The single place the world is narrowed per operator. Key rules:
   that stockpile); `entity.militaryPlan` and the `militaryLog` rows follow the same rule;
   company `vars/shareholders` stripped
   without `companyFinancials` (unless it's your company).
-- Provinces: without `statistics`, only `vars.population`, no demographics.
+- Provinces: without `statistics`, only `vars.population`, no demographics. A province's
+  `econ` block (the national economy's calibration) ships to the GM only.
 - Properties: all visible to everyone (government and military sites included); a site's
   `inventory` is stripped unless its owner's inventory is visible.
 - News: non-`manageNews` sees published only.

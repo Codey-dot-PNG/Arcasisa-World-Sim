@@ -34,7 +34,8 @@ mode). `store.get()` returns it; everything mutates it in place.
   peaceOffers: [ ... ],    // peace negotiations — { id:'peace_…', conflict, talks (startedAt), side, status, rev, terms, … } (docs/WAR.md "Peace negotiations")
   mapFx: [ ... ],          // GM map effects — { id:'fx_…', kind, pos:[x,y], r, at, label } (visual only, see below)
   protestApplications: [ ... ], // Phase 36 — player petitions to start a protest (see below)
-  history: [ ... ],        // per-turn time-series for charts (cap 1000)
+  history: [ ... ],        // per-turn time-series for charts (cap 240)
+  econ: { ... },           // the national economy's state (cpi, indices, calibration) — never shipped
   roles: [ ... ],          // permission templates
   users: [ ... ],          // operator accounts (salt + scrypt passHash)
   sessions: { sid: { userId, ts } },
@@ -128,12 +129,19 @@ from whoever holds the `president` role. Don't set these by hand.
 
 ## Provinces
 
-`{ id, name, color, path | shape, labelPos, capital, vars, demographics, voterBase? }`.
-`vars`: population, gdp (₳M), employment, happiness, approval, education, crime, industry,
-agriculture, oilProduction, trade, infrastructure, healthcare, politicalLeaning …
-`demographics`: `{ GroupName: { population, income, education, politicalLeaning,
-governmentSupport, happiness, economicConfidence, employment } }` for the seven seed groups
-(Working/Middle/Upper Class, Students, Retired, Rural, Urban). `voterBase { partyId: pct }`
+`{ id, name, color, path | shape, labelPos, capital, vars, demographics, voterBase?, econ? }`.
+`vars`: population, gdp (₳M/yr), gdpReal, employment, unemployment, wage (₳/day), income
+(₳/person/month), happiness, approval, economicConfidence, foodSecurity, foodStock (relief
+food), povertyRate, povertyGap, giniIndex, lifeExpectancy, infantMortality, mortalityRate,
+birthRate, education, crime, industry, agriculture, oilProduction, trade, infrastructure,
+healthcare, politicalLeaning … — the economic ones are written by the national economy each
+turn (docs/SIMULATION.md "The national economy").
+`demographics`: `{ GroupName: { population, income (₳/person/month), netIncome, incomeTax,
+savings (₳/person), education, politicalLeaning, governmentSupport, happiness,
+economicConfidence, employment, unemployment, foodAccess, poverty } }` for the seven seed
+groups (Working/Middle/Upper Class, Students, Retired, Rural, Urban). Their roles in the
+economy come from `settings.economy.groupRoles`. `econ` is the engine's calibration and
+working state for the province (GM-only in `filterState`). `voterBase { partyId: pct }`
 scripts a province's vote outright, bypassing the demographic election model.
 Territory is `shape` (SVG path data, evenodd); the GM border painter rewrites it for the
 regions it touches (docs/FRONTEND.md "Border painter"). `settings.map.land` — the pristine
@@ -150,6 +158,11 @@ maxEmployees (employee cap — GM-only lever; seeded from the authored headcount
 derived from live staffing), expenses (per-turn upkeep), texture, inventory, vars,
 prodMode: 'goods'|'cash'|'none',
 produces: [{itemId, perTurn}], cashPerTurn, targetRevenue? }`.
+
+**Staffing target & inputs (Economy v2):** `staffTarget` — the headcount the owner chose
+(set with `employees`); after accidents the site rehires toward it. `autoSupply` (default
+on) — a site with `requires` buys its inputs from the home market each turn; `false` leaves
+supply to its owner. `vars.lastSold[itemId] = { offered, sold }` — last turn's home sales.
 
 **Staffing vs employee cap (Phase 28b):** `employees` (staffing) is CEO-editable and may
 EXCEED `maxEmployees` (the cap) — over-staffing raises output linearly (capped at 5× rated)
@@ -183,6 +196,13 @@ Two special mirror kinds — never edit their quantities directly:
 - **Property deeds:** `meta.propertyId` — qty-1 mirror of `property.ownerId`
   (`deeds.transfer` / `syncAllDeeds`).
 
+**Home market (Economy v2):** every good sold at home gets `meta.demand = { kind
+('staple'|'consumer'|'industrial'|'military'), base, home0, backlog, sEma, dEma }`,
+`meta.basePrice` (its normal price — moved when the GM or an event reprices the item) and,
+after each turn, `meta.market = { offered, demand, sold, imports, exports, price, base, turn }`
+(public). `marketValue` now moves with demand against supply (within 0.3–3× base). Staple
+foods carry `meta.stapleFood` + `meta.foodCalorieWeight`.
+
 **Weapon items** carry `meta.weapon` stats that feed the war engine, plus `meta.originId`
 (which nation's national pattern this is — `null` for Arcasian designs; used by
 `runForeignMilitary` to pick what a power produces). Kinds:
@@ -208,11 +228,14 @@ lastTurn, runs }`. Effect types are documented in docs/SIMULATION.md.
 `worldName, currency ('₳'), currencyName, parliamentSeats (150), time { turn, date, unit
 (hour|day|week), perTurn, auto { enabled, seconds, lastTick } }, registration { open,
 defaultRole, stipend }, newsThresholds { transaction }, demographics, taxation { enabled,
+pitEnabled (income tax on the population), pitBrackets [{upTo ₳/person/month, rate}],
 corporateRate, propertyRate, vatRate, gamblingRate }, newspapers [4 fixed papers],
 newspaperRouting { Category: paperId }, music { library, playlists, activePlaylist,
 allowedPlaylists, lockPlaylist, forcedTrack, volume }, entertainment { venues: [casino|
-lottery…] }, economy { baseDailyWage, wageHappinessK, wageEmploymentK, dailyVariance?,
-happinessOutputK?, happinessConfK?, dayTickMs? }, trade { partners, govBuyPrices, govBuy,
+lottery…] }, economy { dailyVariance?, happinessOutputK?, domesticMultiplier?,
+expensesMultiplier?, dayTickMs?, x100Mult?, x100LockSec?, and the national economy's
+groupRoles, referenceGroup, ladder, urbanize, jobsPerEmployee, dependentStipend,
+dependentGroups + the tunables in economy.js DEF }, trade { partners, govBuyPrices, govBuy,
 exports, imports, lastFlows, lastExportFill, stockIn, history }, map { countries [{id, name,
 entityId, fill, shape}], labels, roads, rails, lights, land? }, mapDecor, election { durationTurns (14), deviationPct (12), supportToVotes
 (2500), campaigns: [{ id, name, description, moneyCost, itemCosts: [{itemId, qty,

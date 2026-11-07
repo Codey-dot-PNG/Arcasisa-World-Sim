@@ -105,7 +105,7 @@ const MapEdit = {
           }
         }, label));
       }
-      if (this.selLight) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSelLight() }, '🗑 Delete light'));
+      if (this.selLight) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSelLight() }, ico('trash'), ' Delete light'));
     } else if (this.mode === 'roads' || this.mode === 'rails') {
       const noun = this.mode === 'roads' ? 'road' : 'railway';
       if (this.drawing) {
@@ -114,7 +114,7 @@ const MapEdit = {
         bar.appendChild(el('button.chip', { onclick: () => { this.drawing = null; GameMap.render(); } }, '✕ Cancel'));
       } else {
         bar.appendChild(el('button.chip', { onclick: () => { this.drawing = { pts: [] }; this.sel = null; GameMap.render(); } }, '+ Draw ' + noun));
-        if (this.sel) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSel() }, '🗑 Delete ' + noun));
+        if (this.sel) bar.appendChild(el('button.chip', { style: 'color:var(--accent);', onclick: () => this.deleteSel() }, ico('trash'), ' Delete ' + noun));
       }
     }
     bar.appendChild(el('button.chip', { onclick: () => this.toggle(false) }, 'Done'));

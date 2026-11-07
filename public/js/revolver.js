@@ -789,7 +789,7 @@ void main(){
       ((r.deaths || {}).accidentList || []).length ? sec('Accidents at their sites', el('ul.ob-list', r.deaths.accidentList.map(a => el('li', `${a.title} — ${a.deaths} dead (turn ${a.turn})`)))) : null,
       Object.keys((r.actions || {}).byType || {}).length ? sec('What they did', el('div.ob-chips', Object.entries(r.actions.byType).sort((a, b) => b[1] - a[1]).map(([k, n]) => el('span', (TYPE[k] || k) + ' · ' + n)))) : null,
       ((r.actions || {}).recent || []).length ? sec('Their last acts', el('ol.ob-acts', r.actions.recent.map(a => el('li', el('span.ob-when', 'T' + a.turn), el('span', a.title + (a.detail ? ' — ' + a.detail : '')))))) : null,
-      el('div.ob-end', '✝'),
+      el('div.ob-end', '†'),
       el('button.ob-out', { type: 'button', onclick: async () => { try { await POST('/api/auth/logout'); } catch (e) { } location.reload(); } }, 'Leave'));
     page.appendChild(doc);
     requestAnimationFrame(() => doc.classList.add('in'));

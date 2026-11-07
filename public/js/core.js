@@ -289,6 +289,86 @@ const KIND_GLYPH = { factory: 'F', office: 'O', bank: 'B', house: 'H', mine: 'M'
 const ICON_MANIFEST = ['airport', 'factory', 'port', 'military', 'mine', 'farm', 'bank', 'government', 'university', 'rail-station', 'radio-mast', 'star'];
 const iconHref = (name) => '/assets/icons/' + name + '.svg';
 
+// UI icons — the interface's own pictograms, drawn in the same hand as the
+// map icons above (24×24, solid, currentColor) and inlined so each takes the
+// colour and size of the text it sits in. They stand where colour emoji used
+// to: an emoji renders in the device's emoji font, in its own colours, and
+// looks different on every platform — never in the paper-and-ink palette.
+// ico(name) for HTML (el() children, toasts, labels, buttons); icoG() for
+// drawing the same glyph inside an svg (map labels, war badges).
+const ICO_LINE = ' fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+const UI_ICONS = {
+  warn: '<path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/>',
+  gear: '<path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.09.63-.09.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/>',
+  brush: '<path d="M7 14c-1.66 0-3 1.34-3 3 0 1.31-1.16 2-2 2 .92 1.22 2.49 2 4 2 2.21 0 4-1.79 4-4 0-1.66-1.34-3-3-3zm13.71-9.37l-1.34-1.34c-.39-.39-1.02-.39-1.41 0L9 12.25 11.75 15l8.96-8.96c.39-.39.39-1.02 0-1.41z"/>',
+  hand: '<path d="M23 5.5V20c0 2.2-1.8 4-4 4h-7.3c-1.08 0-2.1-.43-2.85-1.19L1 14.83s1.26-1.23 1.3-1.25c.22-.19.49-.29.79-.29.22 0 .42.06.6.16.04.01 4.31 2.46 4.31 2.46V4c0-.83.67-1.5 1.5-1.5S11 3.17 11 4v7h1V1.5c0-.83.67-1.5 1.5-1.5S15 .67 15 1.5V11h1V2.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5V11h1V5.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5z"/>',
+  dove: '<path d="M21.5 6.2l-2.3-.9C18.4 4 16.6 3.6 15.3 4.6c-1 .8-1.4 2-1.4 3.2L9 3C8.4 6 9 8.7 10.6 10.6L4 9c.6 3 2.7 5.3 5.6 6l-3.1 3.2L2 19.4c3 1.6 6.6 1.3 9.3-.6l2.4 2.9.9-3.4c2.7-1.6 4.4-4.5 4.4-7.7V7.3z"/>',
+  megaphone: '<path d="M3 9v6h4l6 4V5L7 9H3z"/><path d="M16.5 8.5a5 5 0 0 1 0 7M19.2 6a8.6 8.6 0 0 1 0 12"' + ICO_LINE + '/>',
+  ticket: '<path d="M22 10V6c0-1.11-.9-2-2-2H4c-1.1 0-1.99.89-1.99 2v4c1.1 0 1.99.9 1.99 2s-.89 2-2 2v4c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-4c-1.1 0-2-.9-2-2s.9-2 2-2zm-9 7.5h-2v-2h2v2zm0-4.5h-2v-2h2v2zm0-4.5h-2v-2h2v2z"/>',
+  bolt: '<path d="M7 2v11h3v9l7-12h-4l4-8z"/>',
+  search: '<path d="M15.5 14h-.79l-.28-.27C15.41 12.59 16 11.11 16 9.5 16 5.91 13.09 3 9.5 3S3 5.91 3 9.5 5.91 16 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/>',
+  worker: '<path d="M6 9.5a6 6 0 0 1 12 0z"/><rect x="4" y="9.5" width="16" height="2" rx="1"/><path d="M8.5 12.8a3.5 3.5 0 0 0 7 0z"/><path d="M4 22c0-3.6 3.6-5.8 8-5.8s8 2.2 8 5.8z"/>',
+  radiation: '<path d="M7 3.34A10 10 0 0 1 17 3.34L13.8 8.88A3.6 3.6 0 0 0 10.2 8.88ZM22 12A10 10 0 0 1 17 20.66L13.8 15.12A3.6 3.6 0 0 0 15.6 12ZM7 20.66A10 10 0 0 1 2 12L8.4 12A3.6 3.6 0 0 0 10.2 15.12Z"/><circle cx="12" cy="12" r="2.2"/>',
+  burst: '<path d="M12 0.8L13.99 7.2L19.92 4.08L16.8 10.01L23.2 12L16.8 13.99L19.92 19.92L13.99 16.8L12 23.2L10.01 16.8L4.08 19.92L7.2 13.99L0.8 12L7.2 10.01L4.08 4.08L10.01 7.2Z"/>',
+  fire: '<path d="M13.5.67s.74 2.65.74 4.8c0 2.06-1.35 3.73-3.41 3.73-2.07 0-3.63-1.67-3.63-3.73l.03-.36C5.21 7.51 4 10.62 4 14c0 4.42 3.58 8 8 8s8-3.58 8-8C20 8.61 17.41 3.8 13.5.67zM11.71 19c-1.78 0-3.22-1.4-3.22-3.14 0-1.62 1.05-2.76 2.81-3.12 1.77-.36 3.6-1.21 4.62-2.58.39 1.29.59 2.65.59 4.04 0 2.65-2.15 4.8-4.8 4.8z"/>',
+  flood: '<path d="M2 7c2.5-2 4.5-2 7 0s4.5 2 7 0 4.5-2 6 0M2 12.5c2.5-2 4.5-2 7 0s4.5 2 7 0 4.5-2 6 0M2 18c2.5-2 4.5-2 7 0s4.5 2 7 0 4.5-2 6 0"' + ICO_LINE + '/>',
+  quake: '<path d="M2 12h4l2.5-7 3.5 14 3-10 2 5 1.5-2H22"' + ICO_LINE + '/>',
+  storm: '<circle cx="12" cy="12" r="3.6"' + ICO_LINE + ' stroke-width="2.4"/><path d="M12 8.4C12 4.6 15.4 2.4 20 3.6M12 15.6c0 3.8-3.4 6-8 4.8"' + ICO_LINE + ' stroke-width="2.4"/>',
+  volcano: '<path d="M1.5 21.5l6.5-9.5h2.2l1.8 1.8 1.8-1.8H16l6.5 9.5z"/><circle cx="10.3" cy="7" r="2.1"/><circle cx="14.2" cy="4.6" r="2.6"/><circle cx="12.6" cy="9.4" r="1.5"/>',
+  toxic: '<path d="M6.5 15.5a4.5 4.5 0 0 1-.6-8.96A6.5 6.5 0 0 1 18.3 7.1a4.2 4.2 0 0 1-.3 8.4z"/><circle cx="7.5" cy="19.6" r="1.5"/><circle cx="12" cy="21" r="1.5"/><circle cx="16.5" cy="19.6" r="1.5"/>',
+  pin: '<path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>',
+  person: '<path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>',
+  swords: '<g transform="rotate(45 12 12)"><path d="M10.7 3.6L12 1.2l1.3 2.4V14.8h-2.6z"/><path d="M7.4 14.8h9.2v2.1H7.4zM10.9 16.9h2.2v3.9h-2.2z"/><circle cx="12" cy="22" r="1.6"/></g><g transform="rotate(-45 12 12)"><path d="M10.7 3.6L12 1.2l1.3 2.4V14.8h-2.6z"/><path d="M7.4 14.8h9.2v2.1H7.4zM10.9 16.9h2.2v3.9h-2.2z"/><circle cx="12" cy="22" r="1.6"/></g>',
+  tools: '<g transform="rotate(42 12 12)"><path d="M11 7.5h2V22h-2z"/><path d="M7.5 2.5h9v5h-9z"/></g><g transform="rotate(-42 12 12)"><path d="M11 6h2V22h-2z"/><path d="M3.5 7C7 3.4 17 3.4 20.5 7l-1.2 1.4C15.8 5.7 8.2 5.7 4.7 8.4z"/></g>',
+  plane: '<path d="M21 16v-2l-8-5V3.5c0-.83-.67-1.5-1.5-1.5S10 2.67 10 3.5V9l-8 5v2l8-2.5V19l-2 1.5V22l3.5-1 3.5 1v-1.5L13 19v-5.5l8 2.5z"/>',
+  fuel: '<path d="M5 3h8a1 1 0 0 1 1 1v17H4V4a1 1 0 0 1 1-1zm1 2v5h6V5z" fill-rule="evenodd"/><path d="M14 10.5h1.6a1 1 0 0 1 1 1V18a1.6 1.6 0 0 0 3.2 0V8.4L17.2 5.8"' + ICO_LINE + ' stroke-width="1.8"/>',
+  trash: '<path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z"/>',
+  play: '<path d="M8 5v14l11-7z"/>',
+  pause: '<path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/>',
+  next: '<path d="M6 18l8.5-6L6 6v12zM16 6v12h2V6h-2z"/>',
+  lock: '<path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zm3.1-9H8.9V6c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2z"/>',
+  unlock: '<path d="M12 17c1.1 0 2-.9 2-2s-.9-2-2-2-2 .9-2 2 .9 2 2 2zm6-9h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6h1.9c0-1.71 1.39-3.1 3.1-3.1 1.71 0 3.1 1.39 3.1 3.1v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm0 12H6V10h12v10z"/>',
+  hourglass: '<path d="M6 2h12v2h-1v3.5L13.5 12l3.5 4.5V20h1v2H6v-2h1v-3.5l3.5-4.5L7 7.5V4H6z"/>',
+  ruler: '<path d="M21 6H3c-1.1 0-2 .9-2 2v8c0 1.1.9 2 2 2h18c1.1 0 2-.9 2-2V8c0-1.1-.9-2-2-2zm0 10H3V8h2v4h2V8h2v4h2V8h2v4h2V8h2v4h2V8h2v8z"/>',
+  plus: '<path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/>',
+  helmet: '<path d="M3.5 14.5a8.5 8.5 0 0 1 17 0V16h2v2.5h-21V16h2z"/><path d="M7 19.6c1.6 2 8.4 2 10 0"' + ICO_LINE + ' stroke-width="1.6"/>',
+  peace: '<circle cx="12" cy="12" r="9"' + ICO_LINE + '/><path d="M12 3v18M12 12l-6.36 6.36M12 12l6.36 6.36"' + ICO_LINE + '/>',
+  flag: '<path d="M14.4 6L14 4H5v17h2v-7h5.6l.4 2h7V6z"/>',
+  pen: '<path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zM20.71 7.04c.39-.39.39-1.02 0-1.41l-2.34-2.34c-.39-.39-1.02-.39-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/>',
+  undo: '<path d="M12.5 8c-2.65 0-5.05.99-6.9 2.6L2 7v9h9l-3.62-3.62c1.39-1.16 3.16-1.88 5.12-1.88 3.54 0 6.55 2.31 7.6 5.5l2.37-.78C21.08 11.03 17.15 8 12.5 8z"/>',
+  spade: '<path d="M12 2C9 6 3 9.5 3 14a4.5 4.5 0 0 0 7.6 3.3L9.5 22h5l-1.1-4.7A4.5 4.5 0 0 0 21 14c0-4.5-6-8-9-12z"/>',
+  heart: '<path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/>',
+  diamond: '<path d="M12 2l8 10-8 10-8-10z"/>',
+  club: '<circle cx="12" cy="7" r="4.3"/><circle cx="6.8" cy="14" r="4.3"/><circle cx="17.2" cy="14" r="4.3"/><path d="M11 12h2l1.6 10H9.4z"/>'
+};
+function ico(name, cls) {
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', '0 0 24 24');
+  svg.setAttribute('class', 'ico' + (cls ? ' ' + cls : ''));
+  svg.setAttribute('fill', 'currentColor');
+  svg.setAttribute('aria-hidden', 'true');
+  svg.innerHTML = UI_ICONS[name] || '';
+  return svg;
+}
+// a war or a protest, by its emblem (crossed swords · hammer and pick)
+const conflictIco = (kind) => ico(kind === 'protest' ? 'tools' : 'swords');
+// An authored icon field (item chips, map markers) as text: a letter or
+// symbol stays as typed; an emoji falls back (it would render in colour).
+const EMOJI_RE = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}]/u;
+function glyphText(icon, fallback) {
+  return icon && !EMOJI_RE.test(icon) ? icon : fallback;
+}
+// The glyph as an svg <g>, `size` units square with its top-left at (x, y);
+// fills with currentColor, so give it a class that sets `color` (or a fill).
+function icoG(name, x, y, size, cls) {
+  const g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  g.setAttribute('transform', 'translate(' + x + ' ' + y + ') scale(' + (size / 24) + ')');
+  g.setAttribute('fill', 'currentColor');
+  if (cls) g.setAttribute('class', cls);
+  g.innerHTML = UI_ICONS[name] || '';
+  return g;
+}
+
 /* ---------- optimistic outbox ----------
    The war layer's optimistic-order outbox (docs/WAR.md "Client-side
    prediction"), generalised: an action paints its EXPECTED result into
@@ -411,7 +491,7 @@ async function connectStream() {
         'font-size:11px; letter-spacing:.06em; display:flex; gap:14px; align-items:center;' +
         'box-shadow:0 2px 8px rgba(0,0,0,.35);'
     },
-      el('span', '⚠ NO DATABASE — THE WORLD RESETS ON EVERY REDEPLOY. Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (see DEPLOY.md), or export the world regularly.'),
+      el('span', ico('warn'), ' NO DATABASE — THE WORLD RESETS ON EVERY REDEPLOY. Set SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY (see DEPLOY.md), or export the world regularly.'),
       el('button', { style: 'background:none; border:1px solid #f5eede; color:#f5eede; cursor:pointer; padding:2px 8px; font-family:inherit;', onclick: () => banner.remove() }, 'DISMISS'));
     document.body.appendChild(banner);
   }
@@ -798,20 +878,21 @@ const Notify = {
     const seen = Number(localStorage.getItem(this._key()));
     if (!Number.isFinite(seen) || !seen) { localStorage.setItem(this._key(), String(newest || 1)); return; }
     const fresh = rows.filter(t => (t.ts || 0) > seen && t.actor !== W.me.displayName);
-    for (const t of fresh.slice(-3)) toast('📣 ' + t.title);
+    for (const t of fresh.slice(-3)) toast([ico('megaphone'), ' ' + t.title]);
     if (newest > seen) localStorage.setItem(this._key(), String(newest));
   }
 };
 
 /* ---------- ticker ---------- */
-const TICK_GLYPH = { economy: '₳', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', system: '⚙', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
+const TICK_ICON = { system: 'gear' };
+const TICK_GLYPH = { economy: '₳', news: '¶', politics: '⚑', election: '⚑', ownership: '⇄', simulation: '∴', time: '◔', market: '％', inventory: '▣', gm: '✎', event: '∴', error: '!' };
 function renderTicker() {
   const track = document.getElementById('ticker-track');
   clear(track);
   const items = (S().timeline || []).slice(-14).reverse();
   for (const t of items) {
     track.appendChild(el('span.tick-item', { onclick: () => { if (can('timeline')) App.go('timeline'); }, title: (t.detail || '') },
-      el('span.tt', TICK_GLYPH[t.type] || '·'),
+      el('span.tt', TICK_ICON[t.type] ? ico(TICK_ICON[t.type]) : (TICK_GLYPH[t.type] || '·')),
       el('span', `T${t.turn}`),
       el('span', t.title)
     ));

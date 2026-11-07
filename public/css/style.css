@@ -123,6 +123,10 @@ button, .tab, .swatch, .chip, .exp-item, .gm-nav-item{touch-action:manipulation;
   font-size:14px; cursor:pointer; padding:4px 8px; line-height:1;
 }
 .icon-btn:hover{color:var(--accent); border-color:var(--rule);}
+/* UI icons (core.js ico()) — inline glyphs that take the text's colour and
+   size, set on the baseline like a letter */
+.ico{width:1.1em; height:1.1em; vertical-align:-.17em; flex-shrink:0; overflow:visible;}
+.icon-btn > .ico{vertical-align:-.12em;}
 .btn-row{display:flex; gap:10px; flex-wrap:wrap; margin-top:14px; align-items:center;}
 
 .text-input, select.text-input, textarea.text-input{

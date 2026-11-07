@@ -237,7 +237,7 @@
       const commands = side === 'att' ? ca.att : ca.def;
       const leads = side === 'att' ? ca.attLead : ca.defAll;
       const view = (window.WarEngine && this.predictedDoc && this.predictedDoc(doc)) || doc;
-      inner.appendChild(Views.secLabel((doc.kind === 'protest' ? '⚒ ' : '⚔ ') + doc.name + ' — in the field'));
+      inner.appendChild(Views.secLabel([conflictIco(doc.kind), ' ' + doc.name + ' — in the field']));
       // strength over time (public)
       const ser = doc.series || [];
       if (ser.length >= 2) {
@@ -348,7 +348,7 @@
     },
     // the public picture for an operator with no arsenal on file
     _milPublicConflict(inner, doc) {
-      inner.appendChild(Views.secLabel((doc.kind === 'protest' ? '⚒ ' : '⚔ ') + doc.name));
+      inner.appendChild(Views.secLabel([conflictIco(doc.kind), ' ' + doc.name]));
       const sides = ['att', 'def'].map(s => {
         const us = (doc.units || []).filter(u => live(u) && u.side === s);
         return [entName(this._milPrincipal(doc, s)), us.length, us.reduce((a, u) => a + u.strength, 0)];

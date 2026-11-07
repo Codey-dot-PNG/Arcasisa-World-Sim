@@ -1426,7 +1426,7 @@ function migrate(world) {
   if (!world._aircraftSeeded && Array.isArray(world.items)) {
     if (!world.items.some(i => i.id === 'item_aircraft_f55')) {
       world.items.push({
-        id: 'item_aircraft_f55', icon: '✈', name: 'F55 Fighter Aircraft',
+        id: 'item_aircraft_f55', icon: 'P', name: 'F55 Fighter Aircraft',
         category: 'Military', tradable: true, marketValue: 1200000,
         meta: { weapon: { kind: 'aircraft', model: 'F55', dmg: 0.42, hp: 0.38, speed: 0.82, range: 0.62 }, originId: null },
         description: 'Arcasian F55 tactical fighter. Each serviceable aircraft can carry one battlefield airstrike.'
@@ -2183,6 +2183,89 @@ function migrate(world) {
     } catch (e) { /* economy unavailable during early boot — retried next load */ }
   }
 
+  // ---- Economy settings a canon reset wiped (flag world._econKeysRestored1) --
+  // canon.apply used to swap a kept `settings.economy` in whole. A canon kept
+  // on an older engine (before economy v2, the wage anchor or the GDP level)
+  // reset the world onto an economy object without what migrate had just put
+  // there — the GDP level, the wage scale, group roles, the class ladder —
+  // and the flags that put them there were already set, so nothing put them
+  // back: GDP read ₳107–115B (the wage bill ÷ labour share), the going wage
+  // ₳1, and students and retirees counted as workers. Restore the missing
+  // keys from a freshly migrated seed (a key the world has is never touched)
+  // and let the national economy recalibrate on its next turn on the restored
+  // settings — GDP is back at its level on that turn.
+  if (!world._econKeysRestored1 && !restoringEconKeys) {
+    const econ = world.settings.economy = world.settings.economy || {};
+    const keptEcon = Object.values((world.canon && world.canon.entries) || {}).some(e => e && e.kind === 'setting' && e.id === 'economy');
+    let done = true;
+    if (keptEcon && econ.gdpTarget === undefined) {
+      restoringEconKeys = true;
+      try {
+        const ref = (require('./canon').freshSeed().settings || {}).economy || {};
+        const missing = Object.keys(ref).filter(k => econ[k] === undefined);
+        for (const k of missing) econ[k] = JSON.parse(JSON.stringify(ref[k]));
+        if (missing.length) {
+          // turns played on the wiped settings recorded GDP on the wrong
+          // level: put the record (and the figures the next turn re-levels
+          // from) on the GDP level, so the charts show no spike
+          const gdpNow = Number(world.globalVars && world.globalVars.gdp) || 0;
+          if (world.econ && gdpNow > 0 && Number(econ.gdpTarget) > 0) {
+            scaleGdpRecord(world, Number(econ.gdpTarget) / gdpNow, (h) => h.turn >= 1, true);
+          }
+          delete world.econ;
+          for (const p of (world.provinces || [])) delete p.econ;
+          for (const it of (world.items || [])) if (it.meta) { delete it.meta.demand; delete it.meta._lastPrice; }
+        }
+      } catch (e) { done = false; /* seed unavailable during early boot — retried next load */ }
+      finally { restoringEconKeys = false; }
+    }
+    if (done) { world._econKeysRestored1 = true; changed = true; }
+  }
+
+  // ---- The authored GDP record on the GDP level (flag world._gdpSeedLevel1) --
+  // The seed authored GDP at ₳13B (turn 0, and a 1958–59 history rising
+  // ₳11B → ₳13.5B), but the national economy sets it to the GDP level
+  // (settings.economy.gdpTarget) on its first turn — so the record fell off a
+  // cliff into turn 1 and turn 0 read a third of turn 1. Put the authored
+  // record on the level: the pre-game history (turns before 1) keeps its
+  // shape and its last month reads the level, and a world whose economy has
+  // not run yet reads the level now (each province keeping its share).
+  if (!world._gdpSeedLevel1) {
+    const target = Number((world.settings.economy || {}).gdpTarget) || 0;
+    if (target > 0) {
+      const pre = (world.history || []).filter(h => h.turn < 1 && h.gdp > 0);
+      const last = pre.reduce((a, h) => (!a || h.turn > a.turn ? h : a), null);
+      if (last) scaleGdpRecord(world, target / last.gdp, (h) => h.turn < 1, false);
+      const now = (world.provinces || []).reduce((t, p) => t + ((p.vars && Number(p.vars.gdp)) || 0), 0);
+      if (!world.econ && now > 0) {
+        scaleGdpRecord(world, target / now, () => false, true);
+        if (world.globalVars) world.globalVars.gdp = target;
+      }
+    }
+    world._gdpSeedLevel1 = true;
+    changed = true;
+  }
+
+  // ---- Icon fields without emoji (flag world._iconGlyphs1) ------------------
+  // Items and map markers carry an authored glyph (a letter or symbol, or a
+  // map icon name). A few carried emoji (the F55 fighter's plane, the GM
+  // presets' plane and oil drum), which render in the device's colour emoji
+  // font instead of the interface's ink. Letters take their place: an item
+  // gets its own (P for aircraft, F for fuel, else its name's first letter),
+  // a marker the default ◈. The client falls back the same way for an emoji
+  // typed in later (core.js glyphText).
+  if (!world._iconGlyphs1) {
+    const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}]/u;
+    const LETTER = { '✈': 'P', '🛢': 'F' };
+    for (const it of (world.items || [])) {
+      if (typeof it.icon !== 'string' || !EMOJI.test(it.icon)) continue;
+      it.icon = LETTER[it.icon] || (String(it.name || '?').trim()[0] || '?').toUpperCase();
+    }
+    for (const m of (world.markers || [])) if (typeof m.icon === 'string' && EMOJI.test(m.icon)) m.icon = '◈';
+    world._iconGlyphs1 = true;
+    changed = true;
+  }
+
   // ---- Polling starts where Parliament stands (flag world._pollAppeal1) ----
   // Party scores now count negative regional standing (a regional party no
   // longer polls nationally) and carry an `appeal` term. Calibrate appeal
@@ -2232,6 +2315,26 @@ const fromTxRow = (r) => ({ id: r.id, ts: Number(r.ts), turn: r.turn, simDate: r
 // The world doc stored in Postgres excludes the two append-only logs.
 function coreDoc() {
   return { ...db, timeline: [], transactions: [] };
+}
+
+// migrate() → the economy-keys repair builds a fresh seed, which migrates too;
+// this keeps that nested pass from starting a repair of its own
+let restoringEconKeys = false;
+
+// Scale a world's GDP figures by r: the history rows `rowFilter` picks (GDP,
+// real GDP, per-province GDP) and — with `current` — the live figures too
+// (province gdp vars, the national GDP and its month-ago reference).
+function scaleGdpRecord(world, r, rowFilter, current) {
+  if (!(r > 0) || !Number.isFinite(r) || Math.abs(r - 1) < 1e-9) return;
+  const sc = (o, keys) => { for (const k of keys) if (o && typeof o[k] === 'number') o[k] = Math.round(o[k] * r * 100) / 100; };
+  for (const h of (world.history || [])) {
+    if (!rowFilter(h)) continue;
+    sc(h, ['gdp', 'gdpReal']);
+    for (const pid in (h.provinces || {})) sc(h.provinces[pid], ['gdp']);
+  }
+  if (!current) return;
+  for (const p of (world.provinces || [])) sc(p.vars, ['gdp', 'gdpReal']);
+  sc(world.globalVars, ['gdp', 'gdpReal', 'gdpLastMonth']);
 }
 
 /* ---------- lifecycle ---------- */

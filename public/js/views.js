@@ -112,7 +112,7 @@ const Views = {
     if (it.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(it.icon)) {
       return el('span.item-chip', el('img', { src: iconHref(it.icon), alt: it.icon, style: 'width:18px; height:18px;' }));
     }
-    return el('span.item-chip', it.icon || (it.name || '?')[0].toUpperCase());
+    return el('span.item-chip', glyphText(it.icon, (it.name || '?')[0].toUpperCase()));
   },
   inventoryTable(inv, ownerEntId) {
     if (!inv || !inv.length) return el('div', { style: 'color:var(--ink-faint); font-size:12px;' }, 'Empty.');
@@ -622,7 +622,7 @@ const Views = {
       wrap.appendChild(el('div.btn-row', { style: 'margin-top:8px;' },
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'deposit') }, '▼ Deposit Items'),
         el('button.outline-btn', { onclick: () => this.propertyItemModal(pr, 'withdraw') }, '▲ Withdraw Items'),
-        el('button.solid-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Run this site')));
+        el('button.solid-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); App.renderView(); } }, ico('gear'), ' Run this site')));
     }
     wrap.appendChild(this.secLabel('Recent Activity'));
     wrap.appendChild(this.activityFor(id));
@@ -789,7 +789,7 @@ const Views = {
     if (!it) return el('div', 'Not on file.');
     const wrap = el('div');
     wrap.appendChild(el('div', { style: 'display:flex; align-items:center; gap:10px;' },
-      el('span.item-chip.item-chip-lg', it.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(it.icon) ? el('img', { src: iconHref(it.icon), alt: '', style: 'width:26px; height:26px;' }) : (it.icon || (it.name || '?')[0].toUpperCase())),
+      el('span.item-chip.item-chip-lg', it.icon && typeof ICON_MANIFEST !== 'undefined' && ICON_MANIFEST.includes(it.icon) ? el('img', { src: iconHref(it.icon), alt: '', style: 'width:26px; height:26px;' }) : glyphText(it.icon, (it.name || '?')[0].toUpperCase())),
       el('div.insp-title', { style: 'margin:0;' }, it.name)));
     wrap.appendChild(el('div.insp-sub', it.category + (it.tradable ? ' · tradable' : ' · restricted')));
     if (it.description) wrap.appendChild(el('div.insp-desc', it.description));
@@ -828,7 +828,7 @@ const Views = {
 
   markerEditor(m) {
     const title = el('input.text-input', { value: m.title || '' });
-    const icon = el('input.text-input', { value: m.icon || '◈', placeholder: 'emoji or symbol' });
+    const icon = el('input.text-input', { value: m.icon || '◈', placeholder: 'a letter or symbol' });
     const desc = el('textarea.text-input', { style: 'min-height:120px;' }, m.description || '');
     openModal('MAP MARKER', el('div',
       el('label.field-label', 'Title'), title,
@@ -1431,7 +1431,7 @@ const Views = {
       const provTotal = Object.values(provCount).reduce((s, v) => s + v, 0);
       const top3 = parties.map(pt => ({ abbrev: pt.abbrev, color: pt.color, votes: provCount[pt.id] || 0 }))
         .sort((a, b) => b.votes - a.votes).slice(0, 3);
-      const status = done ? '✓ REPORTED' : prog > 0 ? '⏳ COUNTING' : '◌ WAITING';
+      const status = done ? '✓ REPORTED' : prog > 0 ? [ico('hourglass'), ' COUNTING'] : '◌ WAITING';
       const statusColor = done ? 'var(--accent)' : prog > 0 ? 'var(--ink-soft)' : 'var(--ink-faint)';
       provList.appendChild(el('div', { style: 'display:flex; gap:12px; align-items:center; padding:8px; border:1px solid var(--rule-faint);' + (prog > 0 && !done ? ' background:var(--paper-tint);' : '') },
         el('div', { style: 'min-width:130px;' },
@@ -1460,7 +1460,7 @@ const Views = {
 
     if (isGM()) {
       inner.appendChild(el('div.btn-row',
-        el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } }}, '⚡ Advance Count'),
+        el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } }}, ico('bolt'), ' Advance Count'),
         el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('gm'); App.renderView(); }}, 'Election Commission → GM Studio')));
     }
   },
@@ -1835,7 +1835,7 @@ const Views = {
     }
     const draft = { keepPct: keep, wagePerTurn: wage };
     box.appendChild(el('div.form-grid',
-      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(draft, 'keepPct'), 'Kept stock trades on the open market or via trade offers'),
+      Forms.field('Keep in stock ⇄ Sell domestically', this.mixSlider(draft, 'keepPct'), 'Kept stock trades on the open market or via trade offers'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(draft, 'wagePerTurn', '0.01'), 'Payroll is added to every company property’s total expenses')));
     box.appendChild(el('div.btn-row', el('button.solid-btn', {
       onclick: async (ev) => {
@@ -1844,7 +1844,7 @@ const Views = {
         catch (err) { toast(err.message, true); b.disabled = false; }
       }
     }, 'Save Operations'),
-      el('button.dash-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = e.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); App.renderView(); } }, '⚙ Full Operations Desk')));
+      el('button.dash-btn', { onclick: () => { W.ecoTab = 'holdings'; W.holdSel = e.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); App.renderView(); } }, ico('gear'), ' Full Operations Desk')));
     return box;
   },
 
@@ -2006,7 +2006,7 @@ const Views = {
 
     inner.appendChild(this.secLabel('Operations'));
     inner.appendChild(el('div.form-grid',
-      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(dr, 'keepPct'),
+      Forms.field('Keep in stock ⇄ Sell domestically', this.mixSlider(dr, 'keepPct'),
         'The remainder is sold domestically. Kept goods accumulate at the site for later trade or withdrawal.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01')),
       Forms.field('Training spend / turn (' + CUR() + ')', Forms.num(dr, 'trainingSpend', '1'),
@@ -2265,7 +2265,7 @@ const Views = {
     return el('div',
       el('div.slider-row', input, readout),
       el('div', { style: 'display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:9px; color:var(--ink-faint); margin-top:-2px;' },
-        el('span', '◀ KEEP IN STOCK'), el('span', 'SELL DOMESTICALLY ▶')));
+        el('span', '◂ KEEP IN STOCK'), el('span', 'SELL DOMESTICALLY ▸')));
   },
   // Client mirror of the engine's workforce multiplier (sim.js runEconomy,
   // Phase 28/28b): hours/8 × safety × staffing fulfilment × upgrade. The live
@@ -2864,7 +2864,7 @@ const Views = {
     // green span left of the thumb is sold domestically, the neutral span
     // right of it is kept as stock. Slider value = domestic share.
     inner.appendChild(el('div.form-grid',
-      Forms.field('Keep in stock ↔ Sell domestically', this.mixSlider(dr, 'keepPct'),
+      Forms.field('Keep in stock ⇄ Sell domestically', this.mixSlider(dr, 'keepPct'),
         'Kept stock piles up on your sites — sell it abroad on the open market (Economy → Markets → International trade) or to anyone via trade offers.'),
       Forms.field('Wage / employee / turn (' + CUR() + ')', Forms.num(dr, 'wagePerTurn', '0.01'), 'Payroll is added to upkeep for every property owned by this company')));
 
@@ -3252,7 +3252,7 @@ const Views = {
     if (S().globalVars && S().globalVars.bankCrisis) {
       const sev = Math.round((S().globalVars.bankCrisisSeverity || 0) * 100);
       inner.appendChild(el('div', { style: 'margin:6px 0 4px; padding:10px 14px; border:1px solid var(--accent); background:rgba(150,40,40,.10); font-family:var(--font-mono); font-size:11.5px; letter-spacing:.03em; color:var(--accent);' },
-        '⚠ ECONOMIC CRISIS — THE BANK OF ARCASIA RESERVE IS EXHAUSTED (SEVERITY ' + sev + '%). Confidence, employment and happiness are falling each turn until the reserve is recapitalised.'));
+        ico('warn'), ' ECONOMIC CRISIS — THE BANK OF ARCASIA RESERVE IS EXHAUSTED (SEVERITY ' + sev + '%). Confidence, employment and happiness are falling each turn until the reserve is recapitalised.'));
     }
 
     const tab = (k, label, badge) => el('button.chip', { class: W.ecoTab === k ? 'active' : '', onclick: () => { W.ecoTab = k; App.renderView(); } },
@@ -4698,7 +4698,7 @@ const Views = {
               toast('Your sources deliver: “' + r.article.headline + '” — filed to drafts.');
             } catch (err) { toast(err.message, true); b.disabled = false; }
           }
-        }, '🔎 Investigate'));
+        }, ico('search'), ' Investigate'));
       inner.appendChild(tabs);
     } else if ((perms().manageNews || isGmUser) && !isGmUser) {
       inner.appendChild(el('div', { style: 'font-family:var(--font-mono); font-size:10px; letter-spacing:.08em; color:var(--ink-faint); margin:4px 0 10px;' },

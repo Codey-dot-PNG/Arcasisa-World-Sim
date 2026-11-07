@@ -314,6 +314,16 @@ entities that are not in the new world (reported in `lastApplied.skipped`). Valu
 meaning (object key order and the order of simple lists are ignored — cloud exports come back
 from Postgres reordered).
 
+**Settings merge, they are not swapped in.** A kept setting is merged onto the new world's:
+plain objects key by key (all the way down), lists and values replaced. A key the canon does
+not name keeps what seed + migrate gave it, so a setting kept on an older engine cannot erase
+what the engine has added since. (Until this rule a kept `economy` replaced the whole object:
+a canon kept before economy v2 reset worlds without the GDP level, wage scale, group roles and
+class ladder — GDP read ₳107–115B, the going wage ₳1. `store.migrate` flag
+`world._econKeysRestored1` repairs such worlds once from a freshly migrated seed.)
+`economy.wageScale` is bookkeeping for the scale a world is on, never taken from the canon:
+the new world keeps its own and `economy.applyWageAnchor` then moves it to the kept anchor.
+
 ## Schema history (migration gates in store.migrate)
 
 - **< 2:** removed Kordistan foreign power, population ×2.79 / GDP ×2.686 rescale, Valen no
@@ -352,5 +362,14 @@ from Postgres reordered).
   `military_base` — are ordinary properties and where every air force flies from. A conflict doc's `war.air` (squadrons mirrored from the aircraft
   stock, bases, fuel) is built by `server/war.js` `syncAirWings` on the next tick of any
   war or protest — no migration needed (docs/WAR.md "The air force").
+- **The national economy's GDP level (no schema bump):** `_gdpLevel1` (seeds
+  `settings.economy.gdpTarget` 36,000), `_wageAnchor1` (the wage scale pegged to grain),
+  `_econKeysRestored1` (a world reset under a canon that wiped its economy settings gets the
+  missing keys back from a freshly migrated seed, its played GDP record on the level, and a
+  recalibration — docs above, "Settings merge"), `_gdpSeedLevel1` (the authored pre-game GDP
+  history and a not-yet-run world's turn-0 GDP put on the level, so the record has no cliff).
+- **Icon fields without emoji (no schema bump):** `_iconGlyphs1` — item icons that were emoji
+  become letters (✈ → P, 🛢 → F, else the name's initial), marker icons ◈. The F55 fighter
+  is now seeded with `P`.
 - Plus many ungated idempotent fixes (currency rename, newspapers, music defaults, casino
   owner self-heal, certificate/deed reconciliation…). Follow the existing patterns when adding.

@@ -32,12 +32,6 @@
    overlay svg (GameMap.overSvg) as keyed nodes patched in place, tweened by
    one rAF loop that writes only what changed — see docs/WAR.md "Client". */
 
-const WAR_KIND_GLYPH = { marine: '⚓', infantry: '◆', armored: '▣', garrison: '⛊', reserve: '☰', boat: '⛵', warship: '🚢', protestor: '⚒', police: '⛨' };
-// Transport ships & Boats feature: a land unit whose state reads 'transport'
-// (drifting/stranded over water — see war-engine.js's stepTransportState)
-// renders with this glyph instead of its normal kind glyph, so a column
-// crossing a strait visibly becomes a little ship for the duration.
-const WAR_TRANSPORT_GLYPH = '⛴';
 // Fallback shown for the one render before the real list arrives (or if the
 // fetch fails) — see War._ensureScenarioList / GET /api/gm/war/scenarios,
 // which is the source of truth so this file doesn't have to hardcode every
@@ -421,7 +415,7 @@ const War = {
     if (this._rtTimer) { clearInterval(this._rtTimer); this._rtTimer = null; }
   },
   // Is the player actually LOOKING at the war right now? The battlefield
-  // only renders on the map's ⚔ War layer, and the War Room panel is the
+  // only renders on the map's War layer, and the War Room panel is the
   // only other reader of live tick data. Anywhere else, predicting ticks
   // burns CPU on a simulation nobody can see and the per-tick heartbeat
   // spams the network for state nothing renders — the war still advances
@@ -2343,11 +2337,11 @@ const War = {
     if (old) old.remove();
 
     const n = this._sel.size;
-    const hint = this._tool === 'ruler' ? '📏 Ruler — drag on the map to measure a distance and the time to cover it. A click clears it; Esc puts the ruler away.'
+    const hint = this._tool === 'ruler' ? [ico('ruler'), ' Ruler — drag on the map to measure a distance and the time to cover it. A click clears it; Esc puts the ruler away.']
       : this._tool === 'range' ? '◎ Range — drag out a circle to see what lies within reach. A click clears it; Esc puts the compass away.'
       : !live ? 'This conflict has concluded — the field can be reviewed but no longer commanded.'
-      : plan ? `✈ ${plan.kind === 'patrol' ? 'Patrol' : 'Strike'} — move over the map to see reach and time over the target, then click to send. Esc cancels.`
-        : this._spawnArmed ? '➕ Reinforcements armed — click where they should appear. Esc cancels.'
+      : plan ? [ico('plane'), ` ${plan.kind === 'patrol' ? 'Patrol' : 'Strike'} — move over the map to see reach and time over the target, then click to send. Esc cancels.`]
+        : this._spawnArmed ? [ico('plus'), ' Reinforcements armed — click where they should appear. Esc cancels.']
           : !side ? this.authorityText(war) + ' Click a unit for details.'
             : protest && !n ? (side === 'att'
               ? (this._tapOrders ? 'Tap your crowds' : 'Click your crowds (Shift adds)') + ' and march them to factories and offices — workplaces next to a crowd walk out at turn end.'
@@ -2361,8 +2355,8 @@ const War = {
     const row = el('div.war-toolbar-row');
     if (other) {
       row.appendChild(el('div.seg',
-        el('button', { class: key === 'war' ? 'active' : '', onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.refreshLayer(true); } }, '⚔ War'),
-        el('button', { class: key === 'protest' ? 'active' : '', onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.refreshLayer(true); } }, '⚒ Protest')));
+        el('button', { class: key === 'war' ? 'active' : '', onclick: () => { this._activeKey = 'war'; this._sel.clear(); this.refreshLayer(true); } }, conflictIco('war'), ' War'),
+        el('button', { class: key === 'protest' ? 'active' : '', onclick: () => { this._activeKey = 'protest'; this._sel.clear(); this.refreshLayer(true); } }, conflictIco('protest'), ' Protest')));
     }
     if (live && side) {
       row.appendChild(el('button.dash-btn.btn-xs', { onclick: () => this._selectAll() }, 'Select all'));
@@ -2380,7 +2374,7 @@ const War = {
       row.appendChild(el('button.btn-xs', {
         class: (W.warAirDock ? 'solid-btn active' : 'dash-btn') + ' war-air-btn', title: 'Your air wing: squadrons, fuel, patrols and strikes',
         onclick: () => { W.warAirDock = !W.warAirDock; if (!W.warAirDock) { this._airPlan = null; this._airPlanClear(); } this.renderAirDock(true); this.renderToolbar(); }
-      }, `✈ Air wing · ${airReady} ready` + (airAloft ? ` · ${airAloft} aloft` : '')));
+      }, ico('plane'), ` Air wing · ${airReady} ready` + (airAloft ? ` · ${airAloft} aloft` : '')));
     }
     if (protest && live) {
       // levers are named for what a click DOES; the solid style marks the
@@ -2391,17 +2385,17 @@ const War = {
       }
       if (ca.force) {
         const n = this._armyDeployed(war);
-        row.appendChild(el('button.btn-xs.dash-btn', { title: 'Call out the army: battalions join the security forces', onclick: () => this._armyModal(war) }, '🪖 Army' + (n ? ` · ${n}` : '')));
+        row.appendChild(el('button.btn-xs.dash-btn', { title: 'Call out the army: battalions join the security forces', onclick: () => this._armyModal(war) }, ico('helmet'), ' Army' + (n ? ` · ${n}` : '')));
       }
     }
-    if (isGM() && this._spawnArmed) row.appendChild(el('button.dash-btn.btn-xs.active', { onclick: () => { this._spawnArmed = false; this.renderToolbar(); } }, '➕ Placing — cancel'));
+    if (isGM() && this._spawnArmed) row.appendChild(el('button.dash-btn.btn-xs.active', { onclick: () => { this._spawnArmed = false; this.renderToolbar(); } }, ico('plus'), ' Placing — cancel'));
     if (isGM()) {
       row.appendChild(el('div.seg', { title: 'Which side your orders command' },
         el('button', { class: this._gmSide === 'def' ? 'active' : '', onclick: () => { this._gmSide = 'def'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Police' : 'Defence'),
         el('button', { class: this._gmSide === 'att' ? 'active' : '', onclick: () => { this._gmSide = 'att'; this._sel.clear(); this.refreshLayer(true); } }, protest ? 'Crowds' : 'Invader')));
     }
     row.appendChild(el('div.seg', { title: 'Measuring tools' },
-      el('button', { class: this._tool === 'ruler' ? 'active' : '', title: 'Ruler: distance, bearing and travel times', onclick: () => this.setTool('ruler') }, '📏 Ruler'),
+      el('button', { class: this._tool === 'ruler' ? 'active' : '', title: 'Ruler: distance, bearing and travel times', onclick: () => this.setTool('ruler') }, ico('ruler'), ' Ruler'),
       el('button', { class: this._tool === 'range' ? 'active' : '', title: 'Range compass: a circle and what lies inside it', onclick: () => this.setTool('range') }, '◎ Range')));
     row.appendChild(el('button.dash-btn.btn-xs', { title: 'How to command', onclick: () => this._helpModal() }, '?'));
     bar.appendChild(row);
@@ -2429,7 +2423,7 @@ const War = {
       Forms.field('Deploy to', chips),
       Forms.field('Battalions', Forms.sliderNum(d, 'count', 1, 4, { step: 1 })),
       p.govViolent ? null : el('div.protest-note', 'Force is not authorized yet: the troops will hold the streets but not attack.')),
-      [{ label: '🪖 Deploy', cls: 'danger-btn', onClick: async () => {
+      [{ label: [ico('helmet'), ' Deploy'], cls: 'danger-btn', onClick: async () => {
         await POST('/api/protest/army', { cityId: d.cityId, count: d.count });
         toast(`The army deploys to ${(cityById(d.cityId) || {}).name || 'the city'}.`);
       } }, { label: 'Cancel', cls: 'dash-btn', onClick: () => { } }]);
@@ -2452,7 +2446,7 @@ const War = {
     });
     const out = [];
     if (ca.attLead) {
-      out.push(lever('protestorsViolent', '☮ Call for calm', '⚒ Turn violent', p.protestorsViolent
+      out.push(lever('protestorsViolent', [ico('peace'), ' Call for calm'], [conflictIco('protest'), ' Turn violent'], p.protestorsViolent
         ? 'The crowds are rioting. Calling for calm stops their attacks — the police then stand down unless force is authorized.'
         : 'Let the crowds fight. The police fight back, bystanders get hurt, and the public turns against the movement.'));
       out.push(lever('captureMode', '⚑ Give up ground', '⚑ Seize districts', p.captureMode
@@ -2483,7 +2477,7 @@ const War = {
         ['Strike', 'Park a crowd next to factories, offices and shops: within reach, the workforce walks out at the end of each turn (output drops, the owner loses money).'],
         ['Unrest', 'Every city with a crowd in its streets is in unrest. Peaceful crowds win the movement sympathy and cost the government approval.'],
         ['Escalate', 'Turn violent (organizers) or Use force (security) — see the War Room for what each combination does.'],
-        ['Air wing', 'Grounded until force is authorized; then ✈ Air wing sends squadrons on patrols or strikes.'],
+        ['Air wing', ['Grounded until force is authorized; then ', ico('plane'), ' Air wing sends squadrons on patrols or strikes.']],
         ['Cancel', 'Esc, or click open ground']
       ];
       openModal('LEADING A PROTEST', el('div',
@@ -2498,14 +2492,14 @@ const War = {
       ['Route', 'Right-drag to draw the exact road your units should take'],
       ['Line up', 'Ctrl-drag a line — the selection spreads out along it'],
       ['Hold', 'Hold position on the unit card stops a unit where it stands'],
-      ['Air wing', '✈ Air wing opens your squadrons: Patrol defends an area against enemy aircraft, Strike bombs a target. The planner shows reach and time over the target before you click.'],
+      ['Air wing', [ico('plane'), ' Air wing opens your squadrons: Patrol defends an area against enemy aircraft, Strike bombs a target. The planner shows reach and time over the target before you click.']],
       ['Fuel', 'Each sortie burns refined fuel; tanks last ~30s at 1× and the farther the target the less time over it. Landed squadrons need 2 min to refuel and rearm.'],
-      ['Measure', '📏 Ruler: drag for distance, bearing and travel times · ◎ Range: drag a circle to see what lies inside'],
+      ['Measure', [ico('ruler'), ' Ruler: drag for distance, bearing and travel times · ◎ Range: drag a circle to see what lies inside']],
       ['Cancel', 'Esc, or click open ground']
     ];
     openModal('COMMANDING YOUR FORCES', el('div',
       el('table.data', el('tbody', rows.map(r => el('tr', el('td', el('b', r[0])), el('td', r[1]))))),
-      el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-top:10px;' }, 'Fights happen on contact: units that touch an enemy stop and fight until one side breaks. Units outside their supply corridor (⚠) slowly lose strength and morale.')),
+      el('div', { style: 'font-size:12px; color:var(--ink-faint); margin-top:10px;' }, 'Fights happen on contact: units that touch an enemy stop and fight until one side breaks. Units outside their supply corridor (', ico('warn'), ') slowly lose strength and morale.')),
       [{ label: 'Close', cls: 'dash-btn', onClick: () => { } }]);
   },
 
@@ -2571,7 +2565,7 @@ const War = {
     const names = protest ? ['Crowds', 'Police'] : [entName(war.attackerId) || 'Invader', entName(war.defenderId) || 'Defence'];
     const hud = el('div#war-hud.war-hud', { class: open ? '' : 'collapsed' });
     hud.appendChild(el('div.war-hud-head', { onclick: () => { W.warHudOpen = !open; this.renderHud(); } },
-      el('span.war-hud-title', (protest ? '⚒ ' : '⚔ ') + war.name),
+      el('span.war-hud-title', conflictIco(protest ? 'protest' : 'war'), ' ' + war.name),
       el('span.war-hud-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live' }, statusText()),
       el('span.war-hud-caret', open ? '▾' : '▸')));
     if (!open) { wrap.appendChild(hud); return; }
@@ -2648,7 +2642,7 @@ const War = {
     if (old) old.remove();
     const hud = el('div#war-hud.war-hud.war-hud-protest', { class: open ? '' : 'collapsed' });
     hud.appendChild(el('div.war-hud-head', { onclick: () => { W.warHudOpen = !open; this.renderHud(); } },
-      el('span.war-hud-title', '⚒ ' + war.name),
+      el('span.war-hud-title', conflictIco('protest'), ' ' + war.name),
       el('span.war-hud-status', { class: war.result ? 'ended' : war.paused ? 'paused' : 'live posture-' + posture }, statusText()),
       el('span.war-hud-caret', open ? '▾' : '▸')));
     if (!open) { wrap.appendChild(hud); return; }
@@ -2776,7 +2770,7 @@ const War = {
       card.appendChild(bar('Morale', org / 100, org < WAR_ROUT_ORG ? 'low morale' : 'morale', Math.round(org) + '%'));
       const stateText = { fighting: 'In contact — fighting', routed: 'Routed — falling back', holding: 'Holding', moving: 'On the move', transport: 'Embarked at sea', idle: 'Idle' }[u.state] || u.state;
       card.appendChild(el('div.war-card-row', stateText + (u.garrison ? ' · garrison' : '') + ' · ',
-        u.supplied === false ? el('span.war-card-cutoff', '⚠ cut off') : 'in supply'));
+        u.supplied === false ? el('span.war-card-cutoff', ico('warn'), ' cut off') : 'in supply'));
       if (u.kit) card.appendChild(el('div.war-card-row.war-card-kit', `Kit ×${u.kit.dmg} fire · ×${u.kit.hp} armour · ×${u.kit.morale} morale · ×${u.kit.speed} speed`));
       const rows = (u.inv || []).filter(r => r.qty >= 0.5).map(r => { const it = itemById(r.itemId); return `${fmtNum(Math.round(r.qty))} × ${it ? it.name : r.itemId}`; });
       if (u.kit || rows.length) card.appendChild(el('div.war-card-row.war-card-kit', rows.length ? 'Carrying ' + rows.join(' · ') : 'Carrying nothing — awaiting resupply'));
@@ -2928,7 +2922,7 @@ const War = {
     const statusText = war.result
       ? (war.result.winner === 'att' ? 'Ended — total victory for the invader' : war.result.winner === 'def' ? 'Ended — invasion repelled' : 'Ended')
       : (war.paused ? 'Paused' : war.totalWar ? 'Total war — no terms' : 'Fighting in progress');
-    this._reportHead(inner, war, key, '⚔ ', statusText, '');
+    this._reportHead(inner, war, key, conflictIco('war'), statusText, '');
     const allyLists = war.allies || { att: [], def: [] };
     const lines = [allyLists.att && allyLists.att.length ? `Also attacking: ${allyLists.att.map(entName).join(', ')}` : null,
       allyLists.def && allyLists.def.length ? `Also defending: ${allyLists.def.map(entName).join(', ')}` : null].filter(Boolean);
@@ -3012,7 +3006,7 @@ const War = {
     const elapsed = Math.max(0, Math.round((endMs - new Date(war.startedAt).getTime()) / 1000));
     const hh = Math.floor(elapsed / 3600), mm = Math.floor((elapsed % 3600) / 60), ss = elapsed % 60;
     const lasted = hh >= 48 ? `${Math.floor(hh / 24)}d ${hh % 24}h` : hh ? `${hh}h ${mm}m` : `${mm}m ${ss}s`;
-    inner.appendChild(Views.secLabel(glyph + war.name));
+    inner.appendChild(Views.secLabel([glyph, ' ' + war.name]));
     inner.appendChild(el('div.war-report-head',
       el('span.war-report-status', { class: (war.result ? 'ended' : war.paused ? 'paused' : 'live') + (statusCls ? ' ' + statusCls : '') }, statusText),
       el('span.war-report-meta', `tick ${war.tick} · ${lasted} ${war.active ? 'elapsed' : 'long'} · ${war.speed}×`),
@@ -3070,13 +3064,13 @@ const War = {
       : war.result.winner === 'att' ? 'Ended — demands conceded'
         : /called off/i.test(war.result.reason || '') ? 'Ended — called off by the organizers' : 'Ended';
     const statusText = war.result ? endText : war.paused ? 'Paused' : PROTEST_POSTURE[posture].label + (posture === 'peaceful' ? ' demonstration' : '');
-    this._reportHead(inner, war, key, '⚒ ', statusText, war.result ? '' : 'posture-' + posture);
+    this._reportHead(inner, war, key, conflictIco('protest'), statusText, war.result ? '' : 'posture-' + posture);
 
     // the movement
     const org = sm.org;
     const cityNames = (ids) => (ids || []).map(cityById).filter(Boolean).map(c => c.name).join(', ');
     inner.appendChild(el('div.protest-banner',
-      org && org.logo ? el('img.protest-banner-logo', { src: org.logo, alt: '' }) : el('span.protest-banner-glyph', '⚒'),
+      org && org.logo ? el('img.protest-banner-logo', { src: org.logo, alt: '' }) : el('span.protest-banner-glyph', conflictIco('protest')),
       el('div.protest-banner-body',
         el('div.protest-banner-org', 'Organized by ', el('b', org ? org.name : '—'),
           sm.party && org && sm.party.id !== org.id ? ` · marching for ${sm.party.name}` : ''),
@@ -3170,7 +3164,7 @@ const War = {
     }
     if (ca.force) {
       const n = this._armyDeployed(war);
-      row.appendChild(el('button.danger-btn', { title: 'Send army battalions into the streets beside the police', onclick: () => this._armyModal(war) }, '🪖 Deploy the army'));
+      row.appendChild(el('button.danger-btn', { title: 'Send army battalions into the streets beside the police', onclick: () => this._armyModal(war) }, ico('helmet'), ' Deploy the army'));
       if (n) row.appendChild(el('button.dash-btn', { title: 'Send the troops back to barracks', onclick: () => this._armyWithdraw() }, `Withdraw troops (${n})`));
     }
     if (ca.attLead && !isGM()) {
@@ -3180,7 +3174,7 @@ const War = {
           await POST('/api/protest/disband', {});
           toast('The organizers call the protest off.');
         }, 'Call It Off')
-      }, '✋ Call it off'));
+      }, ico('hand'), ' Call it off'));
     }
     if (ca.concede) {
       const cs = Number((((S().settings || {}).war || {}).protest || {}).concedeSupport);
@@ -3191,7 +3185,7 @@ const War = {
           await POST('/api/protest/concede', {});
           toast('The government concedes.');
         }, 'Concede')
-      }, '🤝 Concede the demands'));
+      }, ico('flag'), ' Concede the demands'));
     }
     if (row.childNodes.length) inner.appendChild(row);
     else inner.appendChild(el('div.protest-note', 'Only the organizers can escalate or call the protest off, and only cleared security officials can authorize force.'));
@@ -3218,7 +3212,7 @@ const War = {
         try { await POST('/api/gm/war/start', { scenario: sel.value }); toast('The invasion begins.'); }
         catch (e) { toast(e.message, true); }
       }
-    }, '⚔ Start War')));
+    }, conflictIco('war'), ' Start War')));
     this._fold(inner, 'wrCustomScenario', 'Custom Scenario Creator', (b) => this.renderCustomScenarioForm(b));
   },
 
@@ -3336,7 +3330,7 @@ const War = {
         try { await POST('/api/gm/protest/start', d); this._protestDraft = null; toast('The crowds take to the streets.'); }
         catch (e) { toast(e.message, true); }
       }
-    }, '⚒ Start the protest');
+    }, conflictIco('protest'), ' Start the protest');
     inner.appendChild(el('div.btn-row', startButton));
     update();
   },
@@ -3372,7 +3366,7 @@ const War = {
         this._reRenderPanel();
         this.renderToolbar();
       }
-    }, this._spawnArmed ? 'Armed — click the map to place (Esc cancels)' : '➕ Arm placement')));
+    }, this._spawnArmed ? 'Armed — click the map to place (Esc cancels)' : [ico('plus'), ' Arm placement'])));
     inner.appendChild(box);
   },
 
@@ -3418,7 +3412,7 @@ const War = {
       row.appendChild(el('span.mono-label', 'GM'));
       row.appendChild(el('button.solid-btn.btn-xs', {
         onclick: async () => { try { await POST('/api/gm/war/control', { paused: !war.paused, conflict: key }); } catch (e) { toast(e.message, true); } }
-      }, war.paused ? '▶ Resume' : '⏸ Pause'));
+      }, war.paused ? [ico('play'), ' Resume'] : [ico('pause'), ' Pause']));
       row.appendChild(this._speedSlider(war, key));
       row.appendChild(el('button.danger-btn.btn-xs', {
         onclick: () => confirmModal(protest ? 'END PROTEST' : 'END WAR', protest ? 'End the protest now? The crowds stand down and production resumes.' : 'End the war now? The result stays on record for review.', async () => {
@@ -3543,7 +3537,7 @@ const War = {
           toast('Petition filed — the Gamemaster will rule on it.');
         } catch (e) { toast(e.message, true); }
       }
-    }, '⚒ File petition')));
+    }, conflictIco('protest'), ' File petition')));
   },
 
   // GM — standing protest rules (settings.war.protest): whether players may
@@ -3710,7 +3704,7 @@ const War = {
           toast('Treaty executed: ' + r.applied.join(' · '));
         }, 'Sign Treaty');
       }
-    }, '✒ Sign Treaty…')));
+    }, ico('pen'), ' Sign Treaty…')));
     inner.appendChild(box);
   },
 

@@ -29,6 +29,8 @@
    withdrawing, borders between their own lands, a message. A deal binds only
    its two parties; the conflict goes on. */
 (function () {
+  // a note from the peace table: the dove, then the news
+  const peaceToast = (msg, isErr) => toast([ico('dove'), ' ' + msg], isErr);
   const NS = 'http://www.w3.org/2000/svg';
   const other = (s) => (s === 'att' ? 'def' : 'att');
   const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - t) / 1000)); return s < 60 ? s + 's ago' : s < 3600 ? Math.round(s / 60) + 'm ago' : Math.round(s / 3600) + 'h ago'; };
@@ -154,10 +156,10 @@
           const doc = o.conflict === 'protest' ? S().protest : S().war;
           if (!doc || doc.startedAt !== o.talks) continue;
           const voices = this.peaceVoices(doc);
-          if (o.status === 'open' && voices.includes(o.to) && !isGM()) toast(`🕊 ${entName(o.from)} ${seen[o.id] ? 'revised its' : 'offers'} a deal to ${entName(o.to)} — see the War Room.`);
-          else if (voices.includes(o.from) && !isGM() && o.status === 'accepted') toast(`🕊 ${entName(o.to)} accepted your deal.`);
-          else if (voices.includes(o.from) && !isGM() && o.status === 'rejected') toast(`🕊 ${entName(o.to)} rejected your deal${o.response ? ' — “' + o.response + '”' : ''}.`, true);
-          else if (o.status === 'accepted' && seen[o.id]) toast(`🕊 Deal struck: ${entName(o.from)} and ${entName(o.to)}.`);
+          if (o.status === 'open' && voices.includes(o.to) && !isGM()) peaceToast(`${entName(o.from)} ${seen[o.id] ? 'revised its' : 'offers'} a deal to ${entName(o.to)} — see the War Room.`);
+          else if (voices.includes(o.from) && !isGM() && o.status === 'accepted') peaceToast(`${entName(o.to)} accepted your deal.`);
+          else if (voices.includes(o.from) && !isGM() && o.status === 'rejected') peaceToast(`${entName(o.to)} rejected your deal${o.response ? ' — “' + o.response + '”' : ''}.`, true);
+          else if (o.status === 'accepted' && seen[o.id]) peaceToast(`Deal struck: ${entName(o.from)} and ${entName(o.to)}.`);
           continue;
         }
         const me = mine(o);
@@ -166,11 +168,11 @@
         const from = doc ? this.peaceSideName(doc, o.side) : 'The other side';
         const to = doc ? this.peaceSideName(doc, other(o.side)) : '';
         if (me !== 'gm' && o.side === me) {
-          if (o.status === 'accepted') toast(`🕊 ${to} accepted your peace terms.`);
-          else if (o.status === 'rejected') toast(`🕊 ${to} rejected your peace terms${o.response ? ' — “' + o.response + '”' : ''}.`, true);
+          if (o.status === 'accepted') peaceToast(`${to} accepted your peace terms.`);
+          else if (o.status === 'rejected') peaceToast(`${to} rejected your peace terms${o.response ? ' — “' + o.response + '”' : ''}.`, true);
         } else if (o.status === 'open') {
-          toast(`🕊 ${from} ${seen[o.id] ? 'revised its' : 'offers'} peace terms — see the War Room.`);
-        } else if (o.status === 'accepted') toast(`🕊 Peace agreed: ${o.conflictName}.`);
+          peaceToast(`${from} ${seen[o.id] ? 'revised its' : 'offers'} peace terms — see the War Room.`);
+        } else if (o.status === 'accepted') peaceToast(`Peace agreed: ${o.conflictName}.`);
       }
     },
 
@@ -194,7 +196,7 @@
       const multi = !!war.factions;
       const voices = multi ? this.peaceVoices(war) : [];
       const box = el('div.peace-table');
-      inner.appendChild(Views.secLabel('🕊 Peace table'));
+      inner.appendChild(Views.secLabel([ico('dove'), ' Peace table']));
       inner.appendChild(box);
       const sides = this.peaceSides(war);
       const who = neg === 'both' ? (multi ? 'You may speak for any party (GM).' : 'You may speak for either side (GM).')
@@ -210,7 +212,7 @@
         if (draft) box.appendChild(draft.deal ? this._dealComposer(war, key, draft) : this._peaceComposer(war, key, draft, neg));
         else box.appendChild(el('div.btn-row', el('button.solid-btn.btn-xs', {
           onclick: () => multi ? this._dealOpen(war, key, voices[0], this.peaceParties(war).find(id => id !== voices[0])) : this._peaceOpen(war, key, neg)
-        }, multi ? '🕊 Propose terms or a deal…' : '🕊 Propose terms…')));
+        }, ico('dove'), multi ? ' Propose terms or a deal…' : ' Propose terms…')));
       }
       if (W.warRoomPeace === key) { W.warRoomPeace = null; setTimeout(() => box.scrollIntoView({ block: 'center', behavior: 'smooth' }), 60); }
     },
@@ -255,7 +257,7 @@
         o.terms && o.terms.borders ? el('p.peace-warn', 'The border clause redraws the map the moment you accept.') : null),
         [{ label: 'Accept — make peace', cls: 'danger-btn', onClick: async () => {
           await POST('/api/war/peace/' + encodeURIComponent(o.id) + '/accept', { rev: o.rev });
-          toast('🕊 Peace agreed.');
+          peaceToast('Peace agreed.');
           if (W.peacePreview && W.peacePreview.offerId === o.id) W.peacePreview = null;
         } }, { label: 'Not yet', cls: 'dash-btn', onClick: () => {} }]);
     },
@@ -351,7 +353,7 @@
         if (d.editing) await POST('/api/war/peace/' + encodeURIComponent(d.editing) + '/revise', { terms });
         else await POST('/api/war/peace/offer', { conflict: key, side: d.side, terms });
         delete this._peaceDraft[key];
-        toast(d.editing ? '🕊 Revision sent.' : '🕊 Your terms are on the table.');
+        peaceToast(d.editing ? 'Revision sent.' : 'Your terms are on the table.');
         App.renderView();
       } catch (e) { toast(e.message, true); }
     },
@@ -461,7 +463,7 @@
         o.terms && o.terms.borders ? el('p.peace-warn', 'The border clause redraws the map the moment you accept.') : null),
         [{ label: 'Accept the deal', cls: 'danger-btn', onClick: async () => {
           await POST('/api/war/peace/' + encodeURIComponent(o.id) + '/accept', { rev: o.rev });
-          toast('🕊 Deal struck.');
+          peaceToast('Deal struck.');
           if (W.peacePreview && W.peacePreview.offerId === o.id) W.peacePreview = null;
         } }, { label: 'Not yet', cls: 'dash-btn', onClick: () => {} }]);
     },
@@ -553,7 +555,7 @@
         if (d.editing) await POST('/api/war/peace/' + encodeURIComponent(d.editing) + '/revise', { terms });
         else await POST('/api/war/peace/offer', { conflict: key, from: d.from, to: d.to, terms });
         delete this._peaceDraft[key];
-        toast(d.editing ? '🕊 Revision sent.' : `🕊 Your deal is on the table for ${entName(d.to)}.`);
+        peaceToast(d.editing ? 'Revision sent.' : `Your deal is on the table for ${entName(d.to)}.`);
         App.renderView();
       } catch (e) { toast(e.message, true); }
     },

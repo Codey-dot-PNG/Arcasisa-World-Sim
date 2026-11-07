@@ -14,6 +14,9 @@ const OFFICE_STYLES = [
   ['ledger', 'Ledger'], ['card', 'Card'], ['dark', 'Night desk'], ['telegram', 'Telegram'], ['accent', 'Dispatch']
 ];
 
+// a widget's glyph: a UI icon name (core.js UI_ICONS) or a typographic mark
+const officeGlyph = (g) => UI_ICONS[g] ? ico(g) : g;
+
 const Office = {
   _local: null,        // this tab's latest layout — authoritative over W.me.office once edited
   _saveTimer: null,
@@ -147,7 +150,7 @@ const Office = {
         if (!Views.canFood()) return Office.empty(body, 'Your role does not run the food programme.');
         Views.foodDistribution(body);
       } },
-    conflict: { label: 'Situation Room', icon: '⚔', desc: 'Live war and protest status, and what you may do.', size: [2, 's'],
+    conflict: { label: 'Situation Room', icon: 'swords', desc: 'Live war and protest status, and what you may do.', size: [2, 's'],
       render(body) {
         const docs = [S().war, S().protest].filter(d => d && d.active);
         if (!docs.length) return Office.empty(body, 'No war or protest is under way.');
@@ -155,7 +158,7 @@ const Office = {
           const st = d.stats || {};
           const p = d.protest || {};
           body.appendChild(el('div.ow-trade',
-            el('div', el('b', (d.kind === 'protest' ? '⚒ ' : '⚔ ') + d.name), ' · tick ' + d.tick + (d.paused ? ' · PAUSED' : '')),
+            el('div', el('b', conflictIco(d.kind), ' ' + d.name), ' · tick ' + d.tick + (d.paused ? ' · PAUSED' : '')),
             el('div', { style: 'font-size:12px; color:var(--ink-soft);' }, d.kind === 'protest'
               ? `${p.protestorsViolent ? 'violent' : 'peaceful'} crowds · ${p.govViolent ? 'force authorized' : 'police holding'} · ${fmtNum((st.unrestCities || []).length)} cities in unrest`
               : `losses ${fmtNum(Math.round(st.attLosses || 0))} / ${fmtNum(Math.round(st.defLosses || 0))} · ${fmtNum((st.citiesHeld || []).length)} cities held`),
@@ -183,7 +186,7 @@ const Office = {
           const us = d.units.filter(u => War.milNationOf(d, u) === n.id && !u.dead && u.strength > 0);
           const cut = us.filter(u => u.supplied === false).length;
           body.appendChild(el('div', { style: 'font-size:12px; color:var(--ink-soft); margin-top:4px;' },
-            (d.kind === 'protest' ? '⚒ ' : '⚔ ') + `${d.name}: ${us.length} formation${us.length === 1 ? '' : 's'} in the field${cut ? ` · ${cut} cut off` : ''}`));
+            conflictIco(d.kind), ` ${d.name}: ${us.length} formation${us.length === 1 ? '' : 's'} in the field${cut ? ` · ${cut} cut off` : ''}`));
         }
         body.appendChild(el('div.btn-row', el('button.dash-btn.btn-xs', { onclick: () => { W.warTab = 'military'; W.milNation = n.id; App.go('war'); } }, 'Military desk →')));
       } },
@@ -218,7 +221,7 @@ const Office = {
     dossier: { label: 'Pinned File', icon: '❐', desc: 'Pin any company, party, person or nation.', size: [1, 's'], settings: 'entity',
       render(body, w) {
         const e = entById((w.opts && w.opts.entityId) || '') || entById(W.me.entityId);
-        if (!e) return Office.empty(body, 'Choose a file to pin (⚙).');
+        if (!e) return Office.empty(body, ['Choose a file to pin (', ico('gear'), ').']);
         const acct = (S().accounts || []).find(a => a.ownerId === e.id);
         body.appendChild(el('div.ow-sub', { onclick: () => select('entity', e.id) }, e.name + ' →'));
         const rows = [['Type', TYPE_LABEL[e.type] || e.type]];
@@ -255,7 +258,7 @@ const Office = {
             el('td.num', c.sharesOutstanding ? el('span.live-price', { 'data-co': c.id }, CUR() + fmtNum(Views.livePrice(c))) : '—'),
             el('td.num', fmtMoney(balOf(c.id))),
             el('td.ow-acts',
-              btn('⚙', 'Operations desk', () => { W.ecoTab = 'holdings'; W.holdSel = c.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); }),
+              btn(ico('gear'), 'Operations desk', () => { W.ecoTab = 'holdings'; W.holdSel = c.id; W.holdPane = 'ops'; W.holdSite = null; W.opsDraft = null; App.go('economy'); }),
               btn('⇄', 'Trade offer from ' + c.name, () => Views.tradeOfferComposer(c.id)),
               c.sharesOutstanding && ownership_controlsClient(W.me.entityId, c.id) || (isGM() && c.sharesOutstanding) ? btn('＋', 'Raise capital (issue shares)', () => Views.marketOfferModal(c)) : null))));
           more(H.companies.length);
@@ -268,7 +271,7 @@ const Office = {
               el('td', entName(pr.ownerId)),
               el('td.num', fmtNum(pr.employees || 0)),
               el('td.ow-acts',
-                btn('⚙', 'Property operations', () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); }),
+                btn(ico('gear'), 'Property operations', () => { W.ecoTab = 'holdings'; W.holdSel = pr.ownerId; W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.go('economy'); }),
                 btn('◎', 'Show on the map', () => { App.go('map'); setTimeout(() => select('property', pr.id), 300); }),
                 deed ? btn('⇄', 'Sell or transfer the deed', () => Views.tradeModal(deed.id, null, pr.ownerId)) : null));
           }));
@@ -430,10 +433,10 @@ const Office = {
     const locked = (() => { try { return localStorage.getItem('arcasia-office-locked') === '1'; } catch (e) { return false; } })();
     inner.appendChild(el('div.doc-title', 'Your Office'));
     inner.appendChild(el('div.doc-sub', locked ? 'Layout locked — unlock to rearrange'
-      : 'Drag a title bar to move a window · drag its corner ◢ to resize · ⚙ settings · ◐ style'));
+      : ['Drag a title bar to move a window · drag its corner ◢ to resize · ', ico('gear'), ' settings · ◐ style']));
     inner.appendChild(el('div.btn-row.office-bar',
       el('button.solid-btn', { onclick: () => this.catalogue() }, '+ Add widget'),
-      el('button.dash-btn', { onclick: () => { try { localStorage.setItem('arcasia-office-locked', locked ? '0' : '1'); } catch (e) { } this.rerender(); } }, locked ? '🔓 Unlock layout' : '🔒 Lock layout'),
+      el('button.dash-btn', { onclick: () => { try { localStorage.setItem('arcasia-office-locked', locked ? '0' : '1'); } catch (e) { } this.rerender(); } }, locked ? [ico('unlock'), ' Unlock layout'] : [ico('lock'), ' Lock layout']),
       el('button.dash-btn', { onclick: () => confirmModal('RESET OFFICE', 'Replace your widgets with the default desk for your role?', async () => { this._local = this.defaults(); this.save(); this.rerender(); }, 'Reset') }, 'Reset')));
     if (!widgets.length) {
       inner.appendChild(el('div.ow-empty', { style: 'padding:30px 0;' }, 'An empty desk. Add a widget to start.'));
@@ -466,11 +469,11 @@ const Office = {
       head.addEventListener('pointerdown', (e) => { if (!e.target.closest('button')) this.dragStart(e, card); });
       head.appendChild(el('span.ow-handle', '⠿'));
     }
-    head.appendChild(el('span.ow-title', (T.icon ? T.icon + ' ' : '') + (w.title || T.label)));
+    head.appendChild(el('span.ow-title', T.icon ? [officeGlyph(T.icon), ' '] : null, w.title || T.label));
     if (!locked) {
       const btn = (label, title, fn) => el('button.ow-btn', { title, onclick: fn }, label);
       head.appendChild(el('span.ow-tools',
-        btn('⚙', 'Settings', () => { this._settingsOpen[w.id] = !this._settingsOpen[w.id]; this.rerender(); }),
+        btn(ico('gear'), 'Settings', () => { this._settingsOpen[w.id] = !this._settingsOpen[w.id]; this.rerender(); }),
         btn('◐', 'Window style', () => this.update(() => {
           const i = OFFICE_STYLES.findIndex(s => s[0] === w.style);
           w.style = OFFICE_STYLES[(i + 1) % OFFICE_STYLES.length][0];
@@ -536,7 +539,7 @@ const Office = {
         clear(document.getElementById('modal-root'));
         toast(T.label + ' added.');
       } },
-        el('span.ow-cat-icon', T.icon || '•'),
+        el('span.ow-cat-icon', T.icon ? officeGlyph(T.icon) : '•'),
         el('span', el('b', T.label), have.has(type) ? el('span.qb-sub', 'on your desk — add another') : null, el('div', { style: 'font-size:12px; color:var(--ink-soft);' }, T.desc))));
     }
     openModal('ADD A WIDGET', list, [{ label: 'Done', cls: 'dash-btn', onClick: () => { } }], true);

@@ -63,8 +63,8 @@ const ITEM_TEMPLATE_PATCH = {
   // mobility against settings.war.fuelPerStrength. originId (an entity id)
   // records the nation of manufacture — informational + tradeable flavour.
   weapon: { category: 'Military', tradable: true, marketValue: 300, icon: 'W', meta: { weapon: { kind: 'smallarms', dmg: 0.2, hp: 0.1, morale: 0.08 }, originId: null } },
-  aircraft: { category: 'Military', tradable: true, marketValue: 1200000, icon: '✈', meta: { weapon: { kind: 'aircraft', model: 'F55', dmg: 0.42, hp: 0.38, speed: 0.82, range: 0.62 }, originId: null } },
-  armyfuel: { category: 'Commodities', tradable: true, marketValue: 40, icon: '🛢', meta: { weapon: { kind: 'fuel', speed: 0.5 } } },
+  aircraft: { category: 'Military', tradable: true, marketValue: 1200000, icon: 'P', meta: { weapon: { kind: 'aircraft', model: 'F55', dmg: 0.42, hp: 0.38, speed: 0.82, range: 0.62 }, originId: null } },
+  armyfuel: { category: 'Commodities', tradable: true, marketValue: 40, icon: 'F', meta: { weapon: { kind: 'fuel', speed: 0.5 } } },
   reserve: { category: 'Reserves', tradable: true, marketValue: 1000, icon: 'R' }
 };
 
@@ -1008,7 +1008,7 @@ const GM = {
       el('p', { style: 'font-size:13.5px; line-height:1.6; margin:0 0 10px;' },
         'Borders are drawn with the border painter on the map: pick who gains land, then drag across a border to push it — the line wanders like a real frontier, coastlines never move. Found new provinces or countries, give a province to a foreign power, or annex a country as a province, all from the painter’s Territory panel.'),
       el('div.btn-row',
-        el('button.solid-btn', { onclick: () => this.openPainter() }, '🖌 Open the border painter'),
+        el('button.solid-btn', { onclick: () => this.openPainter() }, ico('brush'), ' Open the border painter'),
         el('button.dash-btn', { onclick: () => this.openPainter(null, () => Borders.newRegion('province')) }, '+ Found a province'),
         el('button.dash-btn', { onclick: () => this.openPainter(null, () => Borders.newRegion('country')) }, '+ Found a country'))));
 
@@ -1021,7 +1021,7 @@ const GM = {
         el('td.num', fmtNum((p.vars || {}).population || 0)),
         el('td', p.shape || (p.path && p.path.length) ? 'drawn' : el('span', { style: 'color:var(--accent);' }, 'none yet')),
         el('td', { style: 'white-space:nowrap; text-align:right;' },
-          el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('p:' + p.id) }, '🖌 Paint'), ' ',
+          el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('p:' + p.id) }, ico('brush'), ' Paint'), ' ',
           el('button.dash-btn.btn-xs', { onclick: () => { W.gmSel.provinces = p.id; this.go('map', 'provinces'); } }, 'Edit')))))));
 
     const map = S().settings.map || {};
@@ -1038,7 +1038,7 @@ const GM = {
         el('td', this.text(c, 'name')),
         el('td', this.sel(c, 'entityId', [['', '— no dossier —'], ...foreign.map(e => [e.id, e.name])])),
         el('td', live.shape ? 'drawn' : el('span', { style: 'color:var(--accent);' }, 'none yet')),
-        el('td', { style: 'white-space:nowrap; text-align:right;' }, el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('c:' + c.id) }, '🖌 Paint'))));
+        el('td', { style: 'white-space:nowrap; text-align:right;' }, el('button.dash-btn.btn-xs', { onclick: () => this.openPainter('c:' + c.id) }, ico('brush'), ' Paint'))));
     }
     main.appendChild(el('table.data', el('thead', el('tr', el('th', 'Shade'), el('th', 'Name'), el('th', 'Dossier'), el('th', 'Land'), el('th', ''))), tbody));
     main.appendChild(el('div.btn-row', el('button.solid-btn', {
@@ -1088,7 +1088,7 @@ const GM = {
       this.field('Label rotation (°)', this.num(d, 'labelRot')),
       this.field('Label size', this.num(d, 'labelSize'))));
     main.appendChild(this.field('Description', this.area(d, 'description')));
-    if (!isNew) main.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.openPainter('p:' + source.id) }, '🖌 Paint its borders on the map')));
+    if (!isNew) main.appendChild(el('div.btn-row', el('button.dash-btn', { onclick: () => this.openPainter('p:' + source.id) }, ico('brush'), ' Paint its borders on the map')));
     main.appendChild(el('details.gm-advanced', el('summary', 'Advanced — raw boundary path'),
       this.field('Boundary — SVG path data ("M x y L x y … Z") or points "x,y x,y …" on the 3840×2160 map grid', this.area(d, 'shapeText', 'min-height:64px; font-family:var(--font-mono); font-size:11px;'))));
     main.appendChild(this.varsEditor(d, 'province'));
@@ -1558,7 +1558,7 @@ const GM = {
       if (elc.phase === 'campaign') {
         buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/vote'); toast('The polls are open.'); } catch (e) { toast(e.message, true); } } }, '⚑ Open the Polls'));
       } else {
-        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, '⚡ Advance Count'));
+        buttons.appendChild(el('button.solid-btn', { onclick: async () => { try { await POST('/api/gm/election/tick-count'); } catch (e) { toast(e.message, true); } } }, ico('bolt'), ' Advance Count'));
       }
       buttons.appendChild(el('button.dash-btn', { onclick: () => { W.gmTab = 'election'; App.go('parliament'); App.renderView(); } }, 'Watch the Count →'));
       buttons.appendChild(el('button.danger-btn', {
@@ -1824,7 +1824,7 @@ const GM = {
       this.field('Name', this.text(d, 'name')),
       this.field('Category', this.text(d, 'category')),
       this.field('Market value (' + CUR() + ')', this.num(d, 'marketValue')),
-      this.field('Icon (emoji, a letter, or an icon name)', this.text(d, 'icon'), 'e.g. 🛢, R, or one of: ' + (typeof ICON_MANIFEST !== 'undefined' ? ICON_MANIFEST.join(', ') : ''))));
+      this.field('Icon (a letter, a symbol, or an icon name)', this.text(d, 'icon'), 'e.g. R, ◈, or one of: ' + (typeof ICON_MANIFEST !== 'undefined' ? ICON_MANIFEST.join(', ') : ''))));
     main.appendChild(this.check(d, 'tradable', 'Tradable between entities'));
     main.appendChild(this.field('Description', this.area(d, 'description')));
     main.appendChild(this.itemMetadataEditor(d));
@@ -2897,6 +2897,6 @@ const GM = {
           await POST('/api/gm/reset');
           toast('The world begins again. 1962.');
         }, 'Reset Everything')
-      }, '⚠ Reset World'))));
+      }, ico('warn'), ' Reset World'))));
   }
 };

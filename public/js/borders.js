@@ -380,7 +380,7 @@ const Borders = {
 
   /* ---------- pointer input (hooked from GameMap's svg pointerdown) ---------- */
   pointerDown(e) {
-    if (this.stroke) return true; // a second finger mid-stroke is swallowed (use ✋ Pan to pinch)
+    if (this.stroke) return true; // a second finger mid-stroke is swallowed (use the Pan tool to pinch)
     if (!this.ready || e.button !== 0 || this.tool === 'pan' || this.spaceHeld || !this.target) return false;
     if (e.pointerType === 'touch' && GameMap.pointers && GameMap.pointers.size) return false;
     e.preventDefault();
@@ -602,8 +602,8 @@ const Borders = {
       return el('label.bp-slider', el('span', label), input, out);
     };
     panel.appendChild(el('div.chip-row.bp-tools',
-      el('button.chip', { class: this.tool === 'brush' ? 'active' : '', onclick: () => this.setTool('brush') }, '🖌 Push borders'),
-      el('button.chip', { class: this.tool === 'pan' ? 'active' : '', onclick: () => this.setTool('pan') }, '✋ Pan')));
+      el('button.chip', { class: this.tool === 'brush' ? 'active' : '', onclick: () => this.setTool('brush') }, ico('brush'), ' Push borders'),
+      el('button.chip', { class: this.tool === 'pan' ? 'active' : '', onclick: () => this.setTool('pan') }, ico('hand'), ' Pan')));
     panel.appendChild(slider('Brush', 'radius', 15, 400, 5, v => Math.round(v)));
     panel.appendChild(slider('Push', 'strength', 0.05, 1, 0.05, v => Math.round(v * 100) + '%'));
     panel.appendChild(slider('Organic', 'organic', 0, 1, 0.05, v => Math.round(v * 100) + '%'));
@@ -709,7 +709,7 @@ Object.assign(Borders, {
     if (bar && window.innerWidth > 640) panel.style.top = (bar.offsetTop + bar.offsetHeight + 8) + 'px';
     panel.classList.remove('collapsed');
     panel.appendChild(el('div.bp-head',
-      el('span.bp-title', '🕊 Peace map'),
+      el('span.bp-title', ico('dove'), ' Peace map'),
       el('span.bp-status', !this.ready ? 'loading…' : this.touched.size ? `${this.touched.size} region(s) redrawn` : 'no change yet')));
     if (!this.ready) { panel.appendChild(el('div.ow-empty', 'Preparing the map…')); return; }
     const slider = (label, key, min, max, step, fmt) => {
@@ -718,8 +718,8 @@ Object.assign(Borders, {
       return el('label.bp-slider', el('span', label), input, out);
     };
     panel.appendChild(el('div.chip-row.bp-tools',
-      el('button.chip', { class: this.tool === 'brush' ? 'active' : '', onclick: () => this.setTool('brush') }, '🖌 Push borders'),
-      el('button.chip', { class: this.tool === 'pan' ? 'active' : '', onclick: () => this.setTool('pan') }, '✋ Pan')));
+      el('button.chip', { class: this.tool === 'brush' ? 'active' : '', onclick: () => this.setTool('brush') }, ico('brush'), ' Push borders'),
+      el('button.chip', { class: this.tool === 'pan' ? 'active' : '', onclick: () => this.setTool('pan') }, ico('hand'), ' Pan')));
     panel.appendChild(slider('Brush', 'radius', 15, 400, 5, v => Math.round(v)));
     panel.appendChild(slider('Push', 'strength', 0.05, 1, 0.05, v => Math.round(v * 100) + '%'));
     panel.appendChild(el('div.bp-hint', 'Pick who gains the land, then drag across the border. Only the two sides’ own territory can change. Space = pan · [ ] = size · Ctrl+Z = undo'));

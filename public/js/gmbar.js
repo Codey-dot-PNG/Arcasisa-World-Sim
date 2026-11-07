@@ -51,7 +51,7 @@ const GMBar = {
         el('button.gmbar-btn', { onclick: () => this.advance(1) }, '+1'),
         el('button.gmbar-btn', { onclick: () => this.advance(7) }, '+7'),
         el('button.gmbar-btn', { onclick: () => this.advance(30) }, '+30'),
-        el('button.gmbar-btn', { title: 'Preview the next turn without committing it', onclick: () => this.previewTurn() }, '🔍')
+        el('button.gmbar-btn', { title: 'Preview the next turn without committing it', onclick: () => this.previewTurn() }, ico('search'))
       ),
       el('div.gmbar-group.gmbar-find-wrap',
         findInput,

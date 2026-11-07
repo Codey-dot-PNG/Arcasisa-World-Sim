@@ -3,7 +3,7 @@
    map-fx.js; folded into GameMap.
 
    A player puts their character on the map with the layer bar's
-   "📍 Place me on the map" (it lands in the middle of the view), picks the
+   "Place me on the map" (it lands in the middle of the view), picks the
    pin up and drags it where they are, and takes it off with
    "✕ Clear my pin". Everyone sees everyone's pin; clicking one opens that
    character's file. The pin lives on the character's entity
@@ -176,7 +176,7 @@
       if (me) {
         const mine = ents.find(e => e.id === me);
         if (mine && !mine.whereabouts && !this._pinLocal[me]) {
-          bar.appendChild(el('button.chip', { title: 'Put your character on the map — then drag the pin to where you are', onclick: () => this.placeMyPin() }, '📍 Place me on the map'));
+          bar.appendChild(el('button.chip', { title: 'Put your character on the map — then drag the pin to where you are', onclick: () => this.placeMyPin() }, ico('pin'), ' Place me on the map'));
         } else if (mine) {
           bar.appendChild(el('button.chip', { title: 'Centre the map on your pin', onclick: () => { const p = this._pinLocal[me] || (mine.whereabouts || {}).pos; if (p) this.focus(p, 2.5); } }, '◎ Me'));
           bar.appendChild(el('button.chip', { title: 'Take your character off the map', onclick: () => this.clearMyPin() }, '✕ Clear my pin'));
@@ -184,7 +184,7 @@
       }
       if (placed.length) {
         bar.appendChild(el('button.chip', { class: W.showPins === false ? '' : 'active', title: 'Show or hide everyone’s pins',
-          onclick: () => { W.showPins = W.showPins === false; this.renderPins(); this.renderLayerBar(); } }, `👤 People · ${placed.length}`));
+          onclick: () => { W.showPins = W.showPins === false; this.renderPins(); this.renderLayerBar(); } }, ico('person'), ` People · ${placed.length}`));
       }
     },
     async placeMyPin() {

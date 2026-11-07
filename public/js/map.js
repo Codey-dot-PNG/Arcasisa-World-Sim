@@ -216,7 +216,7 @@ const GameMap = {
       // press always falls through so the base pan keeps working.
       if (W.layer === 'war' && window.War && War.onMapPointerDown(e)) { return; }
       // GM border painter: a left drag pushes borders instead of panning
-      // (Space, the ✋ Pan tool or a second finger still pan/pinch)
+      // (Space, the Pan tool or a second finger still pan/pinch)
       // (also a negotiator's peace-map draw — Borders.peace)
       if (window.Borders && Borders.isOn() && Borders.pointerDown(e)) return;
       // The right button never pans — and must not leave stale drag
@@ -728,7 +728,7 @@ const GameMap = {
     if (l.includes('political')) out.push({ id: 'political', label: 'Political' });
     if (l.includes('data') && perms().statistics) out.push({ id: 'data', label: 'Data' });
     if (l.includes('ownership')) out.push({ id: 'ownership', label: 'Ownership' });
-    if (S() && ((S().war && S().war.active) || (S().protest && S().protest.active))) out.push({ id: 'war', label: '⚔ War' }); // public — everyone may watch/command the front (protests ride the same layer)
+    if (S() && ((S().war && S().war.active) || (S().protest && S().protest.active))) out.push({ id: 'war', label: [ico('swords'), ' War'] }); // public — everyone may watch/command the front (protests ride the same layer)
     if (!out.length) out.push({ id: 'plain', label: 'Terrain' });
     return out;
   },
@@ -1202,8 +1202,11 @@ const GameMap = {
       g.appendChild(dash);
       const lbl = document.createElementNS(NS, 'text');
       lbl.setAttribute('class', 'map-airfield-label');
-      lbl.setAttribute('x', 30); lbl.setAttribute('y', 8);
-      lbl.textContent = '✈ ' + pr.name;
+      lbl.setAttribute('x', 51); lbl.setAttribute('y', 8);
+      lbl.textContent = pr.name;
+      // the plane before the name: drawn, not an emoji (it takes the label's
+      // ink and halo, and shows only when the names do)
+      g.appendChild(icoG('plane', 30, -8, 17, 'map-airfield-label'));
       g.appendChild(lbl);
       title(g, `${pr.name} — airfield` + (owner ? ` · ${owner.name}` : ''));
       g.addEventListener('pointerup', (e) => {
@@ -1299,7 +1302,7 @@ const GameMap = {
         glyph.setAttribute('font-size', 22);
         glyph.setAttribute('text-anchor', 'middle');
         glyph.setAttribute('y', 8);
-        glyph.textContent = (mrk.icon && mrk.icon.length <= 3) ? mrk.icon : '◈';
+        glyph.textContent = (mrk.icon && mrk.icon.length <= 3) ? glyphText(mrk.icon, '◈') : '◈';
       }
       g.appendChild(circ); g.appendChild(glyph);
       const lbl = document.createElementNS(NS, 'text');
@@ -1505,7 +1508,7 @@ const GameMap = {
     if (window.MapEdit) MapEdit.toolbar(bar);
     // previewing a peace offer's borders: say so, and a way out
     if (W.peacePreview) {
-      bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, '🕊 Proposed borders'));
+      bar.appendChild(el('span.chip', { style: 'border-color:var(--accent); color:var(--accent); cursor:default;' }, ico('dove'), ' Proposed borders'));
       bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; this.render(); } }, '✕ Close preview'));
       bar.appendChild(el('button.chip', { onclick: () => { W.peacePreview = null; App.go('war'); } }, 'Back to the War Room'));
     }
@@ -1515,7 +1518,7 @@ const GameMap = {
     if (isGM() && !this.editing()) {
       const n = ((S() && S().mapFx) || []).length;
       bar.appendChild(el('button.chip', { class: W.fxPanel ? 'active' : '', title: 'Stage a nuclear strike, fire, flood… on the map (visual only)', onclick: () => this.toggleFxPanel() },
-        '☢ Disasters' + (n ? ' · ' + n : '')));
+        ico('radiation'), ' Disasters' + (n ? ' · ' + n : '')));
     }
     this.renderFxPanel();
   },

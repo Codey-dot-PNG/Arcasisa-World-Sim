@@ -39,15 +39,16 @@
   };
   const f1 = (n) => (Math.round(n * 10) / 10).toString();
 
+  // icon: a UI icon name (core.js UI_ICONS)
   const KINDS = {
-    nuke: { icon: '☢', name: 'Nuclear strike', r: 110, blurb: 'flash, shockwave, mushroom cloud; scorched ground after' },
-    explosion: { icon: '✹', name: 'Explosion', r: 40, blurb: 'fireball, debris and a smoking crater' },
-    fire: { icon: '🔥', name: 'Fire', r: 70, blurb: 'a burning district under a smoke plume' },
-    flood: { icon: '🌊', name: 'Flood', r: 150, blurb: 'water spreading over the land' },
-    quake: { icon: '〰', name: 'Earthquake', r: 160, blurb: 'seismic waves, cracks and a shaking map' },
-    storm: { icon: '🌀', name: 'Hurricane', r: 220, blurb: 'a turning cyclone with its eye' },
-    eruption: { icon: '🌋', name: 'Volcanic eruption', r: 90, blurb: 'lava flows and an ash plume' },
-    toxic: { icon: '☣', name: 'Toxic cloud', r: 110, blurb: 'a drifting chemical cloud' },
+    nuke: { icon: 'radiation', name: 'Nuclear strike', r: 110, blurb: 'flash, shockwave, mushroom cloud; scorched ground after' },
+    explosion: { icon: 'burst', name: 'Explosion', r: 40, blurb: 'fireball, debris and a smoking crater' },
+    fire: { icon: 'fire', name: 'Fire', r: 70, blurb: 'a burning district under a smoke plume' },
+    flood: { icon: 'flood', name: 'Flood', r: 150, blurb: 'water spreading over the land' },
+    quake: { icon: 'quake', name: 'Earthquake', r: 160, blurb: 'seismic waves, cracks and a shaking map' },
+    storm: { icon: 'storm', name: 'Hurricane', r: 220, blurb: 'a turning cyclone with its eye' },
+    eruption: { icon: 'volcano', name: 'Volcanic eruption', r: 90, blurb: 'lava flows and an ash plume' },
+    toxic: { icon: 'toxic', name: 'Toxic cloud', r: 110, blurb: 'a drifting chemical cloud' },
   };
 
   Object.assign(GameMap, {
@@ -525,7 +526,7 @@
         grid.appendChild(el('button.fx-kind', {
           class: W.fxKind === k ? 'active' : '', title: K.blurb,
           onclick: () => { W.fxKind = k; W.fxSize = K.r; this.armFx(); }
-        }, el('span.fx-icon', K.icon), el('span', K.name)));
+        }, el('span.fx-icon', ico(K.icon)), el('span', K.name)));
       }
       p.appendChild(grid);
       const sizeOut = el('span.fx-size-out', '≈ ' + Math.round(W.fxSize * kpp).toLocaleString('en-US') + ' km radius');
@@ -538,7 +539,7 @@
       p.appendChild(lbl);
       const armed = W.placing && W.placing.fx;
       p.appendChild(el('button.solid-btn.fx-go', { onclick: () => (armed ? this.setPlacing(null) : this.armFx()) },
-        armed ? '⌖ Click the map… (cancel)' : KINDS[W.fxKind].icon + '  Place ' + KINDS[W.fxKind].name.toLowerCase()));
+        armed ? '⌖ Click the map… (cancel)' : [ico(KINDS[W.fxKind].icon), '  Place ' + KINDS[W.fxKind].name.toLowerCase()]));
 
       const list = (S().mapFx || []).slice().sort((a, b) => b.at - a.at);
       p.appendChild(el('div.fx-list-head', el('span', 'On the map (' + list.length + ')'),
@@ -547,9 +548,9 @@
         }) }, 'Clear all') : null));
       if (!list.length) p.appendChild(el('div.fx-empty', 'Nothing staged. Pick an effect, set its size, then click the map.'));
       for (const fx of list) {
-        const K = KINDS[fx.kind] || { icon: '•', name: fx.kind };
+        const K = KINDS[fx.kind] || { icon: 'burst', name: fx.kind };
         p.appendChild(el('div.fx-item',
-          el('span.fx-icon', K.icon),
+          el('span.fx-icon', ico(K.icon)),
           el('div.fx-item-body', { title: 'Show on the map', onclick: () => this.focus(fx.pos, Math.max(this.view.k, Math.min(4, 520 / Math.max(30, fx.r)))) },
             el('div', fx.label || K.name),
             el('div.fx-item-sub', [this._fxNear(fx.pos), this._fxAgo(fx.at), Math.round(fx.r * kpp) + ' km'].filter(Boolean).join(' · '))),

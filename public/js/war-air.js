@@ -118,9 +118,11 @@
             sv('path', { d: 'M-9,4.5 L-3,1 M1,-1.4 L7,-4.9', class: 'war-airfield-dash' }, g);
             const n = ready[b.id] || 0, r = rearm[b.id] || 0;
             if (n || r) {
-              const txt = (n ? '✈' + n : '') + (n && r ? ' ' : '') + (r ? '⟳' + r : '');
-              sv('rect', { x: 11, y: -24, width: (txt.length * 6.2 + 8).toFixed(0), height: 13, rx: 6.5, class: 'war-airfield-badge' }, g);
-              sv('text', { x: 15, y: -14.4, class: 'war-airfield-count' }, g).textContent = txt;
+              const txt = (n ? String(n) : '') + (n && r ? ' ' : '') + (r ? '⟳' + r : '');
+              const lead = n ? 10 : 0; // room for the plane before the ready count
+              sv('rect', { x: 11, y: -24, width: (txt.length * 6.2 + 8 + lead).toFixed(0), height: 13, rx: 6.5, class: 'war-airfield-badge' }, g);
+              if (n) g.appendChild(icoG('plane', 14.5, -22.6, 10, 'war-airfield-count'));
+              sv('text', { x: 15 + lead, y: -14.4, class: 'war-airfield-count' }, g).textContent = txt;
             }
             sv('text', { y: 24, 'text-anchor': 'middle', class: 'war-airfield-name' }, g).textContent = b.name;
             sv('title', {}, g).textContent = b.side === 'none' ? `${b.name} — airfield (${entName(b.owner) || 'unowned'}), not in this conflict`
@@ -290,7 +292,7 @@
       // head: whose wing, (GM) switch, close
       const sides = this.airSidesFor(war);
       dock.appendChild(el('div.air-head',
-        el('span.air-title', '✈ Air wing'),
+        el('span.air-title', ico('plane'), ' Air wing'),
         sides.length > 1 ? el('div.seg', sides.slice().sort().reverse().map(s => el('button', {
           class: s === side ? 'active' : '', onclick: () => { this._gmSide = s; this._sel.clear(); this._airPlan = null; this._airPlanClear(); this.refreshLayer(true); this.renderAirDock(true); }
         }, war.kind === 'protest' ? (s === 'def' ? 'Police' : 'Movement') : s === 'def' ? 'Defence' : 'Invader'))) : el('span.air-side', this._airSideName(war, side)),
@@ -298,7 +300,7 @@
       const sortieNeed = Math.max(...sqs.filter(s => s.planes > 0).map(s => s.planes), 0) * per;
       dock.appendChild(el('div.air-meta',
         el('span.air-fuel', { class: fuel < sortieNeed ? 'short' : '', title: 'Refined fuel in this side\'s stockpiles — every sortie fills the tanks' },
-          '⛽ ' + Math.floor(fuel).toLocaleString('en-US') + ' bbl', el('span.air-faint', ` · ${per} per plane per sortie`)),
+          ico('fuel'), ' ' + Math.floor(fuel).toLocaleString('en-US') + ' bbl', el('span.air-faint', ` · ${per} per plane per sortie`)),
         war.kind === 'protest' ? null : el('label.air-auto', { title: 'Hand the wing to the air staff: they keep a patrol over your forces and strike the heaviest enemy concentrations in range.' },
           el('input', { type: 'checkbox', checked: (air.auto || {})[side] ? 'checked' : undefined,
             onchange: async (e) => {
@@ -344,7 +346,7 @@
         onclick: (e) => { if (e.target.closest('button')) return; this._airSel = this._airSel === sq.id ? null : sq.id; this.renderAirDock(true); this.refreshLayer(true);
           if (AIRBORNE[sq.state] && GameMap.focus) GameMap.focus(sq.pos, Math.max(GameMap.view.k, 1.4)); } });
       const planes = el('span.air-planes', { title: `${sq.planes} × ${sq.modelName || 'aircraft'}` });
-      for (let i = 0; i < Math.max(sq.planes, 1) && i < 6; i++) planes.appendChild(el('span.air-plane' + (i < sq.planes ? '' : '.gone'), '✈'));
+      for (let i = 0; i < Math.max(sq.planes, 1) && i < 6; i++) planes.appendChild(el('span.air-plane' + (i < sq.planes ? '' : '.gone'), ico('plane')));
       if (sq.planes > 6) planes.appendChild(el('span.air-faint', '+' + (sq.planes - 6)));
       row.appendChild(el('div.air-row-top',
         el('span.air-name', sq.name), planes, el('span.air-state', { 'data-state': sq.state }, STATE_LABEL[sq.state] || sq.state)));
@@ -366,7 +368,7 @@
         else acts.appendChild(el('span.air-faint', grounded ? 'Grounded' : !base ? 'No airfield' : `Needs ${need} bbl to fly`));
       } else if (AIRBORNE[sq.state]) {
         if (!grounded) { acts.appendChild(arm('patrol')); acts.appendChild(arm('strike')); }
-        if (sq.state !== 'return') acts.appendChild(el('button.dash-btn.btn-xs', { title: 'Break off and fly home', onclick: () => this._airOrder(key, sq, { kind: 'recall' }) }, '↩ Recall'));
+        if (sq.state !== 'return') acts.appendChild(el('button.dash-btn.btn-xs', { title: 'Break off and fly home', onclick: () => this._airOrder(key, sq, { kind: 'recall' }) }, ico('undo'), ' Recall'));
       }
       row.appendChild(acts);
       return row;
@@ -380,8 +382,15 @@
         if (!sq) continue;
         const info = this._sqInfo(war, sq);
         const st = row.querySelector('.air-state');
-        const txt = (STATE_LABEL[sq.state] || sq.state) + (info.kind === 'fuel' ? ' · ⛽ ' + this.fmtDur(info.secs) : info.kind === 'rearm' ? ' · ' + this.fmtDur(info.secs) : '');
-        if (st && st.textContent !== txt) st.textContent = txt;
+        const label = STATE_LABEL[sq.state] || sq.state;
+        const dur = info.kind === 'fuel' || info.kind === 'rearm' ? this.fmtDur(info.secs) : '';
+        const key = label + '|' + info.kind + '|' + dur;
+        if (st && st._key !== key) {
+          st._key = key;
+          clear(st).append(label);
+          if (info.kind === 'fuel') st.append(' · ', ico('fuel'), ' ' + dur);
+          else if (info.kind === 'rearm') st.append(' · ' + dur);
+        }
         const fill = row.querySelector('.air-bar-fill');
         if (fill) {
           fill.style.width = (Math.max(0, Math.min(1, info.bar)) * 100).toFixed(1) + '%';
@@ -543,7 +552,7 @@
         const name = this._airSideName(war, side);
         inner.appendChild(el('div.air-report-side',
           el('b', name), ' — ', `${c.planes} aircraft (${c.aloft} aloft, ${c.ready} ready, ${c.rearm} rearming)`,
-          el('span.air-faint', ` · ${c.sorties} sorties · ${c.kills} shot down · ${c.lost} lost · ⛽ ${Math.floor((air.fuel || {})[side] || 0).toLocaleString('en-US')} bbl`),
+          el('span.air-faint', ` · ${c.sorties} sorties · ${c.kills} shot down · ${c.lost} lost · `, ico('fuel'), ` ${Math.floor((air.fuel || {})[side] || 0).toLocaleString('en-US')} bbl`),
           can.has(side) && war.kind !== 'protest' ? el('label.air-auto', { title: 'Let the air staff fly this wing' },
             el('input', { type: 'checkbox', checked: (air.auto || {})[side] ? 'checked' : undefined,
               onchange: async (e) => { try { await POST('/api/war/air/auto', { conflict: key, side, on: e.target.checked }); } catch (err) { toast(err.message, true); e.target.checked = !e.target.checked; } } }), 'Auto') : null));

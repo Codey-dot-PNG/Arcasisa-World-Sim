@@ -63,7 +63,7 @@ const Entertainment = {
     // CEO / GM odds control
     if (isGM() || (W.me.entityId && ownership_controlsClient(W.me.entityId, v.ownerId))) {
       inner.appendChild(el('div.btn-row', { style: 'margin-bottom:12px;' },
-        el('button.dash-btn', { onclick: () => this.oddsModal(v) }, '⚙ House Settings')));
+        el('button.dash-btn', { onclick: () => this.oddsModal(v) }, ico('gear'), ' House Settings')));
     }
 
     if (v.kind === 'lottery') return this.renderLottery(inner, v);
@@ -479,10 +479,10 @@ const Entertainment = {
   },
   card(c, hidden) {
     if (hidden) return el('div.card.back', '');
-    const suits = ['♠', '♥', '♦', '♣'];
+    const suits = ['spade', 'heart', 'diamond', 'club'];
     const ranks = { 1: 'A', 11: 'J', 12: 'Q', 13: 'K' };
     const s = suits[c.s], red = c.s === 1 || c.s === 2;
-    return el('div.card' + (red ? '.red' : ''), el('span.card-r', ranks[c.r] || String(c.r)), el('span.card-s', s));
+    return el('div.card' + (red ? '.red' : ''), el('span.card-r', ranks[c.r] || String(c.r)), el('span.card-s', ico(s)));
   },
   paintBlackjack() {
     const st = this.bjState;
@@ -569,7 +569,7 @@ const Entertainment = {
           try { const r = await POST('/api/casino/lottery', { venueId: v.id, numbers: this.lotto }); SFX.coin(); toast('Ticket bought: ' + r.ticket.join(' · ') + '. Pot now ' + fmtMoney(r.pot)); this.lotto = []; }
           catch (e) { toast(e.message, true); }
         }
-      }, '🎟 Buy Ticket (' + fmtMoney(v.ticketPrice || 0) + ')'),
+      }, ico('ticket'), ' Buy Ticket (' + fmtMoney(v.ticketPrice || 0) + ')'),
       el('button.dash-btn', { onclick: () => { SFX.click(); this.lotto = []; App.renderView(); } }, 'Clear')));
     inner.appendChild(wrap);
   },

@@ -15,7 +15,7 @@ Assets (flags, logos, building art, paper mastheads) under `public/assets/`.
 
 | File | Role |
 |---|---|
-| `core.js` | The `W` global (me, state, view, selection…), API client (`api()` fetch wrapper), realtime wiring (SSE or Supabase Realtime from `/api/config`), `el()` DOM builder, formatting helpers (`fmtMoney` etc.), explorer sidebar, wire ticker, modals/toasts |
+| `core.js` | The `W` global (me, state, view, selection…), API client (`api()` fetch wrapper), realtime wiring (SSE or Supabase Realtime from `/api/config`), `el()` DOM builder, the UI icon set (`ico()` / `icoG()` — see Conventions), formatting helpers (`fmtMoney` etc.), explorer sidebar, wire ticker, modals/toasts |
 | `app.js` | Boot, login screen, navigation (`App.go(view)`), `renderAll()` orchestration, scroll preservation across periodic re-renders |
 | `views.js` | All player-facing views (map dossier panels, parliament, companies/exchange, economy, population, news, timeline) + the contextual inspector panel |
 | `holdings.js` | Folded into `Views`: the Economy's **Holdings** control board and the open pickers the money/goods modals are built from — see "Holdings & the Economy page" below |
@@ -249,6 +249,14 @@ sync redraws (`_heldSync`) and redraws on blur — after the click that caused t
   permission checks are all server-side. Client-side control checks exist only to show/hide
   UI affordances.
 - Charts/styles read CSS custom properties so they follow the active theme.
+- **No colour emoji.** An emoji renders in the device's emoji font, in its own colours, and
+  differs on every platform. Pictograms come from the UI icon set in core.js: `ico(name)`
+  returns an inline 24×24 `currentColor` svg (`.ico`, sized to the text), usable anywhere
+  `el()` takes a child — buttons, labels, toasts (`toast([ico('dove'), ' …'])`), modal action
+  labels; `icoG(name, x, y, size, cls)` draws the same glyph inside an svg (map labels, war
+  badges). `conflictIco(kind)` is a war's crossed swords or a protest's hammer and pick.
+  Typographic marks that are not emoji (₳ ¶ ⚑ ⇄ ◈ ✎ ◔ ▣ …) stay as text. Authored icon fields
+  (items, markers) go through `glyphText(icon, fallback)`, which drops an emoji for a letter.
 
 ## Live elections (Phase 33) — the Elections desk
 

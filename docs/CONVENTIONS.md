@@ -12,6 +12,8 @@ the codebase document past regressions.
   breadcrumbs when touching related code.
 - Ids via `store.uid(prefix)`. Money rounded to 2dp; vars to 4dp (`applyOp`). Percent-like
   metrics clamped 0–100.
+- No colour emoji in the interface — use the UI icon set (`ico()` in core.js; see
+  docs/FRONTEND.md › Conventions). Plain typographic marks (₳ ¶ ⚑ ⇄ ◈) are fine.
 
 ## The mutation contract (server)
 

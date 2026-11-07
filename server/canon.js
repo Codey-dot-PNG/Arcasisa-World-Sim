@@ -94,6 +94,14 @@ function setPath(o, p, v) {
   for (const k of ks.slice(0, -1)) { if (!x[k] || typeof x[k] !== 'object') x[k] = {}; x = x[k]; }
   if (v === undefined) delete x[ks[ks.length - 1]]; else x[ks[ks.length - 1]] = v;
 }
+const isPlain = (v) => !!v && typeof v === 'object' && !Array.isArray(v);
+// A kept setting over the new world's value: plain objects merge key by key,
+// anything else (lists, numbers, strings) is replaced. Mutates `base`.
+function mergeSetting(base, over) {
+  if (!isPlain(base) || !isPlain(over)) return over;
+  for (const k of Object.keys(over)) base[k] = mergeSetting(base[k], over[k]);
+  return base;
+}
 const words = (n) => String(n || '').toLowerCase().split(/[^a-z\u00c0-\u024f']+/).filter(w => w.length > 2);
 const sharesAWord = (a, b) => { const A = new Set(words(a)); return words(b).some(w => A.has(w)); };
 const labelOf = (r) => (r && (r.name || r.title || r.label || r.key || r.id)) || '?';
@@ -345,11 +353,25 @@ function apply(world) {
     for (const [k, v] of Object.entries(e.fields)) { if (v === null) delete rec[k]; else rec[k] = clone(v); }
     touched.add(e.coll + '/' + e.id); report.applied++;
   }
-  // 3. settings
+  // 3. settings — merged onto the new world's, not swapped in: plain objects
+  // key by key (all the way down), lists and values replaced. A key the
+  // canon does not name keeps what the seed + migrate gave it, so a setting
+  // kept on an older engine cannot erase what the engine has added since (a
+  // whole `economy` kept before the GDP level existed used to wipe it — and
+  // the wage scale, group roles and class ladder with it — on every reset).
+  // `economy.wageScale` is bookkeeping for the scale a world is ON, not
+  // authored: the new world keeps its own, then moves to the kept anchor.
+  let econKept = false;
   for (const e of entries.filter(x => x.kind === 'setting')) {
     world.settings = world.settings || {};
-    setPath(world.settings, e.id, clone(e.value));
+    const v = clone(e.value);
+    if (e.id === 'economy' && isPlain(v)) { delete v.wageScale; econKept = true; }
+    setPath(world.settings, e.id, mergeSetting(getPath(world.settings, e.id), v));
     report.applied++;
+  }
+  if (econKept) {
+    try { require('./economy').applyWageAnchor(world); }
+    catch (e) { report.skipped.push({ key: 'settings/economy', why: 'wage anchor: ' + e.message }); }
   }
   // 4. removals — only of records nothing else points at
   for (const e of entries.filter(x => x.kind === 'remove')) {

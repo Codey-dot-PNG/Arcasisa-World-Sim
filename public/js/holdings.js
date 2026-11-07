@@ -306,8 +306,8 @@
       const site = W.holdSite && propById(W.holdSite);
       const siteOk = site && site.ownerId === id && P.siteIds.has(site.id);
       const panes = [['overview', 'Holdings']];
-      if (P.ops) panes.push(['ops', '⚙ Company operations']);
-      if (siteOk) panes.push(['site', '⚙ ' + site.name]);
+      if (P.ops) panes.push(['ops', [ico('gear'), ' Company operations']]);
+      if (siteOk) panes.push(['site', [ico('gear'), ' ' + site.name]]);
       if (!panes.some(p => p[0] === W.holdPane)) W.holdPane = 'overview';
       if (panes.length > 1) {
         pane.appendChild(el('div.hold-tabs', panes.map(([k, label]) => el('button.hold-tab', { type: 'button', class: W.holdPane === k ? 'active' : '',
@@ -457,12 +457,12 @@
         el('div.sc-sub', [(pr.kind || pr.type || 'property').replace(/_/g, ' '), prov ? prov.name : null].filter(Boolean).join(' · '), ...flags),
         el('div.sc-makes', makes),
         el('div.sc-stats',
-          el('span', { title: 'Staff / capacity' }, '👷 ' + fmtNum(pr.employees || 0) + '/' + fmtNum(maxEmp)),
+          el('span', { title: 'Staff / capacity' }, ico('worker'), ' ' + fmtNum(pr.employees || 0) + '/' + fmtNum(maxEmp)),
           el('span', { class: net >= 0 ? 'pos' : 'neg', title: 'Net per turn (output − upkeep − wages)' }, (net >= 0 ? '+' : '') + fmtMoney(net)),
           stock > 0 ? el('span', { title: 'Stock held at the site' }, '▣ ' + CUR() + fmtCompact(stock)) : null),
         cond !== null && pr.prodMode !== 'none' ? el('div.sc-cond', { title: 'Site condition ' + cond + '%' }, el('span', { style: `width:${cond}%; background:${cond >= 70 ? 'var(--good)' : cond >= 40 ? 'var(--ink-soft)' : 'var(--accent)'};` })) : null,
         el('div.sc-acts',
-          canRun ? el('button.dash-btn.btn-xs', { type: 'button', onclick: () => { W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.renderView(); this.holdFocus(); } }, '⚙ Run') : null,
+          canRun ? el('button.dash-btn.btn-xs', { type: 'button', onclick: () => { W.holdSite = pr.id; W.holdPane = 'site'; W.propOpsDraft = null; App.renderView(); this.holdFocus(); } }, ico('gear'), ' Run') : null,
           el('button.dash-btn.btn-xs', { type: 'button', title: 'Show on the map', onclick: () => { App.go('map'); setTimeout(() => select('property', pr.id), 300); } }, '◎ Map'),
           deed && P.trade ? el('button.dash-btn.btn-xs', { type: 'button', title: 'Sell or hand over the deed', onclick: () => this.tradeModal(deed.id, null, owner.id) }, '⇄ Deed') : null));
     },

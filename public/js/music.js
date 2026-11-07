@@ -380,8 +380,8 @@ const Music = {
   mountWidget() {
     if (this.widget) return;
     const topbar = document.getElementById('topbar');
-    const playBtn = el('button.icon-btn.music-play', { title: 'Play/pause', onclick: () => this.togglePlay() }, '▶');
-    const nextBtn = el('button.icon-btn.music-next', { title: 'Next track', onclick: () => this.next() }, '⏭');
+    const playBtn = el('button.icon-btn.music-play', { title: 'Play/pause', onclick: () => this.togglePlay() }, ico('play'));
+    const nextBtn = el('button.icon-btn.music-next', { title: 'Next track', onclick: () => this.next() }, ico('next'));
     // Replaces the old mute button (which only duplicated pause/volume): opens
     // a menu of the playlists the GM allows players to choose between.
     const plBtn = el('button.icon-btn.music-pl-btn', { title: 'Choose playlist', onclick: (e) => this.togglePlaylistMenu(e) }, '♫');
@@ -436,7 +436,7 @@ const Music = {
     if (cfg.lockPlaylist) {
       const pl = (cfg.playlists || []).find(p => p.id === cfg.activePlaylist);
       menu.appendChild(el('div.music-pl-locked',
-        '🔒 The gamemaster is controlling the music' + (pl ? ' — ' + pl.name : '') + '.'));
+        ico('lock'), ' The gamemaster is controlling the music' + (pl ? ' — ' + pl.name : '') + '.'));
       this.appendTrackMenu(menu, cfg);
       return;
     }
@@ -474,8 +474,16 @@ const Music = {
       menu.appendChild(el('div.music-pl-item', {
         class: selected ? 'selected' : '',
         onclick: () => { this.playTrackById(t.id); this.closePlaylistMenu(); }
-      }, el('span.music-pl-check', selected ? '▶' : '○'), el('span', t.title || 'Untitled track')));
+      }, el('span.music-pl-check', selected ? '●' : '○'), el('span', t.title || 'Untitled track')));
     });
+  },
+
+  // a button's glyph: a UI icon name, or text (♫); swapped only on change
+  setGlyph(btn, g) {
+    if (btn._glyph === g) return;
+    btn._glyph = g;
+    clear(btn);
+    btn.appendChild(UI_ICONS[g] ? ico(g) : document.createTextNode(g));
   },
 
   renderWidget() {
@@ -486,11 +494,11 @@ const Music = {
     const t = this.trackById(this.curForced || this.curTrackId);
     this.els.title.textContent = t ? (t.title || 'Untitled track') + (this.curForced ? ' (forced)' : '') : 'No track';
     this.els.title.title = this.els.title.textContent;
-    this.els.playBtn.textContent = this.isPlaying() ? '⏸' : '▶';
+    this.setGlyph(this.els.playBtn, this.isPlaying() ? 'pause' : 'play');
     this.els.nextBtn.disabled = !!this.curForced;
     // lock glyph + tooltip when the GM is forcing the playlist
     const locked = !!cfg.lockPlaylist;
-    this.els.plBtn.textContent = locked ? '🔒' : '♫';
+    this.setGlyph(this.els.plBtn, locked ? 'lock' : '♫');
     this.els.plBtn.title = locked ? 'Gamemaster is controlling the music' : 'Choose playlist';
     this.els.plBtn.classList.toggle('locked', locked);
     if (document.activeElement !== this.els.volume) this.els.volume.value = String(this.vol);
@@ -501,6 +509,6 @@ const Music = {
 
 document.addEventListener('DOMContentLoaded', () => Music.init());
 
-// Expose for cross-module volume sharing (sfx.js reads Music.vol � a top-level
+// Expose for cross-module volume sharing (sfx.js reads Music.vol � a top-level
 // const is NOT a window property, so the guard was always false).
 window.Music = Music;

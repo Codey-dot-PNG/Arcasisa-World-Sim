@@ -242,7 +242,13 @@ target re-sets it; Recalibrate keeps the current level), and from there it moves
 wage bill, employment and listed output — a wage-scale move leaves it where it is (wage
 units changed, not output). With `gdpTarget` 0 it is the wage bill ÷ `labourShare`. When the
 factor is (re)set, the industrial-demand and growth baselines are carried onto the new level
-so no index jumps. `gdpReal`, `realGrowthAnnual`, `cpi`, `inflation` (12-month), `foodPriceIndex`,
+so no index jumps. The authored record sits on the level too (`store.migrate` flag
+`world._gdpSeedLevel1`): the seed's 1958–59 history keeps its shape with its last month at the
+level, and a world whose economy has not run yet reads the level at turn 0 — so turns 0, 1 and
+2 all read ₳36B, with no cliff from the old ₳13B seed figure. A world reset under a canon that
+wiped its economy settings (see WORLD-DATA.md, the baseline canon) gets the missing keys back
+once (`world._econKeysRestored1`): its played GDP record is put on the level and the economy
+recalibrates, so the next turn reads exactly the level. `gdpReal`, `realGrowthAnnual`, `cpi`, `inflation` (12-month), `foodPriceIndex`,
 `averageDailyWage` (going wage), `wageIndex`, `realWageIndex`, `laborForce`,
 `totalEmployment`, `unemploymentRate`, `avgIncome`, `consumerSpending` (₳/day),
 `householdSavings`, `povertyLineNominal`, `povertyRateNational`, `giniNational`,
